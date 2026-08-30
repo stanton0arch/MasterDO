@@ -72,17 +72,35 @@ Err sys_display_open(void);
 Err sys_display_close(void);
 
 /*
- * Bitmap Item of the current screen -- exactly what FillRect and DrawText8
- * expect (include/3do/graphics.h:800, :796). Returns 0 while the display is
- * not open.
+ * Bitmap Item of the screen being drawn into -- exactly what FillRect and
+ * DrawText8 expect (include/3do/graphics.h:800, :796). Returns 0 while the
+ * display is not open.
+ *
+ * "Being drawn into" and not "displayed": the screens rotate on every
+ * presentation (sys_display_show), so this is the hidden one, the one the
+ * scan is not reading. A caller that paints what the viewer must see this
+ * instant -- an error screen -- paints the one it presented, and presents
+ * it again.
  */
 Item sys_bitmap(void);
 
 /*
- * Screen Item of the current screen -- what DisplayScreen expects
+ * Screen Item of the screen being drawn into -- what DisplayScreen expects
  * (include/3do/graphics.h:793). Returns 0 while the display is not open.
+ * Rotates with sys_bitmap above.
  */
 Item sys_screen(void);
+
+/*
+ * How many screens the rotation runs over, and which one is being drawn
+ * into. The count is what a caller arms a per-screen countdown with when
+ * it has something to repaint on all of them -- a change of background
+ * colour, one screen a frame, each just before it is drawn again -- and
+ * the index is what names the screen it repaints. The index is 0 while
+ * the display is not open.
+ */
+int32 sys_screen_count(void);
+int32 sys_screen_index(void);
 
 /*
  * Dimensions of the bitmap the SDK actually built
@@ -94,9 +112,21 @@ int32 sys_width(void);
 int32 sys_height(void);
 
 /*
- * Fills the current screen with a solid color.
+ * Fills a named screen, or the one being drawn into, with a solid color.
  * SetFGPen then FillRect idiom: src_exemple/file_api/main.c:97-98.
+ *
+ * The named form is the primitive; sys_fill is it applied to
+ * sys_screen_index, kept for the boot sequence, which paints one screen
+ * and has no rotation to think about yet. The two are the same call, and
+ * what separates them is what the call site is able to say: with the
+ * screens rotating, a caller painting them one per frame is doing
+ * something to a particular screen, and the named form makes it write
+ * which one. That is worth a line of source -- the fill and the drawing
+ * that follows it must land on the same screen, and a reader has to be
+ * able to see that they do. An index outside the count is refused and
+ * traced once.
  */
+Err sys_fill_screen(int32 index, Color color);
 Err sys_fill(Color color);
 
 /*
@@ -107,8 +137,23 @@ Err sys_fill(Color color);
 Err sys_text(int32 x, int32 y, const char *text, Color color);
 
 /*
- * Presents the current screen.
- * DisplayScreen: include/3do/graphics.h:793.
+ * Presents the screen just drawn, then rotates: the next drawing goes to
+ * another screen while the scan reads the one presented here.
+ * DisplayScreen: include/3do/graphics.h:793; the rotation idiom itself is
+ * src_exemple_video_player/main.c:730-735.
+ *
+ * The rotation happens whether or not the presentation was accepted, and
+ * that is a choice rather than a property. A refused DisplayScreen leaves
+ * the console showing the screen it was already showing, so turning does
+ * put the next frame's drawing into the one being scanned -- holding the
+ * rotation back is what would avoid that. It is not done, for two
+ * reasons: a refused presentation is already an error, traced, on a
+ * console whose display path has just failed and whose next frame is not
+ * what the run is about; and a rotation that sometimes steps and
+ * sometimes does not makes the position of the screens depend on a
+ * failure history, which every caller that repaints per screen would then
+ * have to reason about. One step per call, always, keeps that reasoning
+ * to one sentence.
  */
 Err sys_display_show(void);
 

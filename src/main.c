@@ -133,10 +133,19 @@ static uint32 main_io_report_in = MAIN_IO_REPORT_FRAMES;
  * much, the one it opens wraps below zero. Each measured stretch is
  * therefore compared to what it can physically be before it is added: a
  * frame's emulated stretch or its draw call above one second, or one
- * sampled line above a tenth of one, is a bad reading and is counted as
- * such (clk= on the periodic line) instead of averaged in. A line is a
- * fifth of a millisecond, a frame's stretch a few tens of them; nothing
- * legitimate reaches the bounds.
+ * side of a sampled line above a tenth of one, is a bad reading and is
+ * counted as such (clk= on the periodic line) instead of averaged in.
+ *
+ * The line bound is per SIDE and not per line: a sampled line is weighed
+ * as two spans, the quota and the video call, and each is compared to the
+ * bound on its own, so a whole sampled line is refused only past two
+ * tenths of a second. That is deliberate -- the bound exists to catch a
+ * clock that jumped by seconds, not to cap a slow render -- and it is
+ * what makes the two sides refusable one without the other, which the
+ * per-side counting of clk= then reports.
+ *
+ * A whole line is a fifth of a millisecond, a frame's stretch a few tens
+ * of them; nothing legitimate reaches the bounds.
  */
 #define MAIN_CLK_MAX_FRAME_USEC 1000000UL
 #define MAIN_CLK_MAX_LINE_USEC   100000UL
@@ -145,12 +154,23 @@ static uint32 main_io_report_in = MAIN_IO_REPORT_FRAMES;
 #define MAIN_CLK_COST_PAIRS 16UL
 
 /*
- * One line in this many is timed around its video call, the phase walking
- * one step per frame so that every line of the frame is seen in as many
+ * One line in this many is timed on both of its sides -- around the
+ * processor's quota and around the video call -- the phase walking one
+ * step per frame so that every line of the frame is seen in as many
  * frames: eight or nine samples a frame spread over its whole height --
  * picture lines and blank ones in their true proportion, which one sample
- * a frame could not keep at the paces a slow render falls to -- for
- * sixteen or eighteen readings, half a percent of a frame held at pace.
+ * a frame could not keep at the paces a slow render falls to. Three
+ * readings a sample, the middle one closing the quota and opening the
+ * video call, so twenty-four to twenty-seven a frame: one reading a
+ * sample more than timing the video call alone, and what it buys is a
+ * figure for the processor that is measured rather than deduced by
+ * subtraction.
+ *
+ * A power of two, and it has to be: the line that carries the sample is
+ * picked with a mask and the phase is wrapped with the same mask, both
+ * cheaper than a remainder on a path that runs 262 times a frame. A value
+ * that is not a power of two would not select one line in that many, it
+ * would select the wrong lines silently.
  */
 #define MAIN_PERF_SAMPLE_STRIDE 32UL
 
@@ -173,6 +193,8 @@ main_perf_emit(uint32 usec,
                uint32 frames,
                uint32 emul_usec,
                uint32 emul_frames,
+               uint32 z80_usec,
+               uint32 z80_samples,
                uint32 vdp_usec,
                uint32 vdp_samples,
                uint32 draw_usec,
@@ -181,8 +203,10 @@ main_perf_emit(uint32 usec,
 {
   uint32 fps10;
   uint32 frame10;
-  uint32 emul_pf;
-  uint32 vdp_pf;
+  uint32 emul10;
+  uint32 z80_mean;
+  uint32 vdp_mean;
+  uint32 share;
   uint32 z8010;
   uint32 vdp10;
   uint32 draw10;
@@ -208,22 +232,67 @@ main_perf_emit(uint32 usec,
     fps10 = (frames / (usec / 1000000UL)) * 10UL;
 
   /*
-   * Microseconds per frame. The video part's figure is one sampled line
-   * scaled to the lines of a frame -- the sample is bounded by
-   * MAIN_CLK_MAX_LINE_USEC, so the product holds in 32 bits -- and the
-   * processor's figure is the emulated stretch of a frame with that
-   * estimate taken out: the stretch was read around the whole line loop,
-   * lines included. Frames whose stretch was a bad reading are not in
+   * The emulated stretch of one frame, in tenths of a millisecond: the
+   * measured quantity, read around the whole line loop with the lines
+   * included. Frames whose stretch was a bad reading are not in
    * emul_frames; a window where every reading was bad reports zero.
    */
-  vdp_pf = (vdp_samples != 0UL)
-           ? (vdp_usec / vdp_samples) * MAIN_LINES_PER_FRAME : 0UL;
-  emul_pf = (emul_frames != 0UL) ? (emul_usec / emul_frames) : 0UL;
+  emul10 = ((emul_frames != 0UL) ? (emul_usec / emul_frames) : 0UL) / 100UL;
+
+  /*
+   * The two halves of that stretch, and they are a SHARE of it and not
+   * two figures of their own. The sampled lines are timed on both sides
+   * -- once around the quota, once around the video call -- and what the
+   * two accumulators are used for is the ratio between them, applied to
+   * the stretch that was actually measured.
+   *
+   * The arrangement it replaces subtracted one mean sample scaled to the
+   * lines of a frame from the measured stretch, which mixed an estimate
+   * with a measurement: nothing made the estimate the smaller of the two,
+   * and when it was not, a floor published a processor figure of zero
+   * beside an inflated video one, and the pair summed past the frame. As
+   * a share, the sum is the stretch by construction, no floor can be
+   * reached, and the sampling bias -- a fixed phase sees a different mix
+   * of picture and blank lines each frame -- falls on both sides at once
+   * and cancels in the ratio.
+   *
+   * The means and not the raw totals, and that is the overflow guard the
+   * scaling above uses in its own way: a total grows with the window and
+   * would carry the product past 32 bits, where a mean is bounded by
+   * MAIN_CLK_MAX_LINE_USEC. Tenths of a millisecond per frame times a
+   * bounded mean holds with room to spare.
+   *
+   * A share needs both of its sides, and the condition below asks for
+   * both of them twice over: a sample kept on each side, and a mean that
+   * is not zero on each side. One side alone would divide the whole
+   * stretch by itself and hand it all to that side, which is exactly the
+   * shape this arrangement exists to make impossible -- a processor
+   * figure of zero beside a video figure carrying the frame. That shape
+   * is reachable two ways: every reading of one side refused as
+   * impossible, and a side whose mean falls to zero once the price of a
+   * clock reading is taken off it. Both are refused here, and the two
+   * figures are then published as zero together. A window that could not
+   * weigh both sides says so by weighing neither; it must never read as a
+   * window that measured everything on one side.
+   */
+  z80_mean = (z80_samples != 0UL) ? (z80_usec / z80_samples) : 0UL;
+  vdp_mean = (vdp_samples != 0UL) ? (vdp_usec / vdp_samples) : 0UL;
+  share = z80_mean + vdp_mean;
+
+  if((z80_samples != 0UL) && (vdp_samples != 0UL) &&
+     (z80_mean != 0UL) && (vdp_mean != 0UL))
+    {
+      z8010 = (emul10 * z80_mean) / share;
+      vdp10 = emul10 - z8010;
+    }
+  else
+    {
+      z8010 = 0UL;
+      vdp10 = 0UL;
+    }
 
   /* Tenths of a millisecond per frame, averaged over the window. */
   frame10 = (usec / 100UL) / frames;
-  z8010 = ((emul_pf > vdp_pf) ? (emul_pf - vdp_pf) : 0UL) / 100UL;
-  vdp10 = vdp_pf / 100UL;
   draw10 = (draw_usec / 100UL) / frames;
 
   LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
@@ -268,6 +337,24 @@ main(int    argc,
    * measured stretch has closed rather than inside it.
    */
   Err draw_err;
+  /*
+   * The ground painted around the picture, and how many screens still owe
+   * that colour. The colour is the emulated machine's own background, read
+   * once per frame and compared with what was last painted: sixteen bits
+   * and one compare per frame in the regime where nothing changes, which
+   * is the regime of every game that sets its background colour once.
+   *
+   * The colour and not the register, because the entry the register names
+   * can be rewritten without the register moving; comparing the resolved
+   * colour catches that too, for the same one load.
+   *
+   * The countdown is armed with the number of screens on every change and
+   * spent one screen a frame, each just before that screen is drawn into:
+   * the change reaches every screen of the rotation, and none of them is
+   * ever repainted while the scan is reading it.
+   */
+  uint16 border_color;
+  int32 border_repaint;
 #if MAIN_MEASURE
   /* The near edge of the one measured stretch of the drawing side. */
   uint32 draw_start;
@@ -282,10 +369,14 @@ main(int    argc,
 #if MAIN_MEASURE
   /*
    * The clock readings of one frame: the two around the emulated stretch,
-   * the two around the one sampled line, and the reading being weighed.
+   * the three around the one sampled line -- its near edge, the boundary
+   * between the quota and the video call, and its far edge -- and the
+   * reading being weighed.
    */
   uint32 emul_start;
   uint32 line_start;
+  uint32 line_mid;
+  uint32 line_end;
   uint32 perf_delta;
   /*
    * What one reading of the clock costs, priced once at the head of the
@@ -309,14 +400,16 @@ main(int    argc,
    */
   uint32 perf_over = 0;
   /*
-   * The three counters the periodic line reports separately -- the
-   * processor's quotas, the video part's lines, the draw call. They are
-   * written by this function and by no other: a module told to do its
-   * share of a turn does not time itself, because the timing belongs
-   * where the turn is cut up and where the pace is held.
+   * The counters the periodic line reports -- the emulated stretch of a
+   * whole frame, the two sampled sides of a line inside it, and the draw
+   * call. They are written by this function and by no other: a module
+   * told to do its share of a turn does not time itself, because the
+   * timing belongs where the turn is cut up and where the pace is held.
    */
   uint32 perf_emul = 0;
   uint32 perf_emul_frames = 0;
+  uint32 perf_z80 = 0;
+  uint32 perf_z80_samples = 0;
   uint32 perf_vdp = 0;
   uint32 perf_vdp_samples = 0;
   uint32 perf_draw = 0;
@@ -370,7 +463,11 @@ main(int    argc,
   /*
    * The paint target is handed to the log layer as soon as it exists, and
    * before anything else can fail: from here on a fatal stop has a screen to
-   * write on.
+   * write on. This binding covers the whole of the boot sequence, which
+   * draws and presents one screen and no other; the frame loop renews it
+   * on every turn, because from its first presentation on the screens
+   * rotate and a binding taken once would name the wrong one half the
+   * time.
    */
   log_bind_screen(sys_bitmap(),sys_screen());
 
@@ -618,20 +715,28 @@ main(int    argc,
   cel = (CCB *)vdp_cel();
 
   /*
-   * The witness fill, once, before any frame: a magenta ground under
-   * everything the run will draw. It serves two readings at one glance.
-   * Around the picture it is the framing border -- its width on each side
-   * is the centring offset, wrong framing shows as unequal borders -- and
-   * under the picture it is a colour the palette does not contain: were
-   * the black entry drawn transparent, the black band would read magenta
-   * instead of black. It covers the boot banner, which has said its word
-   * by now; the screen is never filled again, so the border stays -- and
-   * that survival rests on sys.c never advancing sc_CurrentScreen: every
-   * frame draws into the one bitmap this fill painted. A buffering policy
-   * that starts flipping screens breaks that silence and must repaint the
-   * border on both.
+   * The ground the picture sits in: the emulated machine's own background
+   * colour, the one it shows outside its picture, read from the video
+   * part and painted on every screen of the rotation.
+   *
+   * It is armed here rather than painted here. The countdown is set to
+   * the number of screens and one screen is painted per frame, each just
+   * before the frame's drawing lands on it, so the very first frame draws
+   * on ground of the right colour and the second one does the same on the
+   * other screen. Painting both at the instant of a change would wipe the
+   * screen the scan is reading -- a flash of one frame -- where the
+   * countdown lets the change take two frames to travel, thirty-odd
+   * milliseconds, which nothing can see.
+   *
+   * This replaces a fill in a flat colour the palette could not contain,
+   * which proved two things while the picture was being brought up -- the
+   * framing offsets, read off the width of the bands, and that the black
+   * entry was drawn opaque rather than transparent -- and which said
+   * nothing about the machine being emulated. Those two readings are
+   * settled; a game asked for a background colour and now gets it.
    */
-  (void)sys_fill(MakeRGB15(31,0,31));
+  border_color = vdp_backdrop();
+  border_repaint = sys_screen_count();
 
   vbl_target = sys_vbl_count() + MAIN_VBL_STEP;
 
@@ -667,7 +772,7 @@ main(int    argc,
     }
   if(line_start != 0UL)
     perf_clock_cost /= line_start;
-  LOG_INFO(LOG_CAT_PERF,("clock read cost=%luus (taken out of each vdp sample)",
+  LOG_INFO(LOG_CAT_PERF,("clock read cost=%luus (taken out of each line sample)",
                          (unsigned long)perf_clock_cost));
 
   perf_window = sys_usec();
@@ -718,22 +823,25 @@ main(int    argc,
        * no way of telling which of them it was looking at.
        *
        * The clock is read twice around the whole line loop, for the
-       * emulated stretch, and twice around the video call of one line in
-       * MAIN_PERF_SAMPLE_STRIDE, the phase stepping once per frame so that
-       * the sampled lines walk the whole frame. The video figure is the
-       * mean sample scaled to a frame, the processor figure is the
-       * stretch with it taken out (main_perf_emit). This
-       * loop once read the clock around every quota and every line -- 525
-       * readings a frame, the exact figure with no estimate in it -- and
-       * the console refused it: the call is documented as very low
-       * overhead (docs/3do/3do_portfolio_2.5.md:19573) and costs some
-       * forty microseconds, twenty milliseconds a frame, a third of the
-       * frame this loop is meant to hold. Two readings a frame, the
-       * arrangement before that, could not tell the render from the
-       * quotas once the line call rendered. The mask and compare that
-       * pick the sampled lines are the one thing this arrangement adds
-       * inside the loop, 262 times a frame, against the thousands of
-       * cycles of the quota beside it.
+       * emulated stretch, and three times on one line in
+       * MAIN_PERF_SAMPLE_STRIDE -- around its quota and around its video
+       * call, sharing the boundary reading -- the phase stepping once per
+       * frame so that the sampled lines walk the whole frame. The two
+       * sampled sides are not published as figures of their own: they are
+       * the ratio the measured stretch is split by (main_perf_emit), so
+       * the pair sums to the frame that was measured and neither can be
+       * an estimate that outgrows it. This loop once read the clock
+       * around every quota and every line -- 525 readings a frame, the
+       * exact figure with no estimate in it -- and the console refused
+       * it: the call is documented as very low overhead
+       * (docs/3do/3do_portfolio_2.5.md:19573) and costs some forty
+       * microseconds, twenty milliseconds a frame, a third of the frame
+       * this loop is meant to hold. Two readings a frame, the arrangement
+       * before that, could not tell the render from the quotas once the
+       * line call rendered. The mask and compare that pick the sampled
+       * lines are the one thing this arrangement adds inside the loop,
+       * 262 times a frame, against the thousands of cycles of the quota
+       * beside it.
        */
 #if MAIN_MEASURE
       emul_start = sys_usec();
@@ -767,14 +875,40 @@ main(int    argc,
        */
       for(line = 0; line < MAIN_LINES_PER_FRAME; line++)
         {
-          residue = z80_run((int32)MAIN_TSTATES_PER_LINE - residue);
-
 #if MAIN_MEASURE
           if((line & (MAIN_PERF_SAMPLE_STRIDE - 1UL)) == perf_sample_phase)
             {
+              /*
+               * The sampled line, timed on both sides by three readings:
+               * the middle one closes the quota and opens the video call,
+               * so the two spans are adjacent and share their boundary --
+               * nothing of the line falls between them and nothing is
+               * counted twice. The weighing is done after the far edge is
+               * read, outside both spans.
+               *
+               * Each span carries the cost of the reading that closes it,
+               * which is why the price of one reading comes off each of
+               * them: a call into the operating system is tens of
+               * microseconds here, a few percent of a rendered line and
+               * more than an empty one.
+               */
               line_start = sys_usec();
+              residue = z80_run((int32)MAIN_TSTATES_PER_LINE - residue);
+              line_mid = sys_usec();
               vdp_line();
-              perf_delta = sys_usec() - line_start;
+              line_end = sys_usec();
+
+              perf_delta = line_mid - line_start;
+              if(perf_delta < MAIN_CLK_MAX_LINE_USEC)
+                {
+                  perf_z80 += (perf_delta > perf_clock_cost)
+                              ? (perf_delta - perf_clock_cost) : 0UL;
+                  perf_z80_samples++;
+                }
+              else
+                perf_clk++;
+
+              perf_delta = line_end - line_mid;
               if(perf_delta < MAIN_CLK_MAX_LINE_USEC)
                 {
                   perf_vdp += (perf_delta > perf_clock_cost)
@@ -785,8 +919,12 @@ main(int    argc,
                 perf_clk++;
             }
           else
-            vdp_line();
+            {
+              residue = z80_run((int32)MAIN_TSTATES_PER_LINE - residue);
+              vdp_line();
+            }
 #else
+          residue = z80_run((int32)MAIN_TSTATES_PER_LINE - residue);
           vdp_line();
 #endif
 
@@ -805,12 +943,59 @@ main(int    argc,
 #endif
 
       /*
+       * The ground, once per turn and on the cold side of the emulated
+       * stretch: one load of sixteen bits and one compare while nothing
+       * changes, and a fill only while the countdown says a screen still
+       * owes the colour. A program that writes the register on every
+       * frame arms the countdown again on every frame and so pays one
+       * fill a frame -- there is no cheaper honest answer to a background
+       * that really does change that often -- and it still pays only one
+       * line of trace per report window, the count of the window going
+       * with the other aggregates.
+       *
+       * Before the drawing and not after: the fill covers the whole
+       * screen, so the picture has to land on top of it.
+       */
+      {
+        uint16 backdrop_now = vdp_backdrop();
+
+        if(backdrop_now != border_color)
+          {
+            border_color = backdrop_now;
+            border_repaint = sys_screen_count();
+          }
+
+        if(border_repaint > 0)
+          {
+            /*
+             * Spent on the paint, not on the attempt. A refused fill
+             * leaves that screen showing the ground it had, and the
+             * countdown has to come back to it on the next turn --
+             * decrementing here regardless would leave one screen of the
+             * rotation with the old colour for the rest of the run, half
+             * the frames of a game showing the wrong ground and nothing
+             * saying why. The count that goes with the aggregates is a
+             * count of paints for the same reason: it must not report a
+             * paint that did not happen.
+             */
+            if(sys_fill_screen(sys_screen_index(),(Color)border_color) >= 0)
+              {
+                border_repaint--;
+                vdp_backdrop_repainted();
+              }
+          }
+      }
+
+      /*
        * The end of the frame: the one draw call of the turn, then the
-       * presentation. The draw is what the second accumulator weighs --
+       * presentation. The draw is what the third accumulator weighs --
        * the emulated stretch has already closed its own clock above, so
        * the two figures never overlap -- and the presentation stays
        * outside the measurement: it is one cold call per frame, and the
        * figure being read here is the cel engine's, not the display's.
+       * The fill above is outside it too, and for the same reason: it is
+       * the display's business, not the engine's, and it is paid on the
+       * frames of a change only.
        */
 #if MAIN_MEASURE
       draw_start = sys_usec();
@@ -833,6 +1018,22 @@ main(int    argc,
       if(draw_err < 0)
         LOG_ONCE(LOG_CAT_VDP,LOG_LVL_ERR,
                  ("draw failed err=%ld",(long)draw_err));
+
+      /*
+       * The screen the error path would paint on, renewed on every turn
+       * so that it follows the rotation. It names the screen about to be
+       * presented, which is the one a viewer is looking at for the whole
+       * of the next frame: a stop anywhere in that frame writes its
+       * message over the picture that is on the console, and presents it
+       * again. Bound after the presentation instead, it would name the
+       * screen the scan is not reading, and the message would appear over
+       * a picture two frames old.
+       *
+       * Renewed and not bound once, because a binding taken at boot names
+       * one screen for good: with the screens rotating, every other frame
+       * would paint its message where nothing can see it.
+       */
+      log_bind_screen(sys_bitmap(),sys_screen());
       (void)sys_display_show();
 
 #if MAIN_MEASURE
@@ -875,11 +1076,23 @@ main(int    argc,
                * burst of early ones. What must not happen is that it passes
                * unnoticed, so it is counted and reported.
                *
-               * What to do about it beyond counting -- skip the drawing, let
-               * it slip -- is deliberately not decided here. That choice is
-               * meant to be made on the series of measurements this loop
-               * produces, and making it now would be making it with the very
-               * data it was supposed to rest on still unwritten.
+               * That is the whole policy, and it is now a decision and no
+               * longer an open question: a late frame slips, it is counted
+               * in over=, and nothing else happens to it. No frame is ever
+               * replayed, no emulated frame is ever skipped, and no frame
+               * is ever drawn less than whole -- an emulator that dropped
+               * frames of emulation would run the machine at a pace the
+               * machine does not have, and one that dropped renders would
+               * hide, behind a steadier picture, the very cost the
+               * measurements exist to expose.
+               *
+               * The measurements it was waiting for have been taken, and
+               * they say the render is what costs: the honest answer to a
+               * frame that overruns is therefore to make the render
+               * cheaper, not to skip it. Dropping the render of a late
+               * frame stays available as a lever, to be pulled -- if ever
+               * -- by the work that optimises the render, and only once
+               * that work has a figure to show for itself.
                */
               vbl_target = vbl_now;
 #if MAIN_MEASURE
@@ -929,7 +1142,9 @@ main(int    argc,
            * supposed frame rate.
            */
           main_perf_emit(perf_now - perf_window,perf_frames,
-                         perf_emul,perf_emul_frames,perf_vdp,perf_vdp_samples,
+                         perf_emul,perf_emul_frames,
+                         perf_z80,perf_z80_samples,
+                         perf_vdp,perf_vdp_samples,
                          perf_draw,perf_over,perf_clk);
 
           /*
@@ -997,6 +1212,8 @@ main(int    argc,
           perf_frames = 0;
           perf_emul = 0;
           perf_emul_frames = 0;
+          perf_z80 = 0;
+          perf_z80_samples = 0;
           perf_vdp = 0;
           perf_vdp_samples = 0;
           perf_draw = 0;

@@ -61,6 +61,13 @@ static int32 sys_audio_open_done = 0;
 static uint32 sys_mem_total = 0;
 static int32 sys_mem_sealed = 0;
 
+/*
+ * How many screens the display is built with, and how deep the rotation
+ * of sys_display_show runs. Two: one being drawn while the other is being
+ * scanned, which is the buffering that keeps a picture from being
+ * composed under the beam. Every loop over the screens and the countdown
+ * a caller arms to repaint all of them read this one figure.
+ */
 #define SYS_NUM_SCREENS 2
 
 /*
@@ -368,6 +375,12 @@ sys_display_open(void)
       sys_bm_height = SYS_FALLBACK_HEIGHT;
     }
 
+  /*
+   * The rotation starts on screen 0, and every later write of the field
+   * is the step in sys_display_show: the boot banner is drawn here and
+   * presented once, and from that presentation on the drawing and the
+   * scanning are never the same screen.
+   */
   sys_ctx->sc_CurrentScreen = 0;
   sys_display_used = display_type;
 
@@ -427,6 +440,21 @@ sys_screen(void)
 }
 
 int32
+sys_screen_count(void)
+{
+  return (int32)SYS_NUM_SCREENS;
+}
+
+int32
+sys_screen_index(void)
+{
+  if(sys_ctx == NULL)
+    return 0;
+
+  return (int32)sys_ctx->sc_CurrentScreen;
+}
+
+int32
 sys_width(void)
 {
   return sys_bm_width;
@@ -439,23 +467,33 @@ sys_height(void)
 }
 
 Err
-sys_fill(Color color)
+sys_fill_screen(int32 index,
+                Color color)
 {
   GrafCon gc;
   Rect rect;
   Item bitmap;
   Err err;
 
-  bitmap = sys_bitmap();
+  /*
+   * Every diagnostic below is one-shot, and all three for the same
+   * reason: a fill may be asked for on every frame, and a blocking printf
+   * repeated at that rate would not slow the pace down, it would destroy
+   * it -- and what a measurement then read would be the tracing (pattern
+   * from src_exemple_video_player/cinepak_decoder.c:660-666).
+   */
+  if((sys_ctx == NULL) || (index < 0) || (index >= (int32)SYS_NUM_SCREENS))
+    {
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+               ("sys_fill_screen: no such screen, or display not open"));
+      return -1;
+    }
+
+  bitmap = sys_ctx->sc_BitmapItems[index];
   if(bitmap == 0)
     {
-      /*
-       * sys_fill may be called every frame: the diagnostic is one-shot, since
-       * the blocking printf would otherwise destroy the pace instead of
-       * measuring it (pattern from
-       * src_exemple_video_player/cinepak_decoder.c:660-666).
-       */
-      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,("sys_fill: no bitmap, display not open"));
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+               ("sys_fill_screen: no bitmap, display not open"));
       return -1;
     }
 
@@ -468,9 +506,16 @@ sys_fill(Color color)
 
   err = FillRect(bitmap,&gc,&rect);
   if(err < 0)
-    LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,("sys_fill: FillRect err=%ld",(long)err));
+    LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+             ("sys_fill_screen: FillRect err=%ld",(long)err));
 
   return err;
+}
+
+Err
+sys_fill(Color color)
+{
+  return sys_fill_screen(sys_screen_index(),color);
 }
 
 Err
@@ -521,6 +566,29 @@ sys_display_show(void)
   if(err < 0)
     LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,("sys_display_show: DisplayScreen err=%ld",
                                       (long)err));
+
+  /*
+   * The rotation, and it is the whole point of asking the graphics folio
+   * for more than one screen: from here on the drawing goes to another
+   * screen than the one the scan has just been handed, so no picture is
+   * ever composed under the beam that is reading it.
+   *
+   * It steps whatever the call above answered, and that is a choice.
+   * After a refused presentation the console is still showing the screen
+   * it was showing, so stepping does hand the next frame the one being
+   * scanned; not stepping would be the safe move for that one frame. What
+   * is bought by stepping anyway is that the position of the screens
+   * never depends on a history of failures -- a caller that repaints one
+   * screen per frame can count frames and be right -- and what is given
+   * up is a frame of tearing on a console whose display path has just
+   * failed and said so in the trace.
+   *
+   * The step is a remainder and not a toggle so that the count is the one
+   * place the number of screens is written: raising it changes the depth
+   * of the rotation and nothing else.
+   */
+  sys_ctx->sc_CurrentScreen =
+    (sys_ctx->sc_CurrentScreen + 1UL) % (uint32)SYS_NUM_SCREENS;
 
   return err;
 }

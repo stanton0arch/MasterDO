@@ -77,6 +77,14 @@ static uint32 vdp_pre1_lib = 0;
  * wrap instead of counting.
  */
 static uint32 vdp_irq_seen = 0;
+
+/*
+ * Whether the backdrop line of the current report window has been said.
+ * File level for the same reason as the count above: the window is opened
+ * and closed by vdp_report, and the flag has to outlive the call that
+ * raises it.
+ */
+static uint32 vdp_backdrop_said = 0;
 #endif
 
 /*
@@ -501,7 +509,7 @@ vdp_render_line(uint32 y)
   line = sms.vdp.line + VDP_LINE_LEAD;
   prio = sms.vdp.prio + VDP_LINE_LEAD;
   out = (uint32 *)(sms.vdp.pixels[0] + (y * VDP_PIX_ROW_BYTES));
-  border = 16UL + ((uint32)reg[7] & 15UL);
+  border = VDP_BACKDROP_INDEX();
 
   if(((uint32)reg[1] & 0x40UL) == 0UL)
     {
@@ -764,7 +772,9 @@ vdp_init(void)
   sms.vdp.cnt_spr_ovf = 0;
   sms.vdp.cnt_spr_col = 0;
   sms.vdp.cnt_spr_zoom = 0;
+  sms.vdp.cnt_backdrop = 0;
   vdp_irq_seen = 0;
+  vdp_backdrop_said = 0;
 #endif
 
   /*
@@ -993,6 +1003,34 @@ void *
 vdp_cel(void)
 {
   return sms.vdp.cel;
+}
+
+uint16
+vdp_backdrop(void)
+{
+  return sms.vdp.plut[VDP_BACKDROP_INDEX()];
+}
+
+void
+vdp_backdrop_repainted(void)
+{
+#if VDP_COUNTERS
+  sms.vdp.cnt_backdrop++;
+
+  /*
+   * Once per report window, and the flag is what bounds it: the count
+   * above carries how many repaints there really were, and the aggregate
+   * line of the window says it. A program that beats register 7 pays one
+   * line a second here, not one a frame.
+   */
+  if(vdp_backdrop_said == 0UL)
+    {
+      vdp_backdrop_said = 1UL;
+      LOG_HOT(LOG_CAT_VDP,LOG_LVL_DBG,
+              ("backdrop=%lu border filled",
+               (unsigned long)VDP_BACKDROP_INDEX()));
+    }
+#endif
 }
 
 /*
@@ -1297,6 +1335,22 @@ vdp_report(void)
            (unsigned long)sms.vdp.cnt_spr_col,
            (unsigned long)sms.vdp.cnt_spr_zoom));
 
+  /*
+   * The surround of the picture, and only when there was one to report:
+   * how many repaints the window paid and which palette entry they used.
+   * Zero repaints is the nominal case and says nothing, so the line
+   * appearing at all is already the fact worth reading. The naming line
+   * of the change itself was emitted once, at the change; this is its
+   * count.
+   */
+  if(sms.vdp.cnt_backdrop != 0UL)
+    {
+      LOG_HOT(LOG_CAT_VDP,LOG_LVL_DBG,
+              ("border repaint=%lu backdrop=%lu",
+               (unsigned long)sms.vdp.cnt_backdrop,
+               (unsigned long)VDP_BACKDROP_INDEX()));
+    }
+
   if(sms.vdp.cnt_mode != 0UL)
     {
       LOG_HOT(LOG_CAT_VDP,LOG_LVL_WARN,
@@ -1327,5 +1381,7 @@ vdp_report(void)
   sms.vdp.cnt_spr_ovf = 0;
   sms.vdp.cnt_spr_col = 0;
   sms.vdp.cnt_spr_zoom = 0;
+  sms.vdp.cnt_backdrop = 0;
+  vdp_backdrop_said = 0;
 #endif
 }

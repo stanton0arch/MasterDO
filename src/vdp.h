@@ -381,9 +381,13 @@ typedef struct
    * The index buffers, one frame of packed 6 bit indexes each, allocated
    * in DRAM at init (DRAM is the preferred source for cel data,
    * docs/3do/3DO_Development_Notes.md:38). The count is a build constant
-   * (common.h, SMS_VDP_BUFFERS); one is enough for a picture composed
-   * once, and the array is where a renderer will rotate when measurement
-   * says more are worth having.
+   * (common.h, SMS_VDP_BUFFERS) and the measurements have been taken: it
+   * is one, and the render indexes buffer zero without rotating. The
+   * useful double buffering is the screen's, which the system part now
+   * turns on every presentation, so the cel is never read out of a
+   * picture being composed. The array stays an array so that the day a
+   * measured tear reopens the question, the shape it would need is
+   * already there.
    */
   uint8 *pixels[SMS_VDP_BUFFERS];
 
@@ -438,6 +442,15 @@ typedef struct
   uint32 cnt_spr_ovf;
   uint32 cnt_spr_col;
   uint32 cnt_spr_zoom;
+  /*
+   * How many times the surround of the picture was repainted in the
+   * window, as the frame loop reported it through vdp_backdrop_repainted.
+   * A figure of zero is the nominal one -- a program that leaves its
+   * background colour alone pays no paint at all -- and a figure that
+   * grows with the frames names a program writing register 7 or the
+   * colour entry it points at over and over.
+   */
+  uint32 cnt_backdrop;
 #endif
 } vdp_t;
 
@@ -446,6 +459,26 @@ typedef struct
 #else
 #define VDP_COUNT(name) ((void)0)
 #endif
+
+/*
+ * ---------------------------------------------------------------------------
+ * The backdrop entry: the colour memory entry register 7 names, taken on
+ * its low four bits and read out of the second bank of the palette.
+ * Register 7 sets the border colour and takes it from the second bank of
+ * sixteen (docs/sms_gg/SMSOfficialDocs.md:861-864), which is where the
+ * sixteen comes from; the same document says it once more beside the
+ * colour memory layout, border and sprite colours coming from that second
+ * group (:734). The take on four bits is
+ * TotalSMS/src/core/sms_vdp.c:320.
+ *
+ * The one definition of it in the program. The render uses it for a line
+ * with the display switched off and for the masked left column, and the
+ * frame loop uses it through vdp_backdrop below for the ground it paints
+ * around the picture: one expression, so the picture and its surround can
+ * never name two different colours.
+ * ---------------------------------------------------------------------------
+ */
+#define VDP_BACKDROP_INDEX() (16UL + ((uint32)sms.vdp.reg[7] & 15UL))
 
 /*
  * ---------------------------------------------------------------------------
@@ -572,6 +605,40 @@ int32 vdp_init(void);
 void *vdp_cel(void);
 
 /*
+ * The resolved backdrop colour, RGB555: the palette entry the index above
+ * names, which is the colour the hardware shows outside the picture. Read
+ * once per frame by the frame loop, on the cold side of its line loop,
+ * and never by the render -- the render has the index in a local already.
+ *
+ * The colour and not the index, because a program may leave register 7
+ * alone and rewrite the colour memory entry it points at: comparing
+ * indexes would leave the surround a palette behind. Comparing the
+ * sixteen bits catches both causes for the same one load.
+ *
+ * This module never draws and never waits: it says what the colour is,
+ * and the caller paints.
+ */
+uint16 vdp_backdrop(void);
+
+/*
+ * Notes that the caller has just repainted the surround with the current
+ * backdrop colour. Two things happen and neither is a paint: the window's
+ * repaint count steps, and the index in force is named in the trace at
+ * most once per report window -- a program that writes register 7 on
+ * every frame would otherwise pay a blocking serial write per frame,
+ * which is the one thing the periodic aggregates exist to avoid.
+ *
+ * Cold by construction: the caller only repaints when the colour changed,
+ * once per screen of its rotation. Without the counters the BODY is
+ * empty, not the call: this is an out of line function in another
+ * translation unit and nothing here folds one away, so a silent or a
+ * measured build still pays the call. It is paid a handful of times a run
+ * and never on a path that is timed, which is why the guard is left where
+ * it is rather than pushed into the caller.
+ */
+void vdp_backdrop_repainted(void);
+
+/*
  * The control port, $BF written (TotalSMS/src/core/sms_vdp.c:639-675).
  * First byte: low address and the latch rises. Second byte: the code in
  * bits 7 and 6, the high address in the rest, and the latch falls. Code 0
@@ -654,7 +721,9 @@ void vdp_line(void);
  * is asked to show: name table base, both scroll latches, the two inhibit
  * bits and the left column mask; a fourth, on the same terms, with what
  * the sprites of the window did -- the busiest line, the two bits raised
- * and whether magnification is on; then a warning naming an unsupported
+ * and whether magnification is on; a fifth, only when the window
+ * repainted the surround of the picture at all, with how many times and
+ * with the backdrop index in force; then a warning naming an unsupported
  * mode if one was written, and another naming a 224 or 240 line height
  * if one was asked. The counted lines are not emitted when every figure
  * is zero. Cold: the frame loop calls it where and as often
