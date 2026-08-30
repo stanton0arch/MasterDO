@@ -1,0 +1,54 @@
+# --- C / ASM build artifacts ---
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.elf
+*.exe
+*.out
+*.map
+*.lst
+*.sym
+*.d
+*.su
+core
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+
+# --- Editors / OS noise ---
+*~
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Not part of the public repository ---
+# (repo keeps only: README.md, Makefile, convert.sh, input_videos/, src/,
+#  tools/, and takeme/ minus the movie and the player binary)
+/.agents/
+/.claude/
+/_bmad/
+/_bmad-output/
+/activate-env
+/art/
+/bin/
+/build/
+/debug_outputs/
+/docs/
+/examples/
+/include/
+/iso/
+/lib/
+/src_exemple/
+/src_exemple_video_player/
+/TotalSMS/
+AGENTS.md
+project-context.MD
+
+# takeme/: CD root contents are versioned, except the converted movie
+# and the player binary (rebuilt by every make)
+/takeme/roms/*
+/takeme/LaunchMe
