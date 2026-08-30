@@ -313,9 +313,10 @@ build/%.cpp.o: src/%.cpp | build $(SUBDIR_BUILD_DIRS)
 
 clean:
 ifeq ($(IS_POSIX_SHELL),1)
-	rm -rvf "build" "iso" "$(LAUNCHME)" $(PROGRAM_PATHS:%="%")
+	rm -rvf "build" "iso" "$(LAUNCHME)" "tests/z80/z80_bench" $(PROGRAM_PATHS:%="%")
 else
 	if exist "build" rmdir /S /Q "build"
+	if exist "tests\z80\z80_bench" del "tests\z80\z80_bench"
 	if exist "iso" rmdir /S /Q "iso"
 	if exist $(subst /,\,$(LAUNCHME)) del $(subst /,\,$(LAUNCHME))
 	for %%f in ($(subst /,\,$(PROGRAM_PATHS))) do if exist "%%f" del "%%f"
@@ -331,6 +332,13 @@ else
 	run-iso "$(ISONAME)"
 endif
 
-.PHONY: builddir isodir clean distclean launchme programs libraries install install-libs modbin modbin-launchme banner iso run
+# The host bench of the Z80 core: the 79 instruction tests of ZEXALL replayed
+# on the PC compiler, against src/z80.c as it stands. Seconds, no console, no
+# ROM. It is off the default path on purpose and it does not touch the cross
+# compiler: `make` with no target still builds the game.
+test-z80:
+	sh tests/z80/run_z80.sh
+
+.PHONY: builddir isodir clean distclean launchme programs libraries install install-libs modbin modbin-launchme banner iso run test-z80
 
 -include $(DEPS)

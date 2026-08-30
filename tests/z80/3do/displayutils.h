@@ -1,0 +1,3 @@
+#ifndef BENCH_DISPLAYUTILS_H
+#define BENCH_DISPLAYUTILS_H
+#endif

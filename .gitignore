@@ -14,6 +14,10 @@
 *.su
 core
 
+# The host bench's binary. It has no extension, so no rule above catches it,
+# and tests/z80/ is a tracked directory.
+/tests/z80/z80_bench
+
 # --- Python ---
 __pycache__/
 *.py[cod]
