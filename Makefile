@@ -339,6 +339,16 @@ endif
 test-z80:
 	sh tests/z80/run_z80.sh
 
-.PHONY: builddir isodir clean distclean launchme programs libraries install install-libs modbin modbin-launchme banner iso run test-z80
+# The host bench of the render profiler: the wrappers that let a post of the
+# render be run a second time, and the arithmetic that turns the windows they
+# displace into a breakdown. Checks that the five variants draw the same frame,
+# that each doubles its own post and no other, and that the form the delivered
+# build compiles renders what the instrumented one measures. Same terms as
+# above: seconds, no console, no ROM, off the default path, cross compiler
+# untouched.
+test-vdp:
+	sh tests/vdp-profile/run_profile.sh
+
+.PHONY: builddir isodir clean distclean launchme programs libraries install install-libs modbin modbin-launchme banner iso run test-z80 test-vdp
 
 -include $(DEPS)

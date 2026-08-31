@@ -1,0 +1,6 @@
+# Built by run_profile.sh, never checked in: the three benches it compiles and
+# the coverage directory of its second pass.
+profile_bench
+profile_bench_off
+profile_main_bench
+work/
