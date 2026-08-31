@@ -625,10 +625,6 @@ main_profile_emit(const uint32 *sum10,
   uint32 g_spr;
   uint32 g_pack;
   uint32 g_all;
-  const char *s_bg;
-  const char *s_spr;
-  const char *s_pack;
-  const char *s_all;
   uint32 v;
   uint32 ctrl;
   uint32 sum3;
@@ -677,10 +673,6 @@ main_profile_emit(const uint32 *sum10,
   g_spr = gap[VDP_PROFILE_SPRITES];
   g_pack = gap[VDP_PROFILE_PACK];
   g_all = gap[VDP_PROFILE_ALL];
-  s_bg = (low[VDP_PROFILE_BG] != 0UL) ? "-" : "";
-  s_spr = (low[VDP_PROFILE_SPRITES] != 0UL) ? "-" : "";
-  s_pack = (low[VDP_PROFILE_PACK] != 0UL) ? "-" : "";
-  s_all = (low[VDP_PROFILE_ALL] != 0UL) ? "-" : "";
 
   LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
           ("profile vdp ctrl=%lu.%lums bg=%lu.%lums spr=%lu.%lums pack=%lu.%lums all=%lu.%lums",
@@ -690,12 +682,30 @@ main_profile_emit(const uint32 *sum10,
            (unsigned long)(m_pack / 10UL),(unsigned long)(m_pack % 10UL),
            (unsigned long)(m_all / 10UL),(unsigned long)(m_all % 10UL)));
 
+  /*
+   * Magnitudes only, eight arguments, no string among them.
+   *
+   * What the console showed: this line once carried a sign marker before
+   * each of its four figures -- twelve arguments, four of them strings --
+   * and the fourth figure came out as the third one's whole part followed
+   * by six junk digits, the same six on every round. What still printed
+   * whole in the same run: the periodic line, twelve arguments and every
+   * one of them a number, and the per-post lines, six arguments with a
+   * single leading string. So the fault sits somewhere in the count and
+   * the interleaving together; which of the two carries it was not
+   * established, and this comment does not claim it was. The shape kept
+   * here is one both surviving lines share, and it is kept for that reason
+   * rather than for a diagnosis.
+   *
+   * Nothing is lost with the markers: a variant reading below the control
+   * ends the round above, named, before this line is reached.
+   */
   LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("profile gap bg=%s%lu.%lums spr=%s%lu.%lums pack=%s%lu.%lums all=%s%lu.%lums",
-           s_bg,(unsigned long)(g_bg / 10UL),(unsigned long)(g_bg % 10UL),
-           s_spr,(unsigned long)(g_spr / 10UL),(unsigned long)(g_spr % 10UL),
-           s_pack,(unsigned long)(g_pack / 10UL),(unsigned long)(g_pack % 10UL),
-           s_all,(unsigned long)(g_all / 10UL),(unsigned long)(g_all % 10UL)));
+          ("profile gap bg=%lu.%lums spr=%lu.%lums pack=%lu.%lums grouped=%lu.%lums",
+           (unsigned long)(g_bg / 10UL),(unsigned long)(g_bg % 10UL),
+           (unsigned long)(g_spr / 10UL),(unsigned long)(g_spr % 10UL),
+           (unsigned long)(g_pack / 10UL),(unsigned long)(g_pack % 10UL),
+           (unsigned long)(g_all / 10UL),(unsigned long)(g_all % 10UL)));
 
   /*
    * The price of the instrumentation that was already there, said on

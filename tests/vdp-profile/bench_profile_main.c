@@ -299,8 +299,11 @@ static void test_emit(void)
   round_of(sum10,win_,3714UL,3600UL,4100UL,4300UL,6972UL);
   cap_reset();
   main_profile_emit(sum10,win_,drop,120UL,984UL,32UL);
-  check_eq((unsigned long)cap_holding("gap bg=-11.4ms"),1UL,
-           "the gap line shows the sign");
+  check_eq((unsigned long)cap_holding("gap bg=11.4ms"),1UL,
+           "the gap line reports the magnitude");
+  check_eq((unsigned long)cap_holding("gap bg=-"),0UL,
+           "and carries no sign marker: that line is figures only, because a\n"
+           "       string mixed among four of them came out as junk on the console");
   check_eq((unsigned long)cap_holding("post bg cost="),0UL,
            "and the table refuses to publish a cost for that post");
   check_eq((unsigned long)cap_holding("post bg not measurable"),1UL,
