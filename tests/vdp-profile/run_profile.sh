@@ -1,6 +1,7 @@
 #!/bin/sh
-# One command, three checks, on the wrappers that let the render be broken
-# into posts (src/vdp.h, VDP_REPEAT_BEGIN / VDP_REPEAT_END).
+# One command, four checks: three on the wrappers that let the render be
+# broken into posts (src/vdp.h, VDP_REPEAT_BEGIN / VDP_REPEAT_END), and one on
+# the decoded row cache the background composes from.
 #
 #   1. IDENTITY.  The picture, the composition scratch, the priority mask and
 #      the two sprite bits taken LINE BY LINE, compared byte for byte against
@@ -10,15 +11,31 @@
 #
 #   2. WORK.  The same bench under coverage, one variant per process, three
 #      counters read out of the render. Answers: does each variant actually
-#      do twice the work of its own post, and of no other.
+#      do twice the work of its own post, and of no other. Plus one counter
+#      that must NOT double: the decoding of a tile row. The first pass over
+#      a line leaves every row of it decoded, so a repeated background post
+#      is a pass of hits and its displacement is the cost of composing from
+#      a warm cache -- the decoding falls into the residual instead. That is
+#      a property of the cache and not a defect of the wrapper, but it is a
+#      property the figures have to be read with, so it is pinned here
+#      rather than left to be rediscovered.
 #
 #   3. DELIVERED FORM.  The bench built with the switch OFF -- the form of the
 #      macros that goes out to a player, which checks 1 and 2 never compile --
 #      rendering the same scenes and digesting them, against the instrumented
 #      build's control. Answers: is the delivered render the one measured.
 #
-# Why three and not one. A wrapper opened one line too low -- below the stroke
-# index and the two cursors instead of above them -- leaves the loop already
+#   4. THE DECODED ROW CACHE, in the delivered form. Every line held against
+#      a composition written the old way -- four plane tables per pixel --
+#      plus the cache caught serving, caught being thrown away by a write
+#      through the port, and the picture caught staying where it is under a
+#      fine scroll. Answers: does the cache render what the machine renders,
+#      and does it cache at all. Runs inside check 1 as well; here it runs
+#      through the macros that ship.
+#
+# Why three checks on the wrappers and not one. A wrapper opened one line
+# too low -- below the stroke index and the two cursors instead of above
+# them -- leaves the loop already
 # finished when the second pass starts: it draws the SAME picture and does NO
 # work, so check 1 passes and the post would have measured zero. Check 2 is
 # what catches that, and it was verified to catch it. Conversely a post that
@@ -109,6 +126,14 @@ pat_2='if((uint32)sat\[i\] == VDP_SPR_TERMINATOR)'
 pat_3='row += 16;'
 name_1='strokes'; name_2='sprite-entries'; name_3='pack-groups'
 
+# And the one that must stay put whatever variant runs: the decode of a tile
+# row, inside the miss branch of the background post. A repeated background
+# pass finds every row of the line already decoded, so this count is the
+# same under every variant -- stated as an expectation so that the day it
+# doubles, or the day the pattern stops matching, somebody is told.
+pat_bg_decode='eb\[x\] = (uint8)'
+name_bg_decode='row-decodes'
+
 v=0
 while [ "$v" -lt "$N" ]; do
   ( cd "$W" && rm -f ./*.gcda ./*.gcov && ./bench "$v" >/dev/null &&
@@ -130,7 +155,15 @@ while [ "$v" -lt "$N" ]; do
     line="$line $nm=$c"
     p=$((p + 1))
   done
-  echo "  variant $v:$line"
+  hits=$(grep -c -- "$pat_bg_decode" "$G" || true)
+  if [ "$hits" != "1" ]; then
+    echo "  [FAIL] the pattern for $name_bg_decode matches $hits lines of vdp.c, not 1"
+    fail=1
+  fi
+  d=$(grep -- "$pat_bg_decode" "$G" | head -1 | cut -d: -f1 | tr -d ' ')
+  number "$d" "the $name_bg_decode count of variant $v" || d=0
+  eval "d$v=\$d"
+  echo "  variant $v:$line $name_bg_decode=$d"
   v=$((v + 1))
 done
 
@@ -149,6 +182,8 @@ while [ "$v" -lt "$N" ]; do
     fi
     p=$((p + 1))
   done
+  eval "got=\$d$v"
+  chk "$got" "$d0" "variant $v decodes no extra tile row: the repeat is a pass of hits"
   v=$((v + 1))
 done
 
@@ -167,6 +202,23 @@ else
   fail=1
 fi
 
+echo
+echo "=== 4. the decoded row cache, through the form that ships ==="
+# A section that did not run prints nothing and leaves failed=0 behind it, so
+# the count of its assertions is checked, not only its verdict. The floor is
+# well under what it emits today: it is there to catch a pass that vanished,
+# not to be edited every time one is added.
+"$B/profile_bench_off" > "$W/off-full.txt" || fail=1
+sed -n '/the decoded row cache/,/^$/p' "$W/off-full.txt" | sed 's/^/  /'
+TCN=$(sed -n '/the decoded row cache/,/^$/p' "$W/off-full.txt" | grep -c '\[OK\]' || true)
+number "$TCN" "the row cache assertion count" || TCN=0
+if [ "$TCN" -lt 20 ]; then
+  echo "  [FAIL] the row cache pass emitted $TCN assertions, fewer than the 20 expected"
+  fail=1
+fi
+grep -q '^failed=0$' "$W/off-full.txt" || \
+  { echo "  [FAIL] the delivered form did not come out clean"; fail=1; }
+
 [ "$fail" -eq 0 ] || exit 1
 echo
-echo "all three checks green"
+echo "all four checks green"

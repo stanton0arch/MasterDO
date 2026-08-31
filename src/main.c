@@ -1126,19 +1126,29 @@ main(int    argc,
 #if VDP_PIX_BUF_BYTES != 36864UL
 #error "the pixel buffer screen text says 36 kilobytes: update it with the new size"
 #endif
+#if VDP_TC_TOTAL_BYTES != 36864UL
+#error "the tile cache screen text says 36 kilobytes: update it with the new size"
+#endif
 
   err = vdp_init();
   if(err < 0)
     {
       /*
-       * Two allocations, two screens: the player quotes a code, and the
-       * code must name the block that was refused.
+       * A screen of its own for the blocks that have one: the player
+       * quotes a code, and the code must name the block that was refused.
+       * The plane table has none yet and falls to the video memory screen,
+       * which names the wrong block for it -- a defect older than the row
+       * cache and recorded as such, not one to fix in passing here.
        */
       LOG_ERR(LOG_CAT_VDP,("boot aborted: vdp init err=%ld",(long)err));
       if(err == VDP_ERR_NO_PIXELS)
         log_fatal(LOG_CAT_VDP,LOG_E_VDP_PIXELS,
                   "cannot allocate the pixel buffer",
                   "the console refused 36 kilobytes");
+      else if(err == VDP_ERR_NO_TILECACHE)
+        log_fatal(LOG_CAT_VDP,LOG_E_VDP_TILECACHE,
+                  "cannot allocate the tile cache",
+                  "36 kilobytes of decoded tile rows");
       else
         log_fatal(LOG_CAT_VDP,LOG_E_VDP_VRAM,
                   "cannot allocate the video ram",

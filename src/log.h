@@ -246,13 +246,15 @@ void log_printf(const char *fmt, ...);
  */
 
 /*
- * The video range. Both conditions are allocations refused at boot, and
- * both are stops rather than degraded modes: a program writes its tiles
- * into the video memory before it does anything else, and a picture with
- * no pixel buffer has nowhere to come out.
+ * The video range. Every condition is an allocation refused at boot, and
+ * every one is a stop rather than a degraded mode: a program writes its
+ * tiles into the video memory before it does anything else, a picture with
+ * no pixel buffer has nowhere to come out, and the background is composed
+ * out of the decoded row cache with no path around it.
  */
-#define LOG_E_VDP_VRAM   300
-#define LOG_E_VDP_PIXELS 301
+#define LOG_E_VDP_VRAM      300
+#define LOG_E_VDP_PIXELS    301
+#define LOG_E_VDP_TILECACHE 302
 
 /*
  * Publishes where the fatal error screen must be painted: the bitmap to draw

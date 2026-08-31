@@ -124,21 +124,51 @@
 
 /*
  * ---------------------------------------------------------------------------
- * The line scratch: one byte per pixel of the picture, plus a lead of eight
- * bytes before pixel 0 and a tail of sixteen after pixel 255. The
- * background is composed tile by tile, eight pixels a stroke, and a fine
- * horizontal scroll shifts every stroke right by up to seven pixels: the
- * stroke that supplies the leftmost pixels then starts before pixel 0, and
- * the one that ends the row runs past pixel 255. Both are written whole
- * into the lead and the tail rather than tested pixel by pixel -- the lead
- * and the tail are what makes a write outside the picture impossible by
- * construction, with no compare in the loop. Pixel x of the picture is
- * scratch[VDP_LINE_LEAD + x]. The mask scratch has the same shape.
+ * The line scratch: one byte per pixel of the picture, plus a lead of
+ * eight bytes before it and a tail of sixteen after it. The background is
+ * composed tile by tile, eight pixels a stroke, and under a fine
+ * horizontal scroll the leftmost stroke starts before pixel 0: it is
+ * written whole into the lead rather than tested pixel by pixel, which is
+ * what makes a write outside the picture impossible by construction, with
+ * no compare in the loop.
+ *
+ * Pixel x of the picture is scratch[line_org + x], NOT a fixed offset: the
+ * fine scroll moves the origin rather than each stroke, for the alignment
+ * reason set out below. The mask scratch has the same shape and the same
+ * origin.
+ *
+ * The tail is margin and nothing writes it any more. The 33 strokes stop
+ * at byte 263 and the picture ends at byte 263 at the latest, so bytes 264
+ * upward are never touched; they are kept as slack on the buffer every
+ * background store now reaches by word rather than shrunk to nothing, and
+ * the bench asserts they stay untouched.
  * ---------------------------------------------------------------------------
  */
 #define VDP_LINE_LEAD    8UL
 #define VDP_LINE_TAIL    16UL
 #define VDP_LINE_SCRATCH (VDP_LINE_LEAD + VDP_PIX_WIDTH + VDP_LINE_TAIL)
+
+/*
+ * The scratch is written a word at a time and read a byte at a time, so it
+ * is held as words and viewed as bytes. What forces it: the processor
+ * refuses a word store on an address that is not a multiple of four, and a
+ * stroke shifted right by the fine scroll would land on any of eight.
+ *
+ * So the fine scroll no longer shifts the destination -- it shifts the
+ * origin of the picture inside the scratch. Stroke c is written at byte
+ * c * 8, always aligned, and pixel x of the picture is at line_org + x
+ * with line_org = VDP_LINE_LEAD - fine. The lead holds the stroke that
+ * runs in from the left, the tail the one that runs out to the right, and
+ * both are what makes a write outside the scratch impossible by
+ * construction: the highest byte a stroke touches is 33 * 8 - 1.
+ */
+#if (VDP_LINE_SCRATCH % 4UL) != 0UL
+#error "the line scratch is laid a word at a time: its length must be a multiple of four"
+#endif
+#if (33UL * 8UL) > VDP_LINE_SCRATCH
+#error "the 33 strokes of a scrolled line must fit the scratch"
+#endif
+#define VDP_LINE_WORDS (VDP_LINE_SCRATCH / 4UL)
 
 /*
  * The bit plane table: for each of the four planes of a pattern row, for
@@ -150,6 +180,82 @@
 #define VDP_PLANES_COUNT 4UL
 #define VDP_PLANES_BYTES (VDP_PLANES_COUNT * 256UL * 8UL)
 #define VDP_PLANES_PLANE (256UL * 8UL)
+
+/*
+ * The decoded row cache. A pattern row is four bytes of video memory, one
+ * per plane, and the eight indexes it stands for are the same eight every
+ * time that row is met: the picture shows a few hundred distinct rows and
+ * asks for them tens of thousands of times a frame. Decoded once and kept,
+ * a row costs two word reads instead of thirty-two table reads.
+ *
+ * The key is the row's own video address divided by four, so the table has
+ * one entry per row the video memory can hold and no lookup structure of
+ * its own. Vertical flip needs no entry: it reads another row of the same
+ * pattern, so another address, so another entry.
+ *
+ * An entry is eight indexes, one byte each, held as two words because the
+ * composition reads and lays them a word at a time. The indexes are stored
+ * bare, without the palette bank: the bank belongs to the name table entry
+ * and not to the row, and two columns of different banks share one entry.
+ *
+ * Validity is one byte a row and not one bit: the test sits on the hottest
+ * read of the render, where a bit costs a shift and a mask, and the four
+ * kilobytes it spends are inside the ceiling. Both blocks are taken as one
+ * allocation, the words first so that the whole thing is word aligned.
+ */
+#define VDP_TC_ROW_BYTES   4UL
+#define VDP_TC_ROWS        (VDP_VRAM_SIZE / VDP_TC_ROW_BYTES)
+#define VDP_TC_WORDS       2UL
+#define VDP_TC_BYTES       (VDP_TC_ROWS * VDP_TC_WORDS * 4UL)
+#define VDP_TC_VALID_BYTES VDP_TC_ROWS
+#define VDP_TC_TOTAL_BYTES (VDP_TC_BYTES + VDP_TC_VALID_BYTES)
+
+/*
+ * The ceiling the cache was granted, and it is a refusal rather than a
+ * comment: the free memory of the machine is shared with the sound and the
+ * saves, and a table that grew past this would spend theirs. The figure is
+ * a share of the 229376 bytes of DRAM the boot trace reports free once
+ * every other block is taken -- a little under a third, chosen so that
+ * more than 150 kilobytes are left for the parts that have spent nothing
+ * yet. Raising it is not a code decision; the trace says what is left.
+ */
+#define VDP_TC_CEILING_BYTES 65536UL
+#if VDP_TC_TOTAL_BYTES > VDP_TC_CEILING_BYTES
+#error "the decoded row cache is over its ceiling: shrink it rather than take the memory"
+#endif
+
+/*
+ * The key of the row that holds video address a, and the two lane masks a
+ * composition needs. A byte of eight indexes is below 16 by construction,
+ * so adding 0x7F to it cannot carry into the byte above: the top bit of
+ * b | (b + 0x7F) then says "not transparent" for each of the four at once,
+ * and no test per pixel is paid.
+ *
+ * "Below 16" is a property of the plane table and not a hope: an index is
+ * the OR of one byte per plane, each weighing one bit, so four planes give
+ * four bits. A fifth would break the carry and corrupt the priority mask
+ * in silence, which is why it is refused here rather than commented.
+ */
+#if VDP_PLANES_COUNT > 4UL
+#error "the lane trick below needs indexes under 16: more than four planes breaks the carry"
+#endif
+#define VDP_TC_KEY(a)   (((a) & VDP_VRAM_MASK) >> 2)
+
+/*
+ * The same key from what the render has in hand: a pattern number and a
+ * row, which stand for the video address pattern * 32 + row * 4. Written
+ * as its own macro so that the read side and the write side of the table
+ * cannot drift apart -- the bench holds the two against each other over
+ * every pattern and every row. The largest key a name table entry can ask
+ * for is refused below if it ever stopped fitting the table.
+ */
+#define VDP_TC_KEY_TILE(pattern,row) (((pattern) << 3) + (row))
+
+#if (((0x1FFUL << 5) + (7UL << 2)) >> 2) >= VDP_TC_ROWS
+#error "the largest pattern row a name table entry names is past the end of the row cache"
+#endif
+#define VDP_TC_LANE_LOW 0x7F7F7F7FUL
+#define VDP_TC_LANE_ONE 0x01010101UL
 
 /*
  * The name table rows the scroll wraps on, and the picture rows: 28 rows
@@ -215,8 +321,15 @@
 #error "one subtraction no longer wraps the vertical position on the name table"
 #endif
 
-#if (VDP_LINE_LEAD < 8UL) || (VDP_LINE_TAIL < 15UL)
-#error "a stroke shifted by 7 needs 8 bytes of lead and 15 of tail in the line scratch"
+/*
+ * The stroke that runs in from the left is written whole into the lead, so
+ * the lead holds one. Nothing runs off the right any more: the strokes are
+ * no longer shifted, they stop at byte 33 * 8 - 1, and the constraint that
+ * matters is that the scratch reaches that byte -- checked where the
+ * scratch is defined, along with the word alignment the strokes need.
+ */
+#if VDP_LINE_LEAD < 8UL
+#error "the stroke that runs in from the left needs eight bytes of lead"
 #endif
 
 /*
@@ -271,6 +384,12 @@ typedef struct
    * Video memory, one block taken through the allocator of sys.c at init
    * so that it shows in the boot footprint like every other block. The
    * address that indexes it is kept masked on every path that moves it.
+   *
+   * ONE path writes it: VDP_IO_DATA_WRITE below, which throws away the
+   * decoded row that byte belongs to. Anything else that ever writes here
+   * -- a loader, a save state, a debug poke -- must throw the rows away
+   * too, or the picture will show tiles that no longer exist. The init
+   * clear does it by invalidating the whole table.
    */
   uint8 *vram;
 
@@ -337,12 +456,33 @@ typedef struct
    * The composition scratch of one line, one index per pixel, and the
    * mask that goes with it: 1 where the background pixel is priority and
    * non-zero, or where the left column is masked; 0 elsewhere. The line
-   * is packed from the scratch once composed; the mask is written here
-   * for the sprite stage and read by nothing yet. Shape and offsets:
-   * VDP_LINE_* above.
+   * is packed from the scratch once composed; the mask is read by the
+   * sprite stage, which leaves a background pixel of priority alone.
+   *
+   * Held as words and viewed as bytes: the background lays a stroke a
+   * word at a time. Shape, alignment and the origin of the picture inside
+   * them: VDP_LINE_* above.
    */
-  uint8 line[VDP_LINE_SCRATCH];
-  uint8 prio[VDP_LINE_SCRATCH];
+  uint32 line_w[VDP_LINE_WORDS];
+  uint32 prio_w[VDP_LINE_WORDS];
+
+  /*
+   * Where pixel 0 of the picture sits in the two scratches above, in
+   * bytes. VDP_LINE_LEAD minus the fine scroll of the line being composed
+   * (VDP_LINE_* above says why), and VDP_LINE_LEAD on a line with the
+   * display off. Written by the render at the head of a line and read by
+   * everything that speaks in picture coordinates: the sprite pass, the
+   * masked left column, the packer.
+   */
+  uint32 line_org;
+
+  /*
+   * The decoded row cache and the byte per row that says whether it still
+   * stands. One allocation, sized and keyed by VDP_TC_* above; the
+   * validity bytes follow the words inside the same block.
+   */
+  uint32 *tc;
+  uint8 *tc_valid;
 
   /*
    * The two sprite bits of the status register. Each rises while a line
@@ -451,13 +591,43 @@ typedef struct
    * colour entry it points at over and over.
    */
   uint32 cnt_backdrop;
+
+  /*
+   * What the decoded row cache did over the window: rows served already
+   * decoded, rows decoded on first use, and rows a write to the video
+   * memory threw away while they still stood. The third is counted
+   * without a test -- the validity byte is added before it is cleared --
+   * so the write path keeps its shape whether the counters are in or out.
+   */
+  uint32 cnt_tc_hit;
+  uint32 cnt_tc_miss;
+  uint32 cnt_tc_inval;
 #endif
 } vdp_t;
+
+/*
+ * The two scratches as bytes. Everything that speaks in pixels goes
+ * through these; only the background composition uses the word arrays
+ * directly, and it is the reason they are words.
+ */
+#define VDP_LINE_BYTES ((uint8 *)sms.vdp.line_w)
+#define VDP_PRIO_BYTES ((uint8 *)sms.vdp.prio_w)
 
 #if VDP_COUNTERS
 #define VDP_COUNT(name) (sms.vdp.cnt_##name++)
 #else
 #define VDP_COUNT(name) ((void)0)
+#endif
+
+/*
+ * Adds up the rows an invalidation actually threw away, counting only in
+ * the build that keeps the counters: the validity byte is 1 or 0, so
+ * adding it before clearing it needs no branch on the write path.
+ */
+#if VDP_COUNTERS
+#define VDP_TC_COUNT_INVAL(k) (sms.vdp.cnt_tc_inval += (uint32)sms.vdp.tc_valid[(k)])
+#else
+#define VDP_TC_COUNT_INVAL(k) ((void)0)
 #endif
 
 /*
@@ -582,8 +752,14 @@ uint32 vdp_profile_reps(uint32 post);
  * A colour write also converts: the palette entry of the same index takes
  * the RGB555 of the six bit colour, out of the table below. One load and
  * one store more on the cold branch -- a program writes at most 32
- * colours per palette change -- and nothing on the video memory branch.
- * This is the one pen of the palette; no render reads the colour memory.
+ * colours per palette change. This is the one pen of the palette; no
+ * render reads the colour memory.
+ *
+ * A video memory write throws away the decoded row that byte belongs to,
+ * and that is the whole of the cache's upkeep: one shift and one store,
+ * no test, on the branch that already exists. This macro is the one place
+ * in the program that writes the video memory, which is what makes a
+ * single point of invalidation enough.
  *
  * The argument is evaluated more than once: the expansion site passes a
  * plain parameter. Nothing here touches sms.z80, the obligation every port
@@ -613,6 +789,8 @@ extern uint16 vdp_cram_rgb[64];
       else                                                              \
         {                                                               \
           sms.vdp.vram[sms.vdp.addr & VDP_VRAM_MASK] = (uint8)(v);      \
+          VDP_TC_COUNT_INVAL(VDP_TC_KEY(sms.vdp.addr));                 \
+          sms.vdp.tc_valid[VDP_TC_KEY(sms.vdp.addr)] = 0;               \
           VDP_COUNT(vram_w);                                            \
         }                                                               \
       sms.vdp.addr = (sms.vdp.addr + 1UL) & VDP_VRAM_MASK;              \
@@ -641,14 +819,16 @@ extern uint16 vdp_cram_rgb[64];
 
 /*
  * The failures of vdp_init, one per allocation it makes: the video memory
- * could not be had, an index buffer could not, or the bit plane table
- * could not. The caller tells the pixel buffer apart to paint its own
- * screen and paints the video memory screen for the other two; the trace
- * names the block in every case.
+ * could not be had, an index buffer could not, the bit plane table could
+ * not, or the decoded row cache could not. The caller tells the pixel
+ * buffer and the row cache apart to paint their own screens and paints
+ * the video memory screen for the rest; the trace names the block in
+ * every case.
  */
-#define VDP_ERR_NO_VRAM   (-1)
-#define VDP_ERR_NO_PIXELS (-2)
-#define VDP_ERR_NO_PLANES (-3)
+#define VDP_ERR_NO_VRAM      (-1)
+#define VDP_ERR_NO_PIXELS    (-2)
+#define VDP_ERR_NO_PLANES    (-3)
+#define VDP_ERR_NO_TILECACHE (-4)
 
 /*
  * Brings the video part up: takes the video memory, the index buffers and

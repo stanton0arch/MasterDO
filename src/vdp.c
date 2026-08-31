@@ -45,6 +45,13 @@ static uint8 *vdp_pixels_block[SMS_VDP_BUFFERS];
 static uint8 *vdp_planes_block = NULL;
 
 /*
+ * The decoded row cache, kept across a second init for the same reason.
+ * One block holds both parts: the words of the entries first, so that the
+ * block's own alignment carries them, then the validity byte per row.
+ */
+static uint32 *vdp_tc_block = NULL;
+
+/*
  * The cel, built once at the first successful init and kept: CreateCel
  * allocates from the system, which the seal forbids later, and one block
  * for the whole run is the rule of every allocation here. When the
@@ -369,8 +376,13 @@ vdp_draw_sprites(uint32 y)
   reg = sms.vdp.reg;
   vram = sms.vdp.vram;
   planes = sms.vdp.planes;
-  line = sms.vdp.line + VDP_LINE_LEAD;
-  prio = sms.vdp.prio + VDP_LINE_LEAD;
+  /*
+   * Picture coordinates, so the origin the background left behind: a fine
+   * scroll moves where pixel 0 of the picture sits inside the scratch,
+   * and a sprite does not scroll with the background.
+   */
+  line = VDP_LINE_BYTES + sms.vdp.line_org;
+  prio = VDP_PRIO_BYTES + sms.vdp.line_org;
   taken = (uint8 *)sms.vdp.spr_taken;
   clear = sms.vdp.spr_taken;
   sat = vram + (((uint32)reg[5] & 0x7EUL) << 7);
@@ -517,10 +529,14 @@ vdp_render_line(uint32 y)
   const uint8 *t1;
   const uint8 *t2;
   const uint8 *t3;
+  uint32 *tc;
+  uint8 *tcv;
   uint8 *line;
   uint8 *prio;
-  uint8 *dst;
-  uint8 *pd;
+  uint8 *eb;
+  uint32 *ent;
+  uint32 *dstw;
+  uint32 *pdw;
   uint32 *out;
   uint32 border;
   uint32 hs;
@@ -532,17 +548,29 @@ vdp_render_line(uint32 y)
   uint32 vsi_from;
   uint32 word;
   uint32 row;
-  uint32 bank;
-  uint32 pr;
-  uint32 idx;
+  uint32 key;
+  uint32 bankw;
+  uint32 prw;
+  uint32 e0;
+  uint32 e1;
+  uint32 rv;
+  uint32 sw;
   uint32 x;
   uint32 w0;
   uint32 w1;
   uint32 w2;
 
   reg = sms.vdp.reg;
-  line = sms.vdp.line + VDP_LINE_LEAD;
-  prio = sms.vdp.prio + VDP_LINE_LEAD;
+
+  /*
+   * The origin of the picture inside the scratch, before anything is
+   * written there: the lead, which is where it stands on a line with no
+   * fine scroll and on a line with the display off. Step 2 moves it left
+   * by the fine scroll once that is known.
+   */
+  sms.vdp.line_org = VDP_LINE_LEAD;
+  line = VDP_LINE_BYTES + VDP_LINE_LEAD;
+  prio = VDP_PRIO_BYTES + VDP_LINE_LEAD;
   out = (uint32 *)(sms.vdp.pixels[0] + (y * VDP_PIX_ROW_BYTES));
   border = VDP_BACKDROP_INDEX();
 
@@ -577,10 +605,23 @@ vdp_render_line(uint32 y)
   /* Step 2. */
   vram = sms.vdp.vram;
   planes = sms.vdp.planes;
+  tc = sms.vdp.tc;
+  tcv = sms.vdp.tc_valid;
   hs = ((((uint32)reg[0] & 0x40UL) != 0UL) && (y < 16UL))
        ? 0UL : sms.vdp.hscroll;
   fine = hs & 7UL;
   coarse = hs >> 3;
+
+  /*
+   * The fine scroll shifts the origin of the picture and not the place
+   * each stroke is written, so that a stroke always lands on a word
+   * boundary (vdp.h, VDP_LINE_*). Everything that speaks in picture
+   * coordinates -- the masked left column below, the sprite pass, the
+   * packer -- reads the origin from here.
+   */
+  sms.vdp.line_org = VDP_LINE_LEAD - fine;
+  line = VDP_LINE_BYTES + sms.vdp.line_org;
+  prio = VDP_PRIO_BYTES + sms.vdp.line_org;
   ys = y + sms.vdp.vscroll;
   if(ys >= VDP_NT_LINES)
     ys -= VDP_NT_LINES;
@@ -595,6 +636,19 @@ vdp_render_line(uint32 y)
    * is all lead and is skipped -- 32 strokes, columns 0 to 31; with one,
    * the 33 strokes run from -1 to 31, the last one ending in the tail.
    *
+   * What a second pass of this post does NOT do is decode: the first pass
+   * leaves every row of the line valid, so the repeat is a pass of hits
+   * only. Two consequences, both to be carried with the figures rather
+   * than corrected here -- correcting would mean throwing the rows away
+   * between the two passes, which would measure a line that never
+   * happens. First, the displacement this variant shows is the cost of
+   * composing from a warm cache, so the decoding of the frame's new rows
+   * is left in the residual: on an established screen that share is
+   * nothing, on a change of scenery it is not, and the hit and miss counts
+   * of the report are what says which. Second, those counts read high
+   * under this variant, the way the overflow and collision tallies do
+   * under the sprite one.
+   *
    * This is the background post of the breakdown (vdp.h, VDP_REPEAT_*),
    * and the wrapper opens above the three assignments rather than at the
    * loop: the stroke index and the two cursors advance, so a second pass
@@ -605,8 +659,8 @@ vdp_render_line(uint32 y)
    */
   VDP_REPEAT_BEGIN(VDP_POST_BG)
   c = (fine != 0UL) ? 0UL : 1UL;
-  dst = sms.vdp.line + (c * 8UL) + fine;
-  pd = sms.vdp.prio + (c * 8UL) + fine;
+  dstw = sms.vdp.line_w + (c * 2UL);
+  pdw = sms.vdp.prio_w + (c * 2UL);
 
   for(; c <= 32UL; c++)
     {
@@ -616,37 +670,85 @@ vdp_render_line(uint32 y)
       row = yy & 7UL;
       if((word & 0x400UL) != 0UL)
         row = 7UL - row;
-      tile = vram + ((word & 0x1FFUL) << 5) + (row << 2);
-      t0 = planes + ((uint32)tile[0] << 3);
-      t1 = planes + VDP_PLANES_PLANE + ((uint32)tile[1] << 3);
-      t2 = planes + (2UL * VDP_PLANES_PLANE) + ((uint32)tile[2] << 3);
-      t3 = planes + (3UL * VDP_PLANES_PLANE) + ((uint32)tile[3] << 3);
-      bank = ((word & 0x800UL) != 0UL) ? 16UL : 0UL;
-      pr = (word >> 12) & 1UL;
 
-      if((word & 0x200UL) != 0UL)
+      /*
+       * The row this column shows, by its own video address: pattern
+       * times thirty-two plus row times four, divided by four. Vertical
+       * flip has already chosen another row above, so it needs nothing
+       * here.
+       */
+      key = VDP_TC_KEY_TILE(word & 0x1FFUL,row);
+      ent = tc + (key << 1);
+
+      if(tcv[key] == 0)
         {
+          /*
+           * First use of this row since it was written. The four planes
+           * are read once and the eight indexes are written as bytes,
+           * not as two assembled words: written as bytes they land in
+           * the order the composition lays them back down whatever the
+           * byte order of the machine, and the two words below are then
+           * a copy that cannot reorder anything.
+           */
+          tile = vram + (key << 2);
+          t0 = planes + ((uint32)tile[0] << 3);
+          t1 = planes + VDP_PLANES_PLANE + ((uint32)tile[1] << 3);
+          t2 = planes + (2UL * VDP_PLANES_PLANE) + ((uint32)tile[2] << 3);
+          t3 = planes + (3UL * VDP_PLANES_PLANE) + ((uint32)tile[3] << 3);
+          eb = (uint8 *)ent;
           for(x = 0; x < 8UL; x++)
-            {
-              idx = (uint32)t0[7UL - x] | (uint32)t1[7UL - x]
-                  | (uint32)t2[7UL - x] | (uint32)t3[7UL - x];
-              dst[x] = (uint8)(idx | bank);
-              pd[x] = (uint8)(pr & (idx != 0UL));
-            }
+            eb[x] = (uint8)((uint32)t0[x] | (uint32)t1[x]
+                          | (uint32)t2[x] | (uint32)t3[x]);
+          tcv[key] = 1;
+          VDP_COUNT(tc_miss);
         }
       else
         {
-          for(x = 0; x < 8UL; x++)
-            {
-              idx = (uint32)t0[x] | (uint32)t1[x]
-                  | (uint32)t2[x] | (uint32)t3[x];
-              dst[x] = (uint8)(idx | bank);
-              pd[x] = (uint8)(pr & (idx != 0UL));
-            }
+          VDP_COUNT(tc_hit);
         }
 
-      dst += 8;
-      pd += 8;
+      e0 = ent[0];
+      e1 = ent[1];
+
+      if((word & 0x200UL) != 0UL)
+        {
+          /*
+           * Horizontal flip: the eight indexes the other way round, which
+           * is the two words exchanged and the four bytes of each one
+           * reversed. Four operations a word, against the thirty-two
+           * kilobytes a second table of mirrored rows would cost on a
+           * machine whose free memory is already spoken for.
+           */
+          rv = (e0 ^ ((e0 >> 16) | (e0 << 16))) & 0xFF00FFFFUL;
+          sw = ((e0 >> 8) | (e0 << 24)) ^ (rv >> 8);
+          rv = (e1 ^ ((e1 >> 16) | (e1 << 16))) & 0xFF00FFFFUL;
+          e0 = ((e1 >> 8) | (e1 << 24)) ^ (rv >> 8);
+          e1 = sw;
+        }
+
+      /*
+       * The palette bank and the priority bit belong to the name table
+       * entry, not to the row, so two columns of different banks share
+       * one cached row and the bank is laid on here. Both are spread over
+       * the four lanes of a word and applied to four pixels at once.
+       *
+       * The priority mask is the same thing the pixel loop used to write
+       * one byte at a time: the bit is kept only where the index is not
+       * transparent. An index is below sixteen, so adding 0x7F to each
+       * lane cannot carry into the lane above, and the top bit of
+       * lane | (lane + 0x7F) is exactly "not zero" -- shifted down to the
+       * low bit of the lane and kept only if the column carries priority.
+       */
+      bankw = ((word & 0x800UL) != 0UL) ? (16UL * VDP_TC_LANE_ONE) : 0UL;
+      prw = ((word & 0x1000UL) != 0UL) ? VDP_TC_LANE_ONE : 0UL;
+
+      dstw[0] = e0 | bankw;
+      dstw[1] = e1 | bankw;
+      pdw[0] = ((e0 | (e0 + VDP_TC_LANE_LOW)) >> 7) & prw;
+      pdw[1] = ((e1 | (e1 + VDP_TC_LANE_LOW)) >> 7) & prw;
+
+      dstw += 2;
+      pdw += 2;
     }
   VDP_REPEAT_END;
 
@@ -766,6 +868,29 @@ vdp_init(void)
   sms.vdp.planes = vdp_planes_block;
 
   /*
+   * The decoded row cache, in DRAM beside the index buffers and for the
+   * same reason. Its size is calculated from the size of the video memory
+   * (vdp.h, VDP_TC_*) and refused at compile time if it ever grew past
+   * what it was granted, so what is asked for here cannot drift from what
+   * was budgeted.
+   */
+  if(vdp_tc_block == NULL)
+    {
+      vdp_tc_block = (uint32 *)sys_alloc("vdp_tilecache",
+                                         (int32)VDP_TC_TOTAL_BYTES,
+                                         MEMTYPE_DRAM | MEMTYPE_FILL);
+      if(vdp_tc_block == NULL)
+        {
+          LOG_ERR(LOG_CAT_VDP,
+                  ("init failed: no memory for the decoded row cache"));
+          return VDP_ERR_NO_TILECACHE;
+        }
+    }
+
+  sms.vdp.tc = vdp_tc_block;
+  sms.vdp.tc_valid = (uint8 *)vdp_tc_block + VDP_TC_BYTES;
+
+  /*
    * Cleared here on every init, not only on the first: the allocator's
    * fill flag zeroes the block the one time it is taken, and a second init
    * over a block already used would otherwise leave the previous run's
@@ -783,11 +908,22 @@ vdp_init(void)
   for(i = 0; i < VDP_CRAM_SIZE; i++)
     sms.vdp.cram[i] = 0;
 
-  for(i = 0; i < (int32)VDP_LINE_SCRATCH; i++)
+  for(i = 0; i < (int32)VDP_LINE_WORDS; i++)
     {
-      sms.vdp.line[i] = 0;
-      sms.vdp.prio[i] = 0;
+      sms.vdp.line_w[i] = 0;
+      sms.vdp.prio_w[i] = 0;
     }
+
+  sms.vdp.line_org = VDP_LINE_LEAD;
+
+  /*
+   * Every row invalid, on every init and not only on the first: the video
+   * memory above has just been cleared, so a row left standing from a
+   * previous run would describe tiles that no longer exist. The words
+   * themselves are not cleared -- a row is written before it is read.
+   */
+  for(i = 0; i < (int32)VDP_TC_ROWS; i++)
+    sms.vdp.tc_valid[i] = 0;
 
   for(i = 0; i < VDP_REG_COUNT; i++)
     sms.vdp.reg[i] = vdp_reg_power_on[i];
@@ -836,6 +972,9 @@ vdp_init(void)
   sms.vdp.cnt_spr_col = 0;
   sms.vdp.cnt_spr_zoom = 0;
   sms.vdp.cnt_backdrop = 0;
+  sms.vdp.cnt_tc_hit = 0;
+  sms.vdp.cnt_tc_miss = 0;
+  sms.vdp.cnt_tc_inval = 0;
   vdp_irq_seen = 0;
   vdp_backdrop_said = 0;
 #endif
@@ -1014,6 +1153,17 @@ vdp_init(void)
   LOG_INFO(LOG_CAT_VDP,("init ok mode=4 view=256x192 profile=%s",
                         cart_system_name(sms.cart.system)));
   LOG_INFO(LOG_CAT_VDP,("irq line owner=vdp (test source keeps nmi only)"));
+
+  /*
+   * The row cache as built: how many rows the video memory can hold, what
+   * the block costs in all, and the two facts that make it correct --
+   * a row is decoded at its first use and thrown away when the video
+   * memory under it is written.
+   */
+  LOG_INFO(LOG_CAT_VDP,
+           ("tile cache rows=%lu bytes=%lu (decoded once, invalidated on vram write)",
+            (unsigned long)VDP_TC_ROWS,
+            (unsigned long)VDP_TC_TOTAL_BYTES));
 
   /*
    * Two more, for the drawing side. The first carries the whole cel as
@@ -1414,6 +1564,21 @@ vdp_report(void)
                (unsigned long)VDP_BACKDROP_INDEX()));
     }
 
+  /*
+   * What the decoded row cache did over the window. Emitted every time,
+   * like the background line above: a hit count that stopped growing, or
+   * a miss count that stays level with it, is the fact worth reading, and
+   * neither can be seen from a line that only appears when something is
+   * wrong. Rows thrown away is the third: a game that never rewrites a
+   * tile shows zero there, and a game that redraws its scenery shows the
+   * cost of doing so.
+   */
+  LOG_HOT(LOG_CAT_VDP,LOG_LVL_DBG,
+          ("tilecache hit=%lu miss=%lu inval=%lu",
+           (unsigned long)sms.vdp.cnt_tc_hit,
+           (unsigned long)sms.vdp.cnt_tc_miss,
+           (unsigned long)sms.vdp.cnt_tc_inval));
+
   if(sms.vdp.cnt_mode != 0UL)
     {
       LOG_HOT(LOG_CAT_VDP,LOG_LVL_WARN,
@@ -1445,6 +1610,9 @@ vdp_report(void)
   sms.vdp.cnt_spr_col = 0;
   sms.vdp.cnt_spr_zoom = 0;
   sms.vdp.cnt_backdrop = 0;
+  sms.vdp.cnt_tc_hit = 0;
+  sms.vdp.cnt_tc_miss = 0;
+  sms.vdp.cnt_tc_inval = 0;
   vdp_backdrop_said = 0;
 #endif
 }
