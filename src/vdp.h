@@ -462,6 +462,91 @@ typedef struct
 
 /*
  * ---------------------------------------------------------------------------
+ * The render broken down into posts, by repetition (common.h,
+ * SMS_VDP_PROFILE).
+ *
+ * Derived exactly like VDP_COUNTERS above, and on one condition more: the
+ * breakdown is read off the displacement of the periodic line, so it
+ * exists only where that line does.
+ * ---------------------------------------------------------------------------
+ */
+#if LOG_ENABLE && SMS_TELEMETRY && SMS_VDP_PROFILE
+#define VDP_PROFILE 1
+#else
+#define VDP_PROFILE 0
+#endif
+
+/*
+ * The three repeatable posts of one rendered line, and the five variants
+ * the selector steps through. A variant number is the post it repeats,
+ * which is what lets the repetition count be one compare: the control
+ * repeats nothing, VDP_PROFILE_ALL repeats the three together.
+ *
+ * The posts are the three that are idempotent: run twice they write the
+ * same bytes and leave the same emulated state. The rest of the line --
+ * what vdp_line does around the render, the scanline counter, the pending
+ * flags, the scroll latches -- is not among them and cannot be: repeating
+ * it would advance the raster twice. Its cost is a residual, obtained by
+ * subtracting the three from the published figure, and it is named as one
+ * wherever it is printed.
+ *
+ * The blank branch of the render -- register 1 bit 6 clear, the picture
+ * off -- carries no post either: it fills the row and returns before any
+ * of the three. Lines rendered that way pull every displacement down, so
+ * the reference regime is a regime with the picture on.
+ */
+#define VDP_POST_BG      1UL
+#define VDP_POST_SPRITES 2UL
+#define VDP_POST_PACK    3UL
+
+#define VDP_PROFILE_CONTROL  0UL
+#define VDP_PROFILE_BG       VDP_POST_BG
+#define VDP_PROFILE_SPRITES  VDP_POST_SPRITES
+#define VDP_PROFILE_PACK     VDP_POST_PACK
+#define VDP_PROFILE_ALL      4UL
+#define VDP_PROFILE_VARIANTS 5UL
+
+#if VDP_PROFILE
+/*
+ * Arms a variant for the windows to come. The frame loop owns the cadence
+ * and calls this, because the cutting up of a turn belongs to the loop and
+ * to it alone; this module obeys a selector and reads no clock of its own.
+ * A number past the last variant arms the control rather than trusting it.
+ */
+void vdp_profile_select(uint32 variant);
+
+/*
+ * How many times the named post runs on this line under the armed
+ * variant: two when the variant repeats it, one otherwise.
+ */
+uint32 vdp_profile_reps(uint32 post);
+#endif
+
+/*
+ * The wrapper a repeatable post is written inside. With the switch off it
+ * is a bare do/while(0) around the post -- a compound statement run once,
+ * with a condition the preprocessor has already made constant -- so the
+ * delivered object is the one that was there before. Not taken on trust
+ * from the optimiser: checked by comparing the objects byte for byte,
+ * which is the whole reason the off form is this and not an empty macro
+ * with the post left loose. The pattern is VDP_COUNT's, one step further:
+ * a macro that vanishes instead of a call that vanishes.
+ *
+ * A post wrapped this way must be idempotent AND self-contained: whatever
+ * it advances -- a cursor, an index -- has to be set up inside the
+ * wrapper, or the second pass would start where the first one stopped.
+ */
+#if VDP_PROFILE
+#define VDP_REPEAT_BEGIN(post) do { uint32 vdp_rep_; \
+          for(vdp_rep_ = vdp_profile_reps(post); vdp_rep_ != 0UL; vdp_rep_--) {
+#define VDP_REPEAT_END      } } while(0)
+#else
+#define VDP_REPEAT_BEGIN(post) do {
+#define VDP_REPEAT_END      } while(0)
+#endif
+
+/*
+ * ---------------------------------------------------------------------------
  * The backdrop entry: the colour memory entry register 7 names, taken on
  * its low four bits and read out of the second bank of the palette.
  * Register 7 sets the border colour and takes it from the second bank of

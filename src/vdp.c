@@ -115,6 +115,41 @@ uint16 vdp_cram_rgb[64];
 
 static const uint8 vdp_level[4] = { 0, 10, 21, 31 };
 
+#if VDP_PROFILE
+/*
+ * ---------------------------------------------------------------------------
+ * The render broken down into posts, by repetition (vdp.h, VDP_PROFILE).
+ *
+ * The armed variant, and the whole of this module's part in the
+ * breakdown: one word, written by the frame loop through the accessor
+ * below and read once per post per line. No clock is read here, no
+ * duration is held here, and nothing here decides when a variant changes
+ * -- the loop that cuts up a turn owns all three.
+ *
+ * The control is the value a static starts at, so a run that never arms
+ * anything renders exactly as the delivered build does.
+ * ---------------------------------------------------------------------------
+ */
+static uint32 vdp_profile_variant = VDP_PROFILE_CONTROL;
+
+void
+vdp_profile_select(uint32 variant)
+{
+  vdp_profile_variant = (variant < VDP_PROFILE_VARIANTS)
+                        ? variant : VDP_PROFILE_CONTROL;
+}
+
+uint32
+vdp_profile_reps(uint32 post)
+{
+  if(vdp_profile_variant == VDP_PROFILE_ALL)
+    return 2UL;
+  if(vdp_profile_variant == post)
+    return 2UL;
+  return 1UL;
+}
+#endif
+
 
 /*
  * Packs one composed row into the 6 bit form the engine reads: the
@@ -559,7 +594,16 @@ vdp_render_line(uint32 y)
    * scratch and only its last pixels are picture. With no fine scroll it
    * is all lead and is skipped -- 32 strokes, columns 0 to 31; with one,
    * the 33 strokes run from -1 to 31, the last one ending in the tail.
+   *
+   * This is the background post of the breakdown (vdp.h, VDP_REPEAT_*),
+   * and the wrapper opens above the three assignments rather than at the
+   * loop: the stroke index and the two cursors advance, so a second pass
+   * that did not set them again would write past the row instead of over
+   * it. Set again, the pass writes the same bytes into the same places
+   * and the picture is the one the control renders. Off, the wrapper is a
+   * do/while(0) the compiler folds away.
    */
+  VDP_REPEAT_BEGIN(VDP_POST_BG)
   c = (fine != 0UL) ? 0UL : 1UL;
   dst = sms.vdp.line + (c * 8UL) + fine;
   pd = sms.vdp.prio + (c * 8UL) + fine;
@@ -604,6 +648,7 @@ vdp_render_line(uint32 y)
       dst += 8;
       pd += 8;
     }
+  VDP_REPEAT_END;
 
   /* Step 4. */
   if(((uint32)reg[0] & 0x20UL) != 0UL)
@@ -620,13 +665,31 @@ vdp_render_line(uint32 y)
    * left column of the step above is not covered by them and does not
    * need its priority mask for that: the sprite pass leaves those pixels
    * alone by the left edge it starts from.
+   *
+   * The sprite post of the breakdown, the two calls together: the
+   * selection alone would leave nothing composed, and the composition
+   * alone would need a selection it did not make. Both are idempotent --
+   * the selection recomputes the same kept list, the composition clears
+   * its taken mask on entry and lays the same pixels back down, and the
+   * overflow and collision bits are raised whether or not they already
+   * stood. What a second pass does move is the counters of the report:
+   * the overflow and collision tallies of vdp_report read double under
+   * this variant, which is why they are not read off a profiling run.
    */
+  VDP_REPEAT_BEGIN(VDP_POST_SPRITES)
   vdp_select_sprites(y);
   if(sms.vdp.spr_count != 0UL)
     vdp_draw_sprites(y);
+  VDP_REPEAT_END;
 
-  /* Step 6. */
+  /*
+   * Step 6, and the packing post of the breakdown: a pure function of the
+   * scratch into the row, so a second pass writes the same three words per
+   * sixteen pixels back over themselves.
+   */
+  VDP_REPEAT_BEGIN(VDP_POST_PACK)
   vdp_pack_row(line,out);
+  VDP_REPEAT_END;
 }
 
 int32

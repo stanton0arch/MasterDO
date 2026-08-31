@@ -111,7 +111,7 @@
  * Instrumentation switches. This is the one place where the amount of
  * diagnostic built into the binary is decided.
  *
- * All four are read by the preprocessor alone, never by running code: whatever
+ * All five are read by the preprocessor alone, never by running code: whatever
  * is switched off here is absent from the binary rather than skipped at run
  * time, which is what makes an instrumentation-free build both smaller and
  * free of any residual cost. They are set by editing this file and rebuilding.
@@ -183,6 +183,52 @@
 #endif
 
 /*
+ * SMS_VDP_PROFILE -- the render broken down into posts, by repetition.
+ *
+ * The periodic line publishes one figure for the whole render, and that
+ * figure is a share of a measured frame rather than a stopwatch: it says
+ * how much, never where. This switch answers where without adding a
+ * single clock reading. Under it the video part obeys a selector: one
+ * named post -- the background strokes, the sprite pass, the packing --
+ * runs a second time per line, the frame loop steps the selector one
+ * measurement window at a time, and the cost of a post is read off the
+ * displacement of the figure that already exists. A fifth setting repeats
+ * all three together and is the additivity control: the three separate
+ * displacements must add up to it, or nothing is published.
+ *
+ * Repetition and not removal, and that is forced by the workload. Two of
+ * the three posts carry state the emulated program reads -- the sprite
+ * selection raises the overflow bit, the composition raises the collision
+ * bit -- so removing one would make the program diverge, change the load,
+ * and void the very measurement. Repeating writes the same bytes a second
+ * time: same emulated state, same picture.
+ *
+ * Cuts: the selector, the repetition counter, the per-variant totals and
+ * every line they feed. Off, the repetition macros of vdp.h leave a bare
+ * do/while(0) around each post, which the compiler folds away, so the
+ * delivered objects are the ones that were there before -- a guarantee
+ * from the preprocessor and not from the optimiser, and one that is
+ * checked by comparing the objects byte for byte.
+ * Leaves: everything else, the periodic line included and untouched.
+ */
+#ifndef SMS_VDP_PROFILE
+#define SMS_VDP_PROFILE 0
+#endif
+
+/*
+ * A breakdown without the line it is read off would measure nothing and
+ * print nowhere: both needs are refused loudly rather than silently
+ * building a profile build that says nothing.
+ */
+#if SMS_VDP_PROFILE && !SMS_TELEMETRY
+#error "SMS_VDP_PROFILE needs SMS_TELEMETRY: the breakdown is read off the periodic line"
+#endif
+
+#if SMS_VDP_PROFILE && !LOG_ENABLE
+#error "SMS_VDP_PROFILE needs LOG_ENABLE: a breakdown that cannot print is not one"
+#endif
+
+/*
  * SMS_VDP_BUFFERS -- how many index buffers the video part allocates.
  *
  * Each buffer holds one frame of packed 6 bit colour indexes, sized by the
@@ -231,7 +277,7 @@
 #endif
 
 /*
- * The three configurations worth naming:
+ * The four configurations worth naming:
  *
  *   development  the default this file ships with: LOG_ENABLE 1, LOG_LEVEL
  *                LOG_LVL_INFO, SMS_TELEMETRY 1. A cartridge read off the
@@ -248,8 +294,17 @@
  *   silent       LOG_ENABLE 0. No diagnostic output whatsoever. Proves
  *                that instrumentation compiles down to nothing, and gives
  *                the binary size the others are compared against.
+ *   profiling    the development build plus SMS_VDP_PROFILE 1. It is not a
+ *                fourth build of the program but the same one running its
+ *                render five ways in turn, one measurement window each, so
+ *                that a single run says where the render's milliseconds
+ *                are. It renders the same picture in all five and paces
+ *                the same way; what it does not do is publish a figure
+ *                anyone should quote as the cost of the render, because
+ *                four windows in five are deliberately made slower. The
+ *                quotable figure stays the development build's.
  *
- * SMS_VDP_BUFFERS (above) stays at its default of 1 in all three. In every
+ * SMS_VDP_BUFFERS (above) stays at its default of 1 in all four. In every
  * one of them the frame loop executes the cartridge by scanline quotas,
  * the video part renders one line per quota, and the drawing side -- the
  * one draw call and the presentation -- closes the frame: there is one
