@@ -1,7 +1,8 @@
 #!/bin/sh
-# One command, four checks: three on the wrappers that let the render be
-# broken into posts (src/vdp.h, VDP_REPEAT_BEGIN / VDP_REPEAT_END), and one on
-# the decoded row cache the background composes from.
+# One command, five checks: three on the wrappers that let the render be
+# broken into posts (src/vdp.h, VDP_REPEAT_BEGIN / VDP_REPEAT_END), one on the
+# decoded row cache the background composes from, and one on the line that
+# never touches the composition scratch.
 #
 #   1. IDENTITY.  The picture, the composition scratch, the priority mask and
 #      the two sprite bits taken LINE BY LINE, compared byte for byte against
@@ -32,6 +33,18 @@
 #      fine scroll. Answers: does the cache render what the machine renders,
 #      and does it cache at all. Runs inside check 1 as well; here it runs
 #      through the macros that ship.
+#
+#   5. THE LINE THAT SKIPS THE SCRATCH, in the delivered form. A line with
+#      no sprite on it emits its forty-eight words from the composition and
+#      writes neither scratch. Its row is held byte for byte against what
+#      vdp_pack_row -- which reads BYTES, so its word value is the same on
+#      this host as on the target -- builds from a composition that owes
+#      the path nothing, for each of the eight fine scrolls and with the
+#      left column masked. Then the same background is rendered through the
+#      scratch, forced there by sprites that draw nothing, and the two rows
+#      must be the same row: that is what holds the two compositions of
+#      vdp.c together, since neither the picture nor the digests would move
+#      if only one of them changed.
 #
 # Why three checks on the wrappers and not one. A wrapper opened one line
 # too low -- below the stroke index and the two cursors instead of above
@@ -118,21 +131,63 @@ cp "$S/vdp.c" "$W/vdp_under_test.c"
 ( cd "$W" && $CC -O0 -fno-inline --coverage $FLAGS -w -DSMS_VDP_PROFILE=1 \
     -o bench "$B/bench_profile.c" vdp_under_test.c "$S/sms.c" )
 
-# The three counters, and the line of vdp.c each is read off. A pattern that
-# stops matching, or starts matching twice, makes the proof meaningless in
-# silence -- so both are refused below.
-pat_1='word = read16_le(nt'
+# The three counters, and the line of vdp.c each is read off, with the
+# number of lines that line is expected to be. A pattern that stops
+# matching, or starts matching a different number of times, makes the proof
+# meaningless in silence -- so both are refused below. EVERY pattern here
+# names exactly one line: a pattern that matched two would have its two
+# counts added, and a doubling on one site cancelled by a fall on the other
+# would then pass unseen, which is precisely the blindness this check
+# exists to prevent.
+#
+# A line is now rendered one of two ways -- straight into the row when it
+# carries no sprite, through the composition scratch when it does -- so the
+# background post is pinned once on each. Both sit inside the same wrapper
+# and both must double with it. The packing post is pinned on the packer
+# the scratch way ends with, which is the only packing left: the other way
+# emits as it composes and its cost is inside the background post.
+pat_1='dstw\[0\] = e0 | bankw;'
 pat_2='if((uint32)sat\[i\] == VDP_SPR_TERMINATOR)'
-pat_3='row += 16;'
-name_1='strokes'; name_2='sprite-entries'; name_3='pack-groups'
+pat_3='held = w3;'
+name_1='scratch-strokes'; name_2='sprite-entries'; name_3='pack-groups'
+lines_1=1; lines_2=1; lines_3=1
 
-# And the one that must stay put whatever variant runs: the decode of a tile
-# row, inside the miss branch of the background post. A repeated background
-# pass finds every row of the line already decoded, so this count is the
-# same under every variant -- stated as an expectation so that the day it
-# doubles, or the day the pattern stops matching, somebody is told.
-pat_bg_decode='eb\[x\] = (uint8)'
-name_bg_decode='row-decodes'
+# The background post again, on the line that never touches the scratch.
+# It doubles with post 1 like the one above; pinned separately because the
+# scenes that reach it are not the scenes that reach the other.
+pat_fast='e0 |= bankw;'
+name_fast='short-strokes'
+lines_fast=1
+
+# And the two that must stay put whatever variant runs: the decode of a
+# tile row, inside the miss branch of the background post. A repeated
+# background pass finds every row of the line already decoded, so these
+# counts are the same under every variant. The decode stands in both ways
+# of composing a line and each site is weighed on its own -- the two
+# scratch pointers carry different names for exactly this reason.
+pat_dec_s='eb\[x\] = (uint8)'
+name_dec_s='scratch-decodes'
+lines_dec_s=1
+pat_dec_f='fb\[x\] = (uint8)'
+name_dec_f='short-decodes'
+lines_dec_f=1
+
+# Reads the count gcov put on the one line a pattern matches, refusing a
+# report where that line never ran ("#####") or is not code at all. The
+# diagnostics go to the error stream and the total to the standard one:
+# this runs in a command substitution, so anything it prints normally would
+# be captured into the count instead of reaching the operator, and its
+# fail=1 would be set in a subshell and lost. The caller turns an empty
+# answer into the failure.
+scrape () {
+  s_hits=$(grep -c -- "$1" "$G" || true)
+  if [ "$s_hits" != "$2" ]; then
+    echo "  [FAIL] the pattern for $3 matches $s_hits lines of vdp.c, not $2" >&2
+  fi
+  grep -- "$1" "$G" | cut -d: -f1 | tr -d ' ' |
+    awk '{ if ($0 !~ /^[0-9]+$/) bad = 1; else t += $0 }
+         END { if (bad || t == 0) print ""; else print t }'
+}
 
 v=0
 while [ "$v" -lt "$N" ]; do
@@ -143,33 +198,30 @@ while [ "$v" -lt "$N" ]; do
   line=""
   p=1
   while [ "$p" -le "$POSTS" ]; do
-    eval "pat=\$pat_$p; nm=\$name_$p"
-    hits=$(grep -c -- "$pat" "$G" || true)
-    if [ "$hits" != "1" ]; then
-      echo "  [FAIL] the pattern for $nm matches $hits lines of vdp.c, not 1"
-      fail=1
-    fi
-    c=$(grep -- "$pat" "$G" | head -1 | cut -d: -f1 | tr -d ' ')
+    eval "pat=\$pat_$p; nm=\$name_$p; want=\$lines_$p"
+    c=$(scrape "$pat" "$want" "$nm")
     number "$c" "the $nm count of variant $v" || c=0
     eval "c${v}_$p=\$c"
     line="$line $nm=$c"
     p=$((p + 1))
   done
-  hits=$(grep -c -- "$pat_bg_decode" "$G" || true)
-  if [ "$hits" != "1" ]; then
-    echo "  [FAIL] the pattern for $name_bg_decode matches $hits lines of vdp.c, not 1"
-    fail=1
-  fi
-  d=$(grep -- "$pat_bg_decode" "$G" | head -1 | cut -d: -f1 | tr -d ' ')
-  number "$d" "the $name_bg_decode count of variant $v" || d=0
-  eval "d$v=\$d"
-  echo "  variant $v:$line $name_bg_decode=$d"
+  f=$(scrape "$pat_fast" "$lines_fast" "$name_fast")
+  number "$f" "the $name_fast count of variant $v" || f=0
+  eval "f$v=\$f"
+  ds=$(scrape "$pat_dec_s" "$lines_dec_s" "$name_dec_s")
+  number "$ds" "the $name_dec_s count of variant $v" || ds=0
+  eval "ds$v=\$ds"
+  df=$(scrape "$pat_dec_f" "$lines_dec_f" "$name_dec_f")
+  number "$df" "the $name_dec_f count of variant $v" || df=0
+  eval "df$v=\$df"
+  echo "  variant $v:$line $name_fast=$f $name_dec_s=$ds $name_dec_f=$df"
   v=$((v + 1))
 done
 
 [ "$fail" -eq 0 ] || { echo; echo "the coverage pass could not be trusted"; exit 1; }
 
 # Expected: variant v doubles post p when v is p, or when v is the grouped one.
+BGPOST=1
 v=1
 while [ "$v" -lt "$N" ]; do
   p=1
@@ -182,8 +234,16 @@ while [ "$v" -lt "$N" ]; do
     fi
     p=$((p + 1))
   done
-  eval "got=\$d$v"
-  chk "$got" "$d0" "variant $v decodes no extra tile row: the repeat is a pass of hits"
+  eval "got=\$f$v"
+  if [ "$v" -eq "$BGPOST" ] || [ "$v" -eq "$ALL" ]; then
+    chk "$got" "$((f0 * 2))" "variant $v doubles the $name_fast"
+  else
+    chk "$got" "$f0"         "variant $v leaves the $name_fast alone"
+  fi
+  eval "got=\$ds$v"
+  chk "$got" "$ds0" "variant $v decodes no extra tile row through the scratch: the repeat is a pass of hits"
+  eval "got=\$df$v"
+  chk "$got" "$df0" "variant $v decodes no extra tile row the short way: the repeat is a pass of hits"
   v=$((v + 1))
 done
 
@@ -219,6 +279,21 @@ fi
 grep -q '^failed=0$' "$W/off-full.txt" || \
   { echo "  [FAIL] the delivered form did not come out clean"; fail=1; }
 
+echo
+echo "=== 5. the line that skips the scratch, through the form that ships ==="
+# The section that proves the short way: the row it emits held against the
+# byte packer over the eight fine scrolls, the two scratches caught being
+# left alone, and the same background rendered BOTH ways and compared. Its
+# assertion count is checked like the row cache's, and for the same reason
+# -- a pass that vanished prints nothing and fails nothing.
+sed -n '/the line that skips the scratch/,/^$/p' "$W/off-full.txt" | sed 's/^/  /'
+FPN=$(sed -n '/the line that skips the scratch/,/^$/p' "$W/off-full.txt" | grep -c '\[OK\]' || true)
+number "$FPN" "the short path assertion count" || FPN=0
+if [ "$FPN" -lt 40 ]; then
+  echo "  [FAIL] the short path pass emitted $FPN assertions, fewer than the 40 expected"
+  fail=1
+fi
+
 [ "$fail" -eq 0 ] || exit 1
 echo
-echo "all four checks green"
+echo "all five checks green"

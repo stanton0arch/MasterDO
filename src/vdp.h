@@ -132,16 +132,27 @@
  * what makes a write outside the picture impossible by construction, with
  * no compare in the loop.
  *
+ * IT IS NOT WRITTEN ON EVERY LINE, and that is the thing to know before
+ * reading it anywhere. The mask scratch has exactly one reader, the sprite
+ * composition, and the index scratch has two, that same composition and
+ * the packer behind it. So a line that carries no sprite needs neither: it
+ * lays its sixteen pixel groups straight into the row the engine reads and
+ * leaves both scratches holding whatever an earlier line put there. A line
+ * that carries sprites takes the scratch exactly as it always did. What
+ * either scratch holds after a rendered line therefore says nothing about
+ * that line unless the line carried a sprite.
+ *
  * Pixel x of the picture is scratch[line_org + x], NOT a fixed offset: the
  * fine scroll moves the origin rather than each stroke, for the alignment
  * reason set out below. The mask scratch has the same shape and the same
  * origin.
  *
- * The tail is margin and nothing writes it any more. The 33 strokes stop
- * at byte 263 and the picture ends at byte 263 at the latest, so bytes 264
- * upward are never touched; they are kept as slack on the buffer every
- * background store now reaches by word rather than shrunk to nothing, and
- * the bench asserts they stay untouched.
+ * The tail is margin and nothing writes it. The 33 strokes stop at byte
+ * 263 and the picture ends at byte 263 at the latest, so bytes 264 upward
+ * are never written; they are kept as slack on the buffer every background
+ * store reaches by word rather than shrunk to nothing, and the packer
+ * READS one word past the last group it needs, which lands there too. The
+ * bench asserts nothing writes them.
  * ---------------------------------------------------------------------------
  */
 #define VDP_LINE_LEAD    8UL
@@ -155,12 +166,16 @@
  * stroke shifted right by the fine scroll would land on any of eight.
  *
  * So the fine scroll no longer shifts the destination -- it shifts the
- * origin of the picture inside the scratch. Stroke c is written at byte
- * c * 8, always aligned, and pixel x of the picture is at line_org + x
- * with line_org = VDP_LINE_LEAD - fine. The lead holds the stroke that
- * runs in from the left, the tail the one that runs out to the right, and
- * both are what makes a write outside the scratch impossible by
- * construction: the highest byte a stroke touches is 33 * 8 - 1.
+ * origin of the picture inside the scratch. Stroke c stands at byte c * 8,
+ * always aligned, and pixel x of the picture is at line_org + x with
+ * line_org = VDP_LINE_LEAD - fine. That is a rule about the SHAPE of a
+ * line and not only about the stores: the line that writes no scratch
+ * composes its strokes in the same places and cuts the picture out of them
+ * with the same origin, which is what lets the two ways of rendering a
+ * line be held against each other. The lead holds the stroke that runs in
+ * from the left, the tail the one that runs out to the right, and both are
+ * what makes a write outside the scratch impossible by construction: the
+ * highest byte a stroke touches is 33 * 8 - 1.
  */
 #if (VDP_LINE_SCRATCH % 4UL) != 0UL
 #error "the line scratch is laid a word at a time: its length must be a multiple of four"
@@ -169,6 +184,153 @@
 #error "the 33 strokes of a scrolled line must fit the scratch"
 #endif
 #define VDP_LINE_WORDS (VDP_LINE_SCRATCH / 4UL)
+
+/*
+ * The packer walks the picture as pairs of words: the group of four pixels
+ * that begins at scratch byte line_org + 4j is cut out of the word holding
+ * that byte and out of the word after it. The last group of a line is the
+ * one that pins the size of the tail -- with no fine scroll the origin is
+ * the third word and the group after the last one is the word at byte 264.
+ * Refused here rather than left to be found as a read past the end.
+ */
+#if ((VDP_LINE_LEAD / 4UL) + (VDP_PIX_WIDTH / 4UL) + 1UL) > VDP_LINE_WORDS
+#error "the packer reads one word past the picture: the tail must hold it"
+#endif
+
+/*
+ * The line that writes no scratch cuts each stroke's eight picture pixels
+ * out of four words in hand -- the two of the stroke before and the two of
+ * this one -- and picks which pair by (VDP_LINE_LEAD - fine) >> 2. That
+ * holds because the lead is eight and the fine scroll is under eight, so
+ * the origin never sits more than two words back. A lead of twelve would
+ * put it three words back and every group would be cut from the wrong
+ * stroke, over the whole picture, in silence. Refused rather than
+ * commented, like the two lengths above.
+ */
+#if VDP_LINE_LEAD != 8UL
+#error "the line that skips the scratch cuts from four words: the lead must be eight"
+#endif
+
+/*
+ * ---------------------------------------------------------------------------
+ * The scratch seen as words, and the ONE place in the program where a
+ * pixel index is taken out of a word instead of out of a byte.
+ *
+ * Why it has to be said here rather than at the use. Every index the
+ * render produces is written as a byte -- the decoded row cache lays its
+ * eight indexes byte by byte on purpose -- so the order of the four
+ * indexes inside a word is the byte order of the machine, and the two
+ * machines this code is built for disagree: the lane carrying pixel 0 is
+ * the most significant byte of the word on the big endian target and the
+ * least significant one on a little endian host. The packed word that
+ * comes out has to carry the same VALUE on both, since it is the value a
+ * store puts on the target in the order a console capture proved. So the
+ * lane order is named once, here, and every path that reads a word obeys
+ * it.
+ *
+ * The switch defaults to the target and is held against the machine at
+ * init rather than trusted: a build that guessed wrong draws a scrambled
+ * picture, which is a slow and confusing way to learn it. It can also be
+ * forced from the command line, which is what lets a host build compile
+ * and exercise the order it is not running on.
+ *
+ * BOTH orders are spelled out below, unconditionally, and the switch only
+ * chooses which one the render calls. That is not a matter of taste: a
+ * form written behind an #if that no machine in the loop preprocesses is a
+ * form nothing compiles and nothing tests, and a mistake in it would ride
+ * all the way to the console with every bench green. Named apart, the two
+ * are both compiled everywhere and the bench puts both against
+ * vdp_pack_row, which reads bytes and so belongs to neither order.
+ * ---------------------------------------------------------------------------
+ */
+#ifndef VDP_LANE_MSB_FIRST
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || \
+    defined(_M_X64) || defined(__ARMEL__) || defined(__LITTLE_ENDIAN__) || \
+    (defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
+     ((__BYTE_ORDER__) == (__ORDER_LITTLE_ENDIAN__)))
+#define VDP_LANE_MSB_FIRST 0
+#else
+#define VDP_LANE_MSB_FIRST 1
+#endif
+#endif
+
+/*
+ * The four indexes of one word squeezed into their four six bit fields,
+ * pixel 0 of the word in the high bits of the result: the twenty-four bits
+ * the packed row wants. Four masked shifts and no loop -- this is the
+ * hottest line of the render. One form per byte order; the two differ only
+ * in where each lane sits before it is moved.
+ */
+#define VDP_LANE_PACK_MSB(w)                                        \
+  (((((uint32)(w)) >> 6) & 0x00FC0000UL)                            \
+ | ((((uint32)(w)) >> 4) & 0x0003F000UL)                            \
+ | ((((uint32)(w)) >> 2) & 0x00000FC0UL)                            \
+ | (((uint32)(w)) & 0x0000003FUL))
+
+#define VDP_LANE_PACK_LSB(w)                                        \
+  (((((uint32)(w)) << 18) & 0x00FC0000UL)                           \
+ | ((((uint32)(w)) << 4) & 0x0003F000UL)                            \
+ | ((((uint32)(w)) >> 10) & 0x00000FC0UL)                           \
+ | ((((uint32)(w)) >> 24) & 0x0000003FUL))
+
+/*
+ * The four bytes that begin r bytes into the word a, taken from a and from
+ * the word b that follows it in the scratch: the recut a fine horizontal
+ * scroll asks for, the picture beginning at scratch byte
+ * VDP_LINE_LEAD - fine while the strokes stand on word boundaries. The two
+ * shift counts are computed once for a whole line -- sl is 8 * r and sr is
+ * 31 - sl -- and r is constant down the line, so the recut is exact by
+ * construction and not an approximation: it is the same run of bytes read
+ * from another rank.
+ *
+ * A shift of thirty-two is undefined in C and r == 0 would ask for one, so
+ * the following word is shifted down by one first. With r == 0 that leaves
+ * nothing of it at all and the join is the word a, which is the answer
+ * wanted there.
+ */
+#define VDP_LANE_JOIN_MSB(a,b,sl,sr) (((a) << (sl)) | (((b) >> 1) >> (sr)))
+#define VDP_LANE_JOIN_LSB(a,b,sl,sr) (((a) >> (sl)) | (((b) << 1) << (sr)))
+
+#if VDP_LANE_MSB_FIRST
+#define VDP_LANE_PACK(w)         VDP_LANE_PACK_MSB(w)
+#define VDP_LANE_JOIN(a,b,sl,sr) VDP_LANE_JOIN_MSB(a,b,sl,sr)
+#else
+#define VDP_LANE_PACK(w)         VDP_LANE_PACK_LSB(w)
+#define VDP_LANE_JOIN(a,b,sl,sr) VDP_LANE_JOIN_LSB(a,b,sl,sr)
+#endif
+
+/*
+ * Sixteen pixels -- four lane words in picture order -- laid into the
+ * three words of the packed row. The one emitter of the module: the line
+ * that composes into the scratch and the line that never touches it both
+ * come through here, so a picture cut two ways cannot come out two ways.
+ * The three words it writes are the three vdp_pack_row writes from the
+ * same sixteen bytes, and the bench holds them against each other.
+ *
+ * WARNING, and it is a cost and not a correctness trap: each of the four
+ * lane arguments is copied FOUR TIMES into the packing form below. Pass
+ * variables, never expressions -- a caller that passes four recuts here
+ * computes sixteen of them, and the whole point of this path is that the
+ * packing got cheaper. Both callers assign to locals first.
+ *
+ * The form is spelled once and takes the packer it uses as an argument, so
+ * that the bench can drive it with either byte order without a second copy
+ * of the three shifts drifting away from this one.
+ */
+#define VDP_EMIT16_WITH(pack,a,b,c,d,dst)                           \
+  do                                                                \
+    {                                                               \
+      uint32 vdp_p0_ = pack(a);                                     \
+      uint32 vdp_p1_ = pack(b);                                     \
+      uint32 vdp_p2_ = pack(c);                                     \
+      uint32 vdp_p3_ = pack(d);                                     \
+      (dst)[0] = (vdp_p0_ << 8) | (vdp_p1_ >> 16);                  \
+      (dst)[1] = (vdp_p1_ << 16) | (vdp_p2_ >> 8);                  \
+      (dst)[2] = (vdp_p2_ << 24) | vdp_p3_;                         \
+    }                                                               \
+  while(0)
+
+#define VDP_EMIT16(a,b,c,d,dst) VDP_EMIT16_WITH(VDP_LANE_PACK,a,b,c,d,dst)
 
 /*
  * The bit plane table: for each of the four planes of a pattern row, for
@@ -602,6 +764,19 @@ typedef struct
   uint32 cnt_tc_hit;
   uint32 cnt_tc_miss;
   uint32 cnt_tc_inval;
+
+  /*
+   * How the lines of the window were rendered: straight into the row, or
+   * through the composition scratch. A line goes through the scratch when
+   * it carries at least one sprite, since the sprite pass is the only
+   * reader of the two scratches, and straight into the row otherwise. The
+   * pair is what the cost of a frame is read with -- the work the short
+   * way saves is per line, so a figure for the whole frame means nothing
+   * without knowing how many lines took it. A line with the display off
+   * counts in neither: it fills the row and returns before the choice.
+   */
+  uint32 cnt_line_fast;
+  uint32 cnt_line_scratch;
 #endif
 } vdp_t;
 
@@ -664,6 +839,17 @@ typedef struct
  * off -- carries no post either: it fills the row and returns before any
  * of the three. Lines rendered that way pull every displacement down, so
  * the reference regime is a regime with the picture on.
+ *
+ * WHICH POSTS A LINE ENTERS DEPENDS ON THE LINE, and the figures cannot be
+ * read without knowing it. A line that carries no sprite packs itself as
+ * it composes, so its packing is INSIDE the background post and the
+ * packing post is never entered at all; a line that carries sprites enters
+ * all three. So pack= falls towards nothing on a frame with few sprites
+ * while bg= carries what pack= used to, and neither figure moves for a
+ * reason that has anything to do with the code getting slower or faster.
+ * The key is the lines fast= / scratch= tally, which the counters of the
+ * report publish (cnt_line_fast, cnt_line_scratch above) -- a different
+ * report from this breakdown, and the two are read together or not at all.
  */
 #define VDP_POST_BG      1UL
 #define VDP_POST_SPRITES 2UL
@@ -818,17 +1004,24 @@ extern uint16 vdp_cram_rgb[64];
             ((sms.vdp.reg[0] & 0x10U) != 0U))))
 
 /*
- * The failures of vdp_init, one per allocation it makes: the video memory
- * could not be had, an index buffer could not, the bit plane table could
- * not, or the decoded row cache could not. The caller tells the pixel
- * buffer and the row cache apart to paint their own screens and paints
- * the video memory screen for the rest; the trace names the block in
- * every case.
+ * The failures of vdp_init. The first four are one per allocation it
+ * makes: the video memory could not be had, an index buffer could not, the
+ * bit plane table could not, or the decoded row cache could not. The fifth
+ * is not an allocation at all -- the byte order this build assumes is not
+ * the machine's.
+ *
+ * The caller paints a screen per code: its own for the pixel buffer, for
+ * the row cache and for the byte order, and the video memory screen for
+ * what is left. What is left is the video memory itself and the plane
+ * table, which has no screen of its own yet and so is named wrongly -- a
+ * defect older than any of this and carried knowingly. The trace names the
+ * cause in every case.
  */
 #define VDP_ERR_NO_VRAM      (-1)
 #define VDP_ERR_NO_PIXELS    (-2)
 #define VDP_ERR_NO_PLANES    (-3)
 #define VDP_ERR_NO_TILECACHE (-4)
+#define VDP_ERR_LANE_ORDER   (-5)
 
 /*
  * Brings the video part up: takes the video memory, the index buffers and
@@ -860,6 +1053,34 @@ extern uint16 vdp_cram_rgb[64];
  * be reached: the caller stops the console rather than run on.
  */
 int32 vdp_init(void);
+
+/*
+ * Packs one composed row into the six bit form the engine reads, reading
+ * the row a BYTE at a time: sixteen bytes give three words, the leftmost
+ * pixel in the most significant bits of the first.
+ *
+ * It is the written definition of the packed format and it is not on the
+ * render's path any more -- both ways of rendering a line come through
+ * VDP_EMIT16 above, which reads words. That is exactly why this one is
+ * kept and exposed: reading bytes, it belongs to no byte order at all, so
+ * it can judge both of the lane forms of vdp.h. The bench does not hold
+ * only the form this build calls against it -- it holds BOTH, feeding each
+ * one words laid out the way its own order would lay them, so the form
+ * that will run on the console is exercised by the build that cannot run
+ * it. Delete this function and the format has no statement left that does
+ * not already assume the byte order it is meant to pin down.
+ *
+ * The indexes are taken as they come, unmasked: every value the render
+ * puts in a row is below 32 by construction.
+ *
+ * What it reads and what it writes, since it is called from outside this
+ * module: row is VDP_PIX_WIDTH bytes, one index per pixel, and may sit at
+ * any alignment; dst is VDP_PIX_ROW_BYTES, a whole row of the index
+ * buffer, and must be word aligned -- it is written a word at a time and
+ * its length is a multiple of twelve bytes, three words per sixteen
+ * pixels.
+ */
+void vdp_pack_row(const uint8 *row, uint32 *dst);
 
 /*
  * The cel control block vdp_init built, as an opaque pointer; NULL until

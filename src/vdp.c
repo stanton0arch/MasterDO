@@ -165,19 +165,26 @@ vdp_profile_reps(uint32 post)
  * stores, on purpose: on the big endian target a stored word puts its most
  * significant byte at the lowest address, which is exactly the byte order
  * a console capture proved for this cel -- the picture came out with flat
- * bands where the same order written a byte at a time had put them. On a
- * little endian host the same store reverses the bytes; a bench compiled
- * there compares words, not bytes.
+ * bands where the same order written a byte at a time had put them.
+ *
+ * Reading BYTES is what makes it the written definition of the format: the
+ * word it produces carries the same value whatever the byte order of the
+ * machine, so it belongs to neither order and can judge both. That is what
+ * the bench uses it for -- it drives the two lane forms of vdp.h, the one
+ * this build calls and the one it does not, and holds each against this
+ * function. Holding only the called one would leave the other compiled by
+ * nothing and tested by nothing, and a mistake in it would reach the
+ * console with every bench green.
+ *
+ * It is no longer on the render's path, for that reason and no other; the
+ * header says the rest.
  *
  * The indexes are taken as they come, unmasked: every value the render
- * puts in the scratch is below 32 by construction (a four bit pattern
- * index, plus 16 for the second bank, or a border colour of the same
- * form), and a mask per pixel would be sixteen operations per stroke paid
- * for nothing. The row pointer is a word pointer: the buffers come from
- * the allocator word aligned and the row length is a multiple of twelve
- * bytes (vdp.h refuses a width that is not).
+ * puts in a row is below 32 by construction (a four bit pattern index,
+ * plus 16 for the second bank, or a border colour of the same form), and a
+ * mask per pixel would be sixteen operations per stroke paid for nothing.
  */
-static void
+void
 vdp_pack_row(const uint8 *row,
              uint32      *dst)
 {
@@ -195,6 +202,68 @@ vdp_pack_row(const uint8 *row,
              | ((uint32)row[12] << 18) | ((uint32)row[13] << 12)
              | ((uint32)row[14] << 6)  | (uint32)row[15];
       row += 16;
+      dst += 3;
+    }
+}
+
+/*
+ * The same three words per sixteen pixels, read out of the composition
+ * scratch a WORD at a time. This is the packing post of a line that went
+ * through the scratch, and the only difference with the line that never
+ * touched it is where the four lane words come from: there they are still
+ * in registers as the composition made them, here they are read back.
+ *
+ * The picture begins at scratch byte line_org, which the fine scroll moves
+ * off a word boundary on six values out of eight, so each group of four
+ * pixels is cut out of two consecutive words by VDP_LANE_JOIN. The shift
+ * is constant down the line and computed once here; the word that follows
+ * the last group is inside the tail of the scratch, which vdp.h refuses to
+ * be too short for.
+ *
+ * Sixteen byte reads per sixteen pixels become four word reads. The rest
+ * of the arithmetic is what the byte form paid too.
+ *
+ * The four recuts are put in variables before the emitter is called, and
+ * that is a cost and not a style: the emitter copies each of its lane
+ * arguments four times (vdp.h, VDP_EMIT16), so handing it four recut
+ * expressions would compute sixteen recuts per sixteen pixels instead of
+ * four. The other caller passes variables for the same reason.
+ */
+static void
+vdp_pack_line(uint32 *dst)
+{
+  const uint32 *src;
+  uint32 sl;
+  uint32 sr;
+  uint32 held;
+  uint32 w0;
+  uint32 w1;
+  uint32 w2;
+  uint32 w3;
+  uint32 g0;
+  uint32 g1;
+  uint32 g2;
+  uint32 g3;
+  uint32 n;
+
+  src = sms.vdp.line_w + (sms.vdp.line_org >> 2);
+  sl = (sms.vdp.line_org & 3UL) << 3;
+  sr = 31UL - sl;
+  held = src[0];
+
+  for(n = 0; n < (VDP_PIX_WIDTH / 16UL); n++)
+    {
+      w0 = src[1];
+      w1 = src[2];
+      w2 = src[3];
+      w3 = src[4];
+      g0 = VDP_LANE_JOIN(held,w0,sl,sr);
+      g1 = VDP_LANE_JOIN(w0,w1,sl,sr);
+      g2 = VDP_LANE_JOIN(w1,w2,sl,sr);
+      g3 = VDP_LANE_JOIN(w2,w3,sl,sr);
+      VDP_EMIT16(g0,g1,g2,g3,dst);
+      held = w3;
+      src += 4;
       dst += 3;
     }
 }
@@ -490,7 +559,16 @@ vdp_draw_sprites(uint32 y)
  *      subtraction: the sum is below 448, so one is enough and no modulo
  *      is paid (SMSOfficialDocs.md:895; sms_vdp.c:803-824). The name
  *      table base is register 2 bits 3 to 1 (sms_vdp.c:258-271).
- *   3. One stroke per tile column. Screen column c shows source column
+ *   3. The sprites of the line are chosen, before anything is composed:
+ *      the choice reads the attribute table and the registers only, and
+ *      what it leaves behind -- how many sprites were kept -- decides how
+ *      the line is rendered. None kept and nothing will read the two
+ *      scratches, so neither is written and the composition below lays its
+ *      sixteen pixel groups straight into the row; one kept or more and
+ *      the line goes through the scratch exactly as it always did, since
+ *      the sprite pass reads both. The two ways draw the same row, and the
+ *      same words: they share one emitter (vdp.h, VDP_EMIT16).
+ *   4. One stroke per tile column. Screen column c shows source column
  *      (c - coarse) & 31, each stroke shifted right by the fine scroll
  *      (docs/sms_gg/GGOfficialDocs.md:1394: a value of 1 moves the scene
  *      one dot to the right; sms_vdp.c:798-800, :880). Screen column -1
@@ -508,9 +586,14 @@ vdp_draw_sprites(uint32 y)
  *      the horizontal flip walks the eight pixels the other way. The bank
  *      adds 16 (sms_vdp.c:874-876); the mask is priority and index not
  *      zero (sms_vdp.c:893).
- *   4. Register 0 bit 5: pixels 0 to 7 take the border colour and the
- *      mask (sms_vdp.c:826-836).
- *   5. Pack.
+ *   5. Register 0 bit 5: pixels 0 to 7 take the border colour and the
+ *      mask (sms_vdp.c:826-836). The line that skips the scratch does the
+ *      same to the two words those eight pixels fill, and lays no mask:
+ *      nothing on that line reads one.
+ *   6. The sprites of the line, over the background -- only where step 3
+ *      kept some.
+ *   7. Pack, likewise only where step 3 kept some: the other line is
+ *      already packed.
  *
  * Every table is read through a pointer loaded once at the head: on a
  * processor without a cache each sms.vdp.field is a load, and a line
@@ -534,6 +617,7 @@ vdp_render_line(uint32 y)
   uint8 *line;
   uint8 *prio;
   uint8 *eb;
+  uint8 *fb;
   uint32 *ent;
   uint32 *dstw;
   uint32 *pdw;
@@ -559,6 +643,18 @@ vdp_render_line(uint32 y)
   uint32 w0;
   uint32 w1;
   uint32 w2;
+  uint32 *ow;
+  uint32 lag;
+  uint32 jsl;
+  uint32 jsr;
+  uint32 borderw;
+  uint32 maskcol;
+  uint32 pw0;
+  uint32 pw1;
+  uint32 gw0;
+  uint32 gw1;
+  uint32 qw0;
+  uint32 qw1;
 
   reg = sms.vdp.reg;
 
@@ -578,8 +674,14 @@ vdp_render_line(uint32 y)
     {
       /*
        * Step 1. The three words of a uniform row are computed once and
-       * stored sixteen times; the scratch takes the same row so that it
-       * always holds what the buffer holds.
+       * stored sixteen times, and the scratch takes the same row.
+       *
+       * The reason it once gave for doing so -- that the scratch always
+       * holds what the buffer holds -- no longer stands: a line with no
+       * sprite on it writes no scratch at all (vdp.h, VDP_LINE_*). Nothing
+       * reads what this branch leaves there either, since a line with the
+       * picture off carries no sprite pass. The write is kept because this
+       * branch is left untouched, not because anything depends on it.
        */
       for(x = 0; x < VDP_PIX_WIDTH; x++)
         {
@@ -630,7 +732,193 @@ vdp_render_line(uint32 y)
   vsi_from = (((uint32)reg[0] & 0x80UL) != 0UL) ? 25UL : 33UL;
 
   /*
-   * Step 3. Stroke c is screen column c - 1, and the strokes are counted
+   * Step 3, the sprites of this line CHOSEN, and chosen here rather than
+   * after the background because it is the answer to "does this line need
+   * the scratch at all". The choice reads the attribute table and the
+   * registers and nothing else -- no pixel, no scratch, no name table --
+   * so moving it earlier moves no dependency with it. What it must not
+   * move past is the branch above: the hardware's order is selection then
+   * display, and a line with the picture switched off never gets as far as
+   * either, so the overflow bit falls on exactly the lines it fell on
+   * before.
+   *
+   * The sprite post of the breakdown opens here and closes again below
+   * over the composition, two wrappers carrying the same name: the
+   * displacement the variant measures is the two halves together, which is
+   * what it measured when they were one call. Both halves are idempotent,
+   * the choice rebuilding the same kept list and the composition laying
+   * the same pixels back down.
+   */
+  VDP_REPEAT_BEGIN(VDP_POST_SPRITES)
+  vdp_select_sprites(y);
+  VDP_REPEAT_END;
+
+  if(sms.vdp.spr_count == 0UL)
+    {
+      /*
+       * ------------------------------------------------------------------
+       * A line with no sprite on it, which on a real screen is most of
+       * them. Nothing will read either scratch before the next line
+       * overwrites what matters, so nothing is written to either: the
+       * sixteen pixel groups go straight from the composition into the
+       * three words of the row, and the second walk over the line -- 256
+       * byte reads to make 48 words -- does not happen.
+       *
+       * The picture still begins at scratch byte line_org, so this way of
+       * rendering has to do the recut the scratch used to do for free by
+       * moving the origin. It is the same cut, made on words instead of on
+       * an address: lag says which of the four words in hand the picture
+       * starts in, and VDP_LANE_JOIN takes the four bytes that begin
+       * jsl / 8 bytes into it. Both are constant down the line. Nothing
+       * here is approximate -- it is the same run of index bytes, read
+       * from another rank -- and the bench proves it against the byte
+       * packer, group for group, for each of the eight fine scrolls.
+       *
+       * Strokes 1 to 32 are the picture; stroke 0 is screen column -1 and
+       * exists only under a fine scroll, where the picture starts inside
+       * it. It is composed for its two words and yields no group of its
+       * own, which is why the group work sits behind a test on c.
+       * ------------------------------------------------------------------
+       */
+      VDP_COUNT(line_fast);
+
+      borderw = border * VDP_TC_LANE_ONE;
+      maskcol = (uint32)reg[0] & 0x20UL;
+      lag = (VDP_LINE_LEAD - fine) >> 2;
+      jsl = ((VDP_LINE_LEAD - fine) & 3UL) << 3;
+      jsr = 31UL - jsl;
+      pw0 = 0;
+      pw1 = 0;
+      qw0 = 0;
+      qw1 = 0;
+
+      /*
+       * The background post, and the row cursor is armed inside the
+       * wrapper with the stroke index because the cursor advances: a
+       * second pass that did not arm it again would write past the row
+       * instead of over it.
+       */
+      VDP_REPEAT_BEGIN(VDP_POST_BG)
+      ow = (uint32 *)(sms.vdp.pixels[0] + (y * VDP_PIX_ROW_BYTES));
+      for(c = (fine != 0UL) ? 0UL : 1UL; c <= 32UL; c++)
+        {
+          yy = (c >= vsi_from) ? y : ys;
+          word = read16_le(nt + ((yy >> 3) << 6) + (((c - 1UL - coarse) & 31UL) << 1));
+          row = yy & 7UL;
+          if((word & 0x400UL) != 0UL)
+            row = 7UL - row;
+
+          key = VDP_TC_KEY_TILE(word & 0x1FFUL,row);
+          ent = tc + (key << 1);
+
+          if(tcv[key] == 0)
+            {
+              tile = vram + (key << 2);
+              t0 = planes + ((uint32)tile[0] << 3);
+              t1 = planes + VDP_PLANES_PLANE + ((uint32)tile[1] << 3);
+              t2 = planes + (2UL * VDP_PLANES_PLANE) + ((uint32)tile[2] << 3);
+              t3 = planes + (3UL * VDP_PLANES_PLANE) + ((uint32)tile[3] << 3);
+              /*
+               * Its own name for the same eight bytes the other way of
+               * composing a line writes: the two decode sites are weighed
+               * apart by the coverage control, and two spellings of one
+               * name would make it add them up instead -- a doubling on
+               * one side hidden by a fall on the other.
+               */
+              fb = (uint8 *)ent;
+              for(x = 0; x < 8UL; x++)
+                fb[x] = (uint8)((uint32)t0[x] | (uint32)t1[x]
+                              | (uint32)t2[x] | (uint32)t3[x]);
+              tcv[key] = 1;
+              VDP_COUNT(tc_miss);
+            }
+          else
+            {
+              VDP_COUNT(tc_hit);
+            }
+
+          e0 = ent[0];
+          e1 = ent[1];
+
+          if((word & 0x200UL) != 0UL)
+            {
+              rv = (e0 ^ ((e0 >> 16) | (e0 << 16))) & 0xFF00FFFFUL;
+              sw = ((e0 >> 8) | (e0 << 24)) ^ (rv >> 8);
+              rv = (e1 ^ ((e1 >> 16) | (e1 << 16))) & 0xFF00FFFFUL;
+              e0 = ((e1 >> 8) | (e1 << 24)) ^ (rv >> 8);
+              e1 = sw;
+            }
+
+          bankw = ((word & 0x800UL) != 0UL) ? (16UL * VDP_TC_LANE_ONE) : 0UL;
+          e0 |= bankw;
+          e1 |= bankw;
+
+          if(c != 0UL)
+            {
+              /*
+               * The eight picture pixels this stroke carries, cut out of
+               * the four words in hand: the two of the stroke before and
+               * the two of this one. With no fine scroll the cut is free
+               * and the two words are the two groups.
+               */
+              if(lag == 2UL)
+                {
+                  gw0 = e0;
+                  gw1 = e1;
+                }
+              else if(lag == 1UL)
+                {
+                  gw0 = VDP_LANE_JOIN(pw1,e0,jsl,jsr);
+                  gw1 = VDP_LANE_JOIN(e0,e1,jsl,jsr);
+                }
+              else
+                {
+                  gw0 = VDP_LANE_JOIN(pw0,pw1,jsl,jsr);
+                  gw1 = VDP_LANE_JOIN(pw1,e0,jsl,jsr);
+                }
+
+              /*
+               * Step 5 folded in: register 0 bit 5 gives pixels 0 to 7 the
+               * border colour, and those eight pixels are exactly the two
+               * groups of the first stroke. Four equal bytes in a word
+               * carry no byte order with them, so the word is the same on
+               * either machine. No mask is laid down for the sprite pass:
+               * there is no sprite pass on this line.
+               */
+              if((maskcol != 0UL) && (c == 1UL))
+                {
+                  gw0 = borderw;
+                  gw1 = borderw;
+                }
+
+              /*
+               * Two strokes fill one group of sixteen pixels, so one
+               * stroke in two writes the three words.
+               */
+              if((c & 1UL) != 0UL)
+                {
+                  qw0 = gw0;
+                  qw1 = gw1;
+                }
+              else
+                {
+                  VDP_EMIT16(qw0,qw1,gw0,gw1,ow);
+                  ow += 3;
+                }
+            }
+
+          pw0 = e0;
+          pw1 = e1;
+        }
+      VDP_REPEAT_END;
+
+      return;
+    }
+
+  VDP_COUNT(line_scratch);
+
+  /*
+   * Step 4. Stroke c is screen column c - 1, and the strokes are counted
    * from screen column -1: that first one lands in the lead of the
    * scratch and only its last pixels are picture. With no fine scroll it
    * is all lead and is skipped -- 32 strokes, columns 0 to 31; with one,
@@ -752,7 +1040,7 @@ vdp_render_line(uint32 y)
     }
   VDP_REPEAT_END;
 
-  /* Step 4. */
+  /* Step 5. */
   if(((uint32)reg[0] & 0x20UL) != 0UL)
     {
       for(x = 0; x < 8UL; x++)
@@ -763,34 +1051,35 @@ vdp_render_line(uint32 y)
     }
 
   /*
-   * Step 5. The sprites of this line, over the background. The masked
-   * left column of the step above is not covered by them and does not
-   * need its priority mask for that: the sprite pass leaves those pixels
-   * alone by the left edge it starts from.
+   * Step 6. The sprites of this line, over the background. The masked left
+   * column of the step above is not covered by them and does not need its
+   * priority mask for that: the sprite pass leaves those pixels alone by
+   * the left edge it starts from.
    *
-   * The sprite post of the breakdown, the two calls together: the
-   * selection alone would leave nothing composed, and the composition
-   * alone would need a selection it did not make. Both are idempotent --
-   * the selection recomputes the same kept list, the composition clears
-   * its taken mask on entry and lays the same pixels back down, and the
-   * overflow and collision bits are raised whether or not they already
-   * stood. What a second pass does move is the counters of the report:
-   * the overflow and collision tallies of vdp_report read double under
-   * this variant, which is why they are not read off a profiling run.
+   * The second half of the sprite post, the choice above being the first:
+   * the two carry the same name and the displacement the variant measures
+   * is their sum. This half is reached only with a kept list that is not
+   * empty, which is what the line above the background tested. It is
+   * idempotent -- it clears its taken mask on entry and lays the same
+   * pixels back down, and the collision bit is raised whether or not it
+   * already stood. What a second pass does move is the counters of the
+   * report: the overflow and collision tallies of vdp_report read double
+   * under this variant, which is why they are not read off a profiling
+   * run.
    */
   VDP_REPEAT_BEGIN(VDP_POST_SPRITES)
-  vdp_select_sprites(y);
-  if(sms.vdp.spr_count != 0UL)
-    vdp_draw_sprites(y);
+  vdp_draw_sprites(y);
   VDP_REPEAT_END;
 
   /*
-   * Step 6, and the packing post of the breakdown: a pure function of the
+   * Step 7, and the packing post of the breakdown: a pure function of the
    * scratch into the row, so a second pass writes the same three words per
-   * sixteen pixels back over themselves.
+   * sixteen pixels back over themselves. It reads the scratch as words and
+   * emits through VDP_EMIT16, the same emitter the line that skips the
+   * scratch uses, so one proof covers the two.
    */
   VDP_REPEAT_BEGIN(VDP_POST_PACK)
-  vdp_pack_row(line,out);
+  vdp_pack_line(out);
   VDP_REPEAT_END;
 }
 
@@ -805,6 +1094,24 @@ vdp_init(void)
   uint32 pre0_calc;
   uint32 pre1_calc;
   CCB *cel;
+  uint32 probe;
+
+  /*
+   * The lane order the preprocessor picked (vdp.h, VDP_LANE_MSB_FIRST),
+   * held against the machine actually running. Both ways of rendering a
+   * line read pixel indexes out of a word, and a wrong answer here does
+   * not fail: it draws every group of four pixels backwards, over the
+   * whole picture, which is a slow and confusing thing to diagnose. One
+   * store and one load, once at boot, buys the refusal instead.
+   */
+  probe = 0x01020304UL;
+  if((uint32)(((const uint8 *)&probe)[0])
+     != (VDP_LANE_MSB_FIRST ? 0x01UL : 0x04UL))
+    {
+      LOG_ERR(LOG_CAT_VDP,
+              ("init failed: the byte order built for is not the machine's"));
+      return VDP_ERR_LANE_ORDER;
+    }
 
   if(vdp_vram_block == NULL)
     {
@@ -975,6 +1282,8 @@ vdp_init(void)
   sms.vdp.cnt_tc_hit = 0;
   sms.vdp.cnt_tc_miss = 0;
   sms.vdp.cnt_tc_inval = 0;
+  sms.vdp.cnt_line_fast = 0;
+  sms.vdp.cnt_line_scratch = 0;
   vdp_irq_seen = 0;
   vdp_backdrop_said = 0;
 #endif
@@ -1579,6 +1888,24 @@ vdp_report(void)
            (unsigned long)sms.vdp.cnt_tc_miss,
            (unsigned long)sms.vdp.cnt_tc_inval));
 
+  /*
+   * How the lines of the window were rendered: straight into the row, or
+   * through the composition scratch because they carried a sprite.
+   * Emitted every time, like the two lines above.
+   *
+   * It is the key to the breakdown printed by the other report, and the
+   * two are read together or not at all: a line counted in fast= packs
+   * itself as it composes, so its packing falls INSIDE the background post
+   * and it never enters the packing post. On a frame with few sprites
+   * pack= therefore falls towards nothing and bg= carries what pack= used
+   * to, without either post having got faster or slower. Lines with the
+   * display off are in neither count -- they enter no post at all.
+   */
+  LOG_HOT(LOG_CAT_VDP,LOG_LVL_DBG,
+          ("lines fast=%lu scratch=%lu",
+           (unsigned long)sms.vdp.cnt_line_fast,
+           (unsigned long)sms.vdp.cnt_line_scratch));
+
   if(sms.vdp.cnt_mode != 0UL)
     {
       LOG_HOT(LOG_CAT_VDP,LOG_LVL_WARN,
@@ -1613,6 +1940,8 @@ vdp_report(void)
   sms.vdp.cnt_tc_hit = 0;
   sms.vdp.cnt_tc_miss = 0;
   sms.vdp.cnt_tc_inval = 0;
+  sms.vdp.cnt_line_fast = 0;
+  sms.vdp.cnt_line_scratch = 0;
   vdp_backdrop_said = 0;
 #endif
 }

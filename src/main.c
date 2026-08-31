@@ -1134,9 +1134,11 @@ main(int    argc,
   if(err < 0)
     {
       /*
-       * A screen of its own for the blocks that have one: the player
-       * quotes a code, and the code must name the block that was refused.
-       * The plane table has none yet and falls to the video memory screen,
+       * A screen of its own for every refusal that has one: the player
+       * quotes a code, and the code must name what actually went wrong.
+       * The byte order stop is not an allocation at all, so it gets its
+       * own screen rather than being read out as a memory failure. The
+       * plane table has none yet and falls to the video memory screen,
        * which names the wrong block for it -- a defect older than the row
        * cache and recorded as such, not one to fix in passing here.
        */
@@ -1149,6 +1151,10 @@ main(int    argc,
         log_fatal(LOG_CAT_VDP,LOG_E_VDP_TILECACHE,
                   "cannot allocate the tile cache",
                   "36 kilobytes of decoded tile rows");
+      else if(err == VDP_ERR_LANE_ORDER)
+        log_fatal(LOG_CAT_VDP,LOG_E_VDP_LANEORDER,
+                  "this build has the wrong byte order",
+                  "the render was built for the other one");
       else
         log_fatal(LOG_CAT_VDP,LOG_E_VDP_VRAM,
                   "cannot allocate the video ram",
