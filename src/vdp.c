@@ -134,6 +134,15 @@ static CCB *vdp_cel8_block = NULL;
 static int32 vdp_cel8_on = 0;
 
 /*
+ * Whether the render writes that buffer, which is NOT the same question as
+ * whether the eight bit cel is drawn. The ruler build (common.h,
+ * SMS_CEL_BPP8_TESTPAT) draws it and does not write it: the pattern laid down
+ * at init has to survive the frame to be read off the screen. Every write site
+ * asks this one, the cel choice asks the other.
+ */
+static int32 vdp_cel8_compose = 0;
+
+/*
  * The free DRAM the console reported the moment after the buffer above was
  * taken. Sampled there and printed later because the boot line belongs with
  * the rest of the cel trace, while the figure it carries only means anything
@@ -796,7 +805,7 @@ vdp_render_line(uint32 y)
        * the shipped one. Four equal bytes in a word carry no byte order
        * with them.
        */
-      if(vdp_cel8_on != 0)
+      if(vdp_cel8_compose != 0)
         {
           bg8 = border * VDP_TC_LANE_ONE;
           ow8 = (uint32 *)(vdp_cel8_pixels + (y * VDP_CEL8_ROW_BYTES));
@@ -868,7 +877,7 @@ vdp_render_line(uint32 y)
       * of the fallback, and it costs one test a line, outside the stroke
       * loop the disassembly is counted on.
       */
-     && (vdp_cel8_on != 0)
+     && (vdp_cel8_compose != 0)
 #endif
     )
     {
@@ -1077,7 +1086,7 @@ vdp_render_line(uint32 y)
    * glance. Outside the stroke loop, once a line: it moves no figure the
    * disassembly counts.
    */
-  if(vdp_cel8_on != 0)
+  if(vdp_cel8_compose != 0)
     {
       bg8 = VDP_CEL8_MARK_WORD;
       ow8 = (uint32 *)(vdp_cel8_pixels + (y * VDP_CEL8_ROW_BYTES));
@@ -1809,6 +1818,37 @@ vdp_init(void)
 
   vdp_cel8_on = (vdp_cel8_block != NULL) ? 1 : 0;
 
+#if SMS_CEL_BPP8_TESTPAT
+  /*
+   * The ruler, laid down once and left alone: line y is filled with colour
+   * number y modulo 32, so the picture is six ramps of thirty-two bands over
+   * its hundred and ninety-two lines. What it measures is on the screen and
+   * not in a figure -- where the bands stop says whether every line is being
+   * fetched, and how many colours they show says whether a colour number
+   * still means what it means at six bits.
+   *
+   * A byte at a time on purpose. This runs once at init, it is not on any
+   * path that is counted, and a byte written is a byte the engine reads: no
+   * word arithmetic stands between what is written here and what comes out.
+   */
+  vdp_cel8_compose = 0;
+  if(vdp_cel8_on != 0)
+    {
+      uint32 ry;
+      uint32 rx;
+
+      for(ry = 0; ry < VDP_ACTIVE_LINES; ry++)
+        {
+          uint8 *rrow = vdp_cel8_pixels + (ry * VDP_CEL8_ROW_BYTES);
+
+          for(rx = 0; rx < VDP_PIX_WIDTH; rx++)
+            rrow[rx] = (uint8)(ry & 31UL);
+        }
+    }
+#else
+  vdp_cel8_compose = vdp_cel8_on;
+#endif
+
   /*
    * And this is the only line of the drawing side the probe touches: the
    * frame loop reads the cel once through vdp_cel() and draws whatever it
@@ -1882,9 +1922,10 @@ vdp_init(void)
    */
   if(vdp_cel8_pixels != NULL)
     LOG_INFO(LOG_CAT_VDP,
-             ("cel8 probe=%s bpp=%lu row=%lu bytes=%lu dram_free=%lu "
+             ("cel8 probe=%s compose=%s bpp=%lu row=%lu bytes=%lu dram_free=%lu "
               "(sprite lines are marked, not drawn, by design)",
               vdp_cel8_on ? "on" : "off",
+              vdp_cel8_compose ? "on" : "off (ruler)",
               (unsigned long)VDP_CEL8_BPP,
               (unsigned long)VDP_CEL8_ROW_BYTES,
               (unsigned long)VDP_CEL8_BUF_BYTES,

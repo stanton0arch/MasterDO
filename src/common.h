@@ -622,6 +622,53 @@
 #endif
 
 /*
+ * SMS_CEL_BPP8_TESTPAT -- the depth probe drawing a ruler instead of a game.
+ *
+ * The first console run of the probe drew a cel that was right where it should
+ * be and right at its top edge, and painted only about half its height: below
+ * that, what showed through was the backdrop. The picture it did paint was one
+ * flat colour -- which proves nothing on its own, because the screen being
+ * emulated at that moment decoded seventeen distinct tile rows in a whole run
+ * and was itself flat. So the run answered neither question it was asked: the
+ * drawing cost weighed half a picture, and the colours were never exercised.
+ *
+ * A game picture cannot answer either question, because nothing in it is known
+ * in advance. A ruler can. With this on, the eight bit buffer is filled once
+ * at init with the row of its own line number -- line y takes colour number
+ * y modulo 32 -- and the render stops writing that buffer so the ruler
+ * survives the frame. The screen then answers by itself:
+ *
+ *   six ramps of thirty-two bands filling the whole height -- the row stride
+ *   is right, every line is being fetched, and the draw= of that run is the
+ *   figure the whole probe exists to get;
+ *
+ *   ramps that stop part way down -- the stride is wrong, and the count of
+ *   bands says by how much;
+ *
+ *   thirty-two distinct colours, and they are the emulated palette's -- a
+ *   colour number means the same thing at eight bits as at six, which is the
+ *   other half of what the probe was for.
+ *
+ * It composes nothing, so no figure of the processor side comes from a build
+ * with this on, and the frame rate of such a build is meaningless twice over.
+ *
+ * Cuts: the fill and the tests that keep the render off the buffer.
+ */
+#ifndef SMS_CEL_BPP8_TESTPAT
+#define SMS_CEL_BPP8_TESTPAT 0
+#endif
+
+/*
+ * It is a way of running the depth probe, not a probe of its own: without the
+ * eight bit buffer and the eight bit cel there is nothing to fill and nothing
+ * to draw it with, and a build that asked for the ruler alone would compile to
+ * a program that quietly ignored it.
+ */
+#if SMS_CEL_BPP8_TESTPAT && !SMS_CEL_BPP8
+#error "SMS_CEL_BPP8_TESTPAT needs SMS_CEL_BPP8: there is no eight bit buffer to fill without it"
+#endif
+
+/*
  * ---------------------------------------------------------------------------
  * Sixteen bit access to emulated data: memory of the emulated machine, ROM
  * images, colour entries. Low byte first, whatever the host.
