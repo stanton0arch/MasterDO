@@ -277,7 +277,7 @@
 #endif
 
 /*
- * The five configurations worth naming:
+ * The six configurations worth naming:
  *
  *   development  the default this file ships with: LOG_ENABLE 1, LOG_LEVEL
  *                LOG_LVL_INFO, SMS_TELEMETRY 1. A cartridge read off the
@@ -313,7 +313,22 @@
  *                frame. What it publishes is a cost per memory access, which
  *                is a property of the machine and not of this build.
  *
- * SMS_VDP_BUFFERS (above) stays at its default of 1 in all five. In every
+ *   cel depth    the development build plus SMS_CEL_BPP8 1. The same
+ *                instrument-on-a-build shape again: it composes the
+ *                background at one byte a pixel into a buffer of its own
+ *                and hands that buffer to a cel of eight bits, so that
+ *                what a wider picture costs the display can be read at
+ *                all. NOTHING ABOUT ITS FRAME RATE MAY BE QUOTED -- it
+ *                draws a picture the sprite pass does not reach, and it
+ *                takes forty-eight kilobytes the shipped build does not.
+ *                The one figure it publishes is the draw= field of the
+ *                periodic line, which is the display's own cost and
+ *                nothing else. The processor side of the same question is
+ *                not read from a run at all: it is counted off the
+ *                disassembly of this object against the object built
+ *                without the switch.
+ *
+ * SMS_VDP_BUFFERS (above) stays at its default of 1 in all six. In every
  * one of them the frame loop executes the cartridge by scanline quotas,
  * the video part renders one line per quota, and the drawing side -- the
  * one draw call and the presentation -- closes the frame: there is one
@@ -538,6 +553,73 @@
  * and passes whatever it is given. Written here it would be a guard that
  * cannot fire -- which was tried, and caught by testing that it fires.
  */
+
+/*
+ * SMS_CEL_BPP8 -- what the picture format costs, on both sides.
+ *
+ * The picture is written as six bit indexes squeezed four to three words, and
+ * that squeezing is one of the two big costs of the background: measured, it
+ * is 47.8 of the 212.6 cycles a stroke of eight pixels takes. Writing one
+ * index per byte instead would delete it outright -- the composed word would
+ * already be the word the engine reads -- at the price of a third more data
+ * for the display to fetch. The first half of that trade has a figure. The
+ * second half has never had one anywhere: the only local statement on it is
+ * that performance relates to cel data size (3DO_Development_Notes.md:83-84),
+ * qualitative and unnumbered.
+ *
+ * This switch puts a figure on both halves and stops there. It composes the
+ * background one byte a pixel into a buffer of its own and points a cel of
+ * eight bits at it; the processor half is then counted off the disassembly of
+ * this file with the switch on against the same file with it off, and the
+ * display half is read off the draw= field of the periodic line on one run.
+ *
+ * The processor half is now counted, and it came to more than the packing it
+ * was meant to price: a stroke of eight pixels falls from 232.6 to 174.3
+ * cycles, 58.3 saved where the packing alone accounts for 35.2. The rest is
+ * register pressure coming off -- no pair held back between strokes, no
+ * parity, six fewer words of stack frame.
+ *
+ * It decides nothing. The shipped format stays six bits, and moving it is an
+ * architecture decision taken by a human with both figures in hand -- which is
+ * exactly what this switch exists to put there.
+ *
+ * Off by default, and scaffolding exactly as the three mock-ups and the memory
+ * probe above are: the render's sprite pass and its row packer stay in six
+ * bits, so a line carrying a sprite is stamped flat rather than drawn under
+ * this build, and nothing in the program may come to depend on it. Off, the
+ * object is the one that was there before.
+ *
+ * Cuts: the eight bit buffer, its cel, its boot line, and the two stores that
+ * replace the packing in the background loop -- the whole of it, so that the
+ * delivered picture is composed and drawn exactly as it was.
+ */
+#ifndef SMS_CEL_BPP8
+#define SMS_CEL_BPP8 0
+#endif
+
+/*
+ * It needs telemetry, and not for the reason the mock-ups above need it. They
+ * read a clock of their own; this one reads no clock at all. What it needs is
+ * the periodic line's draw= field -- the only place in the program where the
+ * cost of the drawing is published -- and that field exists exactly where the
+ * measurement does (main.c, MAIN_MEASURE). Built without telemetry the probe
+ * would spend forty-eight kilobytes and a wrong picture to publish nothing.
+ */
+#if SMS_CEL_BPP8 && !SMS_TELEMETRY
+#error "SMS_CEL_BPP8 needs SMS_TELEMETRY: the figure it exists for is the draw= field"
+#endif
+
+/*
+ * And it needs somewhere to print, which is the same field's other half: the
+ * periodic line is a trace line, and so is the boot line that says whether the
+ * probe got its buffer and its cel at all. With tracing compiled out the run
+ * would draw a picture nobody asked for and report neither the figure nor the
+ * fact that it was not measuring. Refused loudly, as the probe above refuses
+ * it.
+ */
+#if SMS_CEL_BPP8 && !LOG_ENABLE
+#error "SMS_CEL_BPP8 needs LOG_ENABLE: a measurement that cannot print is not one"
+#endif
 
 /*
  * ---------------------------------------------------------------------------

@@ -114,6 +114,39 @@
 #define VDP_PLUT_ENTRIES 32
 
 /*
+ * The same picture at one byte a pixel, which is what the cel depth probe
+ * composes and draws (common.h, SMS_CEL_BPP8). Calculated here, beside the
+ * packed sizes and from the same width and height, so that the two shapes
+ * of one picture cannot drift apart -- and calculated in EVERY build, with
+ * no switch over them, because a constant is not code: nothing is emitted
+ * for them, and the two refusals further down stay compiled and able to
+ * fire rather than waiting for a build almost nobody makes.
+ *
+ * The packed row above rounds up to the word for the engine; at eight bits
+ * the width already divides by four, so the rounding is a no-op here and is
+ * written anyway -- the day the width stops dividing, the row still comes
+ * out whole.
+ */
+#define VDP_CEL8_BPP 8UL
+#define VDP_CEL8_ROW_BYTES \
+  ((((VDP_PIX_WIDTH * VDP_CEL8_BPP) + 31UL) / 32UL) * 4UL)
+#define VDP_CEL8_BUF_BYTES (VDP_CEL8_ROW_BYTES * VDP_ACTIVE_LINES)
+
+/*
+ * The word the probe stamps across a row it did not compose -- a line
+ * carrying a sprite, which under that switch goes down the scratch path and
+ * lands in the six bit buffer nothing is drawing from. Four lanes of the
+ * highest palette index, so the row comes out flat and unmistakable instead
+ * of holding the previous frame's picture, which is the one wrong that reads
+ * as right.
+ */
+#define VDP_CEL8_MARK_INDEX 31UL
+#define VDP_CEL8_MARK_WORD  ((VDP_CEL8_MARK_INDEX << 24) \
+                           | (VDP_CEL8_MARK_INDEX << 16) \
+                           | (VDP_CEL8_MARK_INDEX << 8)  \
+                           |  VDP_CEL8_MARK_INDEX)
+
+/*
  * The packer works sixteen pixels at a time -- three words of six bit
  * indexes -- so the width must divide by sixteen for the row to come out
  * whole. Refused at compile time rather than truncated.
@@ -507,6 +540,47 @@
 #if ((VDP_PIX_ROW_BYTES / 4UL) < 2UL) || ((VDP_PIX_WIDTH - 1UL) > 0x7FFUL) \
  || (((VDP_PIX_ROW_BYTES / 4UL) - 2UL) > 0xFFUL)
 #error "cel preamble out of range: a row needs 2 words minimum, the pixel count fits 11 bits, the row offset fits 8"
+#endif
+
+/*
+ * The same two hardware facts held against the eight bit row of the depth
+ * probe, and held in every build for the reason its constants are computed
+ * in every build. Two refusals rather than one: they watch two independent
+ * facts, and a guard that can only fire together with another is a guard
+ * whose own wording is never read. The pixel count is not restated here --
+ * it is the same width the refusal above already watches.
+ */
+#if (VDP_CEL8_ROW_BYTES / 4UL) < 2UL
+#error "eight bit cel: a row needs 2 words minimum for the engine's pipelined fetch"
+#endif
+
+#if ((VDP_CEL8_ROW_BYTES / 4UL) - 2UL) > 0xFFUL
+#error "eight bit cel: the row offset of a depth of 8 bits or less is read from an 8 bit field"
+#endif
+
+/*
+ * And the depth itself, which the two above do not watch: a row of 16 bit
+ * pixels is 512 bytes with a row offset of 126, inside both their ranges,
+ * and the library would still be handed a depth a CODED cel cannot be built
+ * at -- the portfolio is explicit that a coded cel takes 8 bits per pixel at
+ * most (docs/3do/3do_portfolio_2.5.md:5433). Refused here rather than at run
+ * time, where it arrives as a NULL nobody can read a reason out of.
+ */
+#if VDP_CEL8_BPP > 8UL
+#error "eight bit cel: a coded cel takes 8 bits per pixel at most"
+#endif
+
+/*
+ * The last of the four, and the only one that watches two constants against
+ * each other rather than a constant against the hardware. The composition
+ * walks 32 strokes and each writes two words; the row is sized from the
+ * width. Nothing else ties the two, and they agree today by arithmetic that
+ * is written in two places -- the loop bound is a literal. A width that moved
+ * would leave the strokes writing past the end of their row and into the next
+ * line, quietly, with a picture that still looks like a picture.
+ */
+#if ((VDP_PIX_WIDTH / 8UL) * 2UL) != (VDP_CEL8_ROW_BYTES / 4UL)
+#error "eight bit cel: the strokes of a line no longer fill exactly one row"
 #endif
 
 /*

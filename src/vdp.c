@@ -13,6 +13,47 @@
  */
 #include "celutils.h"
 
+#if SMS_CEL_BPP8
+/*
+ * The free memory call the depth probe's boot line reads its figure from.
+ * celutils.h above brings this header in already, so naming it changes
+ * nothing today; it is named because the probe uses it directly, and a file
+ * that uses a header should say so rather than inherit it. It buys no
+ * protection: sitting under this switch, it is only ever preprocessed by a
+ * probe build, so a day when celutils.h stopped including it would be a day
+ * the DEFAULT build kept compiling and only the next probe build broke.
+ */
+#include "mem.h"
+
+/*
+ * The three guards common.h could not carry, on the pattern memprobe.c had
+ * to use for the same reason (memprobe.c:18-19): the level and category
+ * names belong to log.h, and common.h is a leaf that does not include it --
+ * an #if written there would compare against names the preprocessor has
+ * never seen, pass whatever it is given, and be a guard that cannot fire.
+ *
+ * What they protect is not a number that would come out wrong but a run that
+ * would come out MUTE. This build draws a picture that is deliberately part
+ * wrong -- lines carrying sprites are not composed at this depth -- and it
+ * exists to publish exactly two things: the boot line that says whether it is
+ * measuring at all, an INFO line of the video category, and the draw= field
+ * of the periodic line, an INFO line of the performance category. Silence
+ * either of them and what is left is a broken picture and no figure, which is
+ * the one outcome a probe must not be able to reach quietly.
+ */
+#if (LOG_LVL_INFO) > (LOG_LEVEL)
+#error "SMS_CEL_BPP8 needs LOG_LEVEL at LOG_LVL_INFO or above: its boot line and its draw= field are INFO lines"
+#endif
+
+#if ((LOG_CAT_MASK) & (1UL << (LOG_CAT_VDP))) == 0UL
+#error "SMS_CEL_BPP8 needs LOG_CAT_VDP in LOG_CAT_MASK: without it the probe cannot say whether it is measuring"
+#endif
+
+#if ((LOG_CAT_MASK) & (1UL << (LOG_CAT_PERF))) == 0UL
+#error "SMS_CEL_BPP8 needs LOG_CAT_PERF in LOG_CAT_MASK: the draw= field it exists for is a performance line"
+#endif
+#endif
+
 /*
  * The video display processor at the stage where it answers, keeps,
  * renders the background plane and owns the way out for pixels. What the
@@ -74,6 +115,42 @@ static int32 vdp_cel_manual = 0;
  */
 static uint32 vdp_pre0_lib = 0;
 static uint32 vdp_pre1_lib = 0;
+
+#if SMS_CEL_BPP8
+/*
+ * The depth probe (common.h, SMS_CEL_BPP8): a second picture at one byte a
+ * pixel, a second cel of eight bits over it, and the flag that says both
+ * were had. Kept across a second init for the reason every block above is.
+ *
+ * The flag is read in two places and by nobody else: the render, which
+ * composes eight bits only when there is somewhere to compose them, and the
+ * init, which hands the drawing side the eight bit cel only when there is
+ * one. Off, the program composes and draws exactly as the shipped build
+ * does -- the picture stays right, and the boot line says the run measures
+ * nothing rather than letting a figure be read off it.
+ */
+static uint8 *vdp_cel8_pixels = NULL;
+static CCB *vdp_cel8_block = NULL;
+static int32 vdp_cel8_on = 0;
+
+/*
+ * The free DRAM the console reported the moment after the buffer above was
+ * taken. Sampled there and printed later because the boot line belongs with
+ * the rest of the cel trace, while the figure it carries only means anything
+ * at the instant of the allocation.
+ */
+static uint32 vdp_cel8_dram_free = 0;
+
+/*
+ * The eight bit cel's preamble words as the library left them, read out the
+ * moment CreateCel returns. The six bit block keeps its own pair for the same
+ * reason (above): one debug line then puts the library's answer beside this
+ * file's calculation, and a disagreement on the row offset is the one defect
+ * that draws a garbled picture with no error anywhere.
+ */
+static uint32 vdp_cel8_pre0_lib = 0;
+static uint32 vdp_cel8_pre1_lib = 0;
+#endif
 
 #if VDP_COUNTERS
 /*
@@ -653,8 +730,19 @@ vdp_render_line(uint32 y)
   uint32 pw1;
   uint32 gw0;
   uint32 gw1;
+#if SMS_CEL_BPP8
+  /*
+   * The eight bit row of this line, and the word of four border pixels the
+   * display-off branch fills it with. The pair the packing needs is gone
+   * under this switch: at one byte a pixel every stroke writes its own two
+   * words, so nothing is held back for the stroke after it.
+   */
+  uint32 *ow8;
+  uint32 bg8;
+#else
   uint32 qw0;
   uint32 qw1;
+#endif
 
   reg = sms.vdp.reg;
 
@@ -701,6 +789,21 @@ vdp_render_line(uint32 y)
           out[2] = w2;
           out += 3;
         }
+#if SMS_CEL_BPP8
+      /*
+       * And the same uniform row at one byte a pixel, so that a line with
+       * the picture switched off is as right on the probe's cel as it is on
+       * the shipped one. Four equal bytes in a word carry no byte order
+       * with them.
+       */
+      if(vdp_cel8_on != 0)
+        {
+          bg8 = border * VDP_TC_LANE_ONE;
+          ow8 = (uint32 *)(vdp_cel8_pixels + (y * VDP_CEL8_ROW_BYTES));
+          for(x = 0; x < (VDP_CEL8_ROW_BYTES / 4UL); x++)
+            ow8[x] = bg8;
+        }
+#endif
       return;
     }
 
@@ -753,7 +856,21 @@ vdp_render_line(uint32 y)
   vdp_select_sprites(y);
   VDP_REPEAT_END;
 
-  if(sms.vdp.spr_count == 0UL)
+  if(sms.vdp.spr_count == 0UL
+#if SMS_CEL_BPP8
+     /*
+      * The depth probe composes eight bit pixels here and nowhere else, so
+      * this is where it falls back when it has neither buffer nor cel: the
+      * line takes the scratch path below instead, which composes and packs
+      * six bits exactly as the shipped build does and is drawn by the six
+      * bit cel. A run that could not measure then shows a right picture and
+      * says in its boot line that it measured nothing -- which is the whole
+      * of the fallback, and it costs one test a line, outside the stroke
+      * loop the disassembly is counted on.
+      */
+     && (vdp_cel8_on != 0)
+#endif
+    )
     {
       /*
        * ------------------------------------------------------------------
@@ -789,8 +906,10 @@ vdp_render_line(uint32 y)
       jsr = 31UL - jsl;
       pw0 = 0;
       pw1 = 0;
+#if !SMS_CEL_BPP8
       qw0 = 0;
       qw1 = 0;
+#endif
 
       /*
        * The background post, and the row cursor is armed inside the
@@ -799,7 +918,11 @@ vdp_render_line(uint32 y)
        * instead of over it.
        */
       VDP_REPEAT_BEGIN(VDP_POST_BG)
+#if SMS_CEL_BPP8
+      ow = (uint32 *)(vdp_cel8_pixels + (y * VDP_CEL8_ROW_BYTES));
+#else
       ow = (uint32 *)(sms.vdp.pixels[0] + (y * VDP_PIX_ROW_BYTES));
+#endif
       for(c = (fine != 0UL) ? 0UL : 1UL; c <= 32UL; c++)
         {
           yy = (c >= vsi_from) ? y : ys;
@@ -891,6 +1014,26 @@ vdp_render_line(uint32 y)
                   gw1 = borderw;
                 }
 
+#if SMS_CEL_BPP8
+              /*
+               * One byte a pixel, and this is the whole of what the depth
+               * probe changes in the loop: the word the composition has in
+               * hand IS the word the engine reads, so the stroke stores its
+               * two and moves on. No packing, and no pair held back to be
+               * packed with the next stroke -- the parity that fills a
+               * group of sixteen has nothing left to do.
+               *
+               * True only on a big-endian machine, where byte 0 of a lane
+               * word is pixel 0 (vdp.h, VDP_LANE_MSB_FIRST). That is why it
+               * lives behind this switch and not in a named form beside
+               * VDP_EMIT16: a real port of the format would have to be
+               * compiled and exercised in both orders, and this probe
+               * exists to price the format, not to carry it.
+               */
+              ow[0] = gw0;
+              ow[1] = gw1;
+              ow += 2;
+#else
               /*
                * Two strokes fill one group of sixteen pixels, so one
                * stroke in two writes the three words.
@@ -905,6 +1048,7 @@ vdp_render_line(uint32 y)
                   VDP_EMIT16(qw0,qw1,gw0,gw1,ow);
                   ow += 3;
                 }
+#endif
             }
 
           pw0 = e0;
@@ -916,6 +1060,31 @@ vdp_render_line(uint32 y)
     }
 
   VDP_COUNT(line_scratch);
+
+#if SMS_CEL_BPP8
+  /*
+   * The probe does not compose this line: it carries a sprite, so it goes
+   * down the scratch path below, which packs six bit indexes into a buffer
+   * nothing is drawing from under this switch. Its eight bit row would
+   * therefore keep whatever the LAST frame left there -- and a row of last
+   * frame's picture is the one kind of wrong that looks right. The human is
+   * being asked to judge a picture; a stale row would let a real defect of
+   * the composition hide behind a plausible band.
+   *
+   * So the row is stamped flat before we leave. It is one uniform index
+   * across the whole line, which no background of this machine produces by
+   * accident on a line that carries a sprite, and it is unmistakable at a
+   * glance. Outside the stroke loop, once a line: it moves no figure the
+   * disassembly counts.
+   */
+  if(vdp_cel8_on != 0)
+    {
+      bg8 = VDP_CEL8_MARK_WORD;
+      ow8 = (uint32 *)(vdp_cel8_pixels + (y * VDP_CEL8_ROW_BYTES));
+      for(x = 0; x < (VDP_CEL8_ROW_BYTES / 4UL); x++)
+        ow8[x] = bg8;
+    }
+#endif
 
   /*
    * Step 4. Stroke c is screen column c - 1, and the strokes are counted
@@ -1093,6 +1262,10 @@ vdp_init(void)
   uint32 x;
   uint32 pre0_calc;
   uint32 pre1_calc;
+#if SMS_CEL_BPP8
+  uint32 pre0_calc8;
+  uint32 pre1_calc8;
+#endif
   CCB *cel;
   uint32 probe;
 
@@ -1197,6 +1370,51 @@ vdp_init(void)
   sms.vdp.tc = vdp_tc_block;
   sms.vdp.tc_valid = (uint8 *)vdp_tc_block + VDP_TC_BYTES;
 
+#if SMS_CEL_BPP8
+  /*
+   * The depth probe's picture, one byte a pixel: forty-eight kilobytes of
+   * the same DRAM the render competes for.
+   *
+   * LAST OF ALL THE BLOCKS, and that order is the whole of its promise not to
+   * get in the way. Every allocation above is fatal when it is refused -- the
+   * program has no picture, no plane table, no row cache without them -- so a
+   * probe served before them on a console short of forty-eight kilobytes
+   * would take the memory and bring the boot down in place of switching
+   * itself off. Served last, it competes with nothing: what it gets is what
+   * was left over, and what it does not get costs the run its figure and
+   * nothing else.
+   *
+   * A refusal is therefore not fatal and not a failure code: the probe has
+   * nowhere to compose, says so, and the run draws the six bit picture and
+   * measures nothing.
+   */
+  if(vdp_cel8_pixels == NULL)
+    {
+      vdp_cel8_pixels = (uint8 *)sys_alloc("vdp_cel8",
+                                           (int32)VDP_CEL8_BUF_BYTES,
+                                           MEMTYPE_DRAM | MEMTYPE_FILL);
+      if(vdp_cel8_pixels == NULL)
+        LOG_WARN(LOG_CAT_VDP,
+                 ("cel8 probe off: no memory for the eight bit picture, "
+                  "the six bit cel keeps the screen"));
+    }
+
+  /*
+   * And the free figure, read only when there is an allocation for it to
+   * describe, and read on EVERY init rather than only on the one that took
+   * the block: the block is taken once and kept, but what the console has
+   * left is a fact about the moment it is asked, and a second init reprinting
+   * the first one's answer would be publishing a stale figure as a fresh one.
+   */
+  if(vdp_cel8_pixels != NULL)
+    {
+      MemInfo cel8_mi;
+
+      AvailMem(&cel8_mi,MEMTYPE_DRAM);
+      vdp_cel8_dram_free = cel8_mi.minfo_SysFree;
+    }
+#endif
+
   /*
    * Cleared here on every init, not only on the first: the allocator's
    * fill flag zeroes the block the one time it is taken, and a second init
@@ -1211,6 +1429,15 @@ vdp_init(void)
       for(x = 0; x < VDP_PIX_BUF_BYTES; x++)
         sms.vdp.pixels[b][x] = 0;
     }
+
+#if SMS_CEL_BPP8
+  /* Cleared on every init, for the reason the buffers above are. */
+  if(vdp_cel8_pixels != NULL)
+    {
+      for(x = 0; x < VDP_CEL8_BUF_BYTES; x++)
+        vdp_cel8_pixels[x] = 0;
+    }
+#endif
 
   for(i = 0; i < VDP_CRAM_SIZE; i++)
     sms.vdp.cram[i] = 0;
@@ -1341,6 +1568,22 @@ vdp_init(void)
             | PRE1_TLLSB_PDC0
             | (VDP_PIX_WIDTH - PRE1_TLHPCNT_PREFETCH);
 
+#if SMS_CEL_BPP8
+  /*
+   * The same pair for the depth probe's block, spelled from the same header
+   * constants and differing in exactly two places: the depth code, and a row
+   * offset counted off the eight bit row. Same prefetch corrections, same
+   * eight bit row-offset field -- a depth of eight bits or less is read
+   * through that one, and eight bits is still eight bits or less.
+   */
+  pre0_calc8 = ((VDP_ACTIVE_LINES - PRE0_VCNT_PREFETCH) << PRE0_VCNT_SHIFT)
+             | PRE0_BPP_8;
+  pre1_calc8 = (((VDP_CEL8_ROW_BYTES / 4UL) - PRE1_WOFFSET_PREFETCH)
+                << PRE1_WOFFSET8_SHIFT)
+             | PRE1_TLLSB_PDC0
+             | (VDP_PIX_WIDTH - PRE1_TLHPCNT_PREFETCH);
+#endif
+
   if(vdp_cel_block == NULL)
     {
       /*
@@ -1449,7 +1692,117 @@ vdp_init(void)
       cel->ccb_Height = (int32)VDP_ACTIVE_LINES;
     }
 
+#if SMS_CEL_BPP8
+  /*
+   * The depth probe's cel: the block above again, field for field, at eight
+   * bits over the eight bit picture. Built after it and never instead of
+   * it, so that a refusal anywhere here leaves a program that draws its six
+   * bit cel as it always did.
+   *
+   * Coded at eight bits is what the library documents as buildable -- a
+   * coded cel takes any depth up to eight, and at eight it allocates a
+   * palette only because the coded option is set
+   * (docs/3do/3do_portfolio_2.5.md:5433-5439). That palette is left where
+   * it lies and the pointer repointed on this module's own, as on the six
+   * bit way. There is no hand-filled fallback here: on the six bit way a
+   * refusal by the library still has to produce a screen, while here it
+   * only has to produce an honest boot line.
+   *
+   * The palette is the SAME thirty-two entries, and that is the point of
+   * the probe as much as the composition is: an index the loop emits is
+   * five bits wide in either depth -- the loop never writes above 31 -- so
+   * eight bits changes how an index is wrapped and not what it means. The
+   * run says whether that holds by showing a picture with right colours.
+   */
+  if((vdp_cel8_block == NULL) && (vdp_cel8_pixels != NULL))
+    {
+      vdp_cel8_block = CreateCel((int32)VDP_PIX_WIDTH,
+                                 (int32)VDP_ACTIVE_LINES,
+                                 (int32)VDP_CEL8_BPP,
+                                 CREATECEL_CODED,
+                                 (void *)vdp_cel8_pixels);
+      if(vdp_cel8_block == NULL)
+        {
+          /*
+           * The forty-eight kilobytes taken above stay taken, deliberately.
+           * Everything in this program is allocated at init and never given
+           * back -- there is no counterpart to sys_alloc, and handing the
+           * block to FreeMem behind its back would leave the memory total it
+           * publishes describing a program that no longer exists, which is
+           * worse than the block. The build is scaffolding and its own boot
+           * line says the memory went and the figure did not come, so the
+           * cost is visible rather than hidden.
+           */
+          LOG_WARN(LOG_CAT_VDP,
+                   ("cel8 probe off: the library refused an eight bit cel, "
+                    "the six bit cel keeps the screen (the buffer stays "
+                    "taken: nothing here is given back)"));
+        }
+      else
+        {
+          cel = vdp_cel8_block;
+
+          /* The two the library does not set, for the two reasons above. */
+          cel->ccb_Flags |= CCB_BGND | CCB_LDPLUT;
+
+          /* And the two it does, forced rather than assumed, as above. */
+          cel->ccb_Flags |= CCB_CCBPRE | CCB_LAST;
+          cel->ccb_NextPtr = NULL;
+
+          cel->ccb_SourcePtr = (CelData *)vdp_cel8_pixels;
+          cel->ccb_PLUTPtr = sms.vdp.plut;
+          cel->ccb_PIXC = 0x1F001F00UL;
+
+          /*
+           * The preamble words stay the library's, exactly as they do on the
+           * six bit way and for the same reason: the library knows what the
+           * hardware reads. They are READ OUT AND KEPT here so that the
+           * arbiter at the end of this function can hold them against what
+           * this file computes for a row of eight bit pixels -- the same
+           * arbiter the six bit block has had since a capture paid for it.
+           *
+           * It is not a formality on this side. The composition writes 256
+           * bytes a row and nothing but this pair tells the engine to step by
+           * 256: a row offset the library computed differently would shear
+           * the picture into diagonals AND make draw= weigh a fetch pattern
+           * nobody counted -- a wrong figure that looks like a figure.
+           *
+           * Same frame as the cel it replaces: same picture, same raster,
+           * so the same centring and the same 1:1 mapping.
+           */
+          vdp_cel8_pre0_lib = cel->ccb_PRE0;
+          vdp_cel8_pre1_lib = cel->ccb_PRE1;
+
+          px = (sys_width() - (int32)VDP_PIX_WIDTH) / 2;
+          py = (sys_height() - (int32)VDP_ACTIVE_LINES) / 2;
+          if(px < 0)
+            px = 0;
+          if(py < 0)
+            py = 0;
+          cel->ccb_XPos = px << 16;
+          cel->ccb_YPos = py << 16;
+          cel->ccb_HDX = 1L << 20;
+          cel->ccb_HDY = 0;
+          cel->ccb_VDX = 0;
+          cel->ccb_VDY = 1L << 16;
+          cel->ccb_HDDX = 0;
+          cel->ccb_HDDY = 0;
+          cel->ccb_Width = (int32)VDP_PIX_WIDTH;
+          cel->ccb_Height = (int32)VDP_ACTIVE_LINES;
+        }
+    }
+
+  vdp_cel8_on = (vdp_cel8_block != NULL) ? 1 : 0;
+
+  /*
+   * And this is the only line of the drawing side the probe touches: the
+   * frame loop reads the cel once through vdp_cel() and draws whatever it
+   * finds. The six bit block is built either way and stands ready here.
+   */
+  sms.vdp.cel = (void *)(vdp_cel8_on ? vdp_cel8_block : vdp_cel_block);
+#else
   sms.vdp.cel = (void *)vdp_cel_block;
+#endif
 
   /*
    * Two lines. The first names what was built -- one mode, one picture
@@ -1498,6 +1851,35 @@ vdp_init(void)
             (unsigned long)vdp_cel_block->ccb_HDX,
             (unsigned long)vdp_cel_block->ccb_VDY));
 
+#if SMS_CEL_BPP8
+  /*
+   * The depth probe in one line: whether it is measuring at all, the depth
+   * and row it composes at, what the extra picture cost in DRAM, and what the
+   * console had left once it was taken. Every figure the run is read with has
+   * to be in the run's own trace -- a memory total quoted from a document is
+   * a total nobody can check against the build that produced the drawing
+   * figure.
+   *
+   * Two whole spellings, and the second is the reason there are two: a line
+   * that printed the size of a buffer it never got would be announcing a
+   * spend that did not happen, next to the very word saying it did not. What
+   * was not taken is reported as nothing, not as a plan.
+   */
+  if(vdp_cel8_pixels != NULL)
+    LOG_INFO(LOG_CAT_VDP,
+             ("cel8 probe=%s bpp=%lu row=%lu bytes=%lu dram_free=%lu "
+              "(sprite lines are marked, not drawn, by design)",
+              vdp_cel8_on ? "on" : "off",
+              (unsigned long)VDP_CEL8_BPP,
+              (unsigned long)VDP_CEL8_ROW_BYTES,
+              (unsigned long)VDP_CEL8_BUF_BYTES,
+              (unsigned long)vdp_cel8_dram_free));
+  else
+    LOG_INFO(LOG_CAT_VDP,
+             ("cel8 probe=off bytes=0 (no buffer taken, nothing measured, "
+              "the six bit cel keeps the screen)"));
+#endif
+
   /*
    * The preamble arbiter, at debug level: what the library computed for
    * this block beside what this file computes for it. Equal pairs retire
@@ -1517,6 +1899,40 @@ vdp_init(void)
              (unsigned long)vdp_pre1_lib,
              (unsigned long)pre0_calc,
              (unsigned long)pre1_calc));
+
+#if SMS_CEL_BPP8
+  /*
+   * The same arbiter for the probe's block, and one thing more than the six
+   * bit one has: a disagreement is raised rather than left to be noticed.
+   *
+   * The six bit pair is arbitrated at debug level because a wrong picture is
+   * its own alarm -- the screen shears and the run stops there. This build
+   * draws a picture that is ALREADY part wrong on purpose, and its whole
+   * output is one number; a sheared row here would pass for the mess the
+   * probe was expected to make, and draw= would come back as a plausible
+   * figure for a fetch pattern nobody counted. So the pair is printed, and
+   * the moment it differs the line says which half and what it costs.
+   */
+  if(vdp_cel8_block != NULL)
+    {
+      LOG_DBG(LOG_CAT_VDP,
+              ("cel8 pre lib=0x%08lx 0x%08lx calc=0x%08lx 0x%08lx",
+               (unsigned long)vdp_cel8_pre0_lib,
+               (unsigned long)vdp_cel8_pre1_lib,
+               (unsigned long)pre0_calc8,
+               (unsigned long)pre1_calc8));
+
+      if((vdp_cel8_pre0_lib != pre0_calc8) || (vdp_cel8_pre1_lib != pre1_calc8))
+        LOG_WARN(LOG_CAT_VDP,
+                 ("cel8 preamble disagrees: lib=0x%08lx 0x%08lx "
+                  "calc=0x%08lx 0x%08lx -- the engine is not reading the "
+                  "row this build composes, draw= weighs another shape",
+                  (unsigned long)vdp_cel8_pre0_lib,
+                  (unsigned long)vdp_cel8_pre1_lib,
+                  (unsigned long)pre0_calc8,
+                  (unsigned long)pre1_calc8));
+    }
+#endif
 
   return 0;
 }
