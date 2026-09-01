@@ -1551,9 +1551,12 @@ vdp_init(void)
    * Two details this pair had wrong, and a capture paid for both. The row
    * offset has TWO fields in the second word, at two different bit
    * positions: the eight bit one at 24 (include/3do/hardware.h:214, :221)
-   * and the ten bit one at 16 (:215, :222). A depth of eight bits or less
-   * is read through the eight bit one; the wide field belongs to the
-   * sixteen bit form. Written at 16, a row offset of 46 words leaves the
+   * and the ten bit one at 16 (:215, :222). A depth BELOW eight bits is
+   * read through the eight bit one; the wide field belongs to eight bits
+   * and to sixteen alike (src_exemple/lrex/main.c:290-291) -- the boundary
+   * sits between six and eight, not after eight, and reading it as "eight
+   * or less" is a mistake this file has since made once at the other
+   * depth. Written at 16, a row offset of 46 words leaves the
    * field the engine actually reads at zero -- a stride of two words
    * where the rows are 48 apart, which is a picture sheared into thin
    * diagonals rather than a picture with wrong colours. And the linear
@@ -1570,16 +1573,28 @@ vdp_init(void)
 
 #if SMS_CEL_BPP8
   /*
-   * The same pair for the depth probe's block, spelled from the same header
-   * constants and differing in exactly two places: the depth code, and a row
-   * offset counted off the eight bit row. Same prefetch corrections, same
-   * eight bit row-offset field -- a depth of eight bits or less is read
-   * through that one, and eight bits is still eight bits or less.
+   * The same pair for the depth probe's block, and the ONE field that makes
+   * eight bits a different case rather than the same case one notch deeper.
+   *
+   * The row offset moves to the TEN bit field at 16. The boundary is not
+   * "eight bits or less takes the eight bit field" -- it is BELOW eight, and
+   * a depth of exactly eight goes with sixteen: "bits 25-16 for the word
+   * offset for an 8 or 16 bpp cel" (src_exemple/lrex/main.c:290-291, and the
+   * same pairing spelled as code in src_exemple/3d_3do_logo/main.c:79-82,
+   * where a row offset counted for eight bit pixels is written through
+   * WOFFSET10). Written into the eight bit field instead, the field the
+   * engine reads stays at zero: a stride of two words where the rows are
+   * sixty-four apart, which is the picture sheared into diagonals this file
+   * already paid a capture to learn once at six bits.
+   *
+   * The six bit pair above is unaffected -- six is below eight, so it keeps
+   * the eight bit field, and the arbiter below shows the library agreeing
+   * with it word for word.
    */
   pre0_calc8 = ((VDP_ACTIVE_LINES - PRE0_VCNT_PREFETCH) << PRE0_VCNT_SHIFT)
              | PRE0_BPP_8;
   pre1_calc8 = (((VDP_CEL8_ROW_BYTES / 4UL) - PRE1_WOFFSET_PREFETCH)
-                << PRE1_WOFFSET8_SHIFT)
+                << PRE1_WOFFSET10_SHIFT)
              | PRE1_TLLSB_PDC0
              | (VDP_PIX_WIDTH - PRE1_TLHPCNT_PREFETCH);
 #endif

@@ -549,13 +549,20 @@
  * facts, and a guard that can only fire together with another is a guard
  * whose own wording is never read. The pixel count is not restated here --
  * it is the same width the refusal above already watches.
+ *
+ * And the row offset is watched against the field the engine actually reads
+ * at THIS depth, which is not the one the packed row above is watched
+ * against: eight bits takes the ten bit field, with sixteen, while anything
+ * below eight takes the eight bit one (src_exemple/lrex/main.c:290-291). A
+ * guard copied from the packed row would refuse a row this depth can carry
+ * -- and, worse, would state the wrong reason for the refusal.
  */
 #if (VDP_CEL8_ROW_BYTES / 4UL) < 2UL
 #error "eight bit cel: a row needs 2 words minimum for the engine's pipelined fetch"
 #endif
 
-#if ((VDP_CEL8_ROW_BYTES / 4UL) - 2UL) > 0xFFUL
-#error "eight bit cel: the row offset of a depth of 8 bits or less is read from an 8 bit field"
+#if ((VDP_CEL8_ROW_BYTES / 4UL) - 2UL) > 0x3FFUL
+#error "eight bit cel: the row offset of a depth of 8 or 16 bits is read from a 10 bit field"
 #endif
 
 /*
