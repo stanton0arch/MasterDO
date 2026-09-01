@@ -6,6 +6,7 @@
 #include "dynarec_j0.h"
 #include "dynarec_j1.h"
 #include "dynarec_j2.h"
+#include "memprobe.h"
 
 /*
  * Glyph width of the graphics folio's 8x8 font, used to centre text:
@@ -1179,6 +1180,19 @@ main(int    argc,
    * starting; the pattern this follows makes the same point
    * (src_exemple_video_player/main.c:915-921).
    */
+#if SMS_MEM_PROBE
+  /*
+   * Before the footprint is taken, and that is the difference from the three
+   * mock-ups below, which install after it. They measure translated code and
+   * their buffers are not part of what the program runs on; this one takes
+   * sixty-four kilobytes of the same DRAM the render competes for, and a
+   * footprint line that did not carry it would describe a build nobody is
+   * running. The figure the epic makes opposable is the figure of the build
+   * that produced the measurement.
+   */
+  (void)memprobe_install();
+#endif
+
   sys_mem_report();
 
   /*
@@ -1231,6 +1245,17 @@ main(int    argc,
 
 #if SMS_DYNAREC_J2
   (void)dynarec_j2_measure();
+#endif
+
+#if SMS_MEM_PROBE
+  /*
+   * Same side of the door and for the same reason as the three above: after
+   * the seal, so that a probe needing memory to run would be caught instead of
+   * hidden, and before the loop, because it holds the processor for several
+   * seconds -- a frame that took several seconds would be a frame destroyed
+   * rather than a frame slowed.
+   */
+  (void)memprobe_measure();
 #endif
 
   /*

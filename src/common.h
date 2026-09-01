@@ -277,7 +277,7 @@
 #endif
 
 /*
- * The four configurations worth naming:
+ * The five configurations worth naming:
  *
  *   development  the default this file ships with: LOG_ENABLE 1, LOG_LEVEL
  *                LOG_LVL_INFO, SMS_TELEMETRY 1. A cartridge read off the
@@ -304,7 +304,16 @@
  *                four windows in five are deliberately made slower. The
  *                quotable figure stays the development build's.
  *
- * SMS_VDP_BUFFERS (above) stays at its default of 1 in all four. In every
+ *   memory probe the development build plus SMS_MEM_PROBE 1. Like the
+ *                profiling build it is not another program but the same one
+ *                with an instrument bolted on, and like it, NOTHING ABOUT ITS
+ *                SPEED MAY BE QUOTED: it takes 128 kilobytes the shipped build
+ *                does not, 64 of them out of the VRAM the display owns, and it
+ *                stalls the boot for some twenty seconds before the first
+ *                frame. What it publishes is a cost per memory access, which
+ *                is a property of the machine and not of this build.
+ *
+ * SMS_VDP_BUFFERS (above) stays at its default of 1 in all five. In every
  * one of them the frame loop executes the cartridge by scanline quotas,
  * the video part renders one line per quota, and the drawing side -- the
  * one draw call and the presentation -- closes the frame: there is one
@@ -467,6 +476,68 @@
 #if SMS_DYNAREC_J2 && !SMS_TELEMETRY
 #error "SMS_DYNAREC_J2 needs SMS_TELEMETRY: a measurement needs the clock"
 #endif
+
+/*
+ * SMS_MEM_PROBE -- what a memory access really costs on this machine.
+ *
+ * The render spends 25.6 ARM cycles on a background pixel where counting the
+ * operations of its loop announces four to six, and no optimisation of that
+ * loop can be reasoned about until the gap is named. One suspect is the unit
+ * everything here is costed in: the project charges a memory access three
+ * cycles, taken from the ARM60 manual, where LDR is 1S + 1N + 1I
+ * (docs/3do/arm60.md:3291). Those are BUS cycles, and the same manual says an
+ * N-cycle matched to a full DRAM access "will be longer than the minimum
+ * processor cycle time" (:5257), the memory system stretching MCLK to fit
+ * (:5262-5275) -- while page mode only ever serves an S-cycle (:5096-5102).
+ * So a scattered access and a sequential one are not the same access, the
+ * three is a floor rather than a price, and the difference has never been
+ * measured on this console.
+ *
+ * This probe measures it: timed loops of one shape each, the shapes differing
+ * in one property at a time -- sequential against scattered, read against
+ * write, word against byte, DRAM against VRAM. It emulates nothing and nothing
+ * may come to depend on it.
+ *
+ * There is deliberately no cold-against-warm shape. That comparison was meant
+ * to price what the breakdown's second pass skips, and the answer turned out
+ * to be already on record and to be zero: on an established screen the row
+ * cache takes no miss at all, so the two passes do the same work. Measuring it
+ * again would be a run that decides nothing.
+ *
+ * Off by default, and scaffolding exactly as the three mock-ups above are. It
+ * needs telemetry for the same reason they do: it reads a clock.
+ *
+ * Cuts: the buffers, every timed loop and every line printed -- both files
+ * entirely, so the delivered object is the one that was there before.
+ */
+#ifndef SMS_MEM_PROBE
+#define SMS_MEM_PROBE 0
+#endif
+
+#if SMS_MEM_PROBE && !SMS_TELEMETRY
+#error "SMS_MEM_PROBE needs SMS_TELEMETRY: a measurement needs the clock"
+#endif
+
+/*
+ * And it needs somewhere to print, which is not the same need and is the more
+ * dangerous of the two to leave open. Every figure this probe takes leaves
+ * through one LOG_INFO, and that line is also the only reader of the sum the
+ * timed loops feed: with the output compiled out, nothing reads the sum, and
+ * the compiler is then entitled to delete the very accesses being timed. The
+ * build would spend twenty seconds measuring nothing and say so nowhere.
+ * Refused loudly, exactly as SMS_VDP_PROFILE refuses it above.
+ */
+#if SMS_MEM_PROBE && !LOG_ENABLE
+#error "SMS_MEM_PROBE needs LOG_ENABLE: a measurement that cannot print is not one"
+#endif
+
+/*
+ * The matching guard on LOG_LEVEL cannot live here and lives in memprobe.c:
+ * the level names are log.h's, this header is a leaf that does not include it,
+ * and an #if on a name the preprocessor has never seen compares against zero
+ * and passes whatever it is given. Written here it would be a guard that
+ * cannot fire -- which was tried, and caught by testing that it fires.
+ */
 
 /*
  * ---------------------------------------------------------------------------
