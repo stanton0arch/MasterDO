@@ -585,8 +585,9 @@
  *
  * Off by default, and scaffolding exactly as the three mock-ups and the memory
  * probe above are: the render's sprite pass and its row packer stay in six
- * bits, so a line carrying a sprite is stamped flat rather than drawn under
- * this build, and nothing in the program may come to depend on it. Off, the
+ * bits, and a line carrying a sprite reaches the eight bit picture by a byte
+ * copy out of the scratch, outside every counted loop -- a cost paid by this
+ * build alone, and nothing in the program may come to depend on it. Off, the
  * object is the one that was there before.
  *
  * Cuts: the eight bit buffer, its cel, its boot line, and the two stores that

@@ -33,13 +33,12 @@
  * never seen, pass whatever it is given, and be a guard that cannot fire.
  *
  * What they protect is not a number that would come out wrong but a run that
- * would come out MUTE. This build draws a picture that is deliberately part
- * wrong -- lines carrying sprites are not composed at this depth -- and it
- * exists to publish exactly two things: the boot line that says whether it is
- * measuring at all, an INFO line of the video category, and the draw= field
- * of the periodic line, an INFO line of the performance category. Silence
- * either of them and what is left is a broken picture and no figure, which is
- * the one outcome a probe must not be able to reach quietly.
+ * would come out MUTE. This build exists to publish exactly two things: the
+ * boot line that says whether it is measuring at all, an INFO line of the
+ * video category, and the draw= field of the periodic line, an INFO line of
+ * the performance category. Silence either of them and what is left is a
+ * picture and no figure, which is the one outcome a probe must not be able
+ * to reach quietly.
  */
 #if (LOG_LVL_INFO) > (LOG_LEVEL)
 #error "SMS_CEL_BPP8 needs LOG_LEVEL at LOG_LVL_INFO or above: its boot line and its draw= field are INFO lines"
@@ -741,13 +740,16 @@ vdp_render_line(uint32 y)
   uint32 gw1;
 #if SMS_CEL_BPP8
   /*
-   * The eight bit row of this line, and the word of four border pixels the
-   * display-off branch fills it with. The pair the packing needs is gone
-   * under this switch: at one byte a pixel every stroke writes its own two
-   * words, so nothing is held back for the stroke after it.
+   * The eight bit row of this line: as words, with the word of four border
+   * pixels the display-off branch fills it with, and as bytes for the copy a
+   * line with sprites ends on. The pair the packing needs is gone under this
+   * switch: at one byte a pixel every stroke writes its own two words, so
+   * nothing is held back for the stroke after it.
    */
   uint32 *ow8;
   uint32 bg8;
+  const uint8 *src8;
+  uint8 *dst8;
 #else
   uint32 qw0;
   uint32 qw1;
@@ -1070,30 +1072,6 @@ vdp_render_line(uint32 y)
 
   VDP_COUNT(line_scratch);
 
-#if SMS_CEL_BPP8
-  /*
-   * The probe does not compose this line: it carries a sprite, so it goes
-   * down the scratch path below, which packs six bit indexes into a buffer
-   * nothing is drawing from under this switch. Its eight bit row would
-   * therefore keep whatever the LAST frame left there -- and a row of last
-   * frame's picture is the one kind of wrong that looks right. The human is
-   * being asked to judge a picture; a stale row would let a real defect of
-   * the composition hide behind a plausible band.
-   *
-   * So the row is stamped flat before we leave. It is one uniform index
-   * across the whole line, which no background of this machine produces by
-   * accident on a line that carries a sprite, and it is unmistakable at a
-   * glance. Outside the stroke loop, once a line: it moves no figure the
-   * disassembly counts.
-   */
-  if(vdp_cel8_compose != 0)
-    {
-      bg8 = VDP_CEL8_MARK_WORD;
-      ow8 = (uint32 *)(vdp_cel8_pixels + (y * VDP_CEL8_ROW_BYTES));
-      for(x = 0; x < (VDP_CEL8_ROW_BYTES / 4UL); x++)
-        ow8[x] = bg8;
-    }
-#endif
 
   /*
    * Step 4. Stroke c is screen column c - 1, and the strokes are counted
@@ -1259,6 +1237,42 @@ vdp_render_line(uint32 y)
   VDP_REPEAT_BEGIN(VDP_POST_PACK)
   vdp_pack_line(out);
   VDP_REPEAT_END;
+
+#if SMS_CEL_BPP8
+  /*
+   * The depth probe's row of this line, last of all. The line carries a
+   * sprite, so it was composed in the scratch at six bits and packed into a
+   * buffer nothing draws from under this switch; the eight bit row would
+   * otherwise keep what the LAST frame left there, and a row of last frame's
+   * picture is the one kind of wrong that looks right.
+   *
+   * An earlier form stamped the row flat instead, one uniform index across
+   * the line, so that a stale row could not pass for a plausible band. On a
+   * screen where nearly half the lines carry a sprite the stamp was read as
+   * half a picture missing, twice. So the row is filled with the picture:
+   * the scratch holds the 256 final indexes of the line, sprites drawn over
+   * the background, from byte line_org on -- the same rule the packer above
+   * reads by (vdp.h, line_org). A byte at a time because line_org sits off
+   * a word boundary on six fine scrolls out of eight: a word copy would need
+   * the recut VDP_LANE_JOIN does for the packer, and this copy exists to be
+   * obviously right, not fast.
+   *
+   * What it costs, and to whom. About 256 loads and 256 stores a line, some
+   * 3 000 cycles, on the lines that carry a sprite -- of the order of 25 ms
+   * a frame on a screen where 88 lines do. That is paid by this build only,
+   * and it lands in vdp=, frame= and fps= of the periodic line, which this
+   * build's figures never quote. It moves neither loop the dossier counted
+   * nor what draw= weighs, which is the size of the buffer and not its
+   * contents.
+   */
+  if(vdp_cel8_compose != 0)
+    {
+      src8 = VDP_LINE_BYTES + sms.vdp.line_org;
+      dst8 = vdp_cel8_pixels + (y * VDP_CEL8_ROW_BYTES);
+      for(x = 0; x < VDP_PIX_WIDTH; x++)
+        dst8[x] = src8[x];
+    }
+#endif
 }
 
 int32
@@ -1923,13 +1937,16 @@ vdp_init(void)
   if(vdp_cel8_pixels != NULL)
     LOG_INFO(LOG_CAT_VDP,
              ("cel8 probe=%s compose=%s bpp=%lu row=%lu bytes=%lu dram_free=%lu "
-              "(sprite lines are marked, not drawn, by design)",
+              "%s",
               vdp_cel8_on ? "on" : "off",
               vdp_cel8_compose ? "on" : "off (ruler)",
               (unsigned long)VDP_CEL8_BPP,
               (unsigned long)VDP_CEL8_ROW_BYTES,
               (unsigned long)VDP_CEL8_BUF_BYTES,
-              (unsigned long)vdp_cel8_dram_free));
+              (unsigned long)vdp_cel8_dram_free,
+              vdp_cel8_compose
+                ? "(sprite lines copied from the scratch after packing)"
+                : "(the buffer holds the ruler laid down at init)"));
   else
     LOG_INFO(LOG_CAT_VDP,
              ("cel8 probe=off bytes=0 (no buffer taken, nothing measured, "

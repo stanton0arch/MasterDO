@@ -133,20 +133,6 @@
 #define VDP_CEL8_BUF_BYTES (VDP_CEL8_ROW_BYTES * VDP_ACTIVE_LINES)
 
 /*
- * The word the probe stamps across a row it did not compose -- a line
- * carrying a sprite, which under that switch goes down the scratch path and
- * lands in the six bit buffer nothing is drawing from. Four lanes of the
- * highest palette index, so the row comes out flat and unmistakable instead
- * of holding the previous frame's picture, which is the one wrong that reads
- * as right.
- */
-#define VDP_CEL8_MARK_INDEX 31UL
-#define VDP_CEL8_MARK_WORD  ((VDP_CEL8_MARK_INDEX << 24) \
-                           | (VDP_CEL8_MARK_INDEX << 16) \
-                           | (VDP_CEL8_MARK_INDEX << 8)  \
-                           |  VDP_CEL8_MARK_INDEX)
-
-/*
  * The packer works sixteen pixels at a time -- three words of six bit
  * indexes -- so the width must divide by sixteen for the row to come out
  * whole. Refused at compile time rather than truncated.
