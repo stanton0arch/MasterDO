@@ -1,26 +1,23 @@
 #!/bin/sh
 #
-# The two loop bodies the cel depth dossier's figures were counted from.
+# The two stroke loops of the render, pinned to what the compiler emits.
 #
-# comparaison-format-image.md prices one picture format against another by
-# counting, instruction by instruction, the background stroke loop of
-# vdp_render_line built two ways: six bit indexes packed four to three words,
-# and one index per byte behind SMS_CEL_BPP8. Nothing in the delivered build
-# exercises the second one. `make`, `make test-vdp` and `make test-z80` stay
-# green whatever happens inside that #if -- a later edit can break it, or
-# quietly change what it emits, and the only sign would be that nobody can
-# re-derive the dossier's numbers any more.
+# comparaison-format-image.md priced the picture format by counting,
+# instruction by instruction, the background stroke loop of vdp_render_line;
+# the port that followed it composes every line one index per byte and
+# carries two such loops -- the short way, for a line with no sprite, and
+# the sprite way, which lays a priority mask beside the row. `make`,
+# `make test-vdp` and check_picture.sh stay green whatever the compiler
+# makes of either loop: a later edit can quietly make one of them spill to
+# the stack on every stroke, and the only sign would be a frame that got
+# slower with nobody able to say why.
 #
-# So this builds both objects and reads the two loops back out. It does not
-# repeat the hand count of one stroke's current path: what it pins is the pair
-# of loop bodies that count was made from -- how many instructions the
-# compiler emits for a turn of the stroke loop, and how many of them touch
-# memory. Every figure in the dossier is derived from those two, and a move in
-# either is the signal to recount rather than to keep quoting.
-#
-# It also holds the switch to its other promise: at zero it must be inert, so
-# the object built with -DSMS_CEL_BPP8=0 has to be byte for byte the object
-# built without the switch at all.
+# So this builds the object and reads the two loops back out. It does not
+# repeat the hand count of one stroke's current path: what it pins is the
+# pair of loop bodies that count is made from -- how many instructions the
+# compiler emits for a turn of each stroke loop, and how many of them touch
+# memory. A move in either is the signal to recount rather than to keep
+# quoting.
 #
 # It is not hooked to a make target: the exception AGENTS.md grants on the
 # Makefile is for HOST benches, and this one needs the cross compiler and the
@@ -35,16 +32,15 @@ cd "$(dirname "$0")/../.."
 DECAOF=./bin/compiler/linux/decaof
 OBJ=build/vdp.c.o
 
-# Outside build/, unlike the memory probe's check next door: this one builds
-# three times and every build begins with a make clean, which would take the
-# previous object and its listing with it. Removed on the way out.
+# Outside build/, unlike the memory probe's check next door: the build
+# begins with a make clean, which would take a previous object and its
+# listing with it. Removed on the way out.
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-# Both builds are the development build and differ in the switch alone. The
-# probe needs telemetry and a log, so there is no quieter configuration to
-# compare it in, and comparing two different configurations would price the
-# telemetry rather than the format.
+# The development build, which is the one the loops are counted in: the
+# telemetry counters sit inside both loops, and a count taken without them
+# would not be the count of the object that runs.
 build() {
   make clean >/dev/null 2>&1
   make DEFFLAGS="$1" >/dev/null 2>&1
@@ -55,17 +51,17 @@ build() {
   cp "$OBJ" "$2"
 }
 
-# The stroke loop of vdp_render_line: the first backward branch of that
-# function whose body runs to a hundred instructions or more. The smaller
-# loops before it are the uniform row of a line with the picture off and the
-# eight byte decode of a missed pattern row; the composition loop of the
-# scratch path, the same shape and the same size, comes after it. Source order
-# settles which is which, and that is stated here rather than an address being
-# trusted.
+# The stroke loops of vdp_render_line: every CONDITIONAL backward branch of
+# that function whose body runs to a hundred instructions or more, in
+# address order. Conditional, because the function also ends on a plain
+# jump back to a shared epilogue, which spans both loops and is not one.
+# The smaller loops are the uniform row of a line with the picture off and
+# the eight byte decode of a missed pattern row. Source order settles which
+# of the two found is which: the short way comes first, the sprite way
+# after it, and that is stated here rather than an address being trusted.
 #
-# Prints "<instructions> <memory instructions>", or "0 0" if no such loop is
-# left -- which is itself a failure, and reported as one below.
-loop() {
+# Prints one "<instructions> <memory instructions>" line per loop found.
+loops() {
   awk '
     /^vdp_render_line$/ { inside = 1; next }
     inside && /^[a-zA-Z_]/ { inside = 0 }
@@ -77,9 +73,10 @@ loop() {
     END {
       for (k = 0; k < n; k++) {
         s = body[k]
-        if (s !~ /: B/) continue
-        nf = split(s, g, " ")
-        tgt = g[nf]
+        sub(/.*: /, "", s)
+        split(s, op, " ")
+        if (op[1] !~ /^B[A-Z][A-Z]$/) continue
+        tgt = op[2]
         if (tgt !~ /^0x/) continue
         t = strtonum(tgt)
         if (t >= addr[k]) continue
@@ -92,55 +89,47 @@ loop() {
           split(line, f, " ")
           if (f[1] ~ /^(LDR|STR|LDM|STM)/) m++
         }
-        if (i >= 100) { print i, m; exit }
+        if (i >= 100) print i, m
       }
-      print "0 0"
     }' "$1"
 }
 
-echo "== building the delivered form, six bit indexes packed =="
-build "-DDEBUG=1" "$WORK/vdp-off.o"
-"$DECAOF" -c "$WORK/vdp-off.o" > "$WORK/vdp-off.dis"
-
-echo "== building the same file with the switch explicitly at zero =="
-build "-DDEBUG=1 -DSMS_CEL_BPP8=0" "$WORK/vdp-zero.o"
-
-echo "== building the probe, one index per byte =="
-build "-DDEBUG=1 -DSMS_CEL_BPP8=1" "$WORK/vdp-on.o"
-"$DECAOF" -c "$WORK/vdp-on.o" > "$WORK/vdp-on.dis"
+echo "== building the development form, one index per byte =="
+build "-DDEBUG=1" "$WORK/vdp.o"
+"$DECAOF" -c "$WORK/vdp.o" > "$WORK/vdp.dis"
 
 fail=0
 
-
-set -- $(loop "$WORK/vdp-off.dis")
-if [ "$1" = "196" ] && [ "$2" = "64" ]; then
-  echo "  [OK] six bit stroke loop: $1 instructions, $2 memory"
-else
-  echo "  [FAIL] six bit stroke loop: got $1 instructions and $2 memory, want 196 and 64"
+loops "$WORK/vdp.dis" > "$WORK/loops"
+count=$(wc -l < "$WORK/loops")
+if [ "$count" != 2 ]; then
+  echo "  [FAIL] found $count stroke loops of a hundred instructions or more, want 2:"
+  sed 's/^/    /' "$WORK/loops"
   fail=1
-fi
-
-set -- $(loop "$WORK/vdp-on.dis")
-if [ "$1" = "132" ] && [ "$2" = "48" ]; then
-  echo "  [OK] eight bit stroke loop: $1 instructions, $2 memory"
 else
-  echo "  [FAIL] eight bit stroke loop: got $1 instructions and $2 memory, want 132 and 48"
-  fail=1
-fi
+  set -- $(sed -n 1p "$WORK/loops")
+  if [ "$1" = "126" ] && [ "$2" = "46" ]; then
+    echo "  [OK] short way stroke loop: $1 instructions, $2 memory"
+  else
+    echo "  [FAIL] short way stroke loop: got $1 instructions and $2 memory, want 126 and 46"
+    fail=1
+  fi
 
-if cmp -s "$WORK/vdp-off.o" "$WORK/vdp-zero.o"; then
-  echo "  [OK] the switch at zero is inert: the object is byte for byte the one without it"
-else
-  echo "  [FAIL] the switch at zero changed the object: the delivered build is no longer untouched"
-  fail=1
+  set -- $(sed -n 2p "$WORK/loops")
+  if [ "$1" = "137" ] && [ "$2" = "51" ]; then
+    echo "  [OK] sprite way stroke loop: $1 instructions, $2 memory"
+  else
+    echo "  [FAIL] sprite way stroke loop: got $1 instructions and $2 memory, want 137 and 51"
+    fail=1
+  fi
 fi
 
 echo
 if [ "$fail" = 0 ]; then
-  echo "both loop bodies are the ones the dossier counted, and the switch off costs nothing"
+  echo "both loop bodies are the ones on record"
   echo "failed=0"
 else
-  echo "a loop body moved: the dossier's cycle figures are no longer derivable from this code"
+  echo "a loop body moved: recount before quoting any figure derived from it"
   echo "failed=1"
 fi
 exit $fail

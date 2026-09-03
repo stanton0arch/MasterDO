@@ -277,7 +277,7 @@
 #endif
 
 /*
- * The six configurations worth naming:
+ * The five configurations worth naming:
  *
  *   development  the default this file ships with: LOG_ENABLE 1, LOG_LEVEL
  *                LOG_LVL_INFO, SMS_TELEMETRY 1. A cartridge read off the
@@ -313,22 +313,7 @@
  *                frame. What it publishes is a cost per memory access, which
  *                is a property of the machine and not of this build.
  *
- *   cel depth    the development build plus SMS_CEL_BPP8 1. The same
- *                instrument-on-a-build shape again: it composes the
- *                background at one byte a pixel into a buffer of its own
- *                and hands that buffer to a cel of eight bits, so that
- *                what a wider picture costs the display can be read at
- *                all. NOTHING ABOUT ITS FRAME RATE MAY BE QUOTED -- it
- *                draws a picture the sprite pass does not reach, and it
- *                takes forty-eight kilobytes the shipped build does not.
- *                The one figure it publishes is the draw= field of the
- *                periodic line, which is the display's own cost and
- *                nothing else. The processor side of the same question is
- *                not read from a run at all: it is counted off the
- *                disassembly of this object against the object built
- *                without the switch.
- *
- * SMS_VDP_BUFFERS (above) stays at its default of 1 in all six. In every
+ * SMS_VDP_BUFFERS (above) stays at its default of 1 in all five. In every
  * one of them the frame loop executes the cartridge by scanline quotas,
  * the video part renders one line per quota, and the drawing side -- the
  * one draw call and the presentation -- closes the frame: there is one
@@ -555,118 +540,22 @@
  */
 
 /*
- * SMS_CEL_BPP8 -- what the picture format costs, on both sides.
+ * SMS_CEL_BPP8 -- gone, and refused rather than ignored.
  *
- * The picture is written as six bit indexes squeezed four to three words, and
- * that squeezing is one of the two big costs of the background: measured, it
- * is 47.8 of the 212.6 cycles a stroke of eight pixels takes. Writing one
- * index per byte instead would delete it outright -- the composed word would
- * already be the word the engine reads -- at the price of a third more data
- * for the display to fetch. The first half of that trade has a figure. The
- * second half has never had one anywhere: the only local statement on it is
- * that performance relates to cel data size (3DO_Development_Notes.md:83-84),
- * qualitative and unnumbered.
- *
- * This switch puts a figure on both halves and stops there. It composes the
- * background one byte a pixel into a buffer of its own and points a cel of
- * eight bits at it; the processor half is then counted off the disassembly of
- * this file with the switch on against the same file with it off, and the
- * display half is read off the draw= field of the periodic line on one run.
- *
- * The processor half is now counted, and it came to more than the packing it
- * was meant to price: a stroke of eight pixels falls from 232.6 to 174.3
- * cycles, 58.3 saved where the packing alone accounts for 35.2. The rest is
- * register pressure coming off -- no pair held back between strokes, no
- * parity, six fewer words of stack frame.
- *
- * It decides nothing. The shipped format stays six bits, and moving it is an
- * architecture decision taken by a human with both figures in hand -- which is
- * exactly what this switch exists to put there.
- *
- * Off by default, and scaffolding exactly as the three mock-ups and the memory
- * probe above are: the render's sprite pass and its row packer stay in six
- * bits, and a line carrying a sprite reaches the eight bit picture by a byte
- * copy out of the scratch, outside every counted loop -- a cost paid by this
- * build alone, and nothing in the program may come to depend on it. Off, the
- * object is the one that was there before.
- *
- * Cuts: the eight bit buffer, its cel, its boot line, and the two stores that
- * replace the packing in the background loop -- the whole of it, so that the
- * delivered picture is composed and drawn exactly as it was.
+ * It was the probe that priced the picture format from both sides: a second
+ * picture at one byte a pixel, a second cel over it, and the draw= field of
+ * one console run. The figures it produced are what moved the shipped format
+ * to a byte a pixel (vdp.h, VDP_PIX_BPP), and with the format moved the probe
+ * has nothing left to price. A build that still passes the switch is a build
+ * that expects a six bit picture somewhere; there is none, so it is stopped
+ * here with the reason rather than compiled with the switch silently unread.
  */
-#ifndef SMS_CEL_BPP8
-#define SMS_CEL_BPP8 0
+#ifdef SMS_CEL_BPP8
+#error "SMS_CEL_BPP8 no longer exists: the picture is one byte a pixel in every build"
 #endif
 
-/*
- * It needs telemetry, and not for the reason the mock-ups above need it. They
- * read a clock of their own; this one reads no clock at all. What it needs is
- * the periodic line's draw= field -- the only place in the program where the
- * cost of the drawing is published -- and that field exists exactly where the
- * measurement does (main.c, MAIN_MEASURE). Built without telemetry the probe
- * would spend forty-eight kilobytes and a wrong picture to publish nothing.
- */
-#if SMS_CEL_BPP8 && !SMS_TELEMETRY
-#error "SMS_CEL_BPP8 needs SMS_TELEMETRY: the figure it exists for is the draw= field"
-#endif
-
-/*
- * And it needs somewhere to print, which is the same field's other half: the
- * periodic line is a trace line, and so is the boot line that says whether the
- * probe got its buffer and its cel at all. With tracing compiled out the run
- * would draw a picture nobody asked for and report neither the figure nor the
- * fact that it was not measuring. Refused loudly, as the probe above refuses
- * it.
- */
-#if SMS_CEL_BPP8 && !LOG_ENABLE
-#error "SMS_CEL_BPP8 needs LOG_ENABLE: a measurement that cannot print is not one"
-#endif
-
-/*
- * SMS_CEL_BPP8_TESTPAT -- the depth probe drawing a ruler instead of a game.
- *
- * The first console run of the probe drew a cel that was right where it should
- * be and right at its top edge, and painted only about half its height: below
- * that, what showed through was the backdrop. The picture it did paint was one
- * flat colour -- which proves nothing on its own, because the screen being
- * emulated at that moment decoded seventeen distinct tile rows in a whole run
- * and was itself flat. So the run answered neither question it was asked: the
- * drawing cost weighed half a picture, and the colours were never exercised.
- *
- * A game picture cannot answer either question, because nothing in it is known
- * in advance. A ruler can. With this on, the eight bit buffer is filled once
- * at init with the row of its own line number -- line y takes colour number
- * y modulo 32 -- and the render stops writing that buffer so the ruler
- * survives the frame. The screen then answers by itself:
- *
- *   six ramps of thirty-two bands filling the whole height -- the row stride
- *   is right, every line is being fetched, and the draw= of that run is the
- *   figure the whole probe exists to get;
- *
- *   ramps that stop part way down -- the stride is wrong, and the count of
- *   bands says by how much;
- *
- *   thirty-two distinct colours, and they are the emulated palette's -- a
- *   colour number means the same thing at eight bits as at six, which is the
- *   other half of what the probe was for.
- *
- * It composes nothing, so no figure of the processor side comes from a build
- * with this on, and the frame rate of such a build is meaningless twice over.
- *
- * Cuts: the fill and the tests that keep the render off the buffer.
- */
-#ifndef SMS_CEL_BPP8_TESTPAT
-#define SMS_CEL_BPP8_TESTPAT 0
-#endif
-
-/*
- * It is a way of running the depth probe, not a probe of its own: without the
- * eight bit buffer and the eight bit cel there is nothing to fill and nothing
- * to draw it with, and a build that asked for the ruler alone would compile to
- * a program that quietly ignored it.
- */
-#if SMS_CEL_BPP8_TESTPAT && !SMS_CEL_BPP8
-#error "SMS_CEL_BPP8_TESTPAT needs SMS_CEL_BPP8: there is no eight bit buffer to fill without it"
+#ifdef SMS_CEL_BPP8_TESTPAT
+#error "SMS_CEL_BPP8_TESTPAT no longer exists: the probe it drew the ruler for is gone"
 #endif
 
 /*

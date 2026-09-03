@@ -144,7 +144,6 @@ static unsigned rnd(void)
 
 static vdp_t snap;
 static unsigned char pix[VARIANTS][VDP_PIX_BUF_BYTES];
-static unsigned char scratch[VARIANTS][VDP_LINE_SCRATCH];
 static unsigned char prio[VARIANTS][VDP_LINE_SCRATCH];
 /*
  * The two sprite bits, ONE BYTE PER LINE. Read as they stand at the end of
@@ -171,21 +170,19 @@ static int guard_intact(void)
   return 1; }
 
 /*
- * The sixteen bytes past the picture in the composition scratch. The
- * strokes stop at byte 263 and the picture ends there at the latest, so
- * nothing may write from VDP_LINE_LEAD + VDP_PIX_WIDTH upward. Filled with
- * the guard pattern rather than tested for zero: a stroke written one
- * stroke too far would lay indexes there, and some of them are zero.
+ * The sixteen bytes past the picture in the priority scratch. The strokes
+ * stop at byte 263 and the picture ends there at the latest, so nothing
+ * may write from VDP_LINE_LEAD + VDP_PIX_WIDTH upward. Filled with the
+ * guard pattern rather than tested for zero: a stroke written one stroke
+ * too far would lay mask bytes there, and most of them are zero.
  */
 static void tail_arm(void)
-{ memset(VDP_LINE_BYTES + VDP_LINE_LEAD + VDP_PIX_WIDTH,GUARD_FILL,VDP_LINE_TAIL);
-  memset(VDP_PRIO_BYTES + VDP_LINE_LEAD + VDP_PIX_WIDTH,GUARD_FILL,VDP_LINE_TAIL); }
+{ memset(VDP_PRIO_BYTES + VDP_LINE_LEAD + VDP_PIX_WIDTH,GUARD_FILL,VDP_LINE_TAIL); }
 
 static int tail_intact(void)
 { uint32 i;
   for(i = 0; i < VDP_LINE_TAIL; i++)
-    { if(VDP_LINE_BYTES[VDP_LINE_LEAD + VDP_PIX_WIDTH + i] != GUARD_FILL) return 0;
-      if(VDP_PRIO_BYTES[VDP_LINE_LEAD + VDP_PIX_WIDTH + i] != GUARD_FILL) return 0; }
+    { if(VDP_PRIO_BYTES[VDP_LINE_LEAD + VDP_PIX_WIDTH + i] != GUARD_FILL) return 0; }
   return 1; }
 
 /* One picture rendered line by line, the raster forced so that what is
@@ -215,7 +212,6 @@ static void run_variant(uint32 v)
   sprintf(msg,"variant %lu stayed inside the picture buffer",(unsigned long)v);
   check(guard_intact(),msg);
   memcpy(pix[v],sms.vdp.pixels[0],VDP_PIX_BUF_BYTES);
-  memcpy(scratch[v],VDP_LINE_BYTES,VDP_LINE_SCRATCH);
   memcpy(prio[v],VDP_PRIO_BYTES,VDP_LINE_SCRATCH);
 }
 
@@ -287,8 +283,6 @@ static void compare(const char *name)
     {
       sprintf(msg,"%s: variant %lu picture identical to the control",name,(unsigned long)v);
       check(memcmp(pix[v],pix[0],VDP_PIX_BUF_BYTES) == 0,msg);
-      sprintf(msg,"%s: variant %lu composition scratch identical",name,(unsigned long)v);
-      check(memcmp(scratch[v],scratch[0],VDP_LINE_SCRATCH) == 0,msg);
       /* The priority mask is written by the background post and READ by the
          sprite composition: a repeated background pass that corrupted it
          could leave the final picture untouched on this scene and wreck the
@@ -373,12 +367,16 @@ static void reference_bg(uint32 y, uint32 hs, uint32 vs)
       t3 = planes + (3UL * VDP_PLANES_PLANE) + ((uint32)tile[3] << 3);
       bank = ((word & 0x800UL) != 0UL) ? 16UL : 0UL;
       pr = (word >> 12) & 1UL;
+      /* The mask is the priority bit of the column, and that alone: the
+         sprite pass reads whether the pixel under it is opaque off the
+         row (src/vdp.c, vdp_draw_sprites), and the scene below holds it
+         to that. */
       for(x = 0; x < 8UL; x++)
         {
           uint32 k = ((word & 0x200UL) != 0UL) ? (7UL - x) : x;
           idx = (uint32)t0[k] | (uint32)t1[k] | (uint32)t2[k] | (uint32)t3[k];
           dst[x] = (uint8)(idx | bank);
-          pd[x] = (uint8)(pr & (idx != 0UL));
+          pd[x] = (uint8)pr;
         }
       dst += 8; pd += 8;
     }
@@ -400,48 +398,37 @@ static void render_pinned(uint32 y, uint32 hs, uint32 vs)
 }
 
 /*
- * What the line actually produced, held against what the reference line
- * would pack to.
+ * What the line actually produced, held against the reference line.
  *
- * The scratch is no longer the thing to read: a line that carries no
- * sprite never writes it, so comparing it would compare whatever an older
- * line left. What every line does produce is its row of forty-eight words,
- * and vdp_pack_row is the statement of what those words must be -- it
- * reads the reference line a BYTE at a time, so the value it builds is the
- * same on this host as on the target, and holding the row against it here
- * proves there what cannot be run there.
- *
- * Compared byte for byte and not word for word on purpose: the row is
- * compared against a row built by the same machine, so a byte compare is
- * the strictest form available and catches a lane taken from the wrong end
- * of a word, which is the mistake the word path can make.
+ * The row of the picture is one index per byte, pixel x at byte x, and
+ * the reference composes one index per byte from its own origin: the two
+ * are compared byte for byte over the width of the picture. Nothing
+ * stands between the composition and the comparison -- no packer, no
+ * decoder -- so a lane taken from the wrong end of a word, which is the
+ * mistake the word recut can make, shows as a row that differs.
  */
-static uint32 ref_row[VDP_PIX_ROW_BYTES / 4];
-
 static int picture_matches(uint32 y)
 {
-  vdp_pack_row(ref_line + VDP_LINE_LEAD,ref_row);
-  return memcmp(ref_row,sms.vdp.pixels[0] + (y * VDP_PIX_ROW_BYTES),
-                VDP_PIX_ROW_BYTES) == 0;
+  return memcmp(ref_line + VDP_LINE_LEAD,
+                sms.vdp.pixels[0] + (y * VDP_PIX_ROW_BYTES),
+                VDP_PIX_WIDTH) == 0;
 }
 
 /*
- * The two scratches, filled whole with the guard pattern. A line with no
- * sprite on it must leave both exactly as they were found -- not the tail
- * only, the whole of them -- which is the claim that the second walk over
- * the line is gone. Filled with a pattern rather than zeroed for the
- * reason the picture guard is: a pass that laid a flat mask down would
- * pass a test for zero.
+ * The priority scratch, filled whole with the guard pattern. A line with
+ * no sprite on it must leave it exactly as it was found -- not the tail
+ * only, the whole of it -- which is the claim that a line with no sprite
+ * lays no mask. Filled with a pattern rather than zeroed for the reason
+ * the picture guard is: a pass that laid a flat mask down would pass a
+ * test for zero.
  */
 static void scratch_arm(void)
-{ memset(VDP_LINE_BYTES,GUARD_FILL,VDP_LINE_SCRATCH);
-  memset(VDP_PRIO_BYTES,GUARD_FILL,VDP_LINE_SCRATCH); }
+{ memset(VDP_PRIO_BYTES,GUARD_FILL,VDP_LINE_SCRATCH); }
 
 static int scratch_untouched(void)
 { uint32 i;
   for(i = 0; i < VDP_LINE_SCRATCH; i++)
-    { if(VDP_LINE_BYTES[i] != GUARD_FILL) return 0;
-      if(VDP_PRIO_BYTES[i] != GUARD_FILL) return 0; }
+    { if(VDP_PRIO_BYTES[i] != GUARD_FILL) return 0; }
   return 1; }
 
 static void tilecache_scene(const char *name, uint32 hs, uint32 vs,
@@ -468,8 +455,8 @@ static void tilecache_scene(const char *name, uint32 hs, uint32 vs,
   for(y = 0; y < VDP_ACTIVE_LINES; y++)
     {
       /* No sprite anywhere in this scene, so every drawn line takes the
-         short way and must write neither scratch. The blank branch does
-         write them, and is armed for its tail only. */
+         short way and must not write the scratch. The blank branch is
+         armed for its tail only. */
       if(drawn) scratch_arm(); else tail_arm();
       render_pinned(y,hs,vs);
       if(drawn) { if(!scratch_untouched()) clean = 0; }
@@ -481,12 +468,12 @@ static void tilecache_scene(const char *name, uint32 hs, uint32 vs,
   check(same,msg);
   if(drawn)
     {
-      sprintf(msg,"%s: neither scratch was written on a line with no sprite",name);
+      sprintf(msg,"%s: the scratch was not written on a line with no sprite",name);
       check(clean,msg);
     }
   else
     {
-      sprintf(msg,"%s: nothing written past the picture in either scratch",name);
+      sprintf(msg,"%s: nothing written past the picture in the scratch",name);
       check(tail,msg);
     }
 
@@ -663,14 +650,13 @@ static void tilecache_checks(void)
    *
    * So: a background that scrolling cannot change -- every name table
    * entry the same, every plane of its pattern zero -- and one sprite at a
-   * fixed place. The composed row and the packed row must come out
-   * identical under a fine scroll of zero and of five. A sprite pass, a
-   * masked left column or a packer left on the old origin moves them by
-   * the fine scroll.
+   * fixed place. The row and the mask must come out identical under a
+   * fine scroll of zero and of five. A sprite pass or a masked left column
+   * left on the old origin moves them by the fine scroll.
    */
   {
     static unsigned char row_a[VDP_PIX_ROW_BYTES];
-    static unsigned char scratch_a[VDP_PIX_WIDTH];
+    static unsigned char prio_a[VDP_PIX_WIDTH];
     uint32 sy = 40UL;
 
     for(i = 0; i < VDP_VRAM_SIZE; i++)
@@ -692,17 +678,118 @@ static void tilecache_checks(void)
     sms.vdp.vram[0x3F81UL] = 2;         /* pattern */
 
     render_pinned(sy,0UL,0UL);
-    memcpy(scratch_a,VDP_LINE_BYTES + sms.vdp.line_org,VDP_PIX_WIDTH);
-    /* This scene carries a sprite, so the line went through the scratch and
-       the scratch is a thing to read. */
+    /* This scene carries a sprite, so the line laid a mask and the mask
+       is a thing to read. */
+    memcpy(prio_a,VDP_PRIO_BYTES + sms.vdp.line_org,VDP_PIX_WIDTH);
     memcpy(row_a,sms.vdp.pixels[0] + (sy * VDP_PIX_ROW_BYTES),VDP_PIX_ROW_BYTES);
 
     render_pinned(sy,5UL,0UL);
-    check(memcmp(scratch_a,VDP_LINE_BYTES + sms.vdp.line_org,VDP_PIX_WIDTH) == 0,
-          "a fine scroll moves the origin and not what stands in picture coordinates");
+    check(memcmp(prio_a,VDP_PRIO_BYTES + sms.vdp.line_org,VDP_PIX_WIDTH) == 0,
+          "a fine scroll moves the origin of the mask and not what stands in picture coordinates");
     check(memcmp(row_a,sms.vdp.pixels[0] + (sy * VDP_PIX_ROW_BYTES),
                  VDP_PIX_ROW_BYTES) == 0,
-          "the packer reads the picture from the origin the background left");
+          "the sprite pass writes the row from the picture's own origin");
+  }
+
+  /*
+   * The two halves of "the background wins": its column carries priority,
+   * which the mask holds, AND its pixel is opaque, which the sprite pass
+   * reads off the row. One tile, priority on, whose pixels alternate
+   * opaque and transparent; one opaque sprite over it. The sprite must
+   * show through every transparent pixel and be hidden behind every
+   * opaque one -- and with the priority bit off, show everywhere. Held
+   * on the second palette bank too, where a transparent pixel reads as
+   * sixteen in the row and would pass for opaque if the low four bits
+   * were not what the test reads.
+   *
+   * Then a third half under a fine scroll: the mask keeps the line's
+   * origin while the row is recut to the picture's, and only a mask that
+   * is not uniform tells the two origins apart. Priority on every other
+   * source column, the pattern opaque throughout, a fine scroll of five:
+   * screen pixels 64..68 stand on source column 7, which carries no
+   * priority, and 69..71 on column 8, which does. A mask read from a
+   * fixed origin reads the columns five pixels to the right and hides the
+   * sprite over all eight.
+   */
+  {
+    uint32 sy = 40UL;
+    uint32 nt;
+    uint32 bank;
+    int ok_pri = 1;
+    int ok_none = 1;
+    int ok_org = 1;
+
+    for(bank = 0; bank < 2UL; bank++)
+      {
+        for(i = 0; i < VDP_VRAM_SIZE; i++)
+          sms.vdp.vram[i] = 0;
+        for(i = 0; i < VDP_TC_ROWS; i++)
+          sms.vdp.tc_valid[i] = 0;
+        /* Pattern 1: plane 0 set on the even pixels of every row (bit 7 is
+           pixel 0), the other planes clear -- index 1 and 0 alternating. */
+        for(i = 0; i < 8UL; i++)
+          sms.vdp.vram[32UL + (i * 4UL)] = 0xAA;
+        /* Pattern 2 of the sprite bank, every plane set: an opaque sprite. */
+        for(i = 0; i < 32UL; i++)
+          sms.vdp.vram[0x2000UL + (2UL * 32UL) + i] = 0xFF;
+        sms.vdp.reg[0] = 0x06;
+        sms.vdp.reg[1] = 0x62;
+        sms.vdp.reg[2] = 0x0E;
+        sms.vdp.reg[5] = 0x7E;
+        sms.vdp.reg[6] = 0x04;
+        sms.vdp.reg[7] = 0x05;
+        sms.vdp.vram[0x3F00UL] = (uint8)(sy - 8UL);
+        sms.vdp.vram[0x3F01UL] = 0xD0;
+        sms.vdp.vram[0x3F80UL] = 64;        /* x */
+        sms.vdp.vram[0x3F81UL] = 2;         /* pattern */
+
+        /* Every name table entry: pattern 1, priority on, the bank asked. */
+        for(nt = 0; nt < (28UL * 32UL); nt++)
+          write16_le(sms.vdp.vram + 0x3800UL + (nt * 2UL),
+                     0x1001UL | (bank << 11));
+        render_pinned(sy,0UL,0UL);
+        for(i = 0; i < 8UL; i++)
+          {
+            uint32 got = sms.vdp.pixels[0][(sy * VDP_PIX_ROW_BYTES) + 64UL + i];
+            uint32 want = ((i & 1UL) == 0UL) ? (1UL | (bank << 4)) : 31UL;
+            if(got != want) ok_pri = 0;
+          }
+
+        /* The same, priority off: the sprite shows over every pixel. */
+        for(nt = 0; nt < (28UL * 32UL); nt++)
+          write16_le(sms.vdp.vram + 0x3800UL + (nt * 2UL),
+                     0x0001UL | (bank << 11));
+        for(i = 0; i < VDP_TC_ROWS; i++)
+          sms.vdp.tc_valid[i] = 0;
+        render_pinned(sy,0UL,0UL);
+        for(i = 0; i < 8UL; i++)
+          if(sms.vdp.pixels[0][(sy * VDP_PIX_ROW_BYTES) + 64UL + i] != 31U)
+            ok_none = 0;
+
+        /* Pattern 1 opaque on every pixel; priority on the even source
+           columns only; a fine scroll of five. */
+        for(i = 0; i < 8UL; i++)
+          sms.vdp.vram[32UL + (i * 4UL)] = 0xFF;
+        for(nt = 0; nt < (28UL * 32UL); nt++)
+          write16_le(sms.vdp.vram + 0x3800UL + (nt * 2UL),
+                     0x0001UL | (bank << 11)
+                     | (((nt & 1UL) == 0UL) ? 0x1000UL : 0UL));
+        for(i = 0; i < VDP_TC_ROWS; i++)
+          sms.vdp.tc_valid[i] = 0;
+        render_pinned(sy,5UL,0UL);
+        for(i = 0; i < 8UL; i++)
+          {
+            uint32 got = sms.vdp.pixels[0][(sy * VDP_PIX_ROW_BYTES) + 64UL + i];
+            uint32 want = (i < 5UL) ? 31UL : (1UL | (bank << 4));
+            if(got != want) ok_org = 0;
+          }
+      }
+    check(ok_pri,
+          "a priority column hides the sprite behind its opaque pixels only, on both banks");
+    check(ok_none,
+          "without priority the sprite shows over opaque and transparent alike");
+    check(ok_org,
+          "under a fine scroll the mask is read from the line's origin, where its columns stand, on both banks");
   }
 
   /* A colour write moves nothing in the cache: the address it carries is a
@@ -726,17 +813,18 @@ static void tilecache_checks(void)
  * Two claims, and each is checked in its own right: one of them alone
  * would pass on a picture that is wrong the same way twice.
  *
- *   The row a sprite-free line emits is byte for byte the row the byte
- *   packer builds out of a composition that owes this path nothing --
- *   under each of the eight fine scrolls, with the left column masked and
- *   without -- and neither scratch is written while it happens.
+ *   The row a sprite-free line emits is byte for byte the row a
+ *   composition that owes this path nothing lays down -- under each of
+ *   the eight fine scrolls, with the left column masked and without --
+ *   and the scratch is not written while it happens.
  *
- *   The same background rendered THROUGH the scratch comes out the same
- *   row, and the scratches themselves hold what the reference composed.
+ *   The same background rendered the sprite way comes out the same row,
+ *   that row is the reference's, and the mask holds what the reference
+ *   composed.
  *
  * The second is what holds the two ways of rendering a line together: the
  * composition is written twice in the source, and nothing else here would
- * notice if one copy changed. The scratch way is forced by sprites that
+ * notice if one copy changed. The sprite way is forced by sprites that
  * draw nothing at all -- register 0 bit 3 moves a sprite eight pixels
  * left, so a sprite whose horizontal byte is zero covers pixels -8 to -1
  * and every pixel of it is dropped before anything is written and before
@@ -774,9 +862,9 @@ static void fastpath_scene(const char *name, uint32 hs, uint32 vs,
       if(!picture_matches(y)) same = 0;
     }
 
-  sprintf(msg,"%s: every row is the row the byte packer builds",name);
+  sprintf(msg,"%s: every row is the row the byte reference composes",name);
   check(same,msg);
-  sprintf(msg,"%s: neither scratch was written on any line",name);
+  sprintf(msg,"%s: the priority scratch was not written on any line",name);
   check(clean,msg);
   sprintf(msg,"%s: nothing was written outside the picture buffer",name);
   check(guard_intact(),msg);
@@ -900,9 +988,9 @@ static void two_ways(const char *name, uint32 hs, uint32 vs,
   for(y = 0; y < VDP_ACTIVE_LINES; y++)
     {
       /*
-       * The tail of the two scratches, armed around the render that still
-       * composes into them. This is the only pass left where the loop of
-       * thirty-three strokes runs, so it is the only place that can hold
+       * The tail of the scratch, armed around the render that lays a mask
+       * into it. This is the only pass where the loop of thirty-three
+       * strokes writes the scratch, so it is the only place that can hold
        * it to the promise of vdp.h: the strokes stop at byte 263 and
        * nothing writes past it. The scenes with no sprite cannot check it
        * -- they write no scratch at all.
@@ -911,19 +999,18 @@ static void two_ways(const char *name, uint32 hs, uint32 vs,
       render_pinned(y,hs,vs);
       if(!tail_intact()) tail = 0;
       reference_bg(y,hs,vs);
-      if(memcmp(VDP_LINE_BYTES + sms.vdp.line_org,
-                ref_line + VDP_LINE_LEAD,VDP_PIX_WIDTH) != 0) sc = 0;
+      if(!picture_matches(y)) sc = 0;
       if(memcmp(VDP_PRIO_BYTES + sms.vdp.line_org,
                 ref_prio + VDP_LINE_LEAD,VDP_PIX_WIDTH) != 0) pr = 0;
     }
 
-  sprintf(msg,"%s: the scratch way draws the row the short way drew",name);
+  sprintf(msg,"%s: the sprite way draws the row the short way drew",name);
   check(memcmp(frame_a,sms.vdp.pixels[0],VDP_PIX_BUF_BYTES) == 0,msg);
-  sprintf(msg,"%s: the composition scratch holds the reference picture",name);
+  sprintf(msg,"%s: the sprite way's row is the reference picture",name);
   check(sc,msg);
   sprintf(msg,"%s: the priority mask holds the reference mask",name);
   check(pr,msg);
-  sprintf(msg,"%s: nothing written past the picture in either scratch",name);
+  sprintf(msg,"%s: nothing written past the picture in the scratch",name);
   check(tail,msg);
   sprintf(msg,"%s: nothing was written outside the picture buffer, scratch way",name);
   check(guard_intact(),msg);
@@ -940,29 +1027,40 @@ static void two_ways(const char *name, uint32 hs, uint32 vs,
 
 /* ------------------------------------------------------------------ */
 /*
- * The two byte orders, both of them, held against the byte packer.
+ * The two byte orders, both of them, held against the byte run.
  *
- * The render reads pixel indexes out of words, and where a lane sits
+ * The render moves pixel indexes inside words, and where a lane sits
  * inside a word is the byte order of the machine. vdp.h therefore carries
- * two forms of the packing and two of the recut, and picks one. Only the
- * picked one is on the render's path -- but if only the picked one were
- * ever COMPILED, the form that ships to the console would be built by
- * nothing and tested by nothing on the machine this bench runs on, and a
- * mistake in it would ride all the way out with every check green. That
- * was the case and it was demonstrated: a single digit changed in the big
- * endian packing, which would scramble every group of four pixels of every
- * picture on the console, left this bench entirely green.
+ * two forms of the recut and picks one. Only the picked one is on the
+ * render's path -- but if only the picked one were ever COMPILED, the
+ * form that ships to the console would be built by nothing and tested by
+ * nothing on the machine this bench runs on, and a mistake in it would
+ * ride all the way out with every check green. That was the case and it
+ * was demonstrated, on the packing form the format once had: a single
+ * digit changed in the big endian packing, which would scramble every
+ * group of four pixels of every picture on the console, left this bench
+ * entirely green.
  *
- * So both forms are spelled unconditionally (VDP_LANE_PACK_MSB / _LSB,
- * VDP_LANE_JOIN_MSB / _LSB) and both are driven here. Each is fed words
- * laid out the way ITS OWN order would lay a run of index bytes, and both
- * must produce what vdp_pack_row builds from that same run of bytes --
- * which reads bytes, so it belongs to neither order and can judge both.
- * The recut offset is swept over its four values, so the shift of thirty
- * two that r == 0 would ask for is walked too.
+ * So both forms are spelled unconditionally (VDP_LANE_JOIN_MSB / _LSB)
+ * and both are driven here. Each is fed words laid out the way ITS OWN
+ * order would lay a run of index bytes, and each must produce the words
+ * its own order lays for that same run begun r bytes further on -- a
+ * reference that is built from bytes and owes the recut nothing. The
+ * recut offset is swept over its four values, so the shift of thirty two
+ * that r == 0 would ask for is walked too.
+ *
+ * The emitter is driven with them: what it stores is what it was handed,
+ * two words to a stroke, in the row's order. That it is right in both
+ * orders is not a property of the emitter but of where the words come
+ * from (vdp.h, VDP_EMIT8), and the scenes of this bench exercise it for
+ * real in this machine's order: a store that put the lanes down backwards
+ * would fail every row of every scene against the byte reference.
  */
 #define LANE_WORDS ((VDP_PIX_WIDTH / 4UL) + 1UL)
-#define LANE_BYTES (LANE_WORDS * 4UL)
+/* One word more than the recut reads, because the reference is laid from
+   the run begun r bytes on, r up to three, and reads LANE_WORDS words from
+   there. */
+#define LANE_BYTES ((LANE_WORDS + 1UL) * 4UL)
 
 static void lane_words_msb(const unsigned char *ind, uint32 *w)
 { uint32 k;
@@ -978,31 +1076,27 @@ static void lane_words_lsb(const unsigned char *ind, uint32 *w)
          | ((uint32)ind[(k * 4UL) + 3UL] << 24); }
 
 static void lane_emit_msb(const uint32 *w, uint32 sl, uint32 sr, uint32 *out)
-{ uint32 n, g0, g1, g2, g3;
-  for(n = 0; n < (VDP_PIX_WIDTH / 16UL); n++)
+{ uint32 n, g0, g1;
+  for(n = 0; n < (VDP_PIX_WIDTH / 8UL); n++)
     { g0 = VDP_LANE_JOIN_MSB(w[0],w[1],sl,sr);
       g1 = VDP_LANE_JOIN_MSB(w[1],w[2],sl,sr);
-      g2 = VDP_LANE_JOIN_MSB(w[2],w[3],sl,sr);
-      g3 = VDP_LANE_JOIN_MSB(w[3],w[4],sl,sr);
-      VDP_EMIT16_WITH(VDP_LANE_PACK_MSB,g0,g1,g2,g3,out);
-      w += 4; out += 3; } }
+      VDP_EMIT8(g0,g1,out);
+      w += 2; out += 2; } }
 
 static void lane_emit_lsb(const uint32 *w, uint32 sl, uint32 sr, uint32 *out)
-{ uint32 n, g0, g1, g2, g3;
-  for(n = 0; n < (VDP_PIX_WIDTH / 16UL); n++)
+{ uint32 n, g0, g1;
+  for(n = 0; n < (VDP_PIX_WIDTH / 8UL); n++)
     { g0 = VDP_LANE_JOIN_LSB(w[0],w[1],sl,sr);
       g1 = VDP_LANE_JOIN_LSB(w[1],w[2],sl,sr);
-      g2 = VDP_LANE_JOIN_LSB(w[2],w[3],sl,sr);
-      g3 = VDP_LANE_JOIN_LSB(w[3],w[4],sl,sr);
-      VDP_EMIT16_WITH(VDP_LANE_PACK_LSB,g0,g1,g2,g3,out);
-      w += 4; out += 3; } }
+      VDP_EMIT8(g0,g1,out);
+      w += 2; out += 2; } }
 
 static void lane_order_checks(void)
 {
   static unsigned char ind[LANE_BYTES];
   static uint32 w[LANE_WORDS];
   static uint32 got[VDP_PIX_ROW_BYTES / 4];
-  static uint32 want[VDP_PIX_ROW_BYTES / 4];
+  static uint32 want[LANE_WORDS];
   uint32 pat, r, i, sl, sr, seed;
   char msg[160];
 
@@ -1013,14 +1107,10 @@ static void lane_order_checks(void)
        * one catches lanes taken in the wrong order, a walking bit catches
        * a lane shifted by one, a scattered one catches what neither does.
        *
-       * The last two are what pin the WIDTH of each field. The render puts
-       * nothing above 31 in a row, so a mask one bit too narrow at the top
-       * of a six bit field would never show on real indexes -- but the
-       * field is six bits wide by the definition of the format, and these
-       * macros are written to that width, not to what today's render
-       * happens to emit. So the domain is walked to 63, where the byte
-       * packer and the lane forms must still agree, and the top value of
-       * the field is laid down flat as well.
+       * The last two walk the whole byte. The render puts nothing above
+       * 31 in a row, but a recut moves bytes and not indexes, and it is
+       * held to the byte: the domain is walked to 255, and the top value
+       * is laid down flat as well.
        */
       seed = 0x2545F491UL;
       for(i = 0; i < LANE_BYTES; i++)
@@ -1030,26 +1120,27 @@ static void lane_order_checks(void)
           else if(pat == 2UL)
             { seed = (seed * 1103515245UL) + 12345UL;
               ind[i] = (unsigned char)((seed >> 17) & 31UL); }
-          else if(pat == 3UL) ind[i] = (unsigned char)((i * 13UL) & 63UL);
-          else                ind[i] = 63;
+          else if(pat == 3UL) ind[i] = (unsigned char)((i * 13UL) & 255UL);
+          else                ind[i] = 255;
         }
 
       for(r = 0; r < 4UL; r++)
         {
           sl = r * 8UL;
           sr = 31UL - sl;
-          vdp_pack_row(ind + r,want);
 
           lane_words_msb(ind,w);
           lane_emit_msb(w,sl,sr,got);
-          sprintf(msg,"pattern %lu offset %lu: the big endian lane form packs what the byte packer packs",
-                  (unsigned long)pat,(unsigned long)r);
+          lane_words_msb(ind + r,want);
+          sprintf(msg,"pattern %lu offset %lu: the big endian recut lays the byte run begun %lu bytes on",
+                  (unsigned long)pat,(unsigned long)r,(unsigned long)r);
           check(memcmp(got,want,VDP_PIX_ROW_BYTES) == 0,msg);
 
           lane_words_lsb(ind,w);
           lane_emit_lsb(w,sl,sr,got);
-          sprintf(msg,"pattern %lu offset %lu: the little endian lane form packs what the byte packer packs",
-                  (unsigned long)pat,(unsigned long)r);
+          lane_words_lsb(ind + r,want);
+          sprintf(msg,"pattern %lu offset %lu: the little endian recut lays the byte run begun %lu bytes on",
+                  (unsigned long)pat,(unsigned long)r,(unsigned long)r);
           check(memcmp(got,want,VDP_PIX_ROW_BYTES) == 0,msg);
         }
     }
@@ -1057,16 +1148,41 @@ static void lane_order_checks(void)
   /* And the form this build actually calls is one of the two, not a third
      one that drifted: the switch is a choice, never a copy. */
 #if VDP_LANE_MSB_FIRST
-  check(VDP_LANE_PACK(0x01020304UL) == VDP_LANE_PACK_MSB(0x01020304UL)
-        && VDP_LANE_JOIN(0x01020304UL,0x05060708UL,8UL,23UL)
+  check(VDP_LANE_JOIN(0x01020304UL,0x05060708UL,8UL,23UL)
            == VDP_LANE_JOIN_MSB(0x01020304UL,0x05060708UL,8UL,23UL),
-        "this build calls the big endian lane form and nothing else");
+        "this build calls the big endian recut and nothing else");
 #else
-  check(VDP_LANE_PACK(0x01020304UL) == VDP_LANE_PACK_LSB(0x01020304UL)
-        && VDP_LANE_JOIN(0x01020304UL,0x05060708UL,8UL,23UL)
+  check(VDP_LANE_JOIN(0x01020304UL,0x05060708UL,8UL,23UL)
            == VDP_LANE_JOIN_LSB(0x01020304UL,0x05060708UL,8UL,23UL),
-        "this build calls the little endian lane form and nothing else");
+        "this build calls the little endian recut and nothing else");
 #endif
+
+  /*
+   * The emitter on its own, in this machine's order: two words handed to
+   * it must come back as the eight bytes they were built from, in memory
+   * order. This is the one place the store is held to the byte by name
+   * rather than through a scene.
+   */
+  {
+    static const unsigned char eight[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    uint32 two[2];
+    uint32 row[2];
+    uint32 k;
+
+    for(k = 0; k < 2UL; k++)
+      {
+#if VDP_LANE_MSB_FIRST
+        two[k] = ((uint32)eight[k * 4UL] << 24) | ((uint32)eight[(k * 4UL) + 1UL] << 16)
+               | ((uint32)eight[(k * 4UL) + 2UL] << 8) | (uint32)eight[(k * 4UL) + 3UL];
+#else
+        two[k] = (uint32)eight[k * 4UL] | ((uint32)eight[(k * 4UL) + 1UL] << 8)
+               | ((uint32)eight[(k * 4UL) + 2UL] << 16) | ((uint32)eight[(k * 4UL) + 3UL] << 24);
+#endif
+      }
+    VDP_EMIT8(two[0],two[1],row);
+    check(memcmp(row,eight,8) == 0,
+          "the emitter lays the two words it is handed as eight bytes in picture order");
+  }
 }
 
 static void fastpath_checks(void)
@@ -1087,9 +1203,9 @@ static void fastpath_checks(void)
     }
 
   /* Both ways at every fine scroll, and the left column masked on the odd
-     ones: the packer of the scratch way recuts on the same eight values
-     the short way does, and a defect in one of them would otherwise wait
-     for a game that scrolls by that many pixels. */
+     ones: the sprite way recuts on the same eight values the short way
+     does, and a defect in one of them would otherwise wait for a game
+     that scrolls by that many pixels. */
   for(f = 0; f < 8UL; f++)
     {
       sprintf(nm,"both-ways-fine-%lu",(unsigned long)f);
@@ -1219,16 +1335,13 @@ main(int argc, char **argv)
       for(v = 0; v < VARIANTS; v++)
         {
           vdp_profile_select(v);
-          sprintf(msg,"variant %lu: bg=%lu spr=%lu pack=%lu",(unsigned long)v,
+          sprintf(msg,"variant %lu: bg=%lu spr=%lu",(unsigned long)v,
                   (unsigned long)vdp_profile_reps(VDP_POST_BG),
-                  (unsigned long)vdp_profile_reps(VDP_POST_SPRITES),
-                  (unsigned long)vdp_profile_reps(VDP_POST_PACK));
+                  (unsigned long)vdp_profile_reps(VDP_POST_SPRITES));
           check(vdp_profile_reps(VDP_POST_BG) ==
                   ((v == VDP_PROFILE_BG || v == VDP_PROFILE_ALL) ? 2UL : 1UL) &&
                 vdp_profile_reps(VDP_POST_SPRITES) ==
-                  ((v == VDP_PROFILE_SPRITES || v == VDP_PROFILE_ALL) ? 2UL : 1UL) &&
-                vdp_profile_reps(VDP_POST_PACK) ==
-                  ((v == VDP_PROFILE_PACK || v == VDP_PROFILE_ALL) ? 2UL : 1UL),msg);
+                  ((v == VDP_PROFILE_SPRITES || v == VDP_PROFILE_ALL) ? 2UL : 1UL),msg);
         }
       vdp_profile_select(99UL);
       check(vdp_profile_reps(VDP_POST_BG) == 1UL,

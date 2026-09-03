@@ -1,30 +1,45 @@
-/* Host runner for the cel depth probe: the real core on the real ROM.
+/* Host runner for the picture check: the real core on the real ROM.
  *
  * Boots src/cart.c, src/z80.c, src/sms.c and src/vdp.c as they stand, on
  * the ROM the console runs, and plays it frame by frame the way src/main.c
  * does -- 262 lines a frame, the processor's quota then the video part.
- * Every so many frames it takes the picture the cel would draw, as one
- * palette index per pixel, 192 rows of 256:
+ * Every so many frames it takes the picture the cel would draw, one
+ * palette index per pixel, 192 rows of 256, read as the row lies: byte 0
+ * is pixel 0 on both machines, which is what the cel reads.
  *
- *   built without the switch, the six bit row is decoded the way
- *   vdp_pack_row defines it, sixteen indexes in three words, MSB first;
- *   built with -DSMS_CEL_BPP8=1, the eight bit row is read as it lies --
- *   byte 0 is pixel 0 on both machines, which is what the cel reads.
+ * Two modes. "compare" plays the frames and holds every row of every
+ * picture against a REFERENCE: a text file of one digest per row, taken
+ * once from the build that drew the picture before the format moved to a
+ * byte a pixel, and kept beside this file. A row that differs is a
+ * failure. "write" takes the same digests from the build it was compiled
+ * against and writes them out; that is the only way a reference is ever
+ * remade, after a change of picture that was meant, named in the header
+ * it writes.
  *
- * Two modes. "write" stores the pictures in a file; "compare" plays the same
- * frames in the other build and holds each row against that file. The two
- * compositions of one line must be the same 256 bytes: that is the whole
- * claim the probe rests on, and it is held here on a real screen rather
- * than on a scene the bench made up. A row that differs is a failure. A
- * row that is flat where the reference is not is counted apart, because
- * that is what an earlier form of the probe did to a line with sprites on
- * it, and it must now be zero.
+ * The reference kept beside this file was NOT written by this runner: it
+ * holds the picture of the build before the format moved, which this
+ * runner refuses to compile against. That build's own runner -- this file
+ * as it stood at the commit the header names -- played the same frames
+ * and wrote its pictures raw, one index per byte once unpacked from six
+ * bits; each row of 256 was then digested as below, and the derivation
+ * was replayed from the archived tree, row for row, before the reference
+ * was kept.
+ *
+ * The reference is digests and not pixels, so that it carries nothing of
+ * the ROM's imagery; and it names the ROM it was taken from, by size and
+ * by digest, so that another ROM is refused rather than compared.
  *
  * An optional directory takes one PPM per picture, the palette applied and
  * the border filled as the console shows it: the file the eye reads when a
  * figure disagrees with a screen.
  *
- *   romrun <rom> <frames> <every> write|compare <raw file> [ppm dir]
+ *   romrun <rom> <frames> <every> write|compare <reference> [ppm dir] [taken]
+ *
+ * "taken" names the build the reference is written from, one word of at
+ * most 63 characters; it is carried in the header and never compared.
+ *
+ * Exit status: 0 every row the same, 1 a row differs, 2 the run could not
+ * prove anything, 3 the reference is not this ROM's.
  *
  * Stubs follow tests/vdp-profile/bench_profile.c and the cartridge bench
  * that preceded it: the disc is the host file, the allocator is the host's,
@@ -39,7 +54,6 @@
 #include "operror.h"
 #include "filesystem.h"
 #include "celutils.h"
-#include "mem.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -48,21 +62,19 @@
 #define LINES_PER_FRAME  262
 #define TSTATES_PER_LINE 228
 
-/* The picture is the render's, not a size of this file's own; and the eight
-   bit row is read as one unpadded line of it, which vdp.h computes but this
-   file pins, so that a padded row would refuse here rather than compare
-   bytes of padding against pixels. */
+/* The picture is the render's, not a size of this file's own; and the row
+   is read as one unpadded line of it, which vdp.h computes but this file
+   pins, so that a padded row would refuse here rather than compare bytes
+   of padding against pixels. */
 #define PIC_W ((int)VDP_PIX_WIDTH)
 #define PIC_H ((int)VDP_ACTIVE_LINES)
 #define PIC_BYTES (PIC_W * PIC_H)
-#if VDP_CEL8_ROW_BYTES != VDP_PIX_WIDTH
-#error "the eight bit row is read as an unpadded line: it no longer is one"
+#if VDP_PIX_ROW_BYTES != VDP_PIX_WIDTH
+#error "the row is read as an unpadded line of the picture: it no longer is one"
 #endif
-
-/* The raw file: four words of header, then PIC_BYTES per picture. A
-   reference written with other parameters, or by the other depth, is refused
-   by the header rather than compared on a common prefix. */
-#define RAW_MAGIC 0x43454C38UL   /* "CEL8" */
+#if VDP_PIX_BPP != 8UL
+#error "the row is read one index per byte: the depth is no longer eight"
+#endif
 
 /* ---- the disc: one file, the ROM named on the command line ---- */
 
@@ -112,11 +124,10 @@ void sys_mem_seal(void) {}
 int32 sys_width(void) { return 320; }
 int32 sys_height(void) { return 240; }
 Item sys_bitmap(void) { return 0; }
-void AvailMem(MemInfo *mi, uint32 memtype)
-{ (void)memtype; memset(mi,0,sizeof *mi); }
 
-/* One block per call: the probe builds two cels and keeps both. The two
-   preamble words are the library's, as vdp.c's own arbiter expects them. */
+/* One block per call. The two preamble words are the library's for a
+   coded cel of eight bits, as vdp.c's own arbiter expects them: the row
+   offset in the ten bit field. */
 CCB *CreateCel(int32 width, int32 height, int32 bpp, int32 options, void *dataBuf)
 {
   CCB *c = (CCB *)calloc(1,sizeof(CCB));
@@ -173,65 +184,30 @@ void log_fatal(int32 cat, int32 code, const char *l1, const char *l2)
   exit(2);
 }
 
-/* ---- the picture, one index per pixel ---- */
+/* ---- the picture, one index per pixel, as the cel reads it ---- */
 
 static unsigned char pic[PIC_BYTES];
 
-#if !SMS_CEL_BPP8
-/* Sixteen indexes in three words, MSB first: the format vdp_pack_row
-   defines (src/vdp.c). Read as a 96 bit number to keep one rule. */
-static void take_six(void)
-{
-  unsigned y, g, i;
-  for(y = 0; y < PIC_H; y++)
-    {
-      const uint32 *w = (const uint32 *)(sms.vdp.pixels[0] + (y * VDP_PIX_ROW_BYTES));
-      unsigned char *row = pic + (y * PIC_W);
-      for(g = 0; g < PIC_W / 16; g++)
-        {
-          unsigned long long hi = ((unsigned long long)w[0] << 32) | w[1];
-          unsigned long long lo = w[2];
-          for(i = 0; i < 16; i++)
-            {
-              int bit = 90 - 6 * (int)i;   /* lowest bit of the field */
-              unsigned idx;
-              if(bit >= 32)
-                idx = (unsigned)((hi >> (bit - 32)) & 63);
-              else if(bit + 6 <= 32)
-                idx = (unsigned)((lo >> bit) & 63);
-              else
-                idx = (unsigned)((((hi << 32) | lo) >> bit) & 63);
-              row[g * 16 + i] = (unsigned char)idx;
-            }
-          w += 3;
-        }
-    }
-}
-#else
-/* The eight bit buffer as the cel reads it: byte 0 is pixel 0. */
-static void take_eight(void)
+static void take(void)
 {
   CCB *c = (CCB *)vdp_cel();
   memcpy(pic,c->ccb_SourcePtr,(size_t)PIC_BYTES);
 }
-#endif
 
-static void take(void)
+/* FNV-1a over a run of bytes, the digest the render bench uses too
+   (tests/vdp-profile/bench_profile.c). The reference holds one per row
+   and one for the ROM. */
+static unsigned long digest(const unsigned char *p, unsigned long n)
 {
-#if SMS_CEL_BPP8
-  take_eight();
-#else
-  take_six();
-#endif
-}
-
-/* Whether the probe is on, asked once after init rather than after 1200
-   frames: a probe that fell back draws the six bit cel, and comparing that
-   would compare the delivered build with itself. */
-static int probe_is_on(void)
-{
-  CCB *c = (CCB *)vdp_cel();
-  return c->ccb_SourcePtr != (CelData *)sms.vdp.pixels[0];
+  unsigned long h = 2166136261UL;
+  unsigned long i;
+  for(i = 0; i < n; i++)
+    {
+      h ^= (unsigned long)p[i];
+      h *= 16777619UL;
+      h &= 0xFFFFFFFFUL;
+    }
+  return h;
 }
 
 /* ---- PPM, the screen as the console shows it ---- */
@@ -267,7 +243,7 @@ static void ppm(const char *dir, long frame)
           { screen[24 + y][32 + x][0] = 255; screen[24 + y][32 + x][1] = 0;
             screen[24 + y][32 + x][2] = 255; }
       }
-  n = snprintf(path,sizeof path,"%s/f%05ld_%d.ppm",dir,frame,SMS_CEL_BPP8 ? 8 : 6);
+  n = snprintf(path,sizeof path,"%s/f%05ld.ppm",dir,frame);
   if(n < 0 || (size_t)n >= sizeof path)
     {
       fprintf(stderr,"ppm path too long, picture %ld not written\n",frame);
@@ -284,56 +260,95 @@ static void ppm(const char *dir, long frame)
   fclose(f);
 }
 
-/* ---- the raw file header ---- */
+/* ---- the reference: one header line, then one line per picture ---- */
 
-static void put_word(FILE *f, unsigned long w)
+/* The header names everything a comparison depends on, and every field is
+   held: a reference taken with other parameters, on another ROM, or of
+   another picture shape is refused, never compared on a common prefix.
+   The last field names the build the reference was taken from and is not
+   compared -- it is there for the reader. */
+#define REF_TAG "cel8-picture-reference"
+
+static int ref_header_read(FILE *f, long frames, long every,
+                           unsigned long rom_bytes, unsigned long rom_fnv,
+                           unsigned long *pictures)
 {
-  unsigned char b[4];
-  b[0] = (unsigned char)(w >> 24); b[1] = (unsigned char)(w >> 16);
-  b[2] = (unsigned char)(w >> 8);  b[3] = (unsigned char)w;
-  fwrite(b,1,4,f);
+  char line[512];
+  char tag[64];
+  char taken[64];
+  long h_frames, h_every, h_width, h_lines;
+  unsigned long h_pictures, h_rom_bytes, h_rom_fnv;
+
+  if(fgets(line,sizeof line,f) == NULL)
+    {
+      fprintf(stderr,"the reference is empty\n");
+      return 2;
+    }
+  if(sscanf(line,"%63s frames=%ld every=%ld width=%ld lines=%ld pictures=%lu "
+            "rom_bytes=%lu rom_fnv=%lx taken=%63s",
+            tag,&h_frames,&h_every,&h_width,&h_lines,&h_pictures,
+            &h_rom_bytes,&h_rom_fnv,taken) != 9
+     || strcmp(tag,REF_TAG) != 0)
+    {
+      fprintf(stderr,"the reference header is not one this runner reads\n");
+      return 2;
+    }
+  if(h_rom_bytes != rom_bytes || h_rom_fnv != rom_fnv)
+    {
+      fprintf(stderr,"skipped: the rom on disc (%lu bytes, fnv %08lx) is not the one the "
+              "reference was taken from (%lu bytes, fnv %08lx)\n",
+              rom_bytes,rom_fnv,h_rom_bytes,h_rom_fnv);
+      return 3;
+    }
+  if(h_frames != frames || h_every != every
+     || h_width != PIC_W || h_lines != PIC_H)
+    {
+      fprintf(stderr,"the reference was taken for %ld frames every %ld on a %ldx%ld "
+              "picture, not %ld every %ld on %dx%d\n",
+              h_frames,h_every,h_width,h_lines,frames,every,PIC_W,PIC_H);
+      return 2;
+    }
+  *pictures = h_pictures;
+  return 0;
 }
 
-static int get_word(FILE *f, unsigned long *w)
+static void ref_header_write(FILE *f, long frames, long every,
+                             unsigned long pictures, unsigned long rom_bytes,
+                             unsigned long rom_fnv, const char *taken)
 {
-  unsigned char b[4];
-  if(fread(b,1,4,f) != 4) return 0;
-  *w = ((unsigned long)b[0] << 24) | ((unsigned long)b[1] << 16)
-     | ((unsigned long)b[2] << 8) | b[3];
-  return 1;
+  fprintf(f,"%s frames=%ld every=%ld width=%d lines=%d pictures=%lu "
+          "rom_bytes=%lu rom_fnv=%08lx taken=%s\n",
+          REF_TAG,frames,every,PIC_W,PIC_H,pictures,rom_bytes,rom_fnv,taken);
 }
 
 /* ---- main ---- */
-
-static int row_flat(const unsigned char *r)
-{
-  int x;
-  for(x = 1; x < PIC_W; x++)
-    if(r[x] != r[0]) return 0;
-  return 1;
-}
 
 int main(int argc, char **argv)
 {
   long frames, every, fr;
   int writing;
-  FILE *raw;
+  FILE *ref;
   const char *ppmdir;
+  const char *taken = "unnamed";
+  char tmp[512];
+  int n;
   int line;
   int32 residue = 0;
-  unsigned long pictures = 0, lines = 0, identical = 0, different = 0, flat = 0;
+  unsigned long pictures = 0, lines = 0, identical = 0, different = 0;
+  unsigned long want_pictures = 0;
+  unsigned long rom_fnv;
   /* What the run exercised, per frame, so the figures say what they cover:
      frames with the picture off, with the left column masked, and with each
      of the eight fine scrolls (video registers 1, 0 and 8). */
   unsigned long off_frames = 0, masked_frames = 0, fine_frames[8];
   unsigned long w;
-  static unsigned char ref[PIC_BYTES];
+  static unsigned long row_digest[PIC_H];
 
   memset(fine_frames,0,sizeof fine_frames);
 
   if(argc < 6)
     {
-      fprintf(stderr,"usage: romrun <rom> <frames> <every> write|compare <raw> [ppm dir]\n");
+      fprintf(stderr,"usage: romrun <rom> <frames> <every> write|compare <reference> [ppm dir] [taken]\n");
       return 2;
     }
   rom_path = argv[1];
@@ -353,12 +368,17 @@ int main(int argc, char **argv)
       fprintf(stderr,"mode must be write or compare, not %s\n",argv[4]);
       return 2;
     }
-  raw = fopen(argv[5],writing ? "wb" : "rb");
-  ppmdir = (argc > 6) ? argv[6] : NULL;
-  if(raw == NULL)
+  ppmdir = (argc > 6 && argv[6][0] != '\0') ? argv[6] : NULL;
+  if(argc > 7 && argv[7][0] != '\0')
     {
-      fprintf(stderr,"cannot open %s\n",argv[5]);
-      return 2;
+      /* The header is read back as one word: a name that is not one would
+         make the runner refuse the file it wrote itself. */
+      if(strlen(argv[7]) > 63 || strpbrk(argv[7]," \t\r\n") != NULL)
+        {
+          fprintf(stderr,"taken must be one word of at most 63 characters, not '%s'\n",argv[7]);
+          return 2;
+        }
+      taken = argv[7];
     }
 
   z80_init();
@@ -368,38 +388,54 @@ int main(int argc, char **argv)
   z80_reset();
   booted = 1;
 
-#if SMS_CEL_BPP8
-  if(!probe_is_on())
-    {
-      fprintf(stderr,"the probe is off: nothing to compare\n");
-      return 2;
-    }
-#endif
+  rom_fnv = digest(sms.cart.rom,(unsigned long)sms.cart.size);
 
+  /* Written to a temporary name beside the final one and renamed at the
+     end, once the run has proved it took what the header says: a run that
+     stops half way leaves no half reference behind. */
   if(writing)
     {
-      put_word(raw,RAW_MAGIC);
-      put_word(raw,(unsigned long)frames);
-      put_word(raw,(unsigned long)every);
-      put_word(raw,(unsigned long)PIC_BYTES);
+      n = snprintf(tmp,sizeof tmp,"%s.tmp",argv[5]);
+      if(n < 0 || (size_t)n >= sizeof tmp)
+        {
+          fprintf(stderr,"reference path too long\n");
+          return 2;
+        }
+      ref = fopen(tmp,"w");
+      if(ref == NULL)
+        {
+          fprintf(stderr,"cannot write %s\n",tmp);
+          return 2;
+        }
+      /* The header needs the picture count, which the loop decides: it is
+         written first with the count computed the same way. */
+      for(fr = 0; fr < frames; fr++)
+        if((fr % every) == 0 || fr == frames - 1) want_pictures++;
+      ref_header_write(ref,frames,every,want_pictures,
+                       (unsigned long)sms.cart.size,rom_fnv,taken);
     }
   else
     {
-      unsigned long h[4];
-      if(!get_word(raw,&h[0]) || !get_word(raw,&h[1])
-         || !get_word(raw,&h[2]) || !get_word(raw,&h[3])
-         || h[0] != RAW_MAGIC || h[1] != (unsigned long)frames
-         || h[2] != (unsigned long)every || h[3] != (unsigned long)PIC_BYTES)
+      int rc;
+      ref = fopen(argv[5],"r");
+      if(ref == NULL)
         {
-          fprintf(stderr,"the reference was not written for %ld frames every %ld\n",
-                  frames,every);
-          fclose(raw);
+          fprintf(stderr,"cannot open the reference %s\n",argv[5]);
           return 2;
+        }
+      rc = ref_header_read(ref,frames,every,(unsigned long)sms.cart.size,
+                           rom_fnv,&want_pictures);
+      if(rc != 0)
+        {
+          fclose(ref);
+          return rc;
         }
     }
 
   for(fr = 0; fr < frames; fr++)
     {
+      int y;
+
       for(line = 0; line < LINES_PER_FRAME; line++)
         {
           residue = z80_run(TSTATES_PER_LINE - residue);
@@ -415,36 +451,40 @@ int main(int argc, char **argv)
       take();
       pictures++;
       if(ppmdir != NULL) ppm(ppmdir,fr);
+      for(y = 0; y < PIC_H; y++)
+        row_digest[y] = digest(pic + (y * PIC_W),(unsigned long)PIC_W);
 
       if(writing)
         {
-          if(fwrite(pic,1,(size_t)PIC_BYTES,raw) != (size_t)PIC_BYTES)
-            {
-              fprintf(stderr,"short write on the reference at frame %ld\n",fr);
-              fclose(raw);
-              return 2;
-            }
+          fprintf(ref,"frame=%ld",fr);
+          for(y = 0; y < PIC_H; y++)
+            fprintf(ref," %08lx",row_digest[y]);
+          fputc('\n',ref);
         }
       else
         {
-          int y;
-          if(fread(ref,1,(size_t)PIC_BYTES,raw) != (size_t)PIC_BYTES)
+          long ref_frame;
+          if(fscanf(ref," frame=%ld",&ref_frame) != 1 || ref_frame != fr)
             {
-              fprintf(stderr,"the reference ends before frame %ld\n",fr);
-              fclose(raw);
+              fprintf(stderr,"the reference does not hold frame %ld where this run took it\n",fr);
+              fclose(ref);
               return 2;
             }
           for(y = 0; y < PIC_H; y++)
             {
-              const unsigned char *a = pic + y * PIC_W;
-              const unsigned char *b = ref + y * PIC_W;
+              unsigned long h;
+              if(fscanf(ref," %lx",&h) != 1)
+                {
+                  fprintf(stderr,"the reference ends inside frame %ld\n",fr);
+                  fclose(ref);
+                  return 2;
+                }
               lines++;
-              if(memcmp(a,b,(size_t)PIC_W) == 0)
+              if(h == row_digest[y])
                 identical++;
               else
                 {
                   different++;
-                  if(row_flat(a) && !row_flat(b)) flat++;
                   if(different <= 8)
                     fprintf(stderr,"  frame %ld line %d differs\n",fr,y);
                 }
@@ -452,15 +492,27 @@ int main(int argc, char **argv)
         }
     }
 
-  if(!writing && fgetc(raw) != EOF)
+  if(!writing)
     {
-      fprintf(stderr,"the reference holds more pictures than this run took\n");
-      fclose(raw);
+      long stray;
+      if(fscanf(ref," frame=%ld",&stray) == 1)
+        {
+          fprintf(stderr,"the reference holds more pictures than this run took\n");
+          fclose(ref);
+          return 2;
+        }
+    }
+  if(writing && ferror(ref))
+    {
+      fprintf(stderr,"write error on %s\n",tmp);
+      fclose(ref);
+      remove(tmp);
       return 2;
     }
-  if(fclose(raw) != 0)
+  if(fclose(ref) != 0)
     {
-      fprintf(stderr,"cannot close %s\n",argv[5]);
+      fprintf(stderr,"cannot close %s\n",writing ? tmp : argv[5]);
+      if(writing) remove(tmp);
       return 2;
     }
 
@@ -473,11 +525,18 @@ int main(int argc, char **argv)
   if(writing)
     printf("pictures=%lu written\n",pictures);
   else
-    printf("pictures=%lu lines=%lu identical=%lu different=%lu flat=%lu\n",
-           pictures,lines,identical,different,flat);
-  if(pictures == 0 || (!writing && lines == 0))
+    printf("pictures=%lu lines=%lu identical=%lu different=%lu\n",
+           pictures,lines,identical,different);
+  if(pictures == 0 || pictures != want_pictures || (!writing && lines == 0))
     {
-      fprintf(stderr,"nothing taken: the run proves nothing\n");
+      fprintf(stderr,"nothing taken, or not what the header says: the run proves nothing\n");
+      if(writing) remove(tmp);
+      return 2;
+    }
+  if(writing && rename(tmp,argv[5]) != 0)
+    {
+      fprintf(stderr,"cannot rename %s to %s\n",tmp,argv[5]);
+      remove(tmp);
       return 2;
     }
   return (different != 0) ? 1 : 0;

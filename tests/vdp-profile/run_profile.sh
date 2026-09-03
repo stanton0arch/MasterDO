@@ -2,13 +2,13 @@
 # One command, five checks: three on the wrappers that let the render be
 # broken into posts (src/vdp.h, VDP_REPEAT_BEGIN / VDP_REPEAT_END), one on the
 # decoded row cache the background composes from, and one on the line that
-# never touches the composition scratch.
+# never touches the priority scratch.
 #
-#   1. IDENTITY.  The picture, the composition scratch, the priority mask and
-#      the two sprite bits taken LINE BY LINE, compared byte for byte against
-#      the control over seven scenes, with a guard band on each side of the
-#      picture buffer. Answers: do the five variants draw the same frame and
-#      leave the same emulated state.
+#   1. IDENTITY.  The picture, the priority mask and the two sprite bits
+#      taken LINE BY LINE, compared byte for byte against the control over
+#      seven scenes, with a guard band on each side of the picture buffer.
+#      Answers: do the four variants draw the same frame and leave the same
+#      emulated state.
 #
 #   2. WORK.  The same bench under coverage, one variant per process, three
 #      counters read out of the render. Answers: does each variant actually
@@ -35,16 +35,17 @@
 #      through the macros that ship.
 #
 #   5. THE LINE THAT SKIPS THE SCRATCH, in the delivered form. A line with
-#      no sprite on it emits its forty-eight words from the composition and
-#      writes neither scratch. Its row is held byte for byte against what
-#      vdp_pack_row -- which reads BYTES, so its word value is the same on
-#      this host as on the target -- builds from a composition that owes
-#      the path nothing, for each of the eight fine scrolls and with the
-#      left column masked. Then the same background is rendered through the
-#      scratch, forced there by sprites that draw nothing, and the two rows
-#      must be the same row: that is what holds the two compositions of
-#      vdp.c together, since neither the picture nor the digests would move
-#      if only one of them changed.
+#      no sprite on it emits its sixty-four words from the composition and
+#      writes no mask. Its row is held byte for byte against a composition
+#      written the old way, one byte at a time, that owes the path nothing,
+#      for each of the eight fine scrolls and with the left column masked.
+#      Then the same background is rendered the sprite way, forced there
+#      by sprites that draw nothing, and the two rows must be the same row:
+#      that is what holds the two compositions of vdp.c together, since
+#      neither the picture nor the digests would move if only one of them
+#      changed. The recut of a stroke is held in BOTH byte orders against
+#      the byte run it must lay, so the form that runs on the console is
+#      exercised by the build that cannot run it.
 #
 # Why three checks on the wrappers and not one. A wrapper opened one line
 # too low -- below the stroke index and the two cursors instead of above
@@ -140,22 +141,20 @@ cp "$S/vdp.c" "$W/vdp_under_test.c"
 # would then pass unseen, which is precisely the blindness this check
 # exists to prevent.
 #
-# A line is now rendered one of two ways -- straight into the row when it
-# carries no sprite, through the composition scratch when it does -- so the
-# background post is pinned once on each. Both sit inside the same wrapper
-# and both must double with it. The packing post is pinned on the packer
-# the scratch way ends with, which is the only packing left: the other way
-# emits as it composes and its cost is inside the background post.
-pat_1='dstw\[0\] = e0 | bankw;'
+# A line is rendered one of two ways -- the short way when it carries no
+# sprite, with the priority scratch when it does -- so the background post
+# is pinned once on each, on the emit of a stroke, whose row cursor carries
+# a different name on each way for exactly this purpose. Both sit inside
+# the same wrapper and both must double with it.
+pat_1='VDP_EMIT8(gw0,gw1,rw);'
 pat_2='if((uint32)sat\[i\] == VDP_SPR_TERMINATOR)'
-pat_3='held = w3;'
-name_1='scratch-strokes'; name_2='sprite-entries'; name_3='pack-groups'
-lines_1=1; lines_2=1; lines_3=1
+name_1='scratch-strokes'; name_2='sprite-entries'
+lines_1=1; lines_2=1
 
 # The background post again, on the line that never touches the scratch.
 # It doubles with post 1 like the one above; pinned separately because the
 # scenes that reach it are not the scenes that reach the other.
-pat_fast='e0 |= bankw;'
+pat_fast='VDP_EMIT8(gw0,gw1,ow);'
 name_fast='short-strokes'
 lines_fast=1
 
@@ -282,7 +281,7 @@ grep -q '^failed=0$' "$W/off-full.txt" || \
 echo
 echo "=== 5. the line that skips the scratch, through the form that ships ==="
 # The section that proves the short way: the row it emits held against the
-# byte packer over the eight fine scrolls, the two scratches caught being
+# byte reference over the eight fine scrolls, the scratch caught being
 # left alone, and the same background rendered BOTH ways and compared. Its
 # assertion count is checked like the row cache's, and for the same reason
 # -- a pass that vanished prints nothing and fails nothing.

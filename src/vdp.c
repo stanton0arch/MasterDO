@@ -13,46 +13,6 @@
  */
 #include "celutils.h"
 
-#if SMS_CEL_BPP8
-/*
- * The free memory call the depth probe's boot line reads its figure from.
- * celutils.h above brings this header in already, so naming it changes
- * nothing today; it is named because the probe uses it directly, and a file
- * that uses a header should say so rather than inherit it. It buys no
- * protection: sitting under this switch, it is only ever preprocessed by a
- * probe build, so a day when celutils.h stopped including it would be a day
- * the DEFAULT build kept compiling and only the next probe build broke.
- */
-#include "mem.h"
-
-/*
- * The three guards common.h could not carry, on the pattern memprobe.c had
- * to use for the same reason (memprobe.c:18-19): the level and category
- * names belong to log.h, and common.h is a leaf that does not include it --
- * an #if written there would compare against names the preprocessor has
- * never seen, pass whatever it is given, and be a guard that cannot fire.
- *
- * What they protect is not a number that would come out wrong but a run that
- * would come out MUTE. This build exists to publish exactly two things: the
- * boot line that says whether it is measuring at all, an INFO line of the
- * video category, and the draw= field of the periodic line, an INFO line of
- * the performance category. Silence either of them and what is left is a
- * picture and no figure, which is the one outcome a probe must not be able
- * to reach quietly.
- */
-#if (LOG_LVL_INFO) > (LOG_LEVEL)
-#error "SMS_CEL_BPP8 needs LOG_LEVEL at LOG_LVL_INFO or above: its boot line and its draw= field are INFO lines"
-#endif
-
-#if ((LOG_CAT_MASK) & (1UL << (LOG_CAT_VDP))) == 0UL
-#error "SMS_CEL_BPP8 needs LOG_CAT_VDP in LOG_CAT_MASK: without it the probe cannot say whether it is measuring"
-#endif
-
-#if ((LOG_CAT_MASK) & (1UL << (LOG_CAT_PERF))) == 0UL
-#error "SMS_CEL_BPP8 needs LOG_CAT_PERF in LOG_CAT_MASK: the draw= field it exists for is a performance line"
-#endif
-#endif
-
 /*
  * The video display processor at the stage where it answers, keeps,
  * renders the background plane and owns the way out for pixels. What the
@@ -114,51 +74,6 @@ static int32 vdp_cel_manual = 0;
  */
 static uint32 vdp_pre0_lib = 0;
 static uint32 vdp_pre1_lib = 0;
-
-#if SMS_CEL_BPP8
-/*
- * The depth probe (common.h, SMS_CEL_BPP8): a second picture at one byte a
- * pixel, a second cel of eight bits over it, and the flag that says both
- * were had. Kept across a second init for the reason every block above is.
- *
- * The flag is read in two places and by nobody else: the render, which
- * composes eight bits only when there is somewhere to compose them, and the
- * init, which hands the drawing side the eight bit cel only when there is
- * one. Off, the program composes and draws exactly as the shipped build
- * does -- the picture stays right, and the boot line says the run measures
- * nothing rather than letting a figure be read off it.
- */
-static uint8 *vdp_cel8_pixels = NULL;
-static CCB *vdp_cel8_block = NULL;
-static int32 vdp_cel8_on = 0;
-
-/*
- * Whether the render writes that buffer, which is NOT the same question as
- * whether the eight bit cel is drawn. The ruler build (common.h,
- * SMS_CEL_BPP8_TESTPAT) draws it and does not write it: the pattern laid down
- * at init has to survive the frame to be read off the screen. Every write site
- * asks this one, the cel choice asks the other.
- */
-static int32 vdp_cel8_compose = 0;
-
-/*
- * The free DRAM the console reported the moment after the buffer above was
- * taken. Sampled there and printed later because the boot line belongs with
- * the rest of the cel trace, while the figure it carries only means anything
- * at the instant of the allocation.
- */
-static uint32 vdp_cel8_dram_free = 0;
-
-/*
- * The eight bit cel's preamble words as the library left them, read out the
- * moment CreateCel returns. The six bit block keeps its own pair for the same
- * reason (above): one debug line then puts the library's answer beside this
- * file's calculation, and a disagreement on the row offset is the one defect
- * that draws a garbled picture with no error anywhere.
- */
-static uint32 vdp_cel8_pre0_lib = 0;
-static uint32 vdp_cel8_pre1_lib = 0;
-#endif
 
 #if VDP_COUNTERS
 /*
@@ -242,116 +157,6 @@ vdp_profile_reps(uint32 post)
 }
 #endif
 
-
-/*
- * Packs one composed row into the 6 bit form the engine reads: the
- * leftmost pixel in the most significant bits of the first word, each
- * index in the next 6 bits down, sixteen pixels to three words. Word
- * stores, on purpose: on the big endian target a stored word puts its most
- * significant byte at the lowest address, which is exactly the byte order
- * a console capture proved for this cel -- the picture came out with flat
- * bands where the same order written a byte at a time had put them.
- *
- * Reading BYTES is what makes it the written definition of the format: the
- * word it produces carries the same value whatever the byte order of the
- * machine, so it belongs to neither order and can judge both. That is what
- * the bench uses it for -- it drives the two lane forms of vdp.h, the one
- * this build calls and the one it does not, and holds each against this
- * function. Holding only the called one would leave the other compiled by
- * nothing and tested by nothing, and a mistake in it would reach the
- * console with every bench green.
- *
- * It is no longer on the render's path, for that reason and no other; the
- * header says the rest.
- *
- * The indexes are taken as they come, unmasked: every value the render
- * puts in a row is below 32 by construction (a four bit pattern index,
- * plus 16 for the second bank, or a border colour of the same form), and a
- * mask per pixel would be sixteen operations per stroke paid for nothing.
- */
-void
-vdp_pack_row(const uint8 *row,
-             uint32      *dst)
-{
-  uint32 n;
-
-  for(n = 0; n < (VDP_PIX_WIDTH / 16UL); n++)
-    {
-      dst[0] = ((uint32)row[0] << 26) | ((uint32)row[1] << 20)
-             | ((uint32)row[2] << 14) | ((uint32)row[3] << 8)
-             | ((uint32)row[4] << 2)  | ((uint32)row[5] >> 4);
-      dst[1] = (((uint32)row[5] & 15UL) << 28) | ((uint32)row[6] << 22)
-             | ((uint32)row[7] << 16) | ((uint32)row[8] << 10)
-             | ((uint32)row[9] << 4)  | ((uint32)row[10] >> 2);
-      dst[2] = (((uint32)row[10] & 3UL) << 30) | ((uint32)row[11] << 24)
-             | ((uint32)row[12] << 18) | ((uint32)row[13] << 12)
-             | ((uint32)row[14] << 6)  | (uint32)row[15];
-      row += 16;
-      dst += 3;
-    }
-}
-
-/*
- * The same three words per sixteen pixels, read out of the composition
- * scratch a WORD at a time. This is the packing post of a line that went
- * through the scratch, and the only difference with the line that never
- * touched it is where the four lane words come from: there they are still
- * in registers as the composition made them, here they are read back.
- *
- * The picture begins at scratch byte line_org, which the fine scroll moves
- * off a word boundary on six values out of eight, so each group of four
- * pixels is cut out of two consecutive words by VDP_LANE_JOIN. The shift
- * is constant down the line and computed once here; the word that follows
- * the last group is inside the tail of the scratch, which vdp.h refuses to
- * be too short for.
- *
- * Sixteen byte reads per sixteen pixels become four word reads. The rest
- * of the arithmetic is what the byte form paid too.
- *
- * The four recuts are put in variables before the emitter is called, and
- * that is a cost and not a style: the emitter copies each of its lane
- * arguments four times (vdp.h, VDP_EMIT16), so handing it four recut
- * expressions would compute sixteen recuts per sixteen pixels instead of
- * four. The other caller passes variables for the same reason.
- */
-static void
-vdp_pack_line(uint32 *dst)
-{
-  const uint32 *src;
-  uint32 sl;
-  uint32 sr;
-  uint32 held;
-  uint32 w0;
-  uint32 w1;
-  uint32 w2;
-  uint32 w3;
-  uint32 g0;
-  uint32 g1;
-  uint32 g2;
-  uint32 g3;
-  uint32 n;
-
-  src = sms.vdp.line_w + (sms.vdp.line_org >> 2);
-  sl = (sms.vdp.line_org & 3UL) << 3;
-  sr = 31UL - sl;
-  held = src[0];
-
-  for(n = 0; n < (VDP_PIX_WIDTH / 16UL); n++)
-    {
-      w0 = src[1];
-      w1 = src[2];
-      w2 = src[3];
-      w3 = src[4];
-      g0 = VDP_LANE_JOIN(held,w0,sl,sr);
-      g1 = VDP_LANE_JOIN(w0,w1,sl,sr);
-      g2 = VDP_LANE_JOIN(w1,w2,sl,sr);
-      g3 = VDP_LANE_JOIN(w2,w3,sl,sr);
-      VDP_EMIT16(g0,g1,g2,g3,dst);
-      held = w3;
-      src += 4;
-      dst += 3;
-    }
-}
 
 /*
  * ---------------------------------------------------------------------------
@@ -438,8 +243,8 @@ vdp_select_sprites(uint32 y)
 /*
  * ---------------------------------------------------------------------------
  * The sprites of one line, laid over the background already composed in
- * the scratch. The kept entries are walked in table order, which is what
- * makes the first of them win a shared pixel
+ * the row of the picture. The kept entries are walked in table order,
+ * which is what makes the first of them win a shared pixel
  * (TotalSMS/src/core/sms_vdp.c:1206-1213). The two authorised sources
  * disagree here and the disagreement is recorded rather than smoothed
  * over: the document says the higher numbered sprite shows on top
@@ -531,11 +336,16 @@ vdp_draw_sprites(uint32 y)
   vram = sms.vdp.vram;
   planes = sms.vdp.planes;
   /*
-   * Picture coordinates, so the origin the background left behind: a fine
-   * scroll moves where pixel 0 of the picture sits inside the scratch,
-   * and a sprite does not scroll with the background.
+   * Two origins, and they differ. The pixels are written into the row of
+   * the picture, where pixel x is byte x. The mask is read out of the
+   * scratch at the origin the background left behind: a fine scroll moves
+   * where pixel 0 of the picture sits inside the scratch, and a sprite
+   * does not scroll with the background. Every write below is bounded to
+   * the picture -- a pixel left of the first drawn column or past the
+   * right edge is skipped before anything is touched -- which is what lets
+   * the row, with no lead and no tail, take the pixels directly.
    */
-  line = VDP_LINE_BYTES + sms.vdp.line_org;
+  line = sms.vdp.pixels[0] + (y * VDP_PIX_ROW_BYTES);
   prio = VDP_PRIO_BYTES + sms.vdp.line_org;
   taken = (uint8 *)sms.vdp.spr_taken;
   clear = sms.vdp.spr_taken;
@@ -613,7 +423,16 @@ vdp_draw_sprites(uint32 y)
             }
           taken[xi] = 1;
 
-          if(prio[xi] != 0)
+          /*
+           * The background wins where its column carries priority AND
+           * its pixel is opaque. The mask holds the first; the second is
+           * read off the row: a background index is four bits plus
+           * sixteen for the second bank, so its low four bits are zero
+           * exactly when it is transparent (vdp.h, VDP_TC_KEY). The row
+           * still holds the background here -- a pixel a sprite already
+           * wrote is taken, and left above.
+           */
+          if((prio[xi] != 0) && (((uint32)line[xi] & 15UL) != 0UL))
             continue;
 
           line[xi] = (uint8)(16UL + idx);
@@ -623,13 +442,13 @@ vdp_draw_sprites(uint32 y)
 
 /*
  * ---------------------------------------------------------------------------
- * One line of the background plane, composed into the scratch and packed
- * into the index buffer at row y. Called once per line of the picture
- * from vdp_line and from nowhere else; nothing is called from inside it,
- * per pixel or per tile -- the plane table replaces the loop over bits,
- * the two flip directions are two loops written out, and the scratch's
- * lead and tail replace the compare a fine scroll would otherwise need on
- * every pixel.
+ * One line of the background plane, composed into the index buffer at row
+ * y, one byte a pixel. Called once per line of the picture from vdp_line
+ * and from nowhere else; nothing is called from inside it, per pixel or
+ * per tile -- the plane table replaces the loop over bits, the two flip
+ * directions are two loops written out, and the recut of each stroke out
+ * of the words in hand replaces the compare a fine scroll would otherwise
+ * need on every pixel.
  *
  * The order of one line (TotalSMS/src/core/sms_vdp.c:787-898 for every
  * step; the document where it is named):
@@ -647,23 +466,28 @@ vdp_draw_sprites(uint32 y)
  *   3. The sprites of the line are chosen, before anything is composed:
  *      the choice reads the attribute table and the registers only, and
  *      what it leaves behind -- how many sprites were kept -- decides how
- *      the line is rendered. None kept and nothing will read the two
- *      scratches, so neither is written and the composition below lays its
- *      sixteen pixel groups straight into the row; one kept or more and
- *      the line goes through the scratch exactly as it always did, since
- *      the sprite pass reads both. The two ways draw the same row, and the
- *      same words: they share one emitter (vdp.h, VDP_EMIT16).
+ *      the line is rendered. Both ways lay the strokes straight into the
+ *      row through one emitter (vdp.h, VDP_EMIT8). None kept and nothing
+ *      will read a priority mask, so none is written; one kept or more and
+ *      the mask is laid into the scratch as the strokes are composed,
+ *      since the sprite pass reads it. Two loops written out rather than
+ *      one loop with a test: the stroke loop already carries more live
+ *      values than the processor has registers, and a mask cursor held
+ *      live across the line that does not need it would be paid in stack
+ *      traffic on every stroke of the lines that are most of a screen.
  *   4. One stroke per tile column. Screen column c shows source column
  *      (c - coarse) & 31, each stroke shifted right by the fine scroll
  *      (docs/sms_gg/GGOfficialDocs.md:1394: a value of 1 moves the scene
  *      one dot to the right; sms_vdp.c:798-800, :880). Screen column -1
  *      -- the stroke whose tail becomes pixels 0 to fine-1 -- is walked
- *      when the fine scroll is not zero, into the lead of the scratch; the
- *      stroke of screen column 31 then runs into the tail. When register
- *      0 bit 7 holds the right eight columns still, screen columns 24 to
- *      31 take the unscrolled row (sms_vdp.c:838-850): a tile grain,
- *      like TotalSMS, which is at most seven pixels off at that border
- *      under a fine scroll. The name table word is read low byte first
+ *      when the fine scroll is not zero; its eight pixels are composed for
+ *      the recut of the stroke after it and yield no pixels of their own.
+ *      The mask of that stroke lands in the lead of the scratch and the
+ *      mask of screen column 31 runs into its tail. When register 0 bit 7
+ *      holds the right eight columns still, screen columns 24 to 31 take
+ *      the unscrolled row (sms_vdp.c:838-850): a tile grain, like
+ *      TotalSMS, which is at most seven pixels off at that border under a
+ *      fine scroll. The name table word is read low byte first
  *      (sms_vdp.c:852): bit 12 priority, 11 palette bank, 10 vertical
  *      flip, 9 horizontal flip, 0 to 8 the pattern (sms_vdp.c:855-863).
  *      The pattern row is 4 bytes, one per plane, at pattern * 32 + row *
@@ -672,13 +496,10 @@ vdp_draw_sprites(uint32 y)
  *      adds 16 (sms_vdp.c:874-876); the mask is priority and index not
  *      zero (sms_vdp.c:893).
  *   5. Register 0 bit 5: pixels 0 to 7 take the border colour and the
- *      mask (sms_vdp.c:826-836). The line that skips the scratch does the
- *      same to the two words those eight pixels fill, and lays no mask:
- *      nothing on that line reads one.
- *   6. The sprites of the line, over the background -- only where step 3
- *      kept some.
- *   7. Pack, likewise only where step 3 kept some: the other line is
- *      already packed.
+ *      mask (sms_vdp.c:826-836). The colour is laid by the first stroke
+ *      on both ways; the mask only where a sprite pass will read it.
+ *   6. The sprites of the line, over the background in the row -- only
+ *      where step 3 kept some.
  *
  * Every table is read through a pointer loaded once at the head: on a
  * processor without a cache each sms.vdp.field is a load, and a line
@@ -699,12 +520,10 @@ vdp_render_line(uint32 y)
   const uint8 *t3;
   uint32 *tc;
   uint8 *tcv;
-  uint8 *line;
   uint8 *prio;
   uint8 *eb;
   uint8 *fb;
   uint32 *ent;
-  uint32 *dstw;
   uint32 *pdw;
   uint32 *out;
   uint32 border;
@@ -725,10 +544,8 @@ vdp_render_line(uint32 y)
   uint32 rv;
   uint32 sw;
   uint32 x;
-  uint32 w0;
-  uint32 w1;
-  uint32 w2;
   uint32 *ow;
+  uint32 *rw;
   uint32 lag;
   uint32 jsl;
   uint32 jsr;
@@ -738,22 +555,6 @@ vdp_render_line(uint32 y)
   uint32 pw1;
   uint32 gw0;
   uint32 gw1;
-#if SMS_CEL_BPP8
-  /*
-   * The eight bit row of this line: as words, with the word of four border
-   * pixels the display-off branch fills it with, and as bytes for the copy a
-   * line with sprites ends on. The pair the packing needs is gone under this
-   * switch: at one byte a pixel every stroke writes its own two words, so
-   * nothing is held back for the stroke after it.
-   */
-  uint32 *ow8;
-  uint32 bg8;
-  const uint8 *src8;
-  uint8 *dst8;
-#else
-  uint32 qw0;
-  uint32 qw1;
-#endif
 
   reg = sms.vdp.reg;
 
@@ -764,57 +565,20 @@ vdp_render_line(uint32 y)
    * by the fine scroll once that is known.
    */
   sms.vdp.line_org = VDP_LINE_LEAD;
-  line = VDP_LINE_BYTES + VDP_LINE_LEAD;
-  prio = VDP_PRIO_BYTES + VDP_LINE_LEAD;
   out = (uint32 *)(sms.vdp.pixels[0] + (y * VDP_PIX_ROW_BYTES));
   border = VDP_BACKDROP_INDEX();
+  /* Four equal bytes in a word carry no byte order with them. */
+  borderw = border * VDP_TC_LANE_ONE;
 
   if(((uint32)reg[1] & 0x40UL) == 0UL)
     {
       /*
-       * Step 1. The three words of a uniform row are computed once and
-       * stored sixteen times, and the scratch takes the same row.
-       *
-       * The reason it once gave for doing so -- that the scratch always
-       * holds what the buffer holds -- no longer stands: a line with no
-       * sprite on it writes no scratch at all (vdp.h, VDP_LINE_*). Nothing
-       * reads what this branch leaves there either, since a line with the
-       * picture off carries no sprite pass. The write is kept because this
-       * branch is left untouched, not because anything depends on it.
+       * Step 1. The word of four border pixels, stored down the row.
+       * Nothing reads the scratch after this branch -- a line with the
+       * picture off carries no sprite pass -- so nothing is written there.
        */
-      for(x = 0; x < VDP_PIX_WIDTH; x++)
-        {
-          line[x] = (uint8)border;
-          prio[x] = 0;
-        }
-      w0 = (border << 26) | (border << 20) | (border << 14)
-         | (border << 8) | (border << 2) | (border >> 4);
-      w1 = ((border & 15UL) << 28) | (border << 22) | (border << 16)
-         | (border << 10) | (border << 4) | (border >> 2);
-      w2 = ((border & 3UL) << 30) | (border << 24) | (border << 18)
-         | (border << 12) | (border << 6) | border;
-      for(x = 0; x < (VDP_PIX_WIDTH / 16UL); x++)
-        {
-          out[0] = w0;
-          out[1] = w1;
-          out[2] = w2;
-          out += 3;
-        }
-#if SMS_CEL_BPP8
-      /*
-       * And the same uniform row at one byte a pixel, so that a line with
-       * the picture switched off is as right on the probe's cel as it is on
-       * the shipped one. Four equal bytes in a word carry no byte order
-       * with them.
-       */
-      if(vdp_cel8_compose != 0)
-        {
-          bg8 = border * VDP_TC_LANE_ONE;
-          ow8 = (uint32 *)(vdp_cel8_pixels + (y * VDP_CEL8_ROW_BYTES));
-          for(x = 0; x < (VDP_CEL8_ROW_BYTES / 4UL); x++)
-            ow8[x] = bg8;
-        }
-#endif
+      for(x = 0; x < (VDP_PIX_ROW_BYTES / 4UL); x++)
+        out[x] = borderw;
       return;
     }
 
@@ -829,14 +593,14 @@ vdp_render_line(uint32 y)
   coarse = hs >> 3;
 
   /*
-   * The fine scroll shifts the origin of the picture and not the place
-   * each stroke is written, so that a stroke always lands on a word
-   * boundary (vdp.h, VDP_LINE_*). Everything that speaks in picture
-   * coordinates -- the masked left column below, the sprite pass, the
-   * packer -- reads the origin from here.
+   * The fine scroll shifts the origin of the picture inside the scratch
+   * and not the place each stroke's mask is written, so that a stroke
+   * always lands on a word boundary (vdp.h, VDP_LINE_*). Everything that
+   * reads the mask in picture coordinates -- the masked left column
+   * below, the sprite pass -- reads the origin from here. The row of the
+   * picture has no origin to move: the strokes are recut into it.
    */
   sms.vdp.line_org = VDP_LINE_LEAD - fine;
-  line = VDP_LINE_BYTES + sms.vdp.line_org;
   prio = VDP_PRIO_BYTES + sms.vdp.line_org;
   ys = y + sms.vdp.vscroll;
   if(ys >= VDP_NT_LINES)
@@ -867,60 +631,41 @@ vdp_render_line(uint32 y)
   vdp_select_sprites(y);
   VDP_REPEAT_END;
 
-  if(sms.vdp.spr_count == 0UL
-#if SMS_CEL_BPP8
-     /*
-      * The depth probe composes eight bit pixels here and nowhere else, so
-      * this is where it falls back when it has neither buffer nor cel: the
-      * line takes the scratch path below instead, which composes and packs
-      * six bits exactly as the shipped build does and is drawn by the six
-      * bit cel. A run that could not measure then shows a right picture and
-      * says in its boot line that it measured nothing -- which is the whole
-      * of the fallback, and it costs one test a line, outside the stroke
-      * loop the disassembly is counted on.
-      */
-     && (vdp_cel8_compose != 0)
-#endif
-    )
+  /*
+   * The recut every stroke of either way goes through: the picture begins
+   * fine pixels into the stroke of screen column -1, so the eight picture
+   * pixels of stroke c are cut out of the four words in hand -- the two of
+   * stroke c - 1 and the two of stroke c. lag says which of the four the
+   * picture starts in and VDP_LANE_JOIN takes the four bytes that begin
+   * jsl / 8 bytes into it. Both are constant down the line. Nothing here
+   * is approximate -- it is the same run of index bytes, read from another
+   * rank -- and the bench proves it against a composition written the old
+   * way, byte by byte, for each of the eight fine scrolls.
+   *
+   * Strokes 1 to 32 are the picture; stroke 0 is screen column -1 and
+   * exists only under a fine scroll, where the picture starts inside it.
+   * It is composed for its two words and yields no pixels of its own,
+   * which is why the emit sits behind a test on c.
+   */
+  maskcol = (uint32)reg[0] & 0x20UL;
+  lag = (VDP_LINE_LEAD - fine) >> 2;
+  jsl = ((VDP_LINE_LEAD - fine) & 3UL) << 3;
+  jsr = 31UL - jsl;
+  pw0 = 0;
+  pw1 = 0;
+
+  if(sms.vdp.spr_count == 0UL)
     {
       /*
        * ------------------------------------------------------------------
        * A line with no sprite on it, which on a real screen is most of
-       * them. Nothing will read either scratch before the next line
-       * overwrites what matters, so nothing is written to either: the
-       * sixteen pixel groups go straight from the composition into the
-       * three words of the row, and the second walk over the line -- 256
-       * byte reads to make 48 words -- does not happen.
-       *
-       * The picture still begins at scratch byte line_org, so this way of
-       * rendering has to do the recut the scratch used to do for free by
-       * moving the origin. It is the same cut, made on words instead of on
-       * an address: lag says which of the four words in hand the picture
-       * starts in, and VDP_LANE_JOIN takes the four bytes that begin
-       * jsl / 8 bytes into it. Both are constant down the line. Nothing
-       * here is approximate -- it is the same run of index bytes, read
-       * from another rank -- and the bench proves it against the byte
-       * packer, group for group, for each of the eight fine scrolls.
-       *
-       * Strokes 1 to 32 are the picture; stroke 0 is screen column -1 and
-       * exists only under a fine scroll, where the picture starts inside
-       * it. It is composed for its two words and yields no group of its
-       * own, which is why the group work sits behind a test on c.
+       * them. Nothing will read the mask before the next line overwrites
+       * what matters, so none is written: the strokes go straight from
+       * the composition into the row, two words each, and that is the
+       * whole of the line.
        * ------------------------------------------------------------------
        */
       VDP_COUNT(line_fast);
-
-      borderw = border * VDP_TC_LANE_ONE;
-      maskcol = (uint32)reg[0] & 0x20UL;
-      lag = (VDP_LINE_LEAD - fine) >> 2;
-      jsl = ((VDP_LINE_LEAD - fine) & 3UL) << 3;
-      jsr = 31UL - jsl;
-      pw0 = 0;
-      pw1 = 0;
-#if !SMS_CEL_BPP8
-      qw0 = 0;
-      qw1 = 0;
-#endif
 
       /*
        * The background post, and the row cursor is armed inside the
@@ -929,11 +674,7 @@ vdp_render_line(uint32 y)
        * instead of over it.
        */
       VDP_REPEAT_BEGIN(VDP_POST_BG)
-#if SMS_CEL_BPP8
-      ow = (uint32 *)(vdp_cel8_pixels + (y * VDP_CEL8_ROW_BYTES));
-#else
-      ow = (uint32 *)(sms.vdp.pixels[0] + (y * VDP_PIX_ROW_BYTES));
-#endif
+      ow = out;
       for(c = (fine != 0UL) ? 0UL : 1UL; c <= 32UL; c++)
         {
           yy = (c >= vsi_from) ? y : ys;
@@ -1011,59 +752,28 @@ vdp_render_line(uint32 y)
                   gw1 = VDP_LANE_JOIN(pw1,e0,jsl,jsr);
                 }
 
-              /*
-               * Step 5 folded in: register 0 bit 5 gives pixels 0 to 7 the
-               * border colour, and those eight pixels are exactly the two
-               * groups of the first stroke. Four equal bytes in a word
-               * carry no byte order with them, so the word is the same on
-               * either machine. No mask is laid down for the sprite pass:
-               * there is no sprite pass on this line.
-               */
-              if((maskcol != 0UL) && (c == 1UL))
-                {
-                  gw0 = borderw;
-                  gw1 = borderw;
-                }
-
-#if SMS_CEL_BPP8
-              /*
-               * One byte a pixel, and this is the whole of what the depth
-               * probe changes in the loop: the word the composition has in
-               * hand IS the word the engine reads, so the stroke stores its
-               * two and moves on. No packing, and no pair held back to be
-               * packed with the next stroke -- the parity that fills a
-               * group of sixteen has nothing left to do.
-               *
-               * True only on a big-endian machine, where byte 0 of a lane
-               * word is pixel 0 (vdp.h, VDP_LANE_MSB_FIRST). That is why it
-               * lives behind this switch and not in a named form beside
-               * VDP_EMIT16: a real port of the format would have to be
-               * compiled and exercised in both orders, and this probe
-               * exists to price the format, not to carry it.
-               */
-              ow[0] = gw0;
-              ow[1] = gw1;
+              VDP_EMIT8(gw0,gw1,ow);
               ow += 2;
-#else
-              /*
-               * Two strokes fill one group of sixteen pixels, so one
-               * stroke in two writes the three words.
-               */
-              if((c & 1UL) != 0UL)
-                {
-                  qw0 = gw0;
-                  qw1 = gw1;
-                }
-              else
-                {
-                  VDP_EMIT16(qw0,qw1,gw0,gw1,ow);
-                  ow += 3;
-                }
-#endif
             }
 
           pw0 = e0;
           pw1 = e1;
+        }
+
+      /*
+       * Step 5, after the loop and not inside it: register 0 bit 5 gives
+       * pixels 0 to 7 the border colour, and those eight pixels are
+       * exactly the two words of the first stroke, written over. A test
+       * on the stroke index inside the loop would cost every stroke a
+       * compare and, worse, keep two more values live across a loop that
+       * already spills to the stack for want of registers. No mask is
+       * laid down for the sprite pass: there is no sprite pass on this
+       * line.
+       */
+      if(maskcol != 0UL)
+        {
+          out[0] = borderw;
+          out[1] = borderw;
         }
       VDP_REPEAT_END;
 
@@ -1072,13 +782,14 @@ vdp_render_line(uint32 y)
 
   VDP_COUNT(line_scratch);
 
-
   /*
-   * Step 4. Stroke c is screen column c - 1, and the strokes are counted
-   * from screen column -1: that first one lands in the lead of the
-   * scratch and only its last pixels are picture. With no fine scroll it
-   * is all lead and is skipped -- 32 strokes, columns 0 to 31; with one,
-   * the 33 strokes run from -1 to 31, the last one ending in the tail.
+   * Step 4, the line that carries sprites. The same strokes, recut into
+   * the row the same way, plus the priority mask of each stroke laid into
+   * the scratch as it goes: stroke c's mask stands at scratch word c * 2,
+   * always aligned, and the picture's mask begins at byte line_org
+   * (vdp.h, VDP_LINE_*). With no fine scroll stroke 0 is all lead and is
+   * skipped -- 32 strokes, columns 0 to 31; with one, the 33 strokes run
+   * from -1 to 31, the last mask ending in the tail.
    *
    * What a second pass of this post does NOT do is decode: the first pass
    * leaves every row of the line valid, so the repeat is a pass of hits
@@ -1094,16 +805,20 @@ vdp_render_line(uint32 y)
    * under the sprite one.
    *
    * This is the background post of the breakdown (vdp.h, VDP_REPEAT_*),
-   * and the wrapper opens above the three assignments rather than at the
-   * loop: the stroke index and the two cursors advance, so a second pass
-   * that did not set them again would write past the row instead of over
-   * it. Set again, the pass writes the same bytes into the same places
+   * and the wrapper opens above the three assignments rather than at
+   * the loop: the stroke index, the row cursor and the mask cursor
+   * advance, so a second pass that did not set them again would write
+   * past the row instead of over it. Set again, the pass writes the same bytes into the same places
    * and the picture is the one the control renders. Off, the wrapper is a
    * do/while(0) the compiler folds away.
+   *
+   * The row cursor carries its own name here, as the decode below does:
+   * the two stroke loops are weighed apart by the coverage control, and
+   * two spellings of one name would make it add them up.
    */
   VDP_REPEAT_BEGIN(VDP_POST_BG)
   c = (fine != 0UL) ? 0UL : 1UL;
-  dstw = sms.vdp.line_w + (c * 2UL);
+  rw = out;
   pdw = sms.vdp.prio_w + (c * 2UL);
 
   for(; c <= 32UL; c++)
@@ -1176,41 +891,72 @@ vdp_render_line(uint32 y)
        * one cached row and the bank is laid on here. Both are spread over
        * the four lanes of a word and applied to four pixels at once.
        *
-       * The priority mask is the same thing the pixel loop used to write
-       * one byte at a time: the bit is kept only where the index is not
-       * transparent. An index is below sixteen, so adding 0x7F to each
-       * lane cannot carry into the lane above, and the top bit of
-       * lane | (lane + 0x7F) is exactly "not zero" -- shifted down to the
-       * low bit of the lane and kept only if the column carries priority.
+       * The mask carries the priority bit ALONE, eight pixels at a time:
+       * one word of ones or of zeroes, twice. Whether the pixel under it
+       * is opaque is not folded in here -- the sprite pass reads that off
+       * the row itself, where the index it needs already lies (vdp.h, the
+       * guard on VDP_PLANES_COUNT says why its low four bits suffice).
+       * Folding it in used to cost this loop a lane trick per word, some
+       * fourteen instructions a stroke, on a loop that already spills for
+       * want of registers. What the sprite pass pays instead is one byte
+       * read per candidate pixel under a priority column, and it shows in
+       * the sprite post of the breakdown, not here.
        */
-      bankw = ((word & 0x800UL) != 0UL) ? (16UL * VDP_TC_LANE_ONE) : 0UL;
       prw = ((word & 0x1000UL) != 0UL) ? VDP_TC_LANE_ONE : 0UL;
-
-      dstw[0] = e0 | bankw;
-      dstw[1] = e1 | bankw;
-      pdw[0] = ((e0 | (e0 + VDP_TC_LANE_LOW)) >> 7) & prw;
-      pdw[1] = ((e1 | (e1 + VDP_TC_LANE_LOW)) >> 7) & prw;
-
-      dstw += 2;
+      pdw[0] = prw;
+      pdw[1] = prw;
       pdw += 2;
-    }
-  VDP_REPEAT_END;
 
-  /* Step 5. */
-  if(((uint32)reg[0] & 0x20UL) != 0UL)
-    {
-      for(x = 0; x < 8UL; x++)
+      bankw = ((word & 0x800UL) != 0UL) ? (16UL * VDP_TC_LANE_ONE) : 0UL;
+      e0 |= bankw;
+      e1 |= bankw;
+
+      if(c != 0UL)
         {
-          line[x] = (uint8)border;
-          prio[x] = 1;
+          if(lag == 2UL)
+            {
+              gw0 = e0;
+              gw1 = e1;
+            }
+          else if(lag == 1UL)
+            {
+              gw0 = VDP_LANE_JOIN(pw1,e0,jsl,jsr);
+              gw1 = VDP_LANE_JOIN(e0,e1,jsl,jsr);
+            }
+          else
+            {
+              gw0 = VDP_LANE_JOIN(pw0,pw1,jsl,jsr);
+              gw1 = VDP_LANE_JOIN(pw1,e0,jsl,jsr);
+            }
+
+          VDP_EMIT8(gw0,gw1,rw);
+          rw += 2;
         }
+
+      pw0 = e0;
+      pw1 = e1;
     }
 
   /*
-   * Step 6. The sprites of this line, over the background. The masked left
-   * column of the step above is not covered by them and does not need its
-   * priority mask for that: the sprite pass leaves those pixels alone by
-   * the left edge it starts from.
+   * Step 5, after the loop for the reason the short way gives: the first
+   * stroke's two words take the border colour, and the mask of those
+   * eight pixels is raised in picture coordinates, where the sprite pass
+   * will read it.
+   */
+  if(maskcol != 0UL)
+    {
+      out[0] = borderw;
+      out[1] = borderw;
+      for(x = 0; x < 8UL; x++)
+        prio[x] = 1;
+    }
+  VDP_REPEAT_END;
+
+  /*
+   * Step 6. The sprites of this line, over the background in the row. The
+   * masked left column of the step above is not covered by them and does
+   * not need its priority mask for that: the sprite pass leaves those
+   * pixels alone by the left edge it starts from.
    *
    * The second half of the sprite post, the choice above being the first:
    * the two carry the same name and the displacement the variant measures
@@ -1226,53 +972,6 @@ vdp_render_line(uint32 y)
   VDP_REPEAT_BEGIN(VDP_POST_SPRITES)
   vdp_draw_sprites(y);
   VDP_REPEAT_END;
-
-  /*
-   * Step 7, and the packing post of the breakdown: a pure function of the
-   * scratch into the row, so a second pass writes the same three words per
-   * sixteen pixels back over themselves. It reads the scratch as words and
-   * emits through VDP_EMIT16, the same emitter the line that skips the
-   * scratch uses, so one proof covers the two.
-   */
-  VDP_REPEAT_BEGIN(VDP_POST_PACK)
-  vdp_pack_line(out);
-  VDP_REPEAT_END;
-
-#if SMS_CEL_BPP8
-  /*
-   * The depth probe's row of this line, last of all. The line carries a
-   * sprite, so it was composed in the scratch at six bits and packed into a
-   * buffer nothing draws from under this switch; the eight bit row would
-   * otherwise keep what the LAST frame left there, and a row of last frame's
-   * picture is the one kind of wrong that looks right.
-   *
-   * An earlier form stamped the row flat instead, one uniform index across
-   * the line, so that a stale row could not pass for a plausible band. On a
-   * screen where nearly half the lines carry a sprite the stamp was read as
-   * half a picture missing, twice. So the row is filled with the picture:
-   * the scratch holds the 256 final indexes of the line, sprites drawn over
-   * the background, from byte line_org on -- the same rule the packer above
-   * reads by (vdp.h, line_org). A byte at a time because line_org sits off
-   * a word boundary on six fine scrolls out of eight: a word copy would need
-   * the recut VDP_LANE_JOIN does for the packer, and this copy exists to be
-   * obviously right, not fast.
-   *
-   * What it costs, and to whom. About 256 loads and 256 stores a line, some
-   * 3 000 cycles, on the lines that carry a sprite -- of the order of 25 ms
-   * a frame on a screen where 88 lines do. That is paid by this build only,
-   * and it lands in vdp=, frame= and fps= of the periodic line, which this
-   * build's figures never quote. It moves neither loop the dossier counted
-   * nor what draw= weighs, which is the size of the buffer and not its
-   * contents.
-   */
-  if(vdp_cel8_compose != 0)
-    {
-      src8 = VDP_LINE_BYTES + sms.vdp.line_org;
-      dst8 = vdp_cel8_pixels + (y * VDP_CEL8_ROW_BYTES);
-      for(x = 0; x < VDP_PIX_WIDTH; x++)
-        dst8[x] = src8[x];
-    }
-#endif
 }
 
 int32
@@ -1285,10 +984,6 @@ vdp_init(void)
   uint32 x;
   uint32 pre0_calc;
   uint32 pre1_calc;
-#if SMS_CEL_BPP8
-  uint32 pre0_calc8;
-  uint32 pre1_calc8;
-#endif
   CCB *cel;
   uint32 probe;
 
@@ -1393,51 +1088,6 @@ vdp_init(void)
   sms.vdp.tc = vdp_tc_block;
   sms.vdp.tc_valid = (uint8 *)vdp_tc_block + VDP_TC_BYTES;
 
-#if SMS_CEL_BPP8
-  /*
-   * The depth probe's picture, one byte a pixel: forty-eight kilobytes of
-   * the same DRAM the render competes for.
-   *
-   * LAST OF ALL THE BLOCKS, and that order is the whole of its promise not to
-   * get in the way. Every allocation above is fatal when it is refused -- the
-   * program has no picture, no plane table, no row cache without them -- so a
-   * probe served before them on a console short of forty-eight kilobytes
-   * would take the memory and bring the boot down in place of switching
-   * itself off. Served last, it competes with nothing: what it gets is what
-   * was left over, and what it does not get costs the run its figure and
-   * nothing else.
-   *
-   * A refusal is therefore not fatal and not a failure code: the probe has
-   * nowhere to compose, says so, and the run draws the six bit picture and
-   * measures nothing.
-   */
-  if(vdp_cel8_pixels == NULL)
-    {
-      vdp_cel8_pixels = (uint8 *)sys_alloc("vdp_cel8",
-                                           (int32)VDP_CEL8_BUF_BYTES,
-                                           MEMTYPE_DRAM | MEMTYPE_FILL);
-      if(vdp_cel8_pixels == NULL)
-        LOG_WARN(LOG_CAT_VDP,
-                 ("cel8 probe off: no memory for the eight bit picture, "
-                  "the six bit cel keeps the screen"));
-    }
-
-  /*
-   * And the free figure, read only when there is an allocation for it to
-   * describe, and read on EVERY init rather than only on the one that took
-   * the block: the block is taken once and kept, but what the console has
-   * left is a fact about the moment it is asked, and a second init reprinting
-   * the first one's answer would be publishing a stale figure as a fresh one.
-   */
-  if(vdp_cel8_pixels != NULL)
-    {
-      MemInfo cel8_mi;
-
-      AvailMem(&cel8_mi,MEMTYPE_DRAM);
-      vdp_cel8_dram_free = cel8_mi.minfo_SysFree;
-    }
-#endif
-
   /*
    * Cleared here on every init, not only on the first: the allocator's
    * fill flag zeroes the block the one time it is taken, and a second init
@@ -1453,23 +1103,11 @@ vdp_init(void)
         sms.vdp.pixels[b][x] = 0;
     }
 
-#if SMS_CEL_BPP8
-  /* Cleared on every init, for the reason the buffers above are. */
-  if(vdp_cel8_pixels != NULL)
-    {
-      for(x = 0; x < VDP_CEL8_BUF_BYTES; x++)
-        vdp_cel8_pixels[x] = 0;
-    }
-#endif
-
   for(i = 0; i < VDP_CRAM_SIZE; i++)
     sms.vdp.cram[i] = 0;
 
   for(i = 0; i < (int32)VDP_LINE_WORDS; i++)
-    {
-      sms.vdp.line_w[i] = 0;
-      sms.vdp.prio_w[i] = 0;
-    }
+    sms.vdp.prio_w[i] = 0;
 
   sms.vdp.line_org = VDP_LINE_LEAD;
 
@@ -1571,66 +1209,50 @@ vdp_init(void)
    * one line off the vertical count, two words off the row offset, one
    * pixel off the pixel count (include/3do/hardware.h:210, :232, :234).
    *
-   * Two details this pair had wrong, and a capture paid for both. The row
+   * Two details this pair had wrong, and a capture paid for each. The row
    * offset has TWO fields in the second word, at two different bit
    * positions: the eight bit one at 24 (include/3do/hardware.h:214, :221)
    * and the ten bit one at 16 (:215, :222). A depth BELOW eight bits is
    * read through the eight bit one; the wide field belongs to eight bits
-   * and to sixteen alike (src_exemple/lrex/main.c:290-291) -- the boundary
-   * sits between six and eight, not after eight, and reading it as "eight
-   * or less" is a mistake this file has since made once at the other
-   * depth. Written at 16, a row offset of 46 words leaves the
-   * field the engine actually reads at zero -- a stride of two words
-   * where the rows are 48 apart, which is a picture sheared into thin
-   * diagonals rather than a picture with wrong colours. And the linear
-   * bit (:193) is not a coded cel's: the library sets neither of these on
-   * this very block, and the debug line at the end of this function now
-   * shows the two spellings landing on the same two words.
+   * and to sixteen alike -- "bits 25-16 for the word offset for an 8 or
+   * 16 bpp cel" (src_exemple/lrex/main.c:290-291, and the same pairing
+   * spelled as code in src_exemple/3d_3do_logo/main.c:79-82, where a row
+   * offset counted for eight bit pixels is written through WOFFSET10).
+   * The boundary sits between six and eight, not after eight: this file
+   * learned the eight bit field at six bits, then read it as "eight or
+   * less" and was caught by the arbiter at the end of this function when
+   * the depth became eight. Written into the wrong field, the field the
+   * engine reads stays at zero -- a stride of two words where the rows
+   * are sixty-four apart, which is a picture sheared into thin diagonals
+   * rather than a picture with wrong colours. And the linear bit (:193)
+   * is not a coded cel's: the library sets neither of these on this very
+   * block, and the debug line at the end of this function shows the two
+   * spellings landing on the same two words.
    */
   pre0_calc = ((VDP_ACTIVE_LINES - PRE0_VCNT_PREFETCH) << PRE0_VCNT_SHIFT)
-            | PRE0_BPP_6;
+            | PRE0_BPP_8;
   pre1_calc = (((VDP_PIX_ROW_BYTES / 4UL) - PRE1_WOFFSET_PREFETCH)
-               << PRE1_WOFFSET8_SHIFT)
+               << PRE1_WOFFSET10_SHIFT)
             | PRE1_TLLSB_PDC0
             | (VDP_PIX_WIDTH - PRE1_TLHPCNT_PREFETCH);
-
-#if SMS_CEL_BPP8
-  /*
-   * The same pair for the depth probe's block, and the ONE field that makes
-   * eight bits a different case rather than the same case one notch deeper.
-   *
-   * The row offset moves to the TEN bit field at 16. The boundary is not
-   * "eight bits or less takes the eight bit field" -- it is BELOW eight, and
-   * a depth of exactly eight goes with sixteen: "bits 25-16 for the word
-   * offset for an 8 or 16 bpp cel" (src_exemple/lrex/main.c:290-291, and the
-   * same pairing spelled as code in src_exemple/3d_3do_logo/main.c:79-82,
-   * where a row offset counted for eight bit pixels is written through
-   * WOFFSET10). Written into the eight bit field instead, the field the
-   * engine reads stays at zero: a stride of two words where the rows are
-   * sixty-four apart, which is the picture sheared into diagonals this file
-   * already paid a capture to learn once at six bits.
-   *
-   * The six bit pair above is unaffected -- six is below eight, so it keeps
-   * the eight bit field, and the arbiter below shows the library agreeing
-   * with it word for word.
-   */
-  pre0_calc8 = ((VDP_ACTIVE_LINES - PRE0_VCNT_PREFETCH) << PRE0_VCNT_SHIFT)
-             | PRE0_BPP_8;
-  pre1_calc8 = (((VDP_CEL8_ROW_BYTES / 4UL) - PRE1_WOFFSET_PREFETCH)
-                << PRE1_WOFFSET10_SHIFT)
-             | PRE1_TLLSB_PDC0
-             | (VDP_PIX_WIDTH - PRE1_TLHPCNT_PREFETCH);
-#endif
 
   if(vdp_cel_block == NULL)
     {
       /*
-       * The library first. For a depth below 8 bits CreateCel allocates a
-       * zeroed palette of its own and sets neither the background nor the
-       * load-palette flag (docs/3do/3do_portfolio_2.5.md:5425-5455). Its
-       * palette is left where it lies -- a small init-time allocation of
-       * the library, outside the boot total -- and the cel's palette
+       * The library first. A coded cel takes any depth up to eight, and
+       * at eight CreateCel allocates a zeroed palette of its own only
+       * because the coded option is set; it sets neither the background
+       * nor the load-palette flag (docs/3do/3do_portfolio_2.5.md:5425-5455).
+       * Its palette is left where it lies -- a small init-time allocation
+       * of the library, outside the boot total -- and the cel's palette
        * pointer is repointed on this module's own palette below.
+       *
+       * The palette is the same thirty-two entries the picture had at six
+       * bits: an index the render emits is five bits wide at either depth
+       * -- the loop never writes above 31 -- so a byte changes how an
+       * index is wrapped and not what it means. A console run of the
+       * probe that priced this format showed the thirty-two colours, and
+       * the ruler it drew, at this depth.
        */
       vdp_cel_block = CreateCel((int32)VDP_PIX_WIDTH,
                                 (int32)VDP_ACTIVE_LINES,
@@ -1730,148 +1352,7 @@ vdp_init(void)
       cel->ccb_Height = (int32)VDP_ACTIVE_LINES;
     }
 
-#if SMS_CEL_BPP8
-  /*
-   * The depth probe's cel: the block above again, field for field, at eight
-   * bits over the eight bit picture. Built after it and never instead of
-   * it, so that a refusal anywhere here leaves a program that draws its six
-   * bit cel as it always did.
-   *
-   * Coded at eight bits is what the library documents as buildable -- a
-   * coded cel takes any depth up to eight, and at eight it allocates a
-   * palette only because the coded option is set
-   * (docs/3do/3do_portfolio_2.5.md:5433-5439). That palette is left where
-   * it lies and the pointer repointed on this module's own, as on the six
-   * bit way. There is no hand-filled fallback here: on the six bit way a
-   * refusal by the library still has to produce a screen, while here it
-   * only has to produce an honest boot line.
-   *
-   * The palette is the SAME thirty-two entries, and that is the point of
-   * the probe as much as the composition is: an index the loop emits is
-   * five bits wide in either depth -- the loop never writes above 31 -- so
-   * eight bits changes how an index is wrapped and not what it means. The
-   * run says whether that holds by showing a picture with right colours.
-   */
-  if((vdp_cel8_block == NULL) && (vdp_cel8_pixels != NULL))
-    {
-      vdp_cel8_block = CreateCel((int32)VDP_PIX_WIDTH,
-                                 (int32)VDP_ACTIVE_LINES,
-                                 (int32)VDP_CEL8_BPP,
-                                 CREATECEL_CODED,
-                                 (void *)vdp_cel8_pixels);
-      if(vdp_cel8_block == NULL)
-        {
-          /*
-           * The forty-eight kilobytes taken above stay taken, deliberately.
-           * Everything in this program is allocated at init and never given
-           * back -- there is no counterpart to sys_alloc, and handing the
-           * block to FreeMem behind its back would leave the memory total it
-           * publishes describing a program that no longer exists, which is
-           * worse than the block. The build is scaffolding and its own boot
-           * line says the memory went and the figure did not come, so the
-           * cost is visible rather than hidden.
-           */
-          LOG_WARN(LOG_CAT_VDP,
-                   ("cel8 probe off: the library refused an eight bit cel, "
-                    "the six bit cel keeps the screen (the buffer stays "
-                    "taken: nothing here is given back)"));
-        }
-      else
-        {
-          cel = vdp_cel8_block;
-
-          /* The two the library does not set, for the two reasons above. */
-          cel->ccb_Flags |= CCB_BGND | CCB_LDPLUT;
-
-          /* And the two it does, forced rather than assumed, as above. */
-          cel->ccb_Flags |= CCB_CCBPRE | CCB_LAST;
-          cel->ccb_NextPtr = NULL;
-
-          cel->ccb_SourcePtr = (CelData *)vdp_cel8_pixels;
-          cel->ccb_PLUTPtr = sms.vdp.plut;
-          cel->ccb_PIXC = 0x1F001F00UL;
-
-          /*
-           * The preamble words stay the library's, exactly as they do on the
-           * six bit way and for the same reason: the library knows what the
-           * hardware reads. They are READ OUT AND KEPT here so that the
-           * arbiter at the end of this function can hold them against what
-           * this file computes for a row of eight bit pixels -- the same
-           * arbiter the six bit block has had since a capture paid for it.
-           *
-           * It is not a formality on this side. The composition writes 256
-           * bytes a row and nothing but this pair tells the engine to step by
-           * 256: a row offset the library computed differently would shear
-           * the picture into diagonals AND make draw= weigh a fetch pattern
-           * nobody counted -- a wrong figure that looks like a figure.
-           *
-           * Same frame as the cel it replaces: same picture, same raster,
-           * so the same centring and the same 1:1 mapping.
-           */
-          vdp_cel8_pre0_lib = cel->ccb_PRE0;
-          vdp_cel8_pre1_lib = cel->ccb_PRE1;
-
-          px = (sys_width() - (int32)VDP_PIX_WIDTH) / 2;
-          py = (sys_height() - (int32)VDP_ACTIVE_LINES) / 2;
-          if(px < 0)
-            px = 0;
-          if(py < 0)
-            py = 0;
-          cel->ccb_XPos = px << 16;
-          cel->ccb_YPos = py << 16;
-          cel->ccb_HDX = 1L << 20;
-          cel->ccb_HDY = 0;
-          cel->ccb_VDX = 0;
-          cel->ccb_VDY = 1L << 16;
-          cel->ccb_HDDX = 0;
-          cel->ccb_HDDY = 0;
-          cel->ccb_Width = (int32)VDP_PIX_WIDTH;
-          cel->ccb_Height = (int32)VDP_ACTIVE_LINES;
-        }
-    }
-
-  vdp_cel8_on = (vdp_cel8_block != NULL) ? 1 : 0;
-
-#if SMS_CEL_BPP8_TESTPAT
-  /*
-   * The ruler, laid down once and left alone: line y is filled with colour
-   * number y modulo 32, so the picture is six ramps of thirty-two bands over
-   * its hundred and ninety-two lines. What it measures is on the screen and
-   * not in a figure -- where the bands stop says whether every line is being
-   * fetched, and how many colours they show says whether a colour number
-   * still means what it means at six bits.
-   *
-   * A byte at a time on purpose. This runs once at init, it is not on any
-   * path that is counted, and a byte written is a byte the engine reads: no
-   * word arithmetic stands between what is written here and what comes out.
-   */
-  vdp_cel8_compose = 0;
-  if(vdp_cel8_on != 0)
-    {
-      uint32 ry;
-      uint32 rx;
-
-      for(ry = 0; ry < VDP_ACTIVE_LINES; ry++)
-        {
-          uint8 *rrow = vdp_cel8_pixels + (ry * VDP_CEL8_ROW_BYTES);
-
-          for(rx = 0; rx < VDP_PIX_WIDTH; rx++)
-            rrow[rx] = (uint8)(ry & 31UL);
-        }
-    }
-#else
-  vdp_cel8_compose = vdp_cel8_on;
-#endif
-
-  /*
-   * And this is the only line of the drawing side the probe touches: the
-   * frame loop reads the cel once through vdp_cel() and draws whatever it
-   * finds. The six bit block is built either way and stands ready here.
-   */
-  sms.vdp.cel = (void *)(vdp_cel8_on ? vdp_cel8_block : vdp_cel_block);
-#else
   sms.vdp.cel = (void *)vdp_cel_block;
-#endif
 
   /*
    * Two lines. The first names what was built -- one mode, one picture
@@ -1920,45 +1401,21 @@ vdp_init(void)
             (unsigned long)vdp_cel_block->ccb_HDX,
             (unsigned long)vdp_cel_block->ccb_VDY));
 
-#if SMS_CEL_BPP8
-  /*
-   * The depth probe in one line: whether it is measuring at all, the depth
-   * and row it composes at, what the extra picture cost in DRAM, and what the
-   * console had left once it was taken. Every figure the run is read with has
-   * to be in the run's own trace -- a memory total quoted from a document is
-   * a total nobody can check against the build that produced the drawing
-   * figure.
-   *
-   * Two whole spellings, and the second is the reason there are two: a line
-   * that printed the size of a buffer it never got would be announcing a
-   * spend that did not happen, next to the very word saying it did not. What
-   * was not taken is reported as nothing, not as a plan.
-   */
-  if(vdp_cel8_pixels != NULL)
-    LOG_INFO(LOG_CAT_VDP,
-             ("cel8 probe=%s compose=%s bpp=%lu row=%lu bytes=%lu dram_free=%lu "
-              "%s",
-              vdp_cel8_on ? "on" : "off",
-              vdp_cel8_compose ? "on" : "off (ruler)",
-              (unsigned long)VDP_CEL8_BPP,
-              (unsigned long)VDP_CEL8_ROW_BYTES,
-              (unsigned long)VDP_CEL8_BUF_BYTES,
-              (unsigned long)vdp_cel8_dram_free,
-              vdp_cel8_compose
-                ? "(sprite lines copied from the scratch after packing)"
-                : "(the buffer holds the ruler laid down at init)"));
-  else
-    LOG_INFO(LOG_CAT_VDP,
-             ("cel8 probe=off bytes=0 (no buffer taken, nothing measured, "
-              "the six bit cel keeps the screen)"));
-#endif
-
   /*
    * The preamble arbiter, at debug level: what the library computed for
    * this block beside what this file computes for it. Equal pairs retire
    * the calculation as a suspect; different pairs name, bit by bit, what
    * the hand had wrong. Two whole spellings, so the manual way -- which
    * has no library pair to show -- cannot be mistaken for agreement.
+   *
+   * And a disagreement is raised, not left to be noticed: it is the one
+   * defect that draws a garbled picture with no error anywhere. The
+   * composition writes 256 bytes a row and nothing but this pair tells
+   * the engine to step by 256. On the library way the block carries the
+   * library's words, which are the ones drawn, so the warning names a
+   * wrong calculation rather than a wrong picture -- but the manual way
+   * would draw the calculation, and the warning is what says it was
+   * checked against the library while there was one to ask.
    */
   if(vdp_cel_manual)
     LOG_DBG(LOG_CAT_VDP,
@@ -1966,46 +1423,24 @@ vdp_init(void)
              (unsigned long)pre0_calc,
              (unsigned long)pre1_calc));
   else
-    LOG_DBG(LOG_CAT_VDP,
-            ("cel pre lib=0x%08lx 0x%08lx calc=0x%08lx 0x%08lx",
-             (unsigned long)vdp_pre0_lib,
-             (unsigned long)vdp_pre1_lib,
-             (unsigned long)pre0_calc,
-             (unsigned long)pre1_calc));
-
-#if SMS_CEL_BPP8
-  /*
-   * The same arbiter for the probe's block, and one thing more than the six
-   * bit one has: a disagreement is raised rather than left to be noticed.
-   *
-   * The six bit pair is arbitrated at debug level because a wrong picture is
-   * its own alarm -- the screen shears and the run stops there. This build
-   * draws a picture that is ALREADY part wrong on purpose, and its whole
-   * output is one number; a sheared row here would pass for the mess the
-   * probe was expected to make, and draw= would come back as a plausible
-   * figure for a fetch pattern nobody counted. So the pair is printed, and
-   * the moment it differs the line says which half and what it costs.
-   */
-  if(vdp_cel8_block != NULL)
     {
       LOG_DBG(LOG_CAT_VDP,
-              ("cel8 pre lib=0x%08lx 0x%08lx calc=0x%08lx 0x%08lx",
-               (unsigned long)vdp_cel8_pre0_lib,
-               (unsigned long)vdp_cel8_pre1_lib,
-               (unsigned long)pre0_calc8,
-               (unsigned long)pre1_calc8));
+              ("cel pre lib=0x%08lx 0x%08lx calc=0x%08lx 0x%08lx",
+               (unsigned long)vdp_pre0_lib,
+               (unsigned long)vdp_pre1_lib,
+               (unsigned long)pre0_calc,
+               (unsigned long)pre1_calc));
 
-      if((vdp_cel8_pre0_lib != pre0_calc8) || (vdp_cel8_pre1_lib != pre1_calc8))
+      if((vdp_pre0_lib != pre0_calc) || (vdp_pre1_lib != pre1_calc))
         LOG_WARN(LOG_CAT_VDP,
-                 ("cel8 preamble disagrees: lib=0x%08lx 0x%08lx "
-                  "calc=0x%08lx 0x%08lx -- the engine is not reading the "
-                  "row this build composes, draw= weighs another shape",
-                  (unsigned long)vdp_cel8_pre0_lib,
-                  (unsigned long)vdp_cel8_pre1_lib,
-                  (unsigned long)pre0_calc8,
-                  (unsigned long)pre1_calc8));
+                 ("cel preamble disagrees: lib=0x%08lx 0x%08lx "
+                  "calc=0x%08lx 0x%08lx -- the row offset or the depth "
+                  "this file computes is not what the engine reads",
+                  (unsigned long)vdp_pre0_lib,
+                  (unsigned long)vdp_pre1_lib,
+                  (unsigned long)pre0_calc,
+                  (unsigned long)pre1_calc));
     }
-#endif
 
   return 0;
 }
@@ -2378,17 +1813,15 @@ vdp_report(void)
            (unsigned long)sms.vdp.cnt_tc_inval));
 
   /*
-   * How the lines of the window were rendered: straight into the row, or
-   * through the composition scratch because they carried a sprite.
+   * How the lines of the window were rendered: the short way, or with the
+   * priority scratch and the sprite pass because they carried a sprite.
    * Emitted every time, like the two lines above.
    *
    * It is the key to the breakdown printed by the other report, and the
-   * two are read together or not at all: a line counted in fast= packs
-   * itself as it composes, so its packing falls INSIDE the background post
-   * and it never enters the packing post. On a frame with few sprites
-   * pack= therefore falls towards nothing and bg= carries what pack= used
-   * to, without either post having got faster or slower. Lines with the
-   * display off are in neither count -- they enter no post at all.
+   * two are read together or not at all: a line counted in fast= enters
+   * the background post only, so the sprite post weighs the lines counted
+   * in scratch= and nothing else. Lines with the display off are in
+   * neither count -- they enter no post at all.
    */
   LOG_HOT(LOG_CAT_VDP,LOG_LVL_DBG,
           ("lines fast=%lu scratch=%lu",

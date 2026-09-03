@@ -226,17 +226,16 @@ static void test_cpp10(void)
            "the pixels of a picture are calculated, not restated");
 }
 
-/* ctrl 371.4 ms, and three posts displaced by 228.6, 38.6 and 58.6 ms:
-   they sum to 325.8, which the grouped variant is made to match exactly. */
+/* ctrl 371.4 ms, and two posts displaced by 228.6 and 38.6 ms: they sum
+   to 267.2, which the grouped variant is made to match exactly. */
 static void round_of(uint32 *sum10, uint32 *win_, uint32 ctrl, uint32 bg,
-                     uint32 spr, uint32 pack, uint32 all)
+                     uint32 spr, uint32 all)
 {
   uint32 i;
   for(i = 0; i < VDP_PROFILE_VARIANTS; i++) win_[i] = 4UL;
   sum10[VDP_PROFILE_CONTROL] = ctrl * 4UL;
   sum10[VDP_PROFILE_BG]      = bg   * 4UL;
   sum10[VDP_PROFILE_SPRITES] = spr  * 4UL;
-  sum10[VDP_PROFILE_PACK]    = pack * 4UL;
   sum10[VDP_PROFILE_ALL]     = all  * 4UL;
 }
 
@@ -250,28 +249,26 @@ static void test_emit(void)
   for(i = 0; i < VDP_PROFILE_VARIANTS; i++) drop[i] = 0;
 
   printf("main_profile_emit -- additivity that closes\n");
-  round_of(sum10,win_,3714UL,6000UL,4100UL,4300UL,6972UL);
+  round_of(sum10,win_,3714UL,6000UL,4100UL,6386UL);
   cap_reset();
   main_profile_emit(sum10,win_,drop,120UL,984UL,32UL);
-  check_eq((unsigned long)cap_starting("post "),5UL,
-           "a round that closes publishes the five post lines");
+  check_eq((unsigned long)cap_starting("post "),4UL,
+           "a round that closes publishes the four post lines");
   check_eq((unsigned long)cap_holding("does not close"),0UL,
            "and says nothing about not closing");
   check_eq((unsigned long)cap_holding("close=100pct"),1UL,
-           "the additivity reads 100 pct: 228.6 + 38.6 + 58.6 against 325.8");
+           "the additivity reads 100 pct: 228.6 + 38.6 against 267.2");
   /*
-   * Each post pinned to ITS OWN displacement, and the three chosen far
-   * apart on purpose: an assertion on one of them alone leaves two
+   * Each post pinned to ITS OWN displacement, and the two chosen far
+   * apart on purpose: an assertion on one of them alone leaves them
    * transposable without a word.
    */
   check_eq((unsigned long)cap_holding("post bg cost=228.6ms"),1UL,
            "the background post publishes the displacement it was given");
   check_eq((unsigned long)cap_holding("post sprites cost=38.6ms"),1UL,
            "the sprite post publishes its own, not another's");
-  check_eq((unsigned long)cap_holding("post pack cost=58.6ms"),1UL,
-           "and the packing post its own");
-  check_eq((unsigned long)cap_holding("post rest cost=45.6ms"),1UL,
-           "the residual is 371.4 less the three that were measured");
+  check_eq((unsigned long)cap_holding("post rest cost=104.2ms"),1UL,
+           "the residual is 371.4 less the two that were measured");
   check_eq((unsigned long)cap_holding("post total vdp=371.4ms"),1UL,
            "and the total is the published figure itself");
   /* 228.6 ms a frame over 49 152 pixels: 228 600 us * 12.5 = 2 857 500
@@ -285,18 +282,18 @@ static void test_emit(void)
   if(failed) cap_dump();
 
   printf("main_profile_emit -- additivity that does not close\n");
-  round_of(sum10,win_,3714UL,6000UL,4100UL,4300UL,8714UL);
+  round_of(sum10,win_,3714UL,6000UL,4100UL,8714UL);
   cap_reset();
   main_profile_emit(sum10,win_,drop,120UL,984UL,32UL);
   check_eq((unsigned long)cap_starting("post "),0UL,
            "a round that does not close publishes NO post line");
   check_eq((unsigned long)cap_holding("does not close"),1UL,
            "and says so in one line");
-  check_eq((unsigned long)cap_holding("close=65pct"),1UL,
-           "with the figure that failed the gate");
+  check_eq((unsigned long)cap_holding("close=53pct"),1UL,
+           "with the figure that failed the gate: 267.2 against 500.0");
 
   printf("main_profile_emit -- a displacement below zero\n");
-  round_of(sum10,win_,3714UL,3600UL,4100UL,4300UL,6972UL);
+  round_of(sum10,win_,3714UL,3600UL,4100UL,6386UL);
   cap_reset();
   main_profile_emit(sum10,win_,drop,120UL,984UL,32UL);
   check_eq((unsigned long)cap_holding("gap bg=11.4ms"),1UL,
@@ -317,10 +314,10 @@ static void test_emit(void)
   if(failed) cap_dump();
 
   printf("main_profile_emit -- the posts overrun the published figure\n");
-  /* ctrl 371.4; gaps 228.6 + 128.6 + 128.6 = 485.8, past ctrl. The grouped
-     variant is set to the same 485.8 so the gate closes at 100 pct and the
+  /* ctrl 371.4; gaps 228.6 + 228.6 = 457.2, past ctrl. The grouped
+     variant is set to the same 457.2 so the gate closes at 100 pct and the
      overrun is what the round has to notice by itself. */
-  round_of(sum10,win_,3714UL,6000UL,5000UL,5000UL,8572UL);
+  round_of(sum10,win_,3714UL,6000UL,6000UL,8286UL);
   cap_reset();
   main_profile_emit(sum10,win_,drop,120UL,984UL,32UL);
   check_eq((unsigned long)cap_holding("close=100pct"),1UL,
@@ -334,13 +331,13 @@ static void test_emit(void)
   if(failed) cap_dump();
 
   printf("main_profile_emit -- where the round stands\n");
-  round_of(sum10,win_,3714UL,6000UL,4100UL,4300UL,6972UL);
+  round_of(sum10,win_,3714UL,6000UL,4100UL,6386UL);
   for(i = 0; i < VDP_PROFILE_VARIANTS; i++) drop[i] = i;
   cap_reset();
   main_profile_emit(sum10,win_,drop,120UL,984UL,32UL);
-  check_eq((unsigned long)cap_holding("round dropped ctrl=0 bg=1 spr=2 pack=3 all=4"),1UL,
+  check_eq((unsigned long)cap_holding("round dropped ctrl=0 bg=1 spr=2 all=3"),1UL,
            "the windows thrown out are counted per variant, not in one heap");
-  check_eq((unsigned long)cap_holding("round win ctrl=4 bg=4 spr=4 pack=4 all=4"),1UL,
+  check_eq((unsigned long)cap_holding("round win ctrl=4 bg=4 spr=4 all=4"),1UL,
            "and so are the ones kept");
   for(i = 0; i < VDP_PROFILE_VARIANTS; i++) drop[i] = 0;
   if(failed) cap_dump();
@@ -357,12 +354,11 @@ static void test_emit(void)
   check(strcmp(main_profile_name(VDP_PROFILE_CONTROL),"control") == 0,"control");
   check(strcmp(main_profile_name(VDP_PROFILE_BG),"bg") == 0,"bg");
   check(strcmp(main_profile_name(VDP_PROFILE_SPRITES),"sprites") == 0,"sprites");
-  check(strcmp(main_profile_name(VDP_PROFILE_PACK),"pack") == 0,"pack");
   check(strcmp(main_profile_name(VDP_PROFILE_ALL),"all") == 0,"all");
   check(strcmp(main_profile_name(99UL),"control") == 0,"anything else reads as the control");
 
   printf("main_profile_emit -- the price of the clock readings\n");
-  round_of(sum10,win_,3714UL,6000UL,4100UL,4300UL,6972UL);
+  round_of(sum10,win_,3714UL,6000UL,4100UL,6386UL);
   cap_reset();
   /* 984 samples over 120 frames is 8.2 sampled lines a frame, three
      readings each: 24.6 readings a frame at 32 us, i.e. 787 us = 7 tenths

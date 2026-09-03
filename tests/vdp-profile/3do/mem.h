@@ -4,12 +4,13 @@
 #define MEMTYPE_ANY   (uint32)0
 #define MEMTYPE_FILL  (uint32)0x00000100
 #define MEMTYPE_DRAM  (uint32)0x00080000
-/* The free memory query, as include/3do/mem.h:28-34 lays it out: the cel
-   depth probe's boot line reads minfo_SysFree. Declared here, defined by the
-   one host program that compiles the probe, tests/cel8/romrun.c. The render
-   bench beside this header never compiles the probe and defines no AvailMem:
-   a build of it with -DSMS_CEL_BPP8=1 would stop at the link, which is the
-   right place for it to stop. */
+/* The free memory query, as include/3do/mem.h:28-34 lays it out. Nothing
+   under src/ that the host programs compile reads it any more -- the cel
+   depth probe whose boot line did is gone -- and it is kept because the
+   header it stands in for declares it: a stub that dropped a declaration
+   the real header has would make a future caller build here and fail on
+   the console. No host program defines AvailMem today; one that calls it
+   stops at the link, which is the right place for it to stop. */
 typedef struct MemInfo
 {
   uint32 minfo_SysFree;

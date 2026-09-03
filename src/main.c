@@ -328,30 +328,30 @@ main_perf_emit(uint32 usec,
  *
  * The whole method in one sentence: the video part runs one named post a
  * second time per line, and what that costs is read off the vdp= the
- * periodic line already publishes. Five variants -- the control, one per
- * repeatable post, and the three together -- take one measurement window
- * each in turn, so a single run answers five questions. No clock reading
+ * periodic line already publishes. Four variants -- the control, one per
+ * repeatable post, and the two together -- take one measurement window
+ * each in turn, so a single run answers four questions. No clock reading
  * is added anywhere; the instrument is the figure that was already there.
  *
  * Repetition rather than removal, because the load is a game that runs:
- * two of the three posts raise bits the emulated program reads, so
- * removing one would make it diverge and the measurement would no longer
- * be of anything. Repeating writes the same bytes twice.
+ * both posts raise bits the emulated program reads, so removing one would
+ * make it diverge and the measurement would no longer be of anything.
+ * Repeating writes the same bytes twice.
  *
  * What repetition costs in accuracy is one bias, and it has one sign: the
  * second pass finds its data warmer than the first, so every displacement
- * reads LOW. The variant that repeats the three together bounds it -- the
- * sum of the three separate displacements against that one -- and the
+ * reads LOW. The variant that repeats the two together bounds it -- the
+ * sum of the two separate displacements against that one -- and the
  * publication of the table is conditional on that check closing.
  * ---------------------------------------------------------------------------
  */
 
 /*
  * How many healthy windows each variant gathers before a round is
- * published. Five variants at four windows each, one window a second,
- * is a round every TWENTY seconds at best -- longer by one second for
+ * published. Four variants at four windows each, one window a second,
+ * is a round every SIXTEEN seconds at best -- longer by one second for
  * every window thrown out, and by one more for the window discarded
- * after each round. A two-minute run therefore yields five or six
+ * after each round. A two-minute run therefore yields six or seven
  * rounds: enough that the ones taken before the regime settled can be
  * ignored by reading the last, and short enough that several land
  * inside it.
@@ -385,16 +385,16 @@ main_perf_emit(uint32 usec,
 #define MAIN_PROFILE_SUM_MAX 105UL
 
 /*
- * The additivity gate, in percent: the three separate displacements
+ * The additivity gate, in percent: the two separate displacements
  * against the one the grouped variant produces. Outside this band the
- * three do not describe the same thing as the group, and no table is
+ * two do not describe the same thing as the group, and no table is
  * published -- a wrong figure is worth less than no figure.
  *
  * The band is SYMMETRIC, and that is a decision rather than an
  * oversight. The bias named above has a sign and would argue for a wider
  * low side; the answer is that a bias big enough to move the sum by more
  * than a tenth is not a bias to allow for, it is a model that does not
- * hold -- the three posts would not be describing the same work as the
+ * hold -- the two posts would not be describing the same work as the
  * group. Widening the low side to fit such a round would publish exactly
  * the figure this gate exists to withhold. Ten percent either way, and a
  * round outside it is reported as it stands, with no table.
@@ -505,14 +505,13 @@ main_profile_cpp10(uint32 cost10)
 
 /*
  * The armed variant, by name, for every line that has to say which of the
- * five produced it.
+ * four produced it.
  */
 static const char *
 main_profile_name(uint32 variant)
 {
   if(variant == VDP_PROFILE_BG)      return "bg";
   if(variant == VDP_PROFILE_SPRITES) return "sprites";
-  if(variant == VDP_PROFILE_PACK)    return "pack";
   if(variant == VDP_PROFILE_ALL)     return "all";
   return "control";
 }
@@ -531,17 +530,17 @@ main_profile_state(const uint32 *win,
                    const char   *tag)
 {
   LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("profile %s win ctrl=%lu bg=%lu spr=%lu pack=%lu all=%lu frames=%lu",
+          ("profile %s win ctrl=%lu bg=%lu spr=%lu all=%lu frames=%lu",
            tag,(unsigned long)win[VDP_PROFILE_CONTROL],
            (unsigned long)win[VDP_PROFILE_BG],(unsigned long)win[VDP_PROFILE_SPRITES],
-           (unsigned long)win[VDP_PROFILE_PACK],(unsigned long)win[VDP_PROFILE_ALL],
+           (unsigned long)win[VDP_PROFILE_ALL],
            (unsigned long)frames));
 
   LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("profile %s dropped ctrl=%lu bg=%lu spr=%lu pack=%lu all=%lu",
+          ("profile %s dropped ctrl=%lu bg=%lu spr=%lu all=%lu",
            tag,(unsigned long)dropped[VDP_PROFILE_CONTROL],
            (unsigned long)dropped[VDP_PROFILE_BG],(unsigned long)dropped[VDP_PROFILE_SPRITES],
-           (unsigned long)dropped[VDP_PROFILE_PACK],(unsigned long)dropped[VDP_PROFILE_ALL]));
+           (unsigned long)dropped[VDP_PROFILE_ALL]));
 }
 
 /*
@@ -581,24 +580,24 @@ main_profile_post(const char *name,
  * Publishes one round.
  *
  * Order of the lines, and it is the order of the reasoning: where the
- * round stands, what the five variants read, what the repetition
+ * round stands, what the four variants read, what the repetition
  * displaced, what the instrumentation already there costs, whether the
  * displacements add up -- and only then, if they do, the cost of each
  * post. A round that cannot be weighed prints its figures and stops
  * there, saying why.
  *
  * Three ways it stops. A post that read below the control has not been
- * measured, so the sum of the three is missing a term and no percentage
+ * measured, so the sum of the two is missing a term and no percentage
  * of it would mean anything. The sum against the grouped variant may
- * fall outside the gate. And the three may total PAST the published
+ * fall outside the gate. And the two may total PAST the published
  * figure, which leaves no residual to speak of and shares that add to
  * more than the whole; the round says so rather than printing a residual
  * of zero and letting the shares pass.
  *
  * The post named "rest" is not measured and is printed as what it is:
- * the published figure less the three that were. Whatever the render
- * does that none of the three posts covers is inside it, the repetition
- * bias included.
+ * the published figure less the two that were. Whatever the render
+ * does that neither post covers is inside it, the repetition bias
+ * included.
  */
 static void
 main_profile_emit(const uint32 *sum10,
@@ -612,7 +611,7 @@ main_profile_emit(const uint32 *sum10,
   uint32 gap[VDP_PROFILE_VARIANTS];
   uint32 low[VDP_PROFILE_VARIANTS];
   /*
-   * The four variants held one per name for the lines below: the compiler
+   * The three variants held one per name for the lines below: the compiler
    * counts the SOURCE lines a macro's argument list spans and warns past
    * ten, and an indexed argument spelled out is three times as wide as a
    * name. The aliases are what keep those lists short enough to be built
@@ -620,15 +619,13 @@ main_profile_emit(const uint32 *sum10,
    */
   uint32 m_bg;
   uint32 m_spr;
-  uint32 m_pack;
   uint32 m_all;
   uint32 g_bg;
   uint32 g_spr;
-  uint32 g_pack;
   uint32 g_all;
   uint32 v;
   uint32 ctrl;
-  uint32 sum3;
+  uint32 sum2;
   uint32 closes;
   uint32 rest;
   uint32 reads10;
@@ -660,34 +657,31 @@ main_profile_emit(const uint32 *sum10,
         }
     }
 
-  sum3 = gap[VDP_PROFILE_BG] + gap[VDP_PROFILE_SPRITES] + gap[VDP_PROFILE_PACK];
+  sum2 = gap[VDP_PROFILE_BG] + gap[VDP_PROFILE_SPRITES];
   unweighed = low[VDP_PROFILE_BG] + low[VDP_PROFILE_SPRITES]
-            + low[VDP_PROFILE_PACK] + low[VDP_PROFILE_ALL];
+            + low[VDP_PROFILE_ALL];
 
   main_profile_state(win,dropped,frames,"round");
 
   m_bg = mean[VDP_PROFILE_BG];
   m_spr = mean[VDP_PROFILE_SPRITES];
-  m_pack = mean[VDP_PROFILE_PACK];
   m_all = mean[VDP_PROFILE_ALL];
   g_bg = gap[VDP_PROFILE_BG];
   g_spr = gap[VDP_PROFILE_SPRITES];
-  g_pack = gap[VDP_PROFILE_PACK];
   g_all = gap[VDP_PROFILE_ALL];
 
   LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("profile vdp ctrl=%lu.%lums bg=%lu.%lums spr=%lu.%lums pack=%lu.%lums all=%lu.%lums",
+          ("profile vdp ctrl=%lu.%lums bg=%lu.%lums spr=%lu.%lums all=%lu.%lums",
            (unsigned long)(ctrl / 10UL),(unsigned long)(ctrl % 10UL),
            (unsigned long)(m_bg / 10UL),(unsigned long)(m_bg % 10UL),
            (unsigned long)(m_spr / 10UL),(unsigned long)(m_spr % 10UL),
-           (unsigned long)(m_pack / 10UL),(unsigned long)(m_pack % 10UL),
            (unsigned long)(m_all / 10UL),(unsigned long)(m_all % 10UL)));
 
   /*
-   * Magnitudes only, eight arguments, no string among them.
+   * Magnitudes only, six arguments, no string among them.
    *
    * What the console showed: this line once carried a sign marker before
-   * each of its four figures -- twelve arguments, four of them strings --
+   * each of its figures -- twelve arguments, four of them strings --
    * and the fourth figure came out as the third one's whole part followed
    * by six junk digits, the same six on every round. What still printed
    * whole in the same run: the periodic line, twelve arguments and every
@@ -702,10 +696,9 @@ main_profile_emit(const uint32 *sum10,
    * ends the round above, named, before this line is reached.
    */
   LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("profile gap bg=%lu.%lums spr=%lu.%lums pack=%lu.%lums grouped=%lu.%lums",
+          ("profile gap bg=%lu.%lums spr=%lu.%lums grouped=%lu.%lums",
            (unsigned long)(g_bg / 10UL),(unsigned long)(g_bg % 10UL),
            (unsigned long)(g_spr / 10UL),(unsigned long)(g_spr % 10UL),
-           (unsigned long)(g_pack / 10UL),(unsigned long)(g_pack % 10UL),
            (unsigned long)(g_all / 10UL),(unsigned long)(g_all % 10UL)));
 
   /*
@@ -729,14 +722,13 @@ main_profile_emit(const uint32 *sum10,
 
   /*
    * A post that read below the control is named, and it ends the round:
-   * the sum of the three is short of a term, so the gate below would be
+   * the sum of the two is short of a term, so the gate below would be
    * a percentage of an incomplete sum.
    */
   if(unweighed != 0UL)
     {
       main_profile_post("bg",g_bg,low[VDP_PROFILE_BG],ctrl);
       main_profile_post("sprites",g_spr,low[VDP_PROFILE_SPRITES],ctrl);
-      main_profile_post("pack",g_pack,low[VDP_PROFILE_PACK],ctrl);
       main_profile_post("all",g_all,low[VDP_PROFILE_ALL],ctrl);
       LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
               ("profile add cannot be weighed: %lu variant(s) read below the control, no table published",
@@ -747,11 +739,11 @@ main_profile_emit(const uint32 *sum10,
   /*
    * The additivity control, and the gate on everything below it.
    */
-  closes = (g_all != 0UL) ? ((sum3 * 100UL) / g_all) : 0UL;
+  closes = (g_all != 0UL) ? ((sum2 * 100UL) / g_all) : 0UL;
 
   LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("profile add sum3=%lu.%lums grouped=%lu.%lums close=%lupct",
-           (unsigned long)(sum3 / 10UL),(unsigned long)(sum3 % 10UL),
+          ("profile add sum2=%lu.%lums grouped=%lu.%lums close=%lupct",
+           (unsigned long)(sum2 / 10UL),(unsigned long)(sum2 % 10UL),
            (unsigned long)(g_all / 10UL),(unsigned long)(g_all % 10UL),
            (unsigned long)closes));
 
@@ -764,32 +756,31 @@ main_profile_emit(const uint32 *sum10,
 
   /*
    * The share the published figure claims, put against a direct
-   * measurement for the first time: the grouped displacement is what the
-   * three posts cost, and it is compared to the whole of vdp=. What is
-   * left is the rest, and the rest is a residual.
+   * measurement: the grouped displacement is what the two posts cost,
+   * and it is compared to the whole of vdp=. What is left is the rest,
+   * and the rest is a residual.
    */
   main_profile_post("bg",g_bg,0UL,ctrl);
   main_profile_post("sprites",g_spr,0UL,ctrl);
-  main_profile_post("pack",g_pack,0UL,ctrl);
 
-  if(sum3 > ctrl)
+  if(sum2 > ctrl)
     {
       /*
-       * The three measured posts total more than the figure they were
+       * The two measured posts total more than the figure they were
        * measured against. There is no residual to report -- and the
-       * three shares above already add to more than the whole, which is
+       * two shares above already add to more than the whole, which is
        * the reader's warning that the round describes nothing.
        */
       LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
               ("profile posts overrun the published figure by %lu.%lums: the shares total past 100pct",
-               (unsigned long)((sum3 - ctrl) / 10UL),
-               (unsigned long)((sum3 - ctrl) % 10UL)));
+               (unsigned long)((sum2 - ctrl) / 10UL),
+               (unsigned long)((sum2 - ctrl) % 10UL)));
       LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-              ("post rest not interpretable this round: the three posts already overrun vdp"));
+              ("post rest not interpretable this round: the two posts already overrun vdp"));
     }
   else
     {
-      rest = ctrl - sum3;
+      rest = ctrl - sum2;
       LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
               ("post rest cost=%lu.%lums/frame %lu.%lu cycles/pixel share=%lupct of vdp (residual, not measured)",
                (unsigned long)(rest / 10UL),(unsigned long)(rest % 10UL),
@@ -1124,8 +1115,8 @@ main(int    argc,
    * not follow a constant: the guard makes a change of buffer size refuse
    * to build until the words are brought back in line.
    */
-#if VDP_PIX_BUF_BYTES != 36864UL
-#error "the pixel buffer screen text says 36 kilobytes: update it with the new size"
+#if VDP_PIX_BUF_BYTES != 49152UL
+#error "the pixel buffer screen text says 48 kilobytes: update it with the new size"
 #endif
 #if VDP_TC_TOTAL_BYTES != 36864UL
 #error "the tile cache screen text says 36 kilobytes: update it with the new size"
@@ -1147,7 +1138,7 @@ main(int    argc,
       if(err == VDP_ERR_NO_PIXELS)
         log_fatal(LOG_CAT_VDP,LOG_E_VDP_PIXELS,
                   "cannot allocate the pixel buffer",
-                  "the console refused 36 kilobytes");
+                  "the console refused 48 kilobytes");
       else if(err == VDP_ERR_NO_TILECACHE)
         log_fatal(LOG_CAT_VDP,LOG_E_VDP_TILECACHE,
                   "cannot allocate the tile cache",
