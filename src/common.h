@@ -277,7 +277,7 @@
 #endif
 
 /*
- * The five configurations worth naming:
+ * The six configurations worth naming:
  *
  *   development  the default this file ships with: LOG_ENABLE 1, LOG_LEVEL
  *                LOG_LVL_INFO, SMS_TELEMETRY 1. A cartridge read off the
@@ -313,12 +313,22 @@
  *                frame. What it publishes is a cost per memory access, which
  *                is a property of the machine and not of this build.
  *
- * SMS_VDP_BUFFERS (above) stays at its default of 1 in all five. In every
- * one of them the frame loop executes the cartridge by scanline quotas,
- * the video part renders one line per quota, and the drawing side -- the
- * one draw call and the presentation -- closes the frame: there is one
- * executor and one path, and the switches above decide only what is
- * traced and measured along it.
+ *   cel probe    the development build plus SMS_CEL_PROBE 1. The same
+ *                instrument-bolted-on kind as the two above, and further
+ *                from the game than either: it takes two pages of 64
+ *                kilobytes, draws a numbered test pattern instead of the
+ *                cartridge, and NEVER ENTERS THE FRAME LOOP -- the pattern
+ *                stays on the screen for the whole run. What it publishes
+ *                is what the cel engine and the display charge, which is a
+ *                property of the console and not of this build.
+ *
+ * SMS_VDP_BUFFERS (above) stays at its default of 1 in all six. In every
+ * one of them but the cel probe the frame loop executes the cartridge by
+ * scanline quotas, the video part renders one line per quota, and the
+ * drawing side -- the one draw call and the presentation -- closes the
+ * frame: there is one executor and one path, and the switches above
+ * decide only what is traced and measured along it. The cel probe is the
+ * one exception: it stops the boot before the loop and holds its pattern.
  *
  * Two switch names are refused below so that an old build command fails
  * loudly rather than silently building the default. The built-in test
@@ -538,6 +548,51 @@
  * and passes whatever it is given. Written here it would be a guard that
  * cannot fire -- which was tried, and caught by testing that it fires.
  */
+
+/*
+ * SMS_CEL_PROBE -- what the cel engine charges for a list, and what the
+ * screen's colour table does to a picture of colour numbers.
+ *
+ * The picture is leaving the processor for the cel engine and the display
+ * list, and the budget of that move rests on three figures no document
+ * gives: the fixed cost of one draw call, the cost of one small cel in a
+ * list, and the cost -- and the look -- of the screen's colour table driven
+ * from a picture whose pixels carry their colour number. One figure the
+ * documents do give is that the engine does not run beside the processor
+ * (docs/3do/3DO_Development_Notes.md:73), so every microsecond it takes is
+ * taken from the frame.
+ *
+ * This probe measures those three on a numbered test pattern, no game: the
+ * pattern drawn as a list of growing shape, timed over thirty frames a
+ * shape; then the colour table detoured to thirty-two named colours with
+ * the display's averaging as the console leaves it, cut, and put back; then,
+ * where the console accepts it, a display list carrying one colour table
+ * on the lines above the ninety-sixth and another from it down. It emulates nothing, and nothing may come to depend on it.
+ *
+ * A build with it on does not run the cartridge: the pattern stays on the
+ * screen for the whole run, so that it can be read and captured. That is
+ * said again in the trace as the first line the probe prints.
+ *
+ * Off by default, and scaffolding exactly as the memory probe above is. It
+ * needs the clock and the trace for the same reasons.
+ *
+ * Cuts: the two pages, every list, every timed draw and every line printed
+ * -- both files entirely, so the delivered object is the one that was
+ * there before.
+ */
+#ifndef SMS_CEL_PROBE
+#define SMS_CEL_PROBE 0
+#endif
+
+#if SMS_CEL_PROBE && !SMS_TELEMETRY
+#error "SMS_CEL_PROBE needs SMS_TELEMETRY: a measurement needs the clock"
+#endif
+
+#if SMS_CEL_PROBE && !LOG_ENABLE
+#error "SMS_CEL_PROBE needs LOG_ENABLE: a measurement that cannot print is not one"
+#endif
+
+/* The LOG_LEVEL guard lives in celprobe.c, for the reason given above. */
 
 /*
  * SMS_CEL_BPP8 -- gone, and refused rather than ignored.

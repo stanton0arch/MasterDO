@@ -7,6 +7,7 @@
 #include "dynarec_j1.h"
 #include "dynarec_j2.h"
 #include "memprobe.h"
+#include "celprobe.h"
 
 /*
  * Glyph width of the graphics folio's 8x8 font, used to centre text:
@@ -1184,6 +1185,16 @@ main(int    argc,
   (void)memprobe_install();
 #endif
 
+#if SMS_CEL_PROBE
+  /*
+   * Same side of the footprint as the memory probe, and for the same
+   * reason: it takes two pages of the DRAM the render competes for, and
+   * the footprint line must carry them to describe the build that
+   * measures.
+   */
+  (void)celprobe_install();
+#endif
+
   sys_mem_report();
 
   /*
@@ -1247,6 +1258,18 @@ main(int    argc,
    * rather than a frame slowed.
    */
   (void)memprobe_measure();
+#endif
+
+#if SMS_CEL_PROBE
+  /*
+   * After the seal like the probes above, but not before the loop: in its
+   * place. Once installed it draws its test pattern, prints its figures
+   * and holds the pattern on the screen for ever, because the cartridge
+   * would otherwise draw over it with a colour table that is no longer
+   * its own. Everything below this call runs only when the probe could
+   * not get its pages, which it has said in the trace.
+   */
+  celprobe_measure();
 #endif
 
   /*

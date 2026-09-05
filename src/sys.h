@@ -91,6 +91,24 @@ Item sys_bitmap(void);
  */
 Item sys_screen(void);
 
+#if SMS_CEL_PROBE
+/*
+ * The same two Items for a screen named by its index in the rotation,
+ * whether or not it is the one being drawn into. A caller that must act
+ * on every screen -- a colour table to load on all of them, a display
+ * list bound to one of them -- names the screen it means. An index
+ * outside the count is refused, traced once, and answered 0, as is a
+ * display that is not open.
+ *
+ * Compiled with their one caller and not otherwise: the delivered
+ * binary has no use for them yet, and a build with the probe off must
+ * be the build that was there before it, to the byte. The day the
+ * render loads a colour table on every screen, the guard goes.
+ */
+Item sys_screen_at(int32 index);
+Item sys_bitmap_at(int32 index);
+#endif /* SMS_CEL_PROBE */
+
 /*
  * How many screens the rotation runs over, and which one is being drawn
  * into. The count is what a caller arms a per-screen countdown with when

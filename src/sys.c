@@ -439,6 +439,40 @@ sys_screen(void)
   return sys_ctx->sc_ScreenItems[sys_ctx->sc_CurrentScreen];
 }
 
+#if SMS_CEL_PROBE
+Item
+sys_screen_at(int32 index)
+{
+  if(sys_ctx == NULL)
+    return 0;
+
+  if((index < 0) || (index >= (int32)SYS_NUM_SCREENS))
+    {
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,("sys_screen_at: no screen %ld",
+                                        (long)index));
+      return 0;
+    }
+
+  return sys_ctx->sc_ScreenItems[index];
+}
+
+Item
+sys_bitmap_at(int32 index)
+{
+  if(sys_ctx == NULL)
+    return 0;
+
+  if((index < 0) || (index >= (int32)SYS_NUM_SCREENS))
+    {
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,("sys_bitmap_at: no screen %ld",
+                                        (long)index));
+      return 0;
+    }
+
+  return sys_ctx->sc_BitmapItems[index];
+}
+#endif /* SMS_CEL_PROBE */
+
 int32
 sys_screen_count(void)
 {
