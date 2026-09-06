@@ -144,6 +144,12 @@ int32 sys_height(void);
  * that follows it must land on the same screen, and a reader has to be
  * able to see that they do. An index outside the count is refused and
  * traced once.
+ *
+ * The fill covers the WHOLE bitmap whatever clip rectangle the screen
+ * carries (sys_clip below): the rectangle is put back to the full bitmap
+ * around the fill and restored after it, so that a ground painted around
+ * the picture really reaches the edges. The border of the picture is the
+ * one thing drawn outside the rectangle, and it goes through here.
  */
 Err sys_fill_screen(int32 index, Color color);
 Err sys_fill(Color color);
@@ -169,9 +175,37 @@ Err sys_fill(Color color);
 Err sys_set_colors(int32 index, const uint32 *entries, int32 count);
 
 /*
+ * Sets the clip rectangle of a named screen's bitmap: x, y its top-left
+ * corner in the bitmap, w and h its size (SetClipOrigin, SetClipWidth,
+ * SetClipHeight: include/3do/graphics.h:821-823; docs/3do/3do_portfolio_2.5.md:
+ * 9099-9133, 10403-10420, 10972-10984). Everything drawn into the bitmap
+ * afterwards -- the primitives and the cel engine alike -- is cut to that
+ * rectangle, and (0,0) names its top-left corner from then on: a caller
+ * positions what it draws relative to the rectangle, not to the bitmap.
+ *
+ * The order of the three folio calls is the one the document says is
+ * significant: the origin is put back to the bitmap's corner first, so
+ * that the new width and height are measured against the whole bitmap,
+ * then the size is set, then the origin. The rectangle is remembered per
+ * screen: the fill below puts the whole bitmap back for its own call and
+ * restores this rectangle after it. A refusal is traced once and handed
+ * back; the caller decides what a rectangle it could not set means. An
+ * index outside the rotation, a rectangle that does not fit the bitmap
+ * or a display not open is refused and traced once.
+ */
+Err sys_clip(int32 index, int32 x, int32 y, int32 w, int32 h);
+
+/*
  * Draws one line of text at the given position, using the graphics folio's
  * current font.
  * SetFGPen, MoveTo, DrawText8 idiom: src_exemple/file_api/main.c:111-113.
+ *
+ * Drawn UNDER the clip rectangle the screen carries (sys_clip above), at
+ * a position relative to that rectangle's corner: unlike sys_fill_screen
+ * it does not put the whole bitmap back around its call. The text of the
+ * boot is drawn before the frame loop sets the rectangle, and the error
+ * screen puts the rectangle back to the whole bitmap itself before it
+ * writes (log.c).
  */
 Err sys_text(int32 x, int32 y, const char *text, Color color);
 

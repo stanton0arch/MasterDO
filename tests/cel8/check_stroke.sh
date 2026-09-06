@@ -94,8 +94,12 @@ loops() {
     }' "$1"
 }
 
-echo "== building the development form, one index per byte =="
-build "-DDEBUG=1" "$WORK/vdp.o"
+# The two loops belong to the path where the processor composes the
+# background (src/common.h, SMS_DECOR_CEL 0): the delivered build draws
+# it by cel windows and carries neither, so the object is built with the
+# switch off, as the render bench of tests/vdp-profile/ builds it.
+echo "== building the development form, one index per byte, the background by the processor =="
+build "-DDEBUG=1 -DSMS_DECOR_CEL=0" "$WORK/vdp.o"
 "$DECAOF" -c "$WORK/vdp.o" > "$WORK/vdp.dis"
 
 fail=0

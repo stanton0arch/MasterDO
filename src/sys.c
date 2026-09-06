@@ -78,6 +78,17 @@ static int32 sys_mem_sealed = 0;
 #define SYS_CLUT_ENTRIES 33
 
 /*
+ * The clip rectangle each screen carries, as sys_clip last set it, and
+ * whether one was set at all: the fill puts the whole bitmap back for
+ * its own call and needs to know what to restore. Zero size means none
+ * was set and the bitmap is whole.
+ */
+static int32 sys_clip_x[SYS_NUM_SCREENS];
+static int32 sys_clip_y[SYS_NUM_SCREENS];
+static int32 sys_clip_w[SYS_NUM_SCREENS];
+static int32 sys_clip_h[SYS_NUM_SCREENS];
+
+/*
  * The instruments of the sound path, loaded in this order and released in the
  * reverse one. square.dsp is the square wave generator the emulated sound chip
  * needs, one instance per voice once voices are driven; the mixer sums them to
@@ -453,6 +464,23 @@ sys_display_close(void)
   sys_bm_width = 0;
   sys_bm_height = 0;
 
+  /*
+   * The clip rectangles forgotten with the screens they were set on: a
+   * display opened again starts whole, and the fill must not "restore" a
+   * rectangle of a bitmap that no longer exists.
+   */
+  {
+    int32 i;
+
+    for(i = 0; i < (int32)SYS_NUM_SCREENS; i++)
+      {
+        sys_clip_x[i] = 0;
+        sys_clip_y[i] = 0;
+        sys_clip_w[i] = 0;
+        sys_clip_h[i] = 0;
+      }
+  }
+
   return err;
 }
 
@@ -535,6 +563,42 @@ sys_height(void)
   return sys_bm_height;
 }
 
+/*
+ * The three folio calls of a clip rectangle, in the order the document
+ * makes significant (docs/3do/3do_portfolio_2.5.md:10984): the origin
+ * back at the bitmap's corner, so that the size is measured against the
+ * whole bitmap, then the size, then the origin. The first error met is
+ * the one handed back; the calls after it are still made, so that a
+ * bitmap is never left with a size set and its origin not.
+ */
+static Err
+sys_clip_apply(Item  bitmap,
+               int32 x,
+               int32 y,
+               int32 w,
+               int32 h)
+{
+  Err err;
+  Err first;
+
+  first = 0;
+
+  err = SetClipOrigin(bitmap,0,0);
+  if((err < 0) && (first == 0))
+    first = err;
+  err = SetClipWidth(bitmap,w);
+  if((err < 0) && (first == 0))
+    first = err;
+  err = SetClipHeight(bitmap,h);
+  if((err < 0) && (first == 0))
+    first = err;
+  err = SetClipOrigin(bitmap,x,y);
+  if((err < 0) && (first == 0))
+    first = err;
+
+  return first;
+}
+
 Err
 sys_fill_screen(int32 index,
                 Color color)
@@ -573,12 +637,86 @@ sys_fill_screen(int32 index,
 
   SetFGPen(&gc,color);
 
+  /*
+   * The whole bitmap for the fill, then the screen's own rectangle back:
+   * the rectangle in place takes (0,0) as its own corner and cuts what
+   * lies outside it, and this fill is the one drawing that must reach
+   * the edges. A refusal of either reset is traced once; the fill goes
+   * ahead either way, since a ground cut short still beats none.
+   */
+  if(sys_clip_w[index] > 0)
+    {
+      err = sys_clip_apply(bitmap,0,0,sys_bm_width,sys_bm_height);
+      if(err < 0)
+        LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+                 ("sys_fill_screen: full clip refused err=%ld",(long)err));
+    }
+
   err = FillRect(bitmap,&gc,&rect);
   if(err < 0)
     LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
              ("sys_fill_screen: FillRect err=%ld",(long)err));
 
+  if(sys_clip_w[index] > 0)
+    {
+      if(sys_clip_apply(bitmap,sys_clip_x[index],sys_clip_y[index],
+                        sys_clip_w[index],sys_clip_h[index]) < 0)
+        LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+                 ("sys_fill_screen: clip not restored"));
+    }
+
   return err;
+}
+
+Err
+sys_clip(int32 index,
+         int32 x,
+         int32 y,
+         int32 w,
+         int32 h)
+{
+  Item bitmap;
+  Err err;
+
+  if((sys_ctx == NULL) || (index < 0) || (index >= (int32)SYS_NUM_SCREENS))
+    {
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+               ("sys_clip: no such screen, or display not open"));
+      return -1;
+    }
+
+  if((x < 0) || (y < 0) || (w <= 0) || (h <= 0)
+     || ((x + w) > sys_bm_width) || ((y + h) > sys_bm_height))
+    {
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+               ("sys_clip: refused %ldx%ld at %ld,%ld on a %ldx%ld bitmap",
+                (long)w,(long)h,(long)x,(long)y,
+                (long)sys_bm_width,(long)sys_bm_height));
+      return -1;
+    }
+
+  bitmap = sys_ctx->sc_BitmapItems[index];
+  if(bitmap == 0)
+    {
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+               ("sys_clip: no bitmap, display not open"));
+      return -1;
+    }
+
+  err = sys_clip_apply(bitmap,x,y,w,h);
+  if(err < 0)
+    {
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+               ("sys_clip: refused by the folio err=%ld",(long)err));
+      return err;
+    }
+
+  sys_clip_x[index] = x;
+  sys_clip_y[index] = y;
+  sys_clip_w[index] = w;
+  sys_clip_h[index] = h;
+
+  return 0;
 }
 
 Err

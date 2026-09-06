@@ -214,6 +214,8 @@ main_perf_emit(uint32 usec,
                uint32 vdp_samples,
                uint32 draw_usec,
                uint32 clut_usec,
+               uint32 tiles_usec,
+               uint32 list_usec,
                uint32 over,
                uint32 clk)
 {
@@ -227,6 +229,8 @@ main_perf_emit(uint32 usec,
   uint32 vdp10;
   uint32 draw10;
   uint32 clut_per_frame;
+  uint32 tiles_per_frame;
+  uint32 list_per_frame;
 
   /*
    * Guard, and the divisors below rest on it: a window of at least a second
@@ -322,15 +326,29 @@ main_perf_emit(uint32 usec,
    */
   clut_per_frame = clut_usec / frames;
 
+  /*
+   * The background picture's two posts on the same terms, microseconds
+   * per frame over every frame of the window: the tiles converted at the
+   * head of the presentation, and the windows built band by band. Zero
+   * on a frame where nothing was written and nothing moved; the draw of
+   * the windows is in draw= with the sprite cel's.
+   */
+  tiles_per_frame = tiles_usec / frames;
+  list_per_frame = list_usec / frames;
+
+  /*
+   * The arguments are packed on few lines on purpose: the compiler warns
+   * on a macro call whose arguments run ten lines or more.
+   */
   LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("fps=%lu.%lu frame=%lu.%lums z80=%lu.%lums vdp=%lu.%lums draw=%lu.%lums clut=%luus over=%lu clk=%lu",
+          ("fps=%lu.%lu frame=%lu.%lums z80=%lu.%lums vdp=%lu.%lums draw=%lu.%lums clut=%luus tiles=%luus list=%luus over=%lu clk=%lu",
            (unsigned long)(fps10 / 10UL),(unsigned long)(fps10 % 10UL),
            (unsigned long)(frame10 / 10UL),(unsigned long)(frame10 % 10UL),
            (unsigned long)(z8010 / 10UL),(unsigned long)(z8010 % 10UL),
            (unsigned long)(vdp10 / 10UL),(unsigned long)(vdp10 % 10UL),
            (unsigned long)(draw10 / 10UL),(unsigned long)(draw10 % 10UL),
-           (unsigned long)clut_per_frame,
-           (unsigned long)over,(unsigned long)clk));
+           (unsigned long)clut_per_frame,(unsigned long)tiles_per_frame,
+           (unsigned long)list_per_frame,(unsigned long)over,(unsigned long)clk));
 }
 
 #endif /* MAIN_MEASURE */
@@ -813,6 +831,306 @@ main_profile_emit(const uint32 *sum10,
 
 #endif /* MAIN_PROFILE */
 
+/*
+ * ---------------------------------------------------------------------------
+ * The presentation of a frame: what the loop below does once line 191 has
+ * been counted, before the blanking lines of the emulated raster.
+ *
+ * Why there and not at the end of the frame. The picture the console
+ * shows is the picture as the video memory stood line by line, and line
+ * y shows the memory as it was after the processor's quota of line y.
+ * The writes of lines 192 to 261 therefore belong to the NEXT picture:
+ * presenting when line 191 is counted makes that true with nothing to
+ * note about those writes -- they mark tiles the next presentation
+ * converts. The pace on the field counter stays at the end of the frame,
+ * in the loop, which alone holds a pace.
+ *
+ * What one presentation does, in order: the ground painted around the
+ * picture on the screen that owes it; the colour table set on the screen
+ * that owes it; the background picture brought up to date and cut into
+ * bands, then each band's windows built and drawn, one draw call per
+ * band; the sprite layer drawn over them; the screen bound for the error
+ * path and presented. With the older path (common.h, SMS_DECOR_CEL 0)
+ * the picture is the one buffer and the one draw call, as before.
+ *
+ * The state it shares with the loop -- the cel, the ground, the two
+ * countdowns, the measurement accumulators -- is file scope rather than
+ * passed nine ways; the loop below is the one other reader and writer.
+ * ---------------------------------------------------------------------------
+ */
+
+/* The sprite cel -- or the whole picture's on the older path -- read once at boot. */
+static CCB *main_cel = NULL;
+
+/*
+ * The ground painted around the picture, and how many screens still owe
+ * it. What is painted is the NUMBER of the emulated machine's background
+ * entry, laid on the three components the way the picture's own pixels
+ * carry theirs, and the screen's colour table turns both into the same
+ * colour; read once per frame and compared with what was last painted:
+ * sixteen bits and one compare per frame in the regime where nothing
+ * changes, which is the regime of every game that sets its background
+ * entry once. A game that rewrites the colour of that entry and leaves
+ * the register alone repaints nothing here: the table follows it.
+ *
+ * The countdown is armed with the number of screens on every change and
+ * spent one screen a frame, each just before that screen is drawn into:
+ * the change reaches every screen of the rotation, and none of them is
+ * ever repainted while the scan is reading it.
+ */
+static uint16 main_border_color = 0;
+static int32 main_border_repaint = 0;
+
+/*
+ * How many screens still owe the current colour table. Each screen of
+ * the rotation has a table of its own, and the emulated palette is set
+ * on them the way the ground is painted: armed with the screen count
+ * at every change of the colour memory, spent one screen a frame just
+ * before that screen is drawn into. A table set on the screen the scan
+ * is reading would show the old picture in the new colours for one
+ * frame; the countdown lets the change travel in two frames instead,
+ * which nothing sees. Rearmed if the palette moves again while it is
+ * running down, so the next screen always takes the latest table.
+ */
+static int32 main_clut_repaint = 0;
+
+#if MAIN_MEASURE
+/*
+ * The accumulators of the presentation's side of the periodic line: the
+ * draw calls, the colour table sets, the tile conversions, the window
+ * builds -- four spans, disjoint by construction, each closed before the
+ * next opens -- and the readings refused as impossible. Written by the
+ * presentation and read and cleared by the loop at each window.
+ */
+static uint32 main_perf_draw = 0;
+static uint32 main_perf_clut = 0;
+static uint32 main_perf_tiles = 0;
+static uint32 main_perf_list = 0;
+static uint32 main_perf_clk = 0;
+
+/*
+ * What one reading of the clock costs, priced once at the head of the
+ * loop as the mean of a few back-to-back pairs, and taken out of every
+ * span: a span read between two calls into the operating system
+ * otherwise carries one call's worth, tens of microseconds on this
+ * console -- more than an empty line, a few percent of a rendered one.
+ */
+static uint32 main_perf_clock_cost = 0;
+
+/*
+ * How long the last presentation took, wall clock, from its first
+ * reading to its last. The presentation sits inside the emulated stretch
+ * of the frame -- it is made at line 191 -- and the stretch is what the
+ * processor and video figures are shares of, so it is taken out of the
+ * stretch before the share is computed: the four spans above and the
+ * stretch never overlap, and frame= keeps meaning the whole turn.
+ */
+static uint32 main_present_usec = 0;
+
+/*
+ * One span closed: the reading since its start, less the clock's own
+ * cost, added to the accumulator -- or, past what the span can
+ * physically be, counted as a bad reading and left out (MAIN_CLK_MAX_*).
+ */
+static void
+main_perf_span(uint32 *acc,
+               uint32  start)
+{
+  uint32 delta;
+
+  delta = sys_usec() - start;
+  if(delta < MAIN_CLK_MAX_FRAME_USEC)
+    *acc += (delta > main_perf_clock_cost)
+            ? (delta - main_perf_clock_cost) : 0UL;
+  else
+    main_perf_clk++;
+}
+#endif /* MAIN_MEASURE */
+
+static void
+main_present(void)
+{
+  Err draw_err;
+#if MAIN_MEASURE
+  uint32 present_start;
+  uint32 span_start;
+#endif
+#if SMS_DECOR_CEL
+  int32 bands;
+  int32 k;
+  CCB *band;
+#endif
+
+#if MAIN_MEASURE
+  present_start = sys_usec();
+#endif
+
+  /*
+   * The ground, on the cold side of the lines: one load of sixteen bits
+   * and one compare while nothing changes, and a fill only while the
+   * countdown says a screen still owes the number. A program that moves
+   * register 7 on every frame arms the countdown again on every frame
+   * and so pays one fill a frame -- there is no cheaper honest answer to
+   * a background that really does change that often -- and it still
+   * pays only one line of trace per report window, the count of the
+   * window going with the other aggregates. A program that rewrites the
+   * colour of the entry instead pays nothing here: the table below
+   * carries that.
+   *
+   * Before the drawing and not after: the fill covers the whole screen,
+   * so the picture has to land on top of it.
+   */
+  {
+    uint16 backdrop_now = vdp_backdrop();
+
+    if(backdrop_now != main_border_color)
+      {
+        main_border_color = backdrop_now;
+        main_border_repaint = sys_screen_count();
+      }
+
+    if(main_border_repaint > 0)
+      {
+        /*
+         * Spent on the paint, not on the attempt. A refused fill leaves
+         * that screen showing the ground it had, and the countdown has
+         * to come back to it on the next turn -- decrementing here
+         * regardless would leave one screen of the rotation with the old
+         * colour for the rest of the run, half the frames of a game
+         * showing the wrong ground and nothing saying why. The count
+         * that goes with the aggregates is a count of paints for the
+         * same reason: it must not report a paint that did not happen.
+         */
+        if(sys_fill_screen(sys_screen_index(),(Color)main_border_color) >= 0)
+          {
+            main_border_repaint--;
+            vdp_backdrop_repainted();
+          }
+      }
+  }
+
+  /*
+   * The palette, on the same cold side: one call into the video part,
+   * which rebuilds the 32 entries only if a colour byte moved this
+   * frame, and a set on the screen about to be drawn only while the
+   * countdown says it still owes the table. A program that rewrites its
+   * palette every frame pays one set a frame -- the video part folded
+   * its 32 writes into one rebuild -- and a program that leaves it alone
+   * pays a load and a compare.
+   *
+   * Spent on success only, as the fill above is: a refused set leaves
+   * that screen with the table it had, and the countdown comes back to
+   * it on its next turn rather than leaving half the frames of the run
+   * in the wrong colours. The set is timed on its own, apart from the
+   * draw: it is the display's cost, not the engine's, and the line
+   * publishes it beside the draw so the two never blur.
+   */
+  if(vdp_clut_take() != 0)
+    main_clut_repaint = sys_screen_count();
+
+  if(main_clut_repaint > 0)
+    {
+#if MAIN_MEASURE
+      span_start = sys_usec();
+#endif
+      if(sys_set_colors(sys_screen_index(),vdp_clut(),(int32)VDP_CLUT_ENTRIES) >= 0)
+        main_clut_repaint--;
+#if MAIN_MEASURE
+      main_perf_span(&main_perf_clut,span_start);
+#endif
+    }
+
+#if SMS_DECOR_CEL
+  /*
+   * The background: the picture brought up to date and cut into bands
+   * -- the tiles' span -- then each band's windows built -- the list's
+   * span -- and drawn, one draw call per band, inside the draw's span
+   * with the sprite cel below. The build of band k + 1 waits for the
+   * draw of band k: the blocks come from one arena and the video memory
+   * is replayed in place, and the draw is synchronous
+   * (docs/3do/3DO_Development_Notes.md:73), so the engine is done with
+   * band k when the call returns. A band with no block is skipped, said
+   * once; the video part has counted it.
+   */
+#if MAIN_MEASURE
+  span_start = sys_usec();
+#endif
+  bands = vdp_list_begin();
+#if MAIN_MEASURE
+  main_perf_span(&main_perf_tiles,span_start);
+#endif
+
+  for(k = 0; k < bands; k++)
+    {
+#if MAIN_MEASURE
+      span_start = sys_usec();
+#endif
+      band = (CCB *)vdp_list_band(k);
+#if MAIN_MEASURE
+      main_perf_span(&main_perf_list,span_start);
+#endif
+      if(band == NULL)
+        {
+          LOG_ONCE(LOG_CAT_VDP,LOG_LVL_ERR,
+                   ("decor band %ld has no window to draw",(long)k));
+          continue;
+        }
+#if MAIN_MEASURE
+      span_start = sys_usec();
+#endif
+      draw_err = DrawCels(sys_bitmap(),band);
+#if MAIN_MEASURE
+      main_perf_span(&main_perf_draw,span_start);
+#endif
+      if(draw_err < 0)
+        LOG_ONCE(LOG_CAT_VDP,LOG_LVL_ERR,
+                 ("decor draw failed err=%ld",(long)draw_err));
+    }
+
+  vdp_list_end();
+#endif /* SMS_DECOR_CEL */
+
+  /*
+   * The sprite layer over the windows -- or, on the older path, the one
+   * draw call of the whole picture. What the draw accumulator weighs is
+   * the engine's time and nothing else: the presentation that follows
+   * stays outside it, one cold call per frame, the display's business.
+   * A refused draw is traced once and the run goes on: the trace is what
+   * separates a black picture from a dead loop.
+   */
+#if MAIN_MEASURE
+  span_start = sys_usec();
+#endif
+  draw_err = DrawCels(sys_bitmap(),main_cel);
+#if MAIN_MEASURE
+  main_perf_span(&main_perf_draw,span_start);
+#endif
+  if(draw_err < 0)
+    LOG_ONCE(LOG_CAT_VDP,LOG_LVL_ERR,
+             ("draw failed err=%ld",(long)draw_err));
+
+  /*
+   * The screen the error path would paint on, renewed on every turn so
+   * that it follows the rotation. It names the screen about to be
+   * presented, which is the one a viewer is looking at for the whole of
+   * the next frame: a stop anywhere in that frame writes its message
+   * over the picture that is on the console, and presents it again.
+   * Bound after the presentation instead, it would name the screen the
+   * scan is not reading, and the message would appear over a picture
+   * two frames old.
+   *
+   * Renewed and not bound once, because a binding taken at boot names
+   * one screen for good: with the screens rotating, every other frame
+   * would paint its message where nothing can see it.
+   */
+  log_bind_screen(sys_bitmap(),sys_screen());
+  (void)sys_display_show();
+
+#if MAIN_MEASURE
+  main_present_usec = sys_usec() - present_start;
+#endif
+}
+
 int
 main(int    argc,
      char **argv)
@@ -832,54 +1150,6 @@ main(int    argc,
    */
   int32 residue;
   /*
-   * The cel the video part built at init, read once here and handed to
-   * one draw call per frame. The concrete type is in scope in this file
-   * through the graphics header; the video part hands the block over as
-   * an opaque pointer and never draws or waits itself.
-   */
-  CCB *cel;
-  /*
-   * The draw call's verdict, kept so the compare on it sits after the
-   * measured stretch has closed rather than inside it.
-   */
-  Err draw_err;
-  /*
-   * The ground painted around the picture, and how many screens still owe
-   * it. What is painted is the NUMBER of the emulated machine's background
-   * entry, laid on the three components the way the picture's own pixels
-   * carry theirs, and the screen's colour table turns both into the same
-   * colour; read once per frame and compared with what was last painted:
-   * sixteen bits and one compare per frame in the regime where nothing
-   * changes, which is the regime of every game that sets its background
-   * entry once. A game that rewrites the colour of that entry and leaves
-   * the register alone repaints nothing here: the table below follows it.
-   *
-   * The countdown is armed with the number of screens on every change and
-   * spent one screen a frame, each just before that screen is drawn into:
-   * the change reaches every screen of the rotation, and none of them is
-   * ever repainted while the scan is reading it.
-   */
-  uint16 border_color;
-  int32 border_repaint;
-  /*
-   * How many screens still owe the current colour table. Each screen of
-   * the rotation has a table of its own, and the emulated palette is set
-   * on them the way the ground is painted: armed with the screen count
-   * at every change of the colour memory, spent one screen a frame just
-   * before that screen is drawn into. A table set on the screen the scan
-   * is reading would show the old picture in the new colours for one
-   * frame; the countdown lets the change travel in two frames instead,
-   * which nothing sees. Rearmed if the palette moves again while it is
-   * running down, so the next screen always takes the latest table.
-   */
-  int32 clut_repaint;
-#if MAIN_MEASURE
-  /* The near edge of the one measured stretch of the drawing side. */
-  uint32 draw_start;
-  /* The near edge of a colour table set, when a screen owes one. */
-  uint32 clut_start;
-#endif
-  /*
    * Whether the core has yet to be found stopped by the per-frame
    * consultation below. Cleared once, when the core has met an opcode it
    * cannot execute, and nothing ever sets it back: clearing it exactly
@@ -898,15 +1168,6 @@ main(int    argc,
   uint32 line_mid;
   uint32 line_end;
   uint32 perf_delta;
-  /*
-   * What one reading of the clock costs, priced once at the head of the
-   * loop as the least of a few back-to-back pairs, and taken out of every
-   * sampled line: a line read between two calls into the operating
-   * system otherwise carries one call's worth, tens of microseconds on
-   * this console -- more than an empty line, a few percent of a rendered
-   * one, and scaled by the lines of a frame either way.
-   */
-  uint32 perf_clock_cost;
   /* The phase of the sampled lines this frame; it steps once per turn. */
   uint32 perf_sample_phase = 0;
   uint32 perf_window;
@@ -921,10 +1182,11 @@ main(int    argc,
   uint32 perf_over = 0;
   /*
    * The counters the periodic line reports -- the emulated stretch of a
-   * whole frame, the two sampled sides of a line inside it, and the draw
-   * call. They are written by this function and by no other: a module
-   * told to do its share of a turn does not time itself, because the
-   * timing belongs where the turn is cut up and where the pace is held.
+   * whole frame and the two sampled sides of a line inside it. They are
+   * written by this function and by no other, and the presentation's
+   * four spans by main_present above and by no other: a module told to
+   * do its share of a turn does not time itself, because the timing
+   * belongs where the turn is cut up and where the pace is held.
    */
   uint32 perf_emul = 0;
   uint32 perf_emul_frames = 0;
@@ -932,16 +1194,6 @@ main(int    argc,
   uint32 perf_z80_samples = 0;
   uint32 perf_vdp = 0;
   uint32 perf_vdp_samples = 0;
-  uint32 perf_draw = 0;
-  /*
-   * The colour table sets of the window, in microseconds: summed over the
-   * frames that paid one, published divided by all the frames of the
-   * window. Zero over a window where the palette stood still, which is
-   * what most games do once past their title screen.
-   */
-  uint32 perf_clut = 0;
-  /* Readings refused as impossible (MAIN_CLK_MAX_*), per window. */
-  uint32 perf_clk = 0;
 #endif
 #if MAIN_MEASURE
   /*
@@ -1182,12 +1434,45 @@ main(int    argc,
         log_fatal(LOG_CAT_VDP,LOG_E_VDP_LANEORDER,
                   "this build has the wrong byte order",
                   "the render was built for the other one");
+      else if(err == VDP_ERR_NO_DECOR)
+        log_fatal(LOG_CAT_VDP,LOG_E_VDP_DECOR,
+                  "no page for the background picture",
+                  "64k refused, or the blocks outrun it");
       else
         log_fatal(LOG_CAT_VDP,LOG_E_VDP_VRAM,
                   "cannot allocate the video ram",
                   "the console refused 16 kilobytes");
       return (int)err;
     }
+
+  /*
+   * The clip rectangle of every screen set on the picture's area, once:
+   * everything the frame loop draws -- the background windows, the
+   * sprite cel -- is cut to it, and positioned from its corner (sys.h,
+   * sys_clip). What it erases is the alignment columns of a window,
+   * which start left of the picture; the ground around the picture is
+   * the one drawing outside it, and the fill puts the whole bitmap back
+   * for its own call. A refusal is traced and the run goes on: the
+   * picture then shows at most three stray columns at its left edge, and
+   * the trace says why.
+   */
+  {
+    int32 view_x;
+    int32 view_y;
+    int32 view_w;
+    int32 view_h;
+    int32 screen;
+
+    vdp_view(&view_x,&view_y,&view_w,&view_h);
+    for(screen = 0; screen < sys_screen_count(); screen++)
+      {
+        if(sys_clip(screen,view_x,view_y,view_w,view_h) < 0)
+          LOG_ERR(LOG_CAT_VDP,("view clip refused on screen %ld",(long)screen));
+      }
+    LOG_INFO(LOG_CAT_VDP,("view clip %ldx%ld at %ld,%ld set on %ld screens",
+                          (long)view_w,(long)view_h,(long)view_x,(long)view_y,
+                          (long)sys_screen_count()));
+  }
 
   /*
    * The one reset of a boot, and its position is the point: after
@@ -1324,7 +1609,7 @@ main(int    argc,
    * init, so reading it per frame would buy nothing and cost a call on
    * every turn.
    */
-  cel = (CCB *)vdp_cel();
+  main_cel = (CCB *)vdp_cel();
 
   /*
    * The ground the picture sits in: the emulated machine's own background
@@ -1347,8 +1632,8 @@ main(int    argc,
    * nothing about the machine being emulated. Those two readings are
    * settled; a game asked for a background colour and now gets it.
    */
-  border_color = vdp_backdrop();
-  border_repaint = sys_screen_count();
+  main_border_color = vdp_backdrop();
+  main_border_repaint = sys_screen_count();
 
   /*
    * The colour table, armed the same way: the video part built it at init
@@ -1356,7 +1641,7 @@ main(int    argc,
    * its first drawing, so no frame is ever shown through the linear table
    * the display came up with.
    */
-  clut_repaint = sys_screen_count();
+  main_clut_repaint = sys_screen_count();
 
   vbl_target = sys_vbl_count() + MAIN_VBL_STEP;
 
@@ -1404,7 +1689,7 @@ main(int    argc,
    * milliseconds of video work in a build that rendered nothing.
    * A pair that reads as impossible is a bad reading and is left out.
    */
-  perf_clock_cost = 0;
+  main_perf_clock_cost = 0;
   line_start = 0;
   for(perf_delta = 0; perf_delta < MAIN_CLK_COST_PAIRS; perf_delta++)
     {
@@ -1412,14 +1697,14 @@ main(int    argc,
       emul_start = sys_usec() - emul_start;
       if(emul_start < MAIN_CLK_MAX_LINE_USEC)
         {
-          perf_clock_cost += emul_start;
+          main_perf_clock_cost += emul_start;
           line_start++;
         }
     }
   if(line_start != 0UL)
-    perf_clock_cost /= line_start;
+    main_perf_clock_cost /= line_start;
   LOG_INFO(LOG_CAT_PERF,("clock read cost=%luus (taken out of each line sample)",
-                         (unsigned long)perf_clock_cost));
+                         (unsigned long)main_perf_clock_cost));
 
   perf_window = sys_usec();
 #endif
@@ -1547,22 +1832,22 @@ main(int    argc,
               perf_delta = line_mid - line_start;
               if(perf_delta < MAIN_CLK_MAX_LINE_USEC)
                 {
-                  perf_z80 += (perf_delta > perf_clock_cost)
-                              ? (perf_delta - perf_clock_cost) : 0UL;
+                  perf_z80 += (perf_delta > main_perf_clock_cost)
+                              ? (perf_delta - main_perf_clock_cost) : 0UL;
                   perf_z80_samples++;
                 }
               else
-                perf_clk++;
+                main_perf_clk++;
 
               perf_delta = line_end - line_mid;
               if(perf_delta < MAIN_CLK_MAX_LINE_USEC)
                 {
-                  perf_vdp += (perf_delta > perf_clock_cost)
-                              ? (perf_delta - perf_clock_cost) : 0UL;
+                  perf_vdp += (perf_delta > main_perf_clock_cost)
+                              ? (perf_delta - main_perf_clock_cost) : 0UL;
                   perf_vdp_samples++;
                 }
               else
-                perf_clk++;
+                main_perf_clk++;
             }
           else
             {
@@ -1574,155 +1859,37 @@ main(int    argc,
           vdp_line();
 #endif
 
+          /*
+           * The presentation, once the last line of the picture has been
+           * counted and before the first blanking line runs: the picture
+           * is whole, and the writes of the lines to come belong to the
+           * next one (main_present says why). Outside the sampled spans
+           * above, which have closed; inside the emulated stretch, which
+           * takes its duration out below.
+           */
+          if(line == (int32)(VDP_ACTIVE_LINES - 1UL))
+            main_present();
+
           /* place of the sound part: accumulate this line's samples */
         }
 #if MAIN_MEASURE
-      perf_delta = sys_usec() - emul_start;
+      /*
+       * The stretch less the presentation it enclosed: the two are
+       * measured apart and published apart. A stretch that came out
+       * shorter than the presentation is a clock jump, refused below
+       * like any impossible reading.
+       */
+      perf_delta = (sys_usec() - emul_start) - main_present_usec;
       if(perf_delta < MAIN_CLK_MAX_FRAME_USEC)
         {
           perf_emul += perf_delta;
           perf_emul_frames++;
         }
       else
-        perf_clk++;
+        main_perf_clk++;
       perf_sample_phase = (perf_sample_phase + 1UL) & (MAIN_PERF_SAMPLE_STRIDE - 1UL);
 #endif
 
-      /*
-       * The ground, once per turn and on the cold side of the emulated
-       * stretch: one load of sixteen bits and one compare while nothing
-       * changes, and a fill only while the countdown says a screen still
-       * owes the number. A program that moves register 7 on every frame
-       * arms the countdown again on every frame and so pays one fill a
-       * frame -- there is no cheaper honest answer to a background that
-       * really does change that often -- and it still pays only one line
-       * of trace per report window, the count of the window going with
-       * the other aggregates. A program that rewrites the colour of the
-       * entry instead pays nothing here: the table below carries that.
-       *
-       * Before the drawing and not after: the fill covers the whole
-       * screen, so the picture has to land on top of it.
-       */
-      {
-        uint16 backdrop_now = vdp_backdrop();
-
-        if(backdrop_now != border_color)
-          {
-            border_color = backdrop_now;
-            border_repaint = sys_screen_count();
-          }
-
-        if(border_repaint > 0)
-          {
-            /*
-             * Spent on the paint, not on the attempt. A refused fill
-             * leaves that screen showing the ground it had, and the
-             * countdown has to come back to it on the next turn --
-             * decrementing here regardless would leave one screen of the
-             * rotation with the old colour for the rest of the run, half
-             * the frames of a game showing the wrong ground and nothing
-             * saying why. The count that goes with the aggregates is a
-             * count of paints for the same reason: it must not report a
-             * paint that did not happen.
-             */
-            if(sys_fill_screen(sys_screen_index(),(Color)border_color) >= 0)
-              {
-                border_repaint--;
-                vdp_backdrop_repainted();
-              }
-          }
-      }
-
-      /*
-       * The palette, once per turn and on the same cold side: one call
-       * into the video part, which rebuilds the 32 entries only if a
-       * colour byte moved this frame, and a set on the screen about to be
-       * drawn only while the countdown says it still owes the table. A
-       * program that rewrites its palette every frame pays one set a
-       * frame -- the video part folded its 32 writes into one rebuild --
-       * and a program that leaves it alone pays a load and a compare.
-       *
-       * Spent on success only, as the fill above is: a refused set leaves
-       * that screen with the table it had, and the countdown comes back
-       * to it on its next turn rather than leaving half the frames of the
-       * run in the wrong colours. The set is timed on its own, apart from
-       * the draw: it is the display's cost, not the engine's, and the
-       * line publishes it beside the draw so the two never blur.
-       */
-      if(vdp_clut_take() != 0)
-        clut_repaint = sys_screen_count();
-
-      if(clut_repaint > 0)
-        {
-#if MAIN_MEASURE
-          clut_start = sys_usec();
-#endif
-          if(sys_set_colors(sys_screen_index(),vdp_clut(),(int32)VDP_CLUT_ENTRIES) >= 0)
-            clut_repaint--;
-#if MAIN_MEASURE
-          /*
-           * Less the clock's own cost, as the two emulated slices are: a
-           * set is a fraction of a millisecond and the two readings
-           * around it would otherwise be a good part of the figure.
-           */
-          perf_delta = sys_usec() - clut_start;
-          if(perf_delta < MAIN_CLK_MAX_FRAME_USEC)
-            perf_clut += (perf_delta > perf_clock_cost)
-                         ? (perf_delta - perf_clock_cost) : 0UL;
-          else
-            perf_clk++;
-#endif
-        }
-
-      /*
-       * The end of the frame: the one draw call of the turn, then the
-       * presentation. The draw is what the third accumulator weighs --
-       * the emulated stretch has already closed its own clock above, so
-       * the two figures never overlap -- and the presentation stays
-       * outside the measurement: it is one cold call per frame, and the
-       * figure being read here is the cel engine's, not the display's.
-       * The fill above is outside it too, and for the same reason: it is
-       * the display's business, not the engine's, and it is paid on the
-       * frames of a change only.
-       */
-#if MAIN_MEASURE
-      draw_start = sys_usec();
-#endif
-      draw_err = DrawCels(sys_bitmap(),cel);
-#if MAIN_MEASURE
-      perf_delta = sys_usec() - draw_start;
-      if(perf_delta < MAIN_CLK_MAX_FRAME_USEC)
-        perf_draw += perf_delta;
-      else
-        perf_clk++;
-#endif
-      /*
-       * A refused draw is traced once and the run goes on: the trace is
-       * what separates a black picture from a dead loop. The compare sits
-       * on the cold side, after the measured stretch has closed, so the
-       * figure never includes it; the presentation's own failure is
-       * traced by sys.c itself and is not doubled here.
-       */
-      if(draw_err < 0)
-        LOG_ONCE(LOG_CAT_VDP,LOG_LVL_ERR,
-                 ("draw failed err=%ld",(long)draw_err));
-
-      /*
-       * The screen the error path would paint on, renewed on every turn
-       * so that it follows the rotation. It names the screen about to be
-       * presented, which is the one a viewer is looking at for the whole
-       * of the next frame: a stop anywhere in that frame writes its
-       * message over the picture that is on the console, and presents it
-       * again. Bound after the presentation instead, it would name the
-       * screen the scan is not reading, and the message would appear over
-       * a picture two frames old.
-       *
-       * Renewed and not bound once, because a binding taken at boot names
-       * one screen for good: with the screens rotating, every other frame
-       * would paint its message where nothing can see it.
-       */
-      log_bind_screen(sys_bitmap(),sys_screen());
-      (void)sys_display_show();
 
 #if MAIN_MEASURE
       /*
@@ -1833,7 +2000,9 @@ main(int    argc,
                          perf_emul,perf_emul_frames,
                          perf_z80,perf_z80_samples,
                          perf_vdp,perf_vdp_samples,
-                         perf_draw,perf_clut,perf_over,perf_clk);
+                         main_perf_draw,main_perf_clut,
+                         main_perf_tiles,main_perf_list,
+                         perf_over,main_perf_clk);
 
 #if MAIN_PROFILE
           /*
@@ -1877,7 +2046,7 @@ main(int    argc,
                                       perf_emul,perf_emul_frames,
                                       perf_z80,perf_z80_samples,
                                       perf_vdp,perf_vdp_samples,
-                                      perf_draw,&prof_vdp10) != 0)
+                                      main_perf_draw,&prof_vdp10) != 0)
             {
               prof_sum10[prof_variant] += prof_vdp10;
               prof_win[prof_variant]++;
@@ -1910,7 +2079,7 @@ main(int    argc,
           if(prof_full != 0UL)
             {
               main_profile_emit(prof_sum10,prof_win,prof_drop,
-                                prof_frames,prof_samples,perf_clock_cost);
+                                prof_frames,prof_samples,main_perf_clock_cost);
               for(prof_i = 0; prof_i < VDP_PROFILE_VARIANTS; prof_i++)
                 {
                   prof_sum10[prof_i] = 0;
@@ -2011,9 +2180,11 @@ main(int    argc,
           perf_z80_samples = 0;
           perf_vdp = 0;
           perf_vdp_samples = 0;
-          perf_draw = 0;
-          perf_clut = 0;
-          perf_clk = 0;
+          main_perf_draw = 0;
+          main_perf_clut = 0;
+          main_perf_tiles = 0;
+          main_perf_list = 0;
+          main_perf_clk = 0;
         }
 #endif
     }

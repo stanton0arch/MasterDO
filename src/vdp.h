@@ -414,6 +414,100 @@
 
 /*
  * ---------------------------------------------------------------------------
+ * The background as the cel engine draws it (common.h, SMS_DECOR_CEL).
+ *
+ * The picture is the whole name table rendered once: 32 by 28 tiles of 8
+ * pixels, 256 by 224 bytes, one index per pixel, with the same row pitch
+ * as the index buffer above -- the same preamble arithmetic serves both.
+ * It is kept in step tile by tile: a tile whose name table word moved, or
+ * whose pattern was rewritten, is converted again from the decoded row
+ * cache, and nothing else of the picture is touched. The engine draws it
+ * by windows: a source pointer into the picture, a width, a height, and
+ * a position on the screen, the pitch staying the picture's. A scroll is
+ * two windows meeting at the join; a locked row band or column band is a
+ * window of its own; a band of lines drawn with an older video memory is
+ * a set of windows too. So the pixels read per frame stay the 256 by 192
+ * of the visible picture, plus the alignment read below.
+ *
+ * A source pointer is a word address (docs/3do/3DO_Development_Notes.md:
+ * 87-89), so a window that must start on pixel column px starts on the
+ * column px - (px & 3) instead, is (px & 3) pixels wider, and stands
+ * (px & 3) pixels further left: its first pixels are those of the
+ * columns before, and they fall outside the picture's area of the
+ * screen, where the clip rectangle set at init erases them. At most
+ * three columns per window, which the picture check counts against the
+ * pixels a frame reads.
+ *
+ * The picture and the cel control blocks of the windows share one page
+ * of 64 kilobytes, the grain the allocator was measured to spend in: the
+ * picture at the head, the blocks behind it. The block count is the
+ * arena's capacity, sized for the worst frame: a band draws at most nine
+ * windows -- three for the locked top rows (a vertical join, no
+ * horizontal one), six for the scrolled rows (a join each way, and the
+ * locked right columns split by the vertical join) -- so the capacity is
+ * nine per band, and a window past it is refused and counted rather than
+ * written past the page. The page test below is what holds the count.
+ *
+ * The journal holds the video memory writes that landed on the visible
+ * background while the picture was being scanned: line, address, the
+ * byte before and the byte after. It is undone at the head of the
+ * presentation, so that the picture stands as the video memory stood
+ * when the frame began, and replayed band by band, so that each band is
+ * drawn with the memory as it was at its first line; its capacity bounds
+ * the bands to the distinct lines it holds, capped at the band count.
+ *
+ * Every size is calculated from the constants above; the page and the
+ * block size are hardware facts written once. The block size is the
+ * console's cel control block, seventeen words
+ * (include/3do/graphics_ccb.h:8-33); a host with wider pointers has a
+ * wider block, and the init holds the real size against the page as
+ * well, so a page that stopped fitting is refused there with a reason.
+ * ---------------------------------------------------------------------------
+ */
+#define VDP_DECOR_LINES     VDP_NT_LINES
+#define VDP_DECOR_BYTES     (VDP_PIX_ROW_BYTES * VDP_DECOR_LINES)
+#define VDP_DECOR_PAGE      65536UL
+#define VDP_LIST_BANDS      8UL
+#define VDP_LIST_WINDOWS    (VDP_LIST_BANDS * 9UL)
+#define VDP_JOURNAL_ENTRIES 256UL
+#define VDP_CCB_BYTES       68UL
+#define VDP_NT_TILES        ((VDP_NT_LINES / 8UL) * 32UL)
+#define VDP_NT_CHUNKS       ((VDP_NT_TILES * 2UL) / 32UL)
+#define VDP_CHUNKS          (VDP_VRAM_SIZE / 32UL)
+
+#if (VDP_PIX_WIDTH % 4UL) != 0UL
+#error "a window's source pointer is a word address: the width must be a multiple of 4"
+#endif
+
+#if (VDP_DECOR_BYTES % 4UL) != 0UL
+#error "the cel control blocks follow the picture in its page: the picture must end on a word"
+#endif
+
+#if (VDP_DECOR_BYTES + (VDP_LIST_WINDOWS * VDP_CCB_BYTES)) > VDP_DECOR_PAGE
+#error "the picture and the window blocks no longer fit one page of 64 kilobytes"
+#endif
+
+#if (VDP_NT_TILES != 896UL) || (VDP_NT_CHUNKS != 56UL) || (VDP_CHUNKS != 512UL)
+#error "the tile, name table chunk and chunk counts are written into the journal's arithmetic"
+#endif
+
+/*
+ * One entry of the journal: the line the write landed on, the address,
+ * the byte the address held and the byte it took. Two words, no pointer,
+ * no padding -- the two bytes are held as halfwords so that the entry
+ * is a whole number of words on its own and the compiler has nothing to
+ * insert; the array is inside the state and costs what it says.
+ */
+typedef struct
+{
+  uint16 line;
+  uint16 addr;
+  uint16 old;
+  uint16 val;
+} vdp_journal_t;
+
+/*
+ * ---------------------------------------------------------------------------
  * The sprites. Sixty-four entries, each three bytes spread over two
  * halves of a 256 byte table: the vertical position at base + i, the
  * horizontal position and the pattern number at base + 128 + 2i and the
@@ -756,6 +850,120 @@ typedef struct
    */
   void *cel;
 
+  /*
+   * Where the picture sits on the screen, in bitmap pixels: the offset
+   * that centres the 256 by 192 view in the raster the console built.
+   * Read through vdp_view by the frame loop, which sets the clip
+   * rectangle of every screen on it; the cel positions of this module
+   * are then relative to that rectangle, since the folio takes (0,0) as
+   * the top-left corner of the clip window
+   * (docs/3do/3do_portfolio_2.5.md:10984).
+   */
+  int32 view_x;
+  int32 view_y;
+
+#if SMS_DECOR_CEL
+  /*
+   * The background picture and the window blocks, in one page taken at
+   * init (VDP_DECOR_*): the picture at the head, VDP_LIST_WINDOWS cel
+   * control blocks behind it. The blocks are held as an opaque pointer
+   * for the reason the cel above is.
+   */
+  uint8 *decor;
+  void  *windows;
+
+  /*
+   * The journal of the writes that touched the visible background while
+   * the picture was being scanned, in the order they landed -- which is
+   * line order, since the line count only grows inside a frame. The
+   * count is how many stand; the replay cursor is how many the bands
+   * drawn so far have put back.
+   */
+  vdp_journal_t journal[VDP_JOURNAL_ENTRIES];
+  uint32 journal_count;
+  uint32 journal_replayed;
+
+  /*
+   * Up once a write of this picture found the journal full. The journal
+   * is then not a record of the picture's writes, and undoing and
+   * replaying what it holds would leave the memory wrong for good -- a
+   * lost write on an address the journal also holds would be undone to
+   * its old byte and put back to the journaled one, never to the byte
+   * really written. So the presentation of such a picture touches the
+   * memory not at all: one band, the final state, the journal dropped.
+   * Falls at the end of the presentation.
+   */
+  uint32 journal_overflow;
+
+  /*
+   * The name table word each tile of the picture was last converted
+   * from, its thirteen significant bits only (pattern, the two flips,
+   * the bank, the priority: docs/sms_gg/SMSOfficialDocs.md:321-334; bits
+   * 13 to 15 draw nothing and the line render ignores them too), and
+   * 0xFFFF for a tile never converted -- a value no masked word can take,
+   * so the mark never collides with a real entry. A tile is converted
+   * again when the word it shows differs from the masked word the table
+   * holds. All 896 are forced to 0xFFFF when register 2 moves the table.
+   */
+  uint16 decor_word[VDP_NT_TILES];
+
+  /*
+   * Per chunk of 32 bytes of video memory -- the size of one pattern,
+   * so the chunk index of a pattern's bytes is the pattern number. refs
+   * counts the tiles of the picture that show the pattern, kept at the
+   * conversion; hot marks a pattern a name table write named since the
+   * journal was last emptied, before the conversion could count it;
+   * watch is their union with the chunks of the name table itself, the
+   * one byte the data write reads to decide whether a write is worth a
+   * journal entry. The hot list remembers which entries to clear.
+   */
+  uint16 refs[VDP_CHUNKS];
+  uint8  hot[VDP_CHUNKS];
+  uint8  watch[VDP_CHUNKS];
+  uint16 hot_list[VDP_CHUNKS];
+  uint32 hot_count;
+
+  /*
+   * The chunks written since the picture was last brought up to date,
+   * one byte each, held as words so that the sweep reads four at a
+   * time (VDP_DECOR_DIRTY views them as bytes); the patterns among them
+   * that the picture references, marked for the tile sweep of one
+   * presentation and cleared after it; the list of the chunks the sweep
+   * found dirty, so that the marks are cleared without a second walk.
+   */
+  uint32 decor_dirty_w[VDP_CHUNKS / 4UL];
+  uint8  pat_dirty[VDP_CHUNKS];
+  uint16 dirty_list[VDP_CHUNKS];
+
+  /*
+   * Up when every tile has to be looked at whatever the dirty marks say:
+   * after init, and after register 2 moved the table. The first chunk of
+   * the name table, so that a chunk index is tested against the table
+   * with one subtraction.
+   */
+  uint32 decor_sweep_all;
+  uint32 nt_chunk0;
+
+  /*
+   * The rows of the index buffer that hold something -- a sprite pixel,
+   * the border of a line with the display off, the masked left column --
+   * and so must be cleared before the next frame draws them: the buffer
+   * carries the sprites alone now, zero where the background shows, and
+   * a row no sprite reached is left as it is rather than cleared for
+   * nothing.
+   */
+  uint8 row_used[VDP_ACTIVE_LINES];
+
+  /*
+   * The bands of the presentation being drawn: the first line of each
+   * and how many there are, from the distinct lines of the journal; and
+   * how many window blocks of the arena the bands so far have taken.
+   */
+  uint32 band_line[VDP_LIST_BANDS];
+  uint32 band_count;
+  uint32 list_used;
+#endif /* SMS_DECOR_CEL */
+
 #if VDP_COUNTERS
   /*
    * The aggregates the periodic line reports, cleared by it. The figures
@@ -843,6 +1051,28 @@ typedef struct
    */
   uint32 cnt_line_fast;
   uint32 cnt_line_scratch;
+#if SMS_DECOR_CEL
+  /*
+   * What the background picture cost over the window: tiles converted,
+   * windows built, bands drawn, presentations whose distinct journal
+   * lines were more than the bands could take, writes the journal had no
+   * room for, and windows the arena had no block for.
+   */
+  uint32 cnt_decor_tiles;
+  uint32 cnt_list_windows;
+  uint32 cnt_list_bands;
+  uint32 cnt_bands_capped;
+  uint32 cnt_journal_full;
+  uint32 cnt_list_refused;
+  /*
+   * Register 0, 2 or 8 written to another value while the picture was
+   * being scanned. The windows are built once, when line 191 is counted,
+   * with the last value; the line render took each line with the value
+   * of its own line. A picture where this counts is one the two paths
+   * can draw apart, and the figure says so rather than letting it pass.
+   */
+  uint32 cnt_reg_mid;
+#endif
 #endif
 } vdp_t;
 
@@ -852,6 +1082,11 @@ typedef struct
  * it is the reason it is words.
  */
 #define VDP_PRIO_BYTES ((uint8 *)sms.vdp.prio_w)
+
+#if SMS_DECOR_CEL
+/* The dirty marks as bytes, one per chunk of video memory. */
+#define VDP_DECOR_DIRTY ((uint8 *)sms.vdp.decor_dirty_w)
+#endif
 
 #if VDP_COUNTERS
 #define VDP_COUNT(name) (sms.vdp.cnt_##name++)
@@ -1036,6 +1271,31 @@ uint32 vdp_profile_reps(uint32 post);
  * hook carries (z80.c, the input and output space).
  * ---------------------------------------------------------------------------
  */
+#if SMS_DECOR_CEL
+/*
+ * The background picture's share of a video memory write, before the
+ * byte lands: the chunk is marked dirty -- one store, no test -- and,
+ * when the chunk is one the picture watches (a pattern it shows or was
+ * just told to show, or the name table itself) and the byte really
+ * changes, the write is handed to vdp_decor_note, which journals it if
+ * the picture is being scanned and marks the pattern a name table word
+ * now names. One load and one compare on the port path for every write
+ * that is not watched, which is what the sprite patterns of a game are.
+ * The address is read before the store, since the journal keeps the
+ * byte that was there.
+ */
+#define VDP_DECOR_NOTE(a,v)                                             \
+  do                                                                    \
+    {                                                                   \
+      VDP_DECOR_DIRTY[(a) >> 5] = 1;                                    \
+      if((sms.vdp.watch[(a) >> 5] != 0) && (sms.vdp.vram[(a)] != (v)))  \
+        vdp_decor_note((a),(v));                                        \
+    }                                                                   \
+  while(0)
+#else
+#define VDP_DECOR_NOTE(a,v) ((void)0)
+#endif
+
 #define VDP_IO_DATA_WRITE(v)                                            \
   do                                                                    \
     {                                                                   \
@@ -1050,6 +1310,7 @@ uint32 vdp_profile_reps(uint32 post);
         }                                                               \
       else                                                              \
         {                                                               \
+          VDP_DECOR_NOTE(sms.vdp.addr & VDP_VRAM_MASK,(uint8)(v));      \
           sms.vdp.vram[sms.vdp.addr & VDP_VRAM_MASK] = (uint8)(v);      \
           VDP_TC_COUNT_INVAL(VDP_TC_KEY(sms.vdp.addr));                 \
           sms.vdp.tc_valid[VDP_TC_KEY(sms.vdp.addr)] = 0;               \
@@ -1098,6 +1359,7 @@ uint32 vdp_profile_reps(uint32 post);
 #define VDP_ERR_NO_PLANES    (-3)
 #define VDP_ERR_NO_TILECACHE (-4)
 #define VDP_ERR_LANE_ORDER   (-5)
+#define VDP_ERR_NO_DECOR     (-6)
 
 /*
  * Brings the video part up: takes the video memory, the index buffers and
@@ -1201,6 +1463,62 @@ const uint32 *vdp_clut(void);
  * it is rather than pushed into the caller.
  */
 void vdp_backdrop_repainted(void);
+
+/*
+ * Where the picture sits on the screen and how big it is, in bitmap
+ * pixels: the frame loop sets the clip rectangle of every screen on it
+ * once, after init. Every cel position this module writes is then
+ * relative to that rectangle. Valid from init on; the four are written
+ * and never NULL-tested, a caller passes its own four words.
+ */
+void vdp_view(int32 *x, int32 *y, int32 *w, int32 *h);
+
+#if SMS_DECOR_CEL
+/*
+ * A video memory write that the picture watches, called from the data
+ * write macro and from nowhere else, with the byte not yet stored. Two
+ * things, neither of them a pixel: if the picture is being scanned
+ * (line below VDP_ACTIVE_LINES) the write is journaled -- or counted as
+ * lost when the journal is full, in which case the picture simply shows
+ * its final value from the first band; and if the address is in the name
+ * table, the pattern the word names once the byte lands is marked hot,
+ * so that a later write of that pattern in the same picture is journaled
+ * too, before the conversion has counted the reference.
+ */
+void vdp_decor_note(uint32 addr, uint32 value);
+
+/*
+ * The presentation of the background, in three calls the frame loop
+ * makes when line 191 has been counted and before the blanking lines.
+ *
+ * vdp_list_begin undoes the journal, so that the video memory stands as
+ * it stood when the frame began, converts every tile the frame's writes
+ * left stale, and cuts the picture into bands at the distinct lines of
+ * the journal -- one band with no write, up to VDP_LIST_BANDS with
+ * seven or more, the lines past the seventh merged into the last band
+ * and the merge counted. Returns the band count, at least 1. The tile
+ * conversions are here and nowhere else in the frame, which is what the
+ * frame loop times as the tiles' cost.
+ *
+ * vdp_list_band(k) replays the journal up to the first line of band k,
+ * converts what those writes touched, and builds the windows of the
+ * band's lines: one chain of cel control blocks ending on CCB_LAST, its
+ * head returned as an opaque pointer for the draw call, NULL only when
+ * the arena had no block left for the band's first window (counted).
+ * The caller draws it before asking for band k + 1: the blocks are
+ * taken from one arena and the memory is replayed in place. Called with
+ * k from 0 to the count minus one, in order.
+ *
+ * vdp_list_end closes the presentation: the journal is emptied, the hot
+ * marks fall, and the writes of the blanking lines start the next one.
+ * The video memory stands in its final state: the replay of the last
+ * band put it back there, or, when the journal had overflowed, nothing
+ * ever moved it (the overflow flag, which falls here).
+ */
+int32 vdp_list_begin(void);
+void *vdp_list_band(int32 k);
+void vdp_list_end(void);
+#endif /* SMS_DECOR_CEL */
 
 /*
  * The control port, $BF written (TotalSMS/src/core/sms_vdp.c:639-675).

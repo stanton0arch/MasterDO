@@ -89,6 +89,8 @@ Err sys_vbl_open(void) { return 0; }
 Err sys_vbl_wait(uint32 fields) { (void)fields; return 0; }
 uint32 sys_vbl_count(void) { return 0; }
 Err sys_fill_screen(int32 index, Color color) { (void)index; (void)color; return 0; }
+Err sys_clip(int32 index, int32 x, int32 y, int32 w, int32 h)
+{ (void)index; (void)x; (void)y; (void)w; (void)h; return 0; }
 Err sys_fill(Color color) { (void)color; return 0; }
 Err sys_text(int32 x, int32 y, const char *text, Color color)
 { (void)x; (void)y; (void)text; (void)color; return 0; }
@@ -108,6 +110,14 @@ int32 vdp_init(void) { return 0; }
 void vdp_line(void) {}
 void vdp_report(void) {}
 void *vdp_cel(void) { return NULL; }
+void vdp_view(int32 *x, int32 *y, int32 *w, int32 *h)
+{ *x = 32; *y = 24; *w = 256; *h = 192; }
+/* The background by windows (SMS_DECOR_CEL 1); this bench runs the other
+ * path and main.c then calls none of the three, but the stubs stay so
+ * that a build of either path links here. */
+int32 vdp_list_begin(void) { return 1; }
+void *vdp_list_band(int32 k) { (void)k; return NULL; }
+void vdp_list_end(void) {}
 uint16 vdp_backdrop(void) { return 0; }
 void vdp_backdrop_repainted(void) {}
 int32 vdp_clut_take(void) { return 0; }

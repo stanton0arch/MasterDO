@@ -224,6 +224,12 @@ uint8 vdp_io_status_read(void)         { return 0; }
 uint8 vdp_io_vcounter_read(void)       { return 0; }
 uint8 vdp_io_hcounter_read(void)       { return 0; }
 
+/* The data port write is a macro the processor inlines (vdp.h,
+   VDP_IO_DATA_WRITE); the one call it makes out of line -- a write the
+   background picture watches, handed to the render to journal -- lands
+   here and journals nothing: this bench has no picture. */
+void vdp_decor_note(uint32 addr, uint32 value) { (void)addr; (void)value; }
+
 /* The mapper, which the shipped build's Z80_WR8 calls on a register address.
    Recorded rather than thrown away: mapper_path_check reads the log back to
    prove the trigger fires, and the descriptor run reads the count back to

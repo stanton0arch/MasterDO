@@ -277,6 +277,39 @@
 #endif
 
 /*
+ * SMS_DECOR_CEL -- who draws the background plane.
+ *
+ * 1, the default: the background is an image of 256 by 224 pixels, one
+ * byte each -- the whole name table -- that the video part keeps in step
+ * tile by tile, at the tiles the program rewrote, and that the cel engine
+ * draws by windows of that one image: a scroll join, a locked row or
+ * column, a band of the picture drawn with an older state of the video
+ * memory, each is a window with its own source pointer, size and position
+ * and the same row pitch. The index buffer then carries the sprites alone,
+ * zero for a transparent pixel, drawn over the windows by a cel without
+ * the background flag. The picture is presented when line 191 has been
+ * counted, before the blanking lines, because the writes of those lines
+ * belong to the next picture; the windows land inside a clip rectangle
+ * set on each screen at init, which is what erases the up to three
+ * columns a window has to read before its first pixel to start on a word.
+ *
+ * 0: the older path. The processor composes every background pixel of
+ * every line into the index buffer, and one cel draws the whole buffer,
+ * background and sprites, once per frame. Kept selectable until the
+ * windows have been seen on the console under every case they must
+ * cover; the host bench of the render (tests/vdp-profile/) runs at 0, and
+ * the picture check (tests/cel8/) builds both and holds 1 against 0 on
+ * every frame of the reference ROM.
+ *
+ * Cuts, at 0: the image and its page, the windows, the journal of writes
+ * and the bands, and the two lines they print. Leaves: the per-line
+ * composition as it was.
+ */
+#ifndef SMS_DECOR_CEL
+#define SMS_DECOR_CEL 1
+#endif
+
+/*
  * The six configurations worth naming:
  *
  *   development  the default this file ships with: LOG_ENABLE 1, LOG_LEVEL
@@ -334,6 +367,13 @@
  * per frame, after a colour moved, while the cel's palette is the identity;
  * no switch turns that off, since nothing else in the program can turn an
  * index into a colour.
+ *
+ * SMS_DECOR_CEL (above) is 1 in all six: the background plane is a picture
+ * the cel engine draws by windows, presented when line 191 has been
+ * counted, inside a clip rectangle set on the picture's area of each
+ * screen at init; 0 keeps the older path, where the processor composes
+ * the background line by line into the index buffer, for the host bench
+ * of that path and for a comparison on the console.
  *
  * Two switch names are refused below so that an old build command fails
  * loudly rather than silently building the default. The built-in test

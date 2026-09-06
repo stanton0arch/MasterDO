@@ -382,6 +382,38 @@ log_fatal_paint(const char *code_text,
         log_printf("error screen: linear clut restored");
     }
 
+  /*
+   * The clip rectangle put back to the whole bitmap for the same reason,
+   * and just after: the frame loop narrows it to the picture's area and
+   * takes (0,0) as that area's corner (SetClipOrigin, docs/3do/
+   * 3do_portfolio_2.5.md:10984), so the ground below would stop at the
+   * picture's edges and the text would land inside it. The origin first,
+   * back at the bitmap's corner, then the width and the height -- three
+   * calls, in the order the document makes significant; sys.c sets a
+   * narrower rectangle with a fourth, the origin again, which the whole
+   * bitmap does not need. Measured only when the bitmap
+   * could be looked up: without its size there is nothing to set the
+   * width and height to, and the rectangle is left as it is, said so.
+   */
+  if(bm != NULL)
+    {
+      err = SetClipOrigin(log_fatal_bitmap,0,0);
+      if(err >= 0)
+        err = SetClipWidth(log_fatal_bitmap,bm->bm_Width);
+      if(err >= 0)
+        err = SetClipHeight(log_fatal_bitmap,bm->bm_Height);
+      log_begin(LOG_CAT_BOOT,LOG_LVL_INFO);
+      if(err < 0)
+        log_printf("error screen: clip reset refused err=%ld",(long)err);
+      else
+        log_printf("error screen: full clip restored");
+    }
+  else
+    {
+      log_begin(LOG_CAT_BOOT,LOG_LVL_INFO);
+      log_printf("error screen: bitmap not found, clip left as it is");
+    }
+
   SetFGPen(&gc,LOG_FATAL_BACK_COLOR);
   err = FillRect(log_fatal_bitmap,&gc,&rect);
   if((err < 0) && (first_err == 0))

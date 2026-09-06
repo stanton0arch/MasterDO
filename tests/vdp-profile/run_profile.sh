@@ -70,7 +70,11 @@ ROOT=$(cd "$B/../.." && pwd)
 S="$ROOT/src"
 H="$B/3do"
 CC=${CC:-gcc}
-FLAGS="-std=gnu89 -DLOG_LEVEL=3 -I$H -I$S"
+# The render is benched on the path where the processor composes the
+# background (src/common.h, SMS_DECOR_CEL 0): the strokes, the recut and the
+# row cache this script pins belong to that path. The picture check of
+# tests/cel8/ runs the other one.
+FLAGS="-std=gnu89 -DLOG_LEVEL=3 -DSMS_DECOR_CEL=0 -I$H -I$S"
 W="$B/work"
 
 [ -d "$S" ] || { echo "cannot find the sources at $S"; exit 1; }

@@ -257,11 +257,16 @@ void log_printf(const char *fmt, ...);
  * the boot holds that against the machine and stops here when they
  * disagree, because the alternative is a picture scrambled four pixels at
  * a time with nothing saying why.
+ *
+ * The fifth is the page of the background picture the cel engine draws
+ * by windows (vdp.h, VDP_DECOR_*): a picture with no page has no
+ * background to show.
  */
 #define LOG_E_VDP_VRAM      300
 #define LOG_E_VDP_PIXELS    301
 #define LOG_E_VDP_TILECACHE 302
 #define LOG_E_VDP_LANEORDER 303
+#define LOG_E_VDP_DECOR     304
 
 /*
  * Publishes where the fatal error screen must be painted: the bitmap to draw
