@@ -6,6 +6,12 @@
  * and the structure from include/3do/graphics_ccb.h:7-33. */
 #include "types.h"
 
+/* The VDL colour entry control bits, verbatim from include/3do/hardware.h:
+   65 (VDL_FULLRGB), 71 (VDL_DISPCTRL) and 73 (VDL_BACKGROUND). */
+#define VDL_FULLRGB       0x00000000
+#define VDL_DISPCTRL      0xC0000000
+#define VDL_BACKGROUND    0x20000000
+
 typedef int32 Coord;
 typedef uint32 CelData;
 

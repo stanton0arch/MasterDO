@@ -110,6 +110,10 @@ void vdp_report(void) {}
 void *vdp_cel(void) { return NULL; }
 uint16 vdp_backdrop(void) { return 0; }
 void vdp_backdrop_repainted(void) {}
+int32 vdp_clut_take(void) { return 0; }
+const uint32 *vdp_clut(void) { return NULL; }
+Err sys_set_colors(int32 index, const uint32 *entries, int32 count)
+{ (void)index; (void)entries; (void)count; return 0; }
 void vdp_profile_select(uint32 v) { (void)v; }
 uint32 vdp_profile_reps(uint32 p) { (void)p; return 1UL; }
 

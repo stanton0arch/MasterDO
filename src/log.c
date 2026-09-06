@@ -361,6 +361,27 @@ log_fatal_paint(const char *code_text,
       rect.rect_YBottom = (Coord)bm->bm_Height;
     }
 
+  /*
+   * The screen's colour table is put back to the linear one before
+   * anything is drawn (ResetScreenColors, docs/3do/3do_portfolio_2.5.md:
+   * 9935-9950). The frame loop bends that table to the emulated palette,
+   * and the red ground and white text below are true colours, not palette
+   * indexes: through a bent table they would come out in whatever two
+   * entries the game last chose, unreadable at the very moment the screen
+   * is the only thing left to read. The result is traced either way and a
+   * refusal does not stop the paint -- a message in odd colours still
+   * beats a blank screen.
+   */
+  if(log_fatal_screen != 0)
+    {
+      err = ResetScreenColors(log_fatal_screen);
+      log_begin(LOG_CAT_BOOT,LOG_LVL_INFO);
+      if(err < 0)
+        log_printf("error screen: clut reset refused err=%ld",(long)err);
+      else
+        log_printf("error screen: linear clut restored");
+    }
+
   SetFGPen(&gc,LOG_FATAL_BACK_COLOR);
   err = FillRect(log_fatal_bitmap,&gc,&rect);
   if((err < 0) && (first_err == 0))

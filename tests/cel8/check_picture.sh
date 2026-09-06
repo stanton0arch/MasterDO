@@ -149,6 +149,53 @@ if ! grep -q 'lines=[1-9]' "$WORK/out" || ! grep -q ' different=0$' "$WORK/out";
 fi
 echo "  [OK] every row the render composes is the row the reference holds"
 
+# The two tables between an index and a colour, checked on every picture
+# and reported as the fewest entries found right. The cel's palette must
+# be the identity, or the index a pixel carries is not the one the screen
+# asks its table for; and the screen table must be the colour memory
+# converted at the four documented levels plus the display's background
+# entry built from colour 0, computed by the runner from the colour memory
+# alone. Both are demanded in full: one entry wrong is one colour wrong on
+# the console. The figures rest on the pictures the check above counted
+# (lines=[1-9] means at least one was taken), and the per-frame figures
+# below demand at least one frame of their own.
+tables() { grep -E '^(plut identity|clut entries|backdrop number|clut take) ' "$WORK/out"; }
+if ! grep -q '^plut identity 32/32$' "$WORK/out"; then
+  tables
+  echo "  [FAIL] the cel palette is not the identity on every picture taken"
+  echo "failed=1"
+  exit 1
+fi
+echo "  [OK] the cel palette is the identity on every picture taken"
+if ! grep -q '^clut entries 33/33$' "$WORK/out"; then
+  tables
+  echo "  [FAIL] the screen colour table is not the colour memory converted, background entry included"
+  echo "failed=1"
+  exit 1
+fi
+echo "  [OK] the screen colour table is the colour memory at the four documented levels, every picture"
+# The border: the value the render hands the frame loop to fill the ground
+# with must be the backdrop NUMBER of register 7 on all three components,
+# on every picture taken -- a colour there would bypass the screen table.
+if ! grep -qE '^backdrop number ([1-9][0-9]*)/\1$' "$WORK/out"; then
+  tables
+  echo "  [FAIL] the backdrop is not the number register 7 names on every picture"
+  echo "failed=1"
+  exit 1
+fi
+echo "  [OK] the backdrop handed to the frame loop is the number of register 7, every picture"
+# The signal the frame loop rearms its table countdown on: the rebuild must
+# report a change on exactly the frames where a colour byte was written,
+# every frame played -- a silent rebuild leaves the console in the boot
+# table for the whole run, a chatty one sets the table on every frame.
+if ! grep -qE '^clut take ([1-9][0-9]*)/\1$' "$WORK/out"; then
+  tables
+  echo "  [FAIL] the rebuild signal disagrees with the colour writes on some frame"
+  echo "failed=1"
+  exit 1
+fi
+echo "  [OK] the rebuild signal fires on exactly the frames that wrote a colour"
+
 # The cel the picture is drawn through, as the boot trace names it: eight
 # bits, and the preamble the render computes by hand -- the pair a manual
 # fallback would write into the block -- agreeing with the pair the library

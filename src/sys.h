@@ -101,9 +101,10 @@ Item sys_screen(void);
  * display that is not open.
  *
  * Compiled with their one caller and not otherwise: the delivered
- * binary has no use for them yet, and a build with the probe off must
- * be the build that was there before it, to the byte. The day the
- * render loads a colour table on every screen, the guard goes.
+ * binary has no use for them, and a build with the probe off must be
+ * the build that was there before it, to the byte. The colour table the
+ * frame loop sets on every screen goes through sys_set_colors below,
+ * which names the screen by index and keeps the Item inside this module.
  */
 Item sys_screen_at(int32 index);
 Item sys_bitmap_at(int32 index);
@@ -146,6 +147,26 @@ int32 sys_height(void);
  */
 Err sys_fill_screen(int32 index, Color color);
 Err sys_fill(Color color);
+
+/*
+ * Sets entries of a named screen's colour table: the packed form the
+ * display takes, index in the high byte then red, green and blue at
+ * eight bits each (include/3do/graphics.h:264, MakeCLUTColorEntry;
+ * SetScreenColors, docs/3do/3do_portfolio_2.5.md:9438-9475). Each screen
+ * of the rotation has its own table, so a caller changing the palette
+ * sets it on every screen, one screen a frame, each just before it is
+ * drawn into -- the same countdown as the fill above, and for the same
+ * reason: a table set on the screen the scan is reading shows for one
+ * frame with the old picture under it.
+ *
+ * The count is at most the 33 entries a table has, the 32 colours and
+ * the background entry of index 32; an index outside the rotation, an
+ * empty table or a display not open is refused and traced
+ * once, and a refusal from the folio is traced once too. The caller
+ * decides what a refusal means -- here, to try that screen again on its
+ * next turn.
+ */
+Err sys_set_colors(int32 index, const uint32 *entries, int32 count);
 
 /*
  * Draws one line of text at the given position, using the graphics folio's

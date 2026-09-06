@@ -108,19 +108,46 @@ static const uint8 vdp_reg_power_on[VDP_REG_COUNT] =
 
 /*
  * ---------------------------------------------------------------------------
- * The colour table: six bit colour to RGB555, 64 entries. A colour byte
- * carries two bits per component, red in bits 0-1, green in 2-3, blue in
- * 4-5 (SMSOfficialDocs.md:288-306; TotalSMS/src/core/sms_vdp.c:1236-1238),
+ * The colour table: six bit colour to one entry of the screen's colour
+ * table, 64 entries, the index byte left at zero. A colour byte carries
+ * two bits per component, red in bits 0-1, green in 2-3, blue in 4-5
+ * (SMSOfficialDocs.md:288-306; TotalSMS/src/core/sms_vdp.c:1236-1238),
  * each at one of four levels -- off, one third, two thirds, full
- * (SMSOfficialDocs.md:494-500) -- which on the five bits of a component
- * of include/3do/graphics.h:261 are 0, 10, 21 and 31. Filled by a loop at
- * init rather than written as 64 literals: nothing to mistype. Read by the
- * data write macro of vdp.h, which is why it is not static.
+ * (SMSOfficialDocs.md:483-495) -- which on the eight bits of a component
+ * of a screen table entry (include/3do/graphics.h:264) are 0, 85, 170 and
+ * 255. Filled by a loop at init rather than written as 64 literals:
+ * nothing to mistype. Read by the rebuild below and by nothing else.
  * ---------------------------------------------------------------------------
  */
-uint16 vdp_cram_rgb[64];
+static uint32 vdp_clut_rgb[64];
 
-static const uint8 vdp_level[4] = { 0, 10, 21, 31 };
+static const uint8 vdp_level[4] = { 0, 85, 170, 255 };
+
+/*
+ * The rebuild of the screen table from the colour memory: one conversion
+ * per entry, the index put in the high byte here since the table above
+ * has none. Then the display's background entry, the colour it shows for
+ * a zero word: a pixel of index 0 leaves the identity palette as 0x0000,
+ * so that entry is given the same three components as colour 0 and the
+ * pixel shows as colour 0 whichever way the display reads it. Called at
+ * init and by vdp_clut_take, and it is the one place the entries are
+ * written.
+ */
+static void
+vdp_clut_build(void)
+{
+  int32 i;
+  uint32 c0;
+
+  for(i = 0; i < VDP_CRAM_SIZE; i++)
+    sms.vdp.clut[i] = ((uint32)i << 24) |
+                      vdp_clut_rgb[sms.vdp.cram[i] & 0x3FU];
+
+  c0 = vdp_clut_rgb[sms.vdp.cram[0] & 0x3FU];
+  sms.vdp.clut[VDP_CRAM_SIZE] = MakeCLUTBackgroundEntry((c0 >> 16) & 0xFFU,
+                                                        (c0 >> 8) & 0xFFU,
+                                                        c0 & 0xFFU);
+}
 
 #if VDP_PROFILE
 /*
@@ -1153,6 +1180,8 @@ vdp_init(void)
   sms.vdp.cnt_reg_w = 0;
   sms.vdp.cnt_vram_w = 0;
   sms.vdp.cnt_cram_w = 0;
+  sms.vdp.cnt_cram_mid = 0;
+  sms.vdp.cnt_clut_upd = 0;
   sms.vdp.cnt_status_r = 0;
   sms.vdp.cnt_data_r = 0;
   sms.vdp.cnt_vcnt_r = 0;
@@ -1177,21 +1206,27 @@ vdp_init(void)
 #endif
 
   /*
-   * The colour table, then the palette as the conversion of the colour
-   * memory just zeroed -- through the table, the same pen as the data
-   * write, so there is one conversion in this file and not two. Then the
-   * plane table: for plane p and byte value v, pixel x takes bit 7 - x
-   * of v at weight p (SMSOfficialDocs.md:505-578, bit 7 is the left
-   * pixel). Refilled on every init: cheap, and a table that is rebuilt
-   * cannot be stale.
+   * The colour table, then the screen table as the conversion of the
+   * colour memory just zeroed -- through the same rebuild the frame loop
+   * triggers, so there is one conversion in this file and not two -- with
+   * the flag down, since what the table holds is what the memory holds.
+   * Then the cel's palette as the identity, entry n at (n, n, n), the one
+   * and only time it is written. Then the plane table: for plane p and
+   * byte value v, pixel x takes bit 7 - x of v at weight p
+   * (SMSOfficialDocs.md:505-578, bit 7 is the left pixel). Refilled on
+   * every init: cheap, and a table that is rebuilt cannot be stale.
    */
   for(i = 0; i < 64; i++)
-    vdp_cram_rgb[i] = (uint16)MakeRGB15(vdp_level[i & 3],
-                                        vdp_level[(i >> 2) & 3],
-                                        vdp_level[(i >> 4) & 3]);
+    vdp_clut_rgb[i] = MakeCLUTColorEntry(0,
+                                         vdp_level[i & 3],
+                                         vdp_level[(i >> 2) & 3],
+                                         vdp_level[(i >> 4) & 3]);
+
+  vdp_clut_build();
+  sms.vdp.cram_dirty = 0;
 
   for(i = 0; i < VDP_PLUT_ENTRIES; i++)
-    sms.vdp.plut[i] = vdp_cram_rgb[sms.vdp.cram[i] & 0x3FU];
+    sms.vdp.plut[i] = (uint16)MakeRGB15(i,i,i);
 
   for(i = 0; i < (int32)VDP_PLANES_COUNT; i++)
     {
@@ -1365,6 +1400,8 @@ vdp_init(void)
   LOG_INFO(LOG_CAT_VDP,("init ok mode=4 view=256x192 profile=%s",
                         cart_system_name(sms.cart.system)));
   LOG_INFO(LOG_CAT_VDP,("irq line owner=vdp (test source keeps nmi only)"));
+  LOG_INFO(LOG_CAT_VDP,("palette via screen clut (%lu entries + background), cel plut identity",
+                        (unsigned long)VDP_CRAM_SIZE));
 
   /*
    * The row cache as built: how many rows the video memory can hold, what
@@ -1454,7 +1491,28 @@ vdp_cel(void)
 uint16
 vdp_backdrop(void)
 {
-  return sms.vdp.plut[VDP_BACKDROP_INDEX()];
+  uint32 n;
+
+  n = VDP_BACKDROP_INDEX();
+  return (uint16)MakeRGB15(n,n,n);
+}
+
+int32
+vdp_clut_take(void)
+{
+  if(sms.vdp.cram_dirty == 0UL)
+    return 0;
+
+  sms.vdp.cram_dirty = 0;
+  vdp_clut_build();
+  VDP_COUNT(clut_upd);
+  return 1;
+}
+
+const uint32 *
+vdp_clut(void)
+{
+  return sms.vdp.clut;
 }
 
 void
@@ -1732,6 +1790,23 @@ vdp_report(void)
     }
 
   /*
+   * The screen table: the colour writes of the window again, how many of
+   * them landed inside the picture, and how many rebuilds they cost. The
+   * ratio of the first to the third is what the end-of-frame rebuild
+   * buys; the second is the journal of a palette split, which the table
+   * set once per frame cannot show and which a later stage may.
+   */
+  if((sms.vdp.cnt_cram_w != 0UL) || (sms.vdp.cnt_cram_mid != 0UL) ||
+     (sms.vdp.cnt_clut_upd != 0UL))
+    {
+      LOG_HOT(LOG_CAT_VDP,LOG_LVL_DBG,
+              ("clut writes=%lu mid=%lu updates=%lu",
+               (unsigned long)sms.vdp.cnt_cram_w,
+               (unsigned long)sms.vdp.cnt_cram_mid,
+               (unsigned long)sms.vdp.cnt_clut_upd));
+    }
+
+  /*
    * The rarer reads on a line of their own, so that the line above keeps
    * its shape whatever is added here. A non-zero H counter figure is the
    * one to look at when a raster effect comes out wrong (vdp.h).
@@ -1847,6 +1922,8 @@ vdp_report(void)
   sms.vdp.cnt_reg_w = 0;
   sms.vdp.cnt_vram_w = 0;
   sms.vdp.cnt_cram_w = 0;
+  sms.vdp.cnt_cram_mid = 0;
+  sms.vdp.cnt_clut_upd = 0;
   sms.vdp.cnt_status_r = 0;
   sms.vdp.cnt_data_r = 0;
   sms.vdp.cnt_vcnt_r = 0;

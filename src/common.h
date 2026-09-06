@@ -329,6 +329,11 @@
  * frame: there is one executor and one path, and the switches above
  * decide only what is traced and measured along it. The cel probe is the
  * one exception: it stops the boot before the loop and holds its pattern.
+ * In every build the emulated palette is the screen's own colour table,
+ * set on each screen once at the start of the loop and then at most once
+ * per frame, after a colour moved, while the cel's palette is the identity;
+ * no switch turns that off, since nothing else in the program can turn an
+ * index into a colour.
  *
  * Two switch names are refused below so that an old build command fails
  * loudly rather than silently building the default. The built-in test

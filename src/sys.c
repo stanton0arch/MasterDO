@@ -69,6 +69,13 @@ static int32 sys_mem_sealed = 0;
  * a caller arms to repaint all of them read this one figure.
  */
 #define SYS_NUM_SCREENS 2
+/*
+ * The most entries one call may set on a screen's colour table: indexes
+ * 0 to 31 for the colours and 32 for the display's background colour
+ * (docs/3do/3do_portfolio_2.5.md:9874; SetScreenColors refuses an index
+ * above 32, :9469).
+ */
+#define SYS_CLUT_ENTRIES 33
 
 /*
  * The instruments of the sound path, loaded in this order and released in the
@@ -279,9 +286,12 @@ Err
 sys_display_open(void)
 {
   Err err;
+  Err eh;
+  Err ev;
   int32 display_type;
   int32 reported_type;
   int32 i;
+  int32 avg_off;
   Bitmap *bm;
 
   if(sys_ctx != NULL)
@@ -362,6 +372,31 @@ sys_display_open(void)
         }
       sys_ctx->sc_BitmapItems[i] = sys_ctx->sc_Bitmaps[i]->bm.n_Item;
     }
+
+  /*
+   * The display's averaging is cut on every screen, both directions
+   * (include/3do/graphics.h:790-791; docs/3do/3do_portfolio_2.5.md:10167).
+   * What the picture carries is a palette index on each component, and
+   * the screen's colour table turns it into a colour afterwards: an
+   * average of two indexes is an index of nothing, a colour between two
+   * unrelated entries. Cut explicitly rather than trusted off: the
+   * default was read off one host and is not a property of the folio.
+   * A refusal is traced and not fatal -- the picture is then wrong at the
+   * edges of the colours and the trace says why, which is a better run
+   * than none.
+   */
+  avg_off = 0;
+  for(i = 0; i < SYS_NUM_SCREENS; i++)
+    {
+      eh = DisableHAVG(sys_ctx->sc_ScreenItems[i]);
+      ev = DisableVAVG(sys_ctx->sc_ScreenItems[i]);
+      if((eh < 0) || (ev < 0))
+        LOG_WARN(LOG_CAT_SYS,("display averaging refused screen=%ld h=%ld v=%ld",
+                              (long)i,(long)eh,(long)ev));
+      else
+        avg_off++;
+    }
+  LOG_INFO(LOG_CAT_SYS,("display averaging off screens=%ld",(long)avg_off));
 
   bm = sys_ctx->sc_Bitmaps[0];
   sys_bm_width = bm->bm_Width;
@@ -542,6 +577,54 @@ sys_fill_screen(int32 index,
   if(err < 0)
     LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
              ("sys_fill_screen: FillRect err=%ld",(long)err));
+
+  return err;
+}
+
+Err
+sys_set_colors(int32         index,
+               const uint32 *entries,
+               int32         count)
+{
+  Item screen;
+  Err err;
+
+  /*
+   * One-shot diagnostics, as in the fill above and for the same reason: a
+   * program that rewrites its palette every frame asks for this every
+   * frame, and a blocking printf at that rate would be the measurement.
+   */
+  if((sys_ctx == NULL) || (index < 0) || (index >= (int32)SYS_NUM_SCREENS))
+    {
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+               ("sys_set_colors: no such screen, or display not open"));
+      return -1;
+    }
+
+  if((entries == NULL) || (count <= 0) || (count > SYS_CLUT_ENTRIES))
+    {
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+               ("sys_set_colors: refused count=%ld",(long)count));
+      return -1;
+    }
+
+  screen = sys_ctx->sc_ScreenItems[index];
+  if(screen == 0)
+    {
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+               ("sys_set_colors: no screen item, display not open"));
+      return -1;
+    }
+
+  /*
+   * The folio reads the entries and does not write them; its prototype
+   * says uint32 * all the same (include/3do/graphics.h:829), hence the
+   * cast, here and nowhere else.
+   */
+  err = SetScreenColors(screen,(uint32 *)entries,count);
+  if(err < 0)
+    LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+             ("sys_set_colors: SetScreenColors err=%ld",(long)err));
 
   return err;
 }

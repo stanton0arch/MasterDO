@@ -224,10 +224,6 @@ uint8 vdp_io_status_read(void)         { return 0; }
 uint8 vdp_io_vcounter_read(void)       { return 0; }
 uint8 vdp_io_hcounter_read(void)       { return 0; }
 
-/* A table of data, not a function (vdp.h:514): the colour macro of the video
-   part indexes it from code z80.c pulls in. */
-uint16 vdp_cram_rgb[64];
-
 /* The mapper, which the shipped build's Z80_WR8 calls on a register address.
    Recorded rather than thrown away: mapper_path_check reads the log back to
    prove the trigger fires, and the descriptor run reads the count back to

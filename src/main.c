@@ -213,6 +213,7 @@ main_perf_emit(uint32 usec,
                uint32 vdp_usec,
                uint32 vdp_samples,
                uint32 draw_usec,
+               uint32 clut_usec,
                uint32 over,
                uint32 clk)
 {
@@ -225,6 +226,7 @@ main_perf_emit(uint32 usec,
   uint32 z8010;
   uint32 vdp10;
   uint32 draw10;
+  uint32 clut_per_frame;
 
   /*
    * Guard, and the divisors below rest on it: a window of at least a second
@@ -310,13 +312,24 @@ main_perf_emit(uint32 usec,
   frame10 = (usec / 100UL) / frames;
   draw10 = (draw_usec / 100UL) / frames;
 
+  /*
+   * The colour table in whole microseconds per frame, over all the frames
+   * of the window and not only those that set one: the figure is what a
+   * frame pays on average, which is zero for a still palette and the
+   * price of one set for a palette rewritten every frame. Microseconds
+   * because the set is a fraction of a millisecond and tenths would
+   * publish 0.2 for every value it can take.
+   */
+  clut_per_frame = clut_usec / frames;
+
   LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("fps=%lu.%lu frame=%lu.%lums z80=%lu.%lums vdp=%lu.%lums draw=%lu.%lums over=%lu clk=%lu",
+          ("fps=%lu.%lu frame=%lu.%lums z80=%lu.%lums vdp=%lu.%lums draw=%lu.%lums clut=%luus over=%lu clk=%lu",
            (unsigned long)(fps10 / 10UL),(unsigned long)(fps10 % 10UL),
            (unsigned long)(frame10 / 10UL),(unsigned long)(frame10 % 10UL),
            (unsigned long)(z8010 / 10UL),(unsigned long)(z8010 % 10UL),
            (unsigned long)(vdp10 / 10UL),(unsigned long)(vdp10 % 10UL),
            (unsigned long)(draw10 / 10UL),(unsigned long)(draw10 % 10UL),
+           (unsigned long)clut_per_frame,
            (unsigned long)over,(unsigned long)clk));
 }
 
@@ -832,14 +845,14 @@ main(int    argc,
   Err draw_err;
   /*
    * The ground painted around the picture, and how many screens still owe
-   * that colour. The colour is the emulated machine's own background, read
-   * once per frame and compared with what was last painted: sixteen bits
-   * and one compare per frame in the regime where nothing changes, which
-   * is the regime of every game that sets its background colour once.
-   *
-   * The colour and not the register, because the entry the register names
-   * can be rewritten without the register moving; comparing the resolved
-   * colour catches that too, for the same one load.
+   * it. What is painted is the NUMBER of the emulated machine's background
+   * entry, laid on the three components the way the picture's own pixels
+   * carry theirs, and the screen's colour table turns both into the same
+   * colour; read once per frame and compared with what was last painted:
+   * sixteen bits and one compare per frame in the regime where nothing
+   * changes, which is the regime of every game that sets its background
+   * entry once. A game that rewrites the colour of that entry and leaves
+   * the register alone repaints nothing here: the table below follows it.
    *
    * The countdown is armed with the number of screens on every change and
    * spent one screen a frame, each just before that screen is drawn into:
@@ -848,9 +861,23 @@ main(int    argc,
    */
   uint16 border_color;
   int32 border_repaint;
+  /*
+   * How many screens still owe the current colour table. Each screen of
+   * the rotation has a table of its own, and the emulated palette is set
+   * on them the way the ground is painted: armed with the screen count
+   * at every change of the colour memory, spent one screen a frame just
+   * before that screen is drawn into. A table set on the screen the scan
+   * is reading would show the old picture in the new colours for one
+   * frame; the countdown lets the change travel in two frames instead,
+   * which nothing sees. Rearmed if the palette moves again while it is
+   * running down, so the next screen always takes the latest table.
+   */
+  int32 clut_repaint;
 #if MAIN_MEASURE
   /* The near edge of the one measured stretch of the drawing side. */
   uint32 draw_start;
+  /* The near edge of a colour table set, when a screen owes one. */
+  uint32 clut_start;
 #endif
   /*
    * Whether the core has yet to be found stopped by the per-frame
@@ -906,6 +933,13 @@ main(int    argc,
   uint32 perf_vdp = 0;
   uint32 perf_vdp_samples = 0;
   uint32 perf_draw = 0;
+  /*
+   * The colour table sets of the window, in microseconds: summed over the
+   * frames that paid one, published divided by all the frames of the
+   * window. Zero over a window where the palette stood still, which is
+   * what most games do once past their title screen.
+   */
+  uint32 perf_clut = 0;
   /* Readings refused as impossible (MAIN_CLK_MAX_*), per window. */
   uint32 perf_clk = 0;
 #endif
@@ -1316,6 +1350,14 @@ main(int    argc,
   border_color = vdp_backdrop();
   border_repaint = sys_screen_count();
 
+  /*
+   * The colour table, armed the same way: the video part built it at init
+   * over the zeroed colour memory, and each screen takes it just before
+   * its first drawing, so no frame is ever shown through the linear table
+   * the display came up with.
+   */
+  clut_repaint = sys_screen_count();
+
   vbl_target = sys_vbl_count() + MAIN_VBL_STEP;
 
   /*
@@ -1550,12 +1592,13 @@ main(int    argc,
        * The ground, once per turn and on the cold side of the emulated
        * stretch: one load of sixteen bits and one compare while nothing
        * changes, and a fill only while the countdown says a screen still
-       * owes the colour. A program that writes the register on every
-       * frame arms the countdown again on every frame and so pays one
-       * fill a frame -- there is no cheaper honest answer to a background
-       * that really does change that often -- and it still pays only one
-       * line of trace per report window, the count of the window going
-       * with the other aggregates.
+       * owes the number. A program that moves register 7 on every frame
+       * arms the countdown again on every frame and so pays one fill a
+       * frame -- there is no cheaper honest answer to a background that
+       * really does change that often -- and it still pays only one line
+       * of trace per report window, the count of the window going with
+       * the other aggregates. A program that rewrites the colour of the
+       * entry instead pays nothing here: the table below carries that.
        *
        * Before the drawing and not after: the fill covers the whole
        * screen, so the picture has to land on top of it.
@@ -1589,6 +1632,47 @@ main(int    argc,
               }
           }
       }
+
+      /*
+       * The palette, once per turn and on the same cold side: one call
+       * into the video part, which rebuilds the 32 entries only if a
+       * colour byte moved this frame, and a set on the screen about to be
+       * drawn only while the countdown says it still owes the table. A
+       * program that rewrites its palette every frame pays one set a
+       * frame -- the video part folded its 32 writes into one rebuild --
+       * and a program that leaves it alone pays a load and a compare.
+       *
+       * Spent on success only, as the fill above is: a refused set leaves
+       * that screen with the table it had, and the countdown comes back
+       * to it on its next turn rather than leaving half the frames of the
+       * run in the wrong colours. The set is timed on its own, apart from
+       * the draw: it is the display's cost, not the engine's, and the
+       * line publishes it beside the draw so the two never blur.
+       */
+      if(vdp_clut_take() != 0)
+        clut_repaint = sys_screen_count();
+
+      if(clut_repaint > 0)
+        {
+#if MAIN_MEASURE
+          clut_start = sys_usec();
+#endif
+          if(sys_set_colors(sys_screen_index(),vdp_clut(),(int32)VDP_CLUT_ENTRIES) >= 0)
+            clut_repaint--;
+#if MAIN_MEASURE
+          /*
+           * Less the clock's own cost, as the two emulated slices are: a
+           * set is a fraction of a millisecond and the two readings
+           * around it would otherwise be a good part of the figure.
+           */
+          perf_delta = sys_usec() - clut_start;
+          if(perf_delta < MAIN_CLK_MAX_FRAME_USEC)
+            perf_clut += (perf_delta > perf_clock_cost)
+                         ? (perf_delta - perf_clock_cost) : 0UL;
+          else
+            perf_clk++;
+#endif
+        }
 
       /*
        * The end of the frame: the one draw call of the turn, then the
@@ -1749,7 +1833,7 @@ main(int    argc,
                          perf_emul,perf_emul_frames,
                          perf_z80,perf_z80_samples,
                          perf_vdp,perf_vdp_samples,
-                         perf_draw,perf_over,perf_clk);
+                         perf_draw,perf_clut,perf_over,perf_clk);
 
 #if MAIN_PROFILE
           /*
@@ -1928,6 +2012,7 @@ main(int    argc,
           perf_vdp = 0;
           perf_vdp_samples = 0;
           perf_draw = 0;
+          perf_clut = 0;
           perf_clk = 0;
         }
 #endif

@@ -1151,6 +1151,13 @@ celprobe_measure(void)
    * that the detour below is seen as a change, then the three states of
    * the averaging, each held long enough to be looked at and captured.
    */
+  /*
+   * "As booted" now means cut: the display opener disables the averaging
+   * on every screen (sys.c, sys_display_open), so this first case and the
+   * "off" case below measure the same state. Kept as the point the first
+   * run of this probe was read against; the "on" case is the one that
+   * differs.
+   */
   LOG_INFO(LOG_CAT_PERF,("probe clut linear: grey ramp, averaging as booted"));
   (void)sys_vbl_wait(CELPROBE_HOLD_FIELDS / 2UL);
 

@@ -64,6 +64,17 @@
 #define VDP_VRAM_SIZE 16384UL
 #define VDP_VRAM_MASK 0x3FFFUL
 #define VDP_CRAM_SIZE 32
+/*
+ * The screen's colour table as this module builds it: the 32 colours,
+ * then one more entry, index 32, which the display takes as its
+ * background colour (docs/3do/3do_portfolio_2.5.md:9874, "32 for the
+ * background color"). It is built from colour 0: a pixel of index 0
+ * leaves the identity palette as the word 0x0000, and the display shows
+ * a zero word in its background colour rather than through entry 0 of
+ * the table, so the two are kept the same colour and a zero pixel comes
+ * out as colour 0 either way.
+ */
+#define VDP_CLUT_ENTRIES (VDP_CRAM_SIZE + 1)
 #define VDP_CRAM_MASK 0x1FUL
 #define VDP_REG_COUNT 16
 #define VDP_REG_LAST  10
@@ -569,11 +580,36 @@ typedef struct
   uint8 *vram;
 
   /*
-   * Colour memory, 32 bytes, stored as written and converted at the write
-   * into the palette below. Nothing reads it per pixel or per line: the
-   * palette is its image, and the cel engine reads the palette.
+   * Colour memory, 32 bytes, stored as written and read by nothing per
+   * pixel or per line. Its image is the screen's colour table below, which
+   * vdp_clut_take rebuilds once per frame when the flag beside it is up:
+   * a colour write here is a byte stored and a flag raised, nothing more.
    */
   uint8 cram[VDP_CRAM_SIZE];
+
+  /*
+   * Up when a colour byte has been written since the table was last
+   * rebuilt, down once vdp_clut_take has rebuilt it. Written and not
+   * compared: the data write macro stores it on the port path and a
+   * store is all it does there. A word, like the other flags of this
+   * structure, so that no padding is added around it.
+   */
+  uint32 cram_dirty;
+
+  /*
+   * The screen's colour table, 33 packed entries in the form the display
+   * takes them (include/3do/graphics.h:264, MakeCLUTColorEntry): the
+   * index in the high byte, then red, green and blue at eight bits each,
+   * one of four levels apiece; the last entry is the display's background
+   * colour (include/3do/graphics.h:272, MakeCLUTBackgroundEntry), the
+   * colour of a zero word, built from colour 0 so that a pixel of index 0
+   * shows as colour 0. Rebuilt from the colour memory by vdp_clut_take
+   * and read through vdp_clut by the frame loop, which loads it on each
+   * screen of the rotation just before that screen is drawn. This module
+   * never loads it anywhere: it says what the colours are, and the caller
+   * sets them.
+   */
+  uint32 clut[VDP_CLUT_ENTRIES];
 
   /*
    * The registers, stored as written. Read here: bit 4 of register 0 and
@@ -619,11 +655,15 @@ typedef struct
   uint32 line_pending;
 
   /*
-   * The palette of the coded cel, RGB555, owned here and written by one
-   * pen only: the conversion of the emulated colour memory, at init over
-   * the zeroed colour memory and then at every colour write through the
-   * data write macro below -- and nothing else, ever. The cel engine
-   * reads it through the cel's palette pointer, loaded on every draw.
+   * The palette of the coded cel, RGB555, and it is the IDENTITY: entry n
+   * holds n on each of its three components, filled once at init and
+   * written by nothing afterwards. A coded cel has no form without a
+   * palette, so it keeps one, but this one decides no colour: a pixel of
+   * index n comes out of the cel as (n, n, n), each five bit component
+   * indexes the screen's colour table above, and that table -- the image
+   * of the colour memory -- names the colour shown. Entry 0 is 0x0000,
+   * which the background flag of the cel paints opaque, as before. The
+   * cel engine reads it through the cel's palette pointer on every draw.
    */
   uint16 plut[VDP_PLUT_ENTRIES];
 
@@ -725,6 +765,17 @@ typedef struct
   uint32 cnt_reg_w;
   uint32 cnt_vram_w;
   uint32 cnt_cram_w;
+  /*
+   * Of the colour writes, how many landed while the picture was being
+   * scanned (line below VDP_ACTIVE_LINES), and how many times the screen
+   * table was rebuilt. The first is a journal and not a fault: the table
+   * is set once per frame, so a colour written mid-picture shows on the
+   * next frame's lines, and a program that does this on purpose -- a
+   * palette split -- is what the figure names. The second, against the
+   * first line's count, says how many writes one rebuild absorbed.
+   */
+  uint32 cnt_cram_mid;
+  uint32 cnt_clut_upd;
   uint32 cnt_status_r;
   uint32 cnt_data_r;
   uint32 cnt_vcnt_r;
@@ -806,6 +857,24 @@ typedef struct
 #define VDP_COUNT(name) (sms.vdp.cnt_##name++)
 #else
 #define VDP_COUNT(name) ((void)0)
+#endif
+
+/*
+ * Counts a colour write that lands while the picture is being scanned.
+ * The test on the line is inside the guard and not around the macro, so
+ * that a build without counters carries neither the compare nor the
+ * count on the port path.
+ */
+#if VDP_COUNTERS
+#define VDP_COUNT_CRAM_MID()                                      \
+  do                                                              \
+    {                                                             \
+      if(sms.vdp.vcount < VDP_ACTIVE_LINES)                       \
+        sms.vdp.cnt_cram_mid++;                                   \
+    }                                                             \
+  while(0)
+#else
+#define VDP_COUNT_CRAM_MID() ((void)0)
 #endif
 
 /*
@@ -949,11 +1018,12 @@ uint32 vdp_profile_reps(uint32 post);
  * bits. The colour index is the low five bits of the address
  * (SMSOfficialDocs.md:690-740; sms_vdp.c:540).
  *
- * A colour write also converts: the palette entry of the same index takes
- * the RGB555 of the six bit colour, out of the table below. One load and
- * one store more on the cold branch -- a program writes at most 32
- * colours per palette change. This is the one pen of the palette; no
- * render reads the colour memory.
+ * A colour write converts nothing: the byte is stored, the dirty flag is
+ * raised, and the conversion of the 32 entries into the screen's colour
+ * table waits for the end of the frame (vdp_clut_take), once, whether
+ * one colour moved or all of them. No library call ever sits on this
+ * path. The cel's own palette is the identity and is not written here or
+ * anywhere after init.
  *
  * A video memory write throws away the decoded row that byte belongs to,
  * and that is the whole of the cache's upkeep: one shift and one store,
@@ -966,14 +1036,6 @@ uint32 vdp_profile_reps(uint32 post);
  * hook carries (z80.c, the input and output space).
  * ---------------------------------------------------------------------------
  */
-/*
- * The six bit colour to RGB555 table, 64 entries, filled at init from the
- * four documented levels and read by the macro below wherever it expands.
- * Defined in vdp.c; a data table with external linkage because the macro
- * expands inside the processor's port function, in another file.
- */
-extern uint16 vdp_cram_rgb[64];
-
 #define VDP_IO_DATA_WRITE(v)                                            \
   do                                                                    \
     {                                                                   \
@@ -982,9 +1044,9 @@ extern uint16 vdp_cram_rgb[64];
       if(sms.vdp.code == VDP_CODE_CRAM_WRITE)                           \
         {                                                               \
           sms.vdp.cram[sms.vdp.addr & VDP_CRAM_MASK] = (uint8)(v);      \
-          sms.vdp.plut[sms.vdp.addr & VDP_CRAM_MASK] =                  \
-            vdp_cram_rgb[(v) & 0x3FU];                                  \
+          sms.vdp.cram_dirty = 1;                                       \
           VDP_COUNT(cram_w);                                            \
+          VDP_COUNT_CRAM_MID();                                         \
         }                                                               \
       else                                                              \
         {                                                               \
@@ -1077,20 +1139,50 @@ int32 vdp_init(void);
 void *vdp_cel(void);
 
 /*
- * The resolved backdrop colour, RGB555: the palette entry the index above
- * names, which is the colour the hardware shows outside the picture. Read
- * once per frame by the frame loop, on the cold side of its line loop,
- * and never by the render -- the render has the index in a local already.
+ * The backdrop as the ground is to be filled with, RGB555: the index the
+ * macro above names, repeated on the three components, exactly as the
+ * identity palette of the cel emits a pixel of that index. The fill lays
+ * a number and not a colour; the screen's colour table turns it into the
+ * colour of that entry, so the surround and the picture go through the
+ * same table and can never disagree. Read once per frame by the frame
+ * loop, on the cold side of its line loop, and never by the render -- the
+ * render has the index in a local already.
  *
- * The colour and not the index, because a program may leave register 7
- * alone and rewrite the colour memory entry it points at: comparing
- * indexes would leave the surround a palette behind. Comparing the
- * sixteen bits catches both causes for the same one load.
+ * It moves only when register 7 moves. A program that rewrites the colour
+ * memory entry it points at repaints nothing here: the table changes, and
+ * the ground already filled with the number follows it.
  *
- * This module never draws and never waits: it says what the colour is,
+ * This module never draws and never waits: it says what the value is,
  * and the caller paints.
  */
 uint16 vdp_backdrop(void);
+
+/*
+ * Whether the screen's colour table has to be set again: 1 when a colour
+ * byte has moved since the last call, and the 32 entries have then been
+ * rebuilt from the colour memory, the flag cleared and the rebuild
+ * counted; 0 otherwise, with nothing touched. Called once per frame by
+ * the frame loop, at the end of the frame, before the draw: a program
+ * that writes its whole palette every frame costs one rebuild per frame,
+ * one that leaves it alone costs a load and a compare.
+ *
+ * The rebuild is here and not on the write path on purpose: 32 colour
+ * writes in a frame are one rebuild and not 32, and the port path keeps
+ * to a store and a flag. Without the counters the count is not made; the
+ * rebuild is, in every build.
+ */
+int32 vdp_clut_take(void);
+
+/*
+ * The screen's colour table as last rebuilt, VDP_CLUT_ENTRIES packed
+ * entries -- the 32 colours and then the background entry, index 32 -- in
+ * the form SetScreenColors takes (include/3do/graphics.h:829). Valid from
+ * init on -- the init rebuilds it over the zeroed colour memory -- and
+ * current once vdp_clut_take has been called. A pointer to this module's
+ * own array, read by the frame loop and by nothing else; never written
+ * through.
+ */
+const uint32 *vdp_clut(void);
 
 /*
  * Notes that the caller has just repainted the surround with the current

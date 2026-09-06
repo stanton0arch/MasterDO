@@ -29,9 +29,12 @@
  * the ROM's imagery; and it names the ROM it was taken from, by size and
  * by digest, so that another ROM is refused rather than compared.
  *
- * An optional directory takes one PPM per picture, the palette applied and
- * the border filled as the console shows it: the file the eye reads when a
- * figure disagrees with a screen.
+ * An optional directory takes one PPM per picture, the screen's colour
+ * table applied and the border filled as the console shows it: the file
+ * the eye reads when a figure disagrees with a screen. Two more figures
+ * come out with the digests, and the script demands them: the cel's
+ * palette is the identity, and the screen table is the colour memory
+ * converted, both on every picture taken.
  *
  *   romrun <rom> <frames> <every> write|compare <reference> [ppm dir] [taken]
  *
@@ -210,15 +213,68 @@ static unsigned long digest(const unsigned char *p, unsigned long n)
   return h;
 }
 
+/* ---- the two tables the console turns an index into a colour with ---- */
+
+/* The cel's palette must be the identity -- entry n holds n on each of its
+   three five bit components -- or the index a pixel carries is not the
+   index the screen table is asked for. Returns how many of the 32 entries
+   are. */
+static unsigned long plut_identity(void)
+{
+  unsigned long ok = 0, n;
+  for(n = 0; n < VDP_PLUT_ENTRIES; n++)
+    if(sms.vdp.plut[n] == (uint16)((n << 10) | (n << 5) | n)) ok++;
+  return ok;
+}
+
+/* The screen table must be the colour memory converted: entry i carries i
+   in its high byte and, per component, the level of the two bits of
+   cram[i] -- R1R0 in bits 0-1, G1G0 in 2-3, B1B0 in 4-5 -- at 0, 85, 170
+   or 255 (docs/sms_gg/SMSOfficialDocs.md:483-495); and the 33rd entry, the
+   display's background colour, carries the control bits 0xE0000000
+   (include/3do/hardware.h:71,73) over the three components of colour 0,
+   since a pixel of index 0 is the zero word the display paints in that
+   colour. Computed here from the colour memory alone, owing the render's
+   own table nothing. Returns how many of the 33 entries are. */
+static unsigned long clut_entries(void)
+{
+  static const unsigned long level[4] = { 0, 85, 170, 255 };
+  const uint32 *clut = vdp_clut();
+  unsigned long ok = 0, i, want, c, rgb;
+  for(i = 0; i < VDP_CRAM_SIZE; i++)
+    {
+      c = sms.vdp.cram[i] & 0x3FUL;
+      want = (i << 24) | (level[c & 3] << 16) | (level[(c >> 2) & 3] << 8)
+           | level[(c >> 4) & 3];
+      if((unsigned long)clut[i] == want) ok++;
+    }
+  c = sms.vdp.cram[0] & 0x3FUL;
+  rgb = (level[c & 3] << 16) | (level[(c >> 2) & 3] << 8) | level[(c >> 4) & 3];
+  if((unsigned long)clut[VDP_CRAM_SIZE] == (0xE0000000UL | rgb)) ok++;
+  return ok;
+}
+
+/* The border is filled with a NUMBER and not a colour: the backdrop entry,
+   16 plus the low four bits of register 7 (docs/sms_gg/SMSOfficialDocs.md:
+   861-864), repeated on the three components exactly as the identity
+   palette emits a pixel of that index. Computed here from the register
+   alone. Returns 1 when the render agrees. */
+static int backdrop_number(void)
+{
+  unsigned long n = 16UL + (sms.vdp.reg[7] & 15UL);
+  return vdp_backdrop() == (uint16)((n << 10) | (n << 5) | n);
+}
+
 /* ---- PPM, the screen as the console shows it ---- */
 
 static unsigned char screen[240][320][3];
 
-static void rgb555(uint16 c, unsigned char *p)
+/* One entry of the screen table to its three bytes: red, green, blue. */
+static void entry_rgb(uint32 e, unsigned char *p)
 {
-  p[0] = (unsigned char)(((c >> 10) & 31) * 255 / 31);
-  p[1] = (unsigned char)(((c >> 5) & 31) * 255 / 31);
-  p[2] = (unsigned char)((c & 31) * 255 / 31);
+  p[0] = (unsigned char)((e >> 16) & 255);
+  p[1] = (unsigned char)((e >> 8) & 255);
+  p[2] = (unsigned char)(e & 255);
 }
 
 static void ppm(const char *dir, long frame)
@@ -228,8 +284,11 @@ static void ppm(const char *dir, long frame)
   int x, y;
   FILE *f;
   int n;
+  const uint32 *clut = vdp_clut();
 
-  rgb555(vdp_backdrop(),b);
+  /* The border is filled with the backdrop NUMBER on every component; the
+     screen table gives it its colour, as it does every pixel. */
+  entry_rgb(clut[vdp_backdrop() & 31],b);
   for(y = 0; y < 240; y++)
     for(x = 0; x < 320; x++)
       memcpy(screen[y][x],b,3);
@@ -237,8 +296,8 @@ static void ppm(const char *dir, long frame)
     for(x = 0; x < PIC_W; x++)
       {
         unsigned idx = pic[y * PIC_W + x];
-        if(idx < VDP_PLUT_ENTRIES)
-          rgb555(sms.vdp.plut[idx],screen[24 + y][32 + x]);
+        if(idx < VDP_CRAM_SIZE)
+          entry_rgb(clut[idx],screen[24 + y][32 + x]);
         else
           { screen[24 + y][32 + x][0] = 255; screen[24 + y][32 + x][1] = 0;
             screen[24 + y][32 + x][2] = 255; }
@@ -342,6 +401,16 @@ int main(int argc, char **argv)
      of the eight fine scrolls (video registers 1, 0 and 8). */
   unsigned long off_frames = 0, masked_frames = 0, fine_frames[8];
   unsigned long w;
+  /* The fewest entries found right, over every picture taken: one bad
+     entry on one picture is a failure, whatever the others showed. */
+  unsigned long plut_ok = VDP_PLUT_ENTRIES, clut_ok = VDP_CLUT_ENTRIES, k;
+  /* Frames on which the rebuild signal the frame loop consumes agreed with
+     the colour write counter: raised when and only when a colour byte was
+     written since the last frame. Counted on every frame, not only the
+     pictures taken. */
+  unsigned long take_ok = 0, take_frames = 0, cram_w_seen = 0;
+  /* Pictures whose border carries the backdrop number register 7 names. */
+  unsigned long backdrop_ok = 0;
   static unsigned long row_digest[PIC_H];
 
   memset(fine_frames,0,sizeof fine_frames);
@@ -445,11 +514,28 @@ int main(int argc, char **argv)
       if((sms.vdp.reg[0] & 0x20U) != 0U) masked_frames++;
       fine_frames[sms.vdp.reg[8] & 7U]++;
 
+      /* The end of the frame as src/main.c closes it: the screen table is
+         rebuilt now if a colour moved, so what the picture below is read
+         through is what the console would show. The signal itself is held
+         against the colour write counter: the frame loop rearms its table
+         countdown on it, so a rebuild that stayed silent, or one that
+         fired without a write, would leave the console in the wrong
+         colours while every table here reads right. */
+      k = (sms.vdp.cnt_cram_w != cram_w_seen) ? 1UL : 0UL;
+      cram_w_seen = sms.vdp.cnt_cram_w;
+      if((vdp_clut_take() != 0) == (k != 0UL)) take_ok++;
+      take_frames++;
+
       if((fr % every) != 0 && fr != frames - 1)
         continue;
 
       take();
       pictures++;
+      k = plut_identity();
+      if(k < plut_ok) plut_ok = k;
+      k = clut_entries();
+      if(k < clut_ok) clut_ok = k;
+      if(backdrop_number()) backdrop_ok++;
       if(ppmdir != NULL) ppm(ppmdir,fr);
       for(y = 0; y < PIC_H; y++)
         row_digest[y] = digest(pic + (y * PIC_W),(unsigned long)PIC_W);
@@ -521,6 +607,11 @@ int main(int argc, char **argv)
   for(w = 0; w < 8; w++)
     printf("%s%lu",(w != 0) ? "/" : "",fine_frames[w]);
   printf("\n");
+
+  printf("plut identity %lu/%d\n",plut_ok,(int)VDP_PLUT_ENTRIES);
+  printf("clut entries %lu/%d\n",clut_ok,(int)VDP_CLUT_ENTRIES);
+  printf("backdrop number %lu/%lu\n",backdrop_ok,pictures);
+  printf("clut take %lu/%lu\n",take_ok,take_frames);
 
   if(writing)
     printf("pictures=%lu written\n",pictures);
