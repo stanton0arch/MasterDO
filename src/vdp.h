@@ -19,17 +19,24 @@
  * What this stage does. It answers on the ports, stores every byte a
  * program sends to video memory, colour memory and the registers, counts
  * lines, raises the VBlank and line interrupts and holds the interrupt
- * line until the status register is read. It also renders the background
- * plane of mode 4: once per line of the picture, from the name table, the
- * patterns and the scroll registers the program wrote, straight into the
+ * line until the status register is read. On the delivered path
+ * (common.h, SMS_DECOR_CEL 1) it writes no pixel: it keeps a picture of
+ * the name table and a sheet of the sprite patterns in step with the
+ * video memory, and builds, once per frame, a list of cels the engine
+ * draws -- windows of the picture, sprites, priority tiles, backdrop
+ * (VDP_DECOR_*, VDP_SHEET_*). The two sprite bits of the status register
+ * are computed per line from a table of the attribute table, without a
+ * pixel. On the older path it renders the background plane of mode 4:
+ * once per line of the picture, from the name table, the patterns and
+ * the scroll registers the program wrote, straight into the
  * one-byte-per-pixel index buffer the coded cel below reads -- one line
  * per call of vdp_line, eight pixels a stroke, two words a stroke. Then
  * the sprites of that line: the attribute table is walked once, eight of
  * its entries at most are kept, and their opaque pixels are laid into the
  * same row -- above the background, except where the priority mask the
  * background just wrote into its scratch says the background wins.
- * The two sprite bits of the status register are raised there and fall on
- * a status read, like the two interrupt requests.
+ * The two sprite bits of the status register are raised there on either
+ * path and fall on a status read, like the two interrupt requests.
  * Colour memory is converted at the write, never at the render: the
  * palette of the cel is the image of the colour memory, kept in step by
  * the data write macro.
@@ -492,6 +499,88 @@
 #endif
 
 /*
+ * ---------------------------------------------------------------------------
+ * The sprites and the priority tiles as the cel engine draws them: small
+ * cels of the same list, in every band, after the windows of the
+ * background.
+ *
+ * The sprite patterns are converted on demand into a SHEET: 256 pixels
+ * wide, 128 lines, one byte a pixel, the row pitch of the picture -- the
+ * one pitch the console has been seen to draw -- so that a sprite is a
+ * window of the sheet exactly as a scroll region is a window of the
+ * picture, through the same cel factory. Pattern p lives at column
+ * VDP_SHEET_X(p) and line VDP_SHEET_Y(p): the pair (2k, 2k + 1) is laid
+ * as sixteen contiguous lines, so a tall sprite is one window of sixteen
+ * rows. Colour 0 is stored as 0, which the identity palette leaves as the
+ * 000 the engine paints transparent; colours 1 to 15 are stored as 16 to
+ * 31, the second bank of the palette (docs/sms_gg/SMSOfficialDocs.md:
+ * 383-385). A pattern's place is converted when a sprite of a band needs
+ * it and its validity byte is down; the byte falls with the dirty sweep of
+ * the picture, so a game that rewrites its sprite patterns pays eight rows
+ * per pattern touched and nothing else.
+ *
+ * A priority tile needs no conversion: it is a window of the background
+ * picture drawn under a SECOND palette, the identity with entry 16 at
+ * 000 -- so 0 and 16, the colour 0 of either bank, pass and the fifteen
+ * colours of either bank cover the sprites (SMSOfficialDocs.md:474-481:
+ * background colour 0 always shows under the sprites). Runs of
+ * consecutive priority tiles of a tile row are one window.
+ *
+ * The sheet and the small cel control blocks share one page of 64
+ * kilobytes, as the picture and its window blocks do: the sheet at the
+ * head, VDP_LIST_CELS blocks behind it. A cel past the reserve is refused
+ * and counted. The rows a program switches the display off on, and the
+ * masked left column, are cels too: a column of VDP_COLUMN_W bytes by 192
+ * lines filled with the backdrop index, kept in the free tail of the
+ * picture's page and refilled when register 7 moves, drawn 1:1 for the
+ * column and stretched 32 times wide for a run of rows switched off.
+ * ---------------------------------------------------------------------------
+ */
+#define VDP_SHEET_W       256UL
+#define VDP_SHEET_LINES   128UL
+#define VDP_SHEET_BYTES   (VDP_SHEET_W * VDP_SHEET_LINES)
+#define VDP_SPRITE_PAGE   65536UL
+#define VDP_LIST_CELS     480UL
+#define VDP_COLUMN_W      8UL
+#define VDP_COLUMN_BYTES  (VDP_COLUMN_W * VDP_ACTIVE_LINES)
+#define VDP_SHEET_X(p)    ((((p) >> 1) & 31UL) << 3)
+#define VDP_SHEET_Y(p)    ((((p) >> 6) << 4) + (((p) & 1UL) << 3))
+
+#if VDP_SHEET_W != VDP_PIX_ROW_BYTES
+#error "a sprite is a window of the sheet through the picture's cel factory: the sheet must have the picture's row pitch"
+#endif
+
+#if (VDP_CHUNKS * 64UL) != VDP_SHEET_BYTES
+#error "the sheet holds one place of 8 by 8 bytes per pattern the video memory can hold"
+#endif
+
+#if (VDP_SHEET_BYTES + (VDP_LIST_CELS * VDP_CCB_BYTES)) > VDP_SPRITE_PAGE
+#error "the sheet and the small cel blocks no longer fit one page of 64 kilobytes"
+#endif
+
+#if (VDP_DECOR_BYTES + (VDP_LIST_WINDOWS * VDP_CCB_BYTES) + VDP_COLUMN_BYTES) > VDP_DECOR_PAGE
+#error "the backdrop column no longer fits in the tail of the picture's page"
+#endif
+
+/*
+ * One window of a band as it was built, kept so that the priority tiles
+ * of the band are cut exactly as the windows were: the screen columns
+ * and rows it covers, and the picture column and row it shows first. At
+ * most nine per band (VDP_LIST_WINDOWS says why).
+ */
+typedef struct
+{
+  uint16 xa;
+  uint16 xb;
+  uint16 ya;
+  uint16 yb;
+  uint16 px;
+  uint16 py;
+} vdp_win_t;
+
+#define VDP_BAND_WINDOWS (VDP_LIST_WINDOWS / VDP_LIST_BANDS)
+
+/*
  * One entry of the journal: the line the write landed on, the address,
  * the byte the address held and the byte it took. Two words, no pointer,
  * no padding -- the two bytes are held as halfwords so that the entry
@@ -945,16 +1034,6 @@ typedef struct
   uint32 nt_chunk0;
 
   /*
-   * The rows of the index buffer that hold something -- a sprite pixel,
-   * the border of a line with the display off, the masked left column --
-   * and so must be cleared before the next frame draws them: the buffer
-   * carries the sprites alone now, zero where the background shows, and
-   * a row no sprite reached is left as it is rather than cleared for
-   * nothing.
-   */
-  uint8 row_used[VDP_ACTIVE_LINES];
-
-  /*
    * The bands of the presentation being drawn: the first line of each
    * and how many there are, from the distinct lines of the journal; and
    * how many window blocks of the arena the bands so far have taken.
@@ -962,6 +1041,81 @@ typedef struct
   uint32 band_line[VDP_LIST_BANDS];
   uint32 band_count;
   uint32 list_used;
+
+  /*
+   * The sheet of converted sprite patterns, the small cel blocks behind
+   * it in the same page (VDP_SHEET_*, VDP_LIST_CELS), and the backdrop
+   * column in the tail of the picture's page (VDP_COLUMN_*). The blocks
+   * are held as an opaque pointer for the reason the windows are. How
+   * many blocks the bands of this presentation have taken so far.
+   */
+  uint8 *sheet;
+  void  *cels;
+  uint8 *column;
+  uint32 cels_used;
+
+  /*
+   * Whether the place of pattern p in the sheet holds the pattern as the
+   * video memory now holds it: raised by the conversion, dropped by the
+   * dirty sweep of the picture for every chunk written since. The chunk
+   * index of a pattern's bytes is the pattern number, as for refs.
+   */
+  uint8 sheet_valid[VDP_CHUNKS];
+
+  /*
+   * The second palette, for the priority tiles: the identity, entry 16
+   * at 000. Filled once at init, written by nothing afterwards.
+   */
+  uint16 plut_prio[VDP_PLUT_ENTRIES];
+
+  /*
+   * The sprite attribute table: its address (register 5 bits 6 to 1,
+   * SMSOfficialDocs.md:827-838), its first chunk for the watch test, and
+   * whether a table byte, register 1 or register 5 has moved since the
+   * per-line table below was built.
+   */
+  uint32 sat_base;
+  uint32 sat_chunk0;
+  uint32 spr_dirty;
+
+  /*
+   * The patterns the table names, each once, so that a write of one is
+   * journaled like a write of a pattern the picture shows: the marks per
+   * chunk, and the list of the marked ones so that they fall without a
+   * walk. Rebuilt with the per-line table.
+   */
+  uint8  spr_named[VDP_CHUNKS];
+  uint16 spr_named_list[VDP_SPR_COUNT * 2UL];
+  uint32 spr_named_count;
+
+  /*
+   * The per-line table, built from the attribute table when it changes,
+   * for the line being counted and the lines after it, and read once
+   * per line: for each entry before the terminator, the screen line it
+   * starts on (signed, as spr_top is), for the collision of the current
+   * line; per line of the picture, the entries the hardware admitted
+   * when the line was counted -- the first eight in table order, as
+   * indexes for the collision, as a bit per entry for the band builder
+   * -- how many, and whether a ninth fell on the line. The bands read
+   * the admission alone off it: everything else about an entry they
+   * take from the video memory as replayed to their first line.
+   */
+  int16  sat_top[VDP_SPR_COUNT];
+  uint32 spr_adm[VDP_ACTIVE_LINES][2];
+  uint8  spr_idx[VDP_ACTIVE_LINES][VDP_SPR_MAX_ON_LINE];
+  uint8  spr_n[VDP_ACTIVE_LINES];
+  uint8  spr_ovf_line[VDP_ACTIVE_LINES];
+
+  /*
+   * The lines the display was off on (register 1 bit 6 clear when the
+   * line was counted): drawn in the backdrop colour by a stretched cel
+   * of the column, over everything else of the band.
+   */
+  uint8  row_off[VDP_ACTIVE_LINES];
+
+  /* The windows of the band being built, for the priority pass. */
+  vdp_win_t win[VDP_BAND_WINDOWS];
+  uint32    win_count;
 #endif /* SMS_DECOR_CEL */
 
 #if VDP_COUNTERS
@@ -1065,13 +1219,26 @@ typedef struct
   uint32 cnt_journal_full;
   uint32 cnt_list_refused;
   /*
-   * Register 0, 2 or 8 written to another value while the picture was
-   * being scanned. The windows are built once, when line 191 is counted,
-   * with the last value; the line render took each line with the value
-   * of its own line. A picture where this counts is one the two paths
-   * can draw apart, and the figure says so rather than letting it pass.
+   * Register 0, 2, 8, 1 (size, magnification, display), 5, 6 or 7
+   * written to another value while the picture was being scanned. The
+   * list is built once, when line 191 is counted, with the last value;
+   * the line render took each line with the value of its own line. A
+   * picture where this counts is one the two paths can draw apart, and
+   * the figure says so rather than letting it pass.
    */
   uint32 cnt_reg_mid;
+
+  /*
+   * The small cels of the window: built in all, of which sprite cels,
+   * how many more a sprite cost past its first (a refused range, a
+   * magnified sprite cut on an odd line, a band boundary), priority
+   * runs, and cels the reserve had no block for.
+   */
+  uint32 cnt_cels;
+  uint32 cnt_sprites;
+  uint32 cnt_split;
+  uint32 cnt_prio;
+  uint32 cnt_cels_refused;
 #endif
 #endif
 } vdp_t;
@@ -1273,16 +1440,19 @@ uint32 vdp_profile_reps(uint32 post);
  */
 #if SMS_DECOR_CEL
 /*
- * The background picture's share of a video memory write, before the
- * byte lands: the chunk is marked dirty -- one store, no test -- and,
- * when the chunk is one the picture watches (a pattern it shows or was
- * just told to show, or the name table itself) and the byte really
- * changes, the write is handed to vdp_decor_note, which journals it if
- * the picture is being scanned and marks the pattern a name table word
- * now names. One load and one compare on the port path for every write
- * that is not watched, which is what the sprite patterns of a game are.
- * The address is read before the store, since the journal keeps the
- * byte that was there.
+ * The list's share of a video memory write, before the byte lands: the
+ * chunk is marked dirty -- one store, no test; the dirty sweep of the
+ * next presentation drops the decoded sheet place of that chunk with it
+ * -- and, when the chunk is one the list watches (a pattern the picture
+ * shows or was just told to show, a pattern the sprite table names, the
+ * name table or the sprite table itself) and the byte really changes,
+ * the write is handed to vdp_decor_note, which journals it if the
+ * picture is being scanned, marks the pattern a name table word or a
+ * sprite entry now names, and marks the per-line sprite table stale
+ * when the byte is one of the sprite table's. One load and one compare
+ * on the port path for every write that is not watched, which is what
+ * the unused patterns of a game are. The address is read before the
+ * store, since the journal keeps the byte that was there.
  */
 #define VDP_DECOR_NOTE(a,v)                                             \
   do                                                                    \
@@ -1345,7 +1515,8 @@ uint32 vdp_profile_reps(uint32 post);
  * makes: the video memory could not be had, an index buffer could not, the
  * bit plane table could not, or the decoded row cache could not. The fifth
  * is not an allocation at all -- the byte order this build assumes is not
- * the machine's.
+ * the machine's. The sixth and seventh are the two pages of the cel list:
+ * the picture's and the sprite sheet's.
  *
  * The caller paints a screen per code: its own for the pixel buffer, for
  * the row cache and for the byte order, and the video memory screen for
@@ -1360,6 +1531,7 @@ uint32 vdp_profile_reps(uint32 post);
 #define VDP_ERR_NO_TILECACHE (-4)
 #define VDP_ERR_LANE_ORDER   (-5)
 #define VDP_ERR_NO_DECOR     (-6)
+#define VDP_ERR_NO_SPRITES   (-7)
 
 /*
  * Brings the video part up: takes the video memory, the index buffers and
@@ -1488,6 +1660,22 @@ void vdp_view(int32 *x, int32 *y, int32 *w, int32 *h);
 void vdp_decor_note(uint32 addr, uint32 value);
 
 /*
+ * The per-line table of the sprites rebuilt from the attribute table as
+ * the video memory holds it, for the lines from the one given on: one
+ * walk of the sixty-four entries, stopped on the terminator, each entry
+ * marked on the lines it touches -- the first eight of a line admitted,
+ * a ninth raising the line's overflow mark -- and the patterns the table
+ * names marked for the watch. Called by the line clock when a table
+ * byte, register 1, 5 or 6 moved since the last build, before the
+ * line's flags are read off it, with that line; and by nothing per
+ * pixel. The lines before it keep their admission, which the bands of
+ * the presentation still draw. The flags of a line then cost a load
+ * each, and the collision costs a decoded row per sprite only on the
+ * lines where two admitted sprites overlap horizontally.
+ */
+void vdp_sprite_scan(uint32 from);
+
+/*
  * The presentation of the background, in three calls the frame loop
  * makes when line 191 has been counted and before the blanking lines.
  *
@@ -1575,12 +1763,15 @@ uint8 vdp_io_hcounter_read(void);
 /*
  * One scanline elapsed. Called by the frame loop after each quota, 262
  * times per frame. First, while the count is inside the picture (0 to
- * 191) and the display is on, the line is rendered: the background of
- * that line, from the name table, the patterns, the scroll latches and
- * the inhibit bits of register 0, then the sprites of that line over it,
- * into the index buffer at that row -- with the display off, the row is
- * filled with the border colour and neither the name table nor the
- * attribute table is read.
+ * 191) and the display is on, the line is rendered: on the older path,
+ * the background of that line, from the name table, the patterns, the
+ * scroll latches and the inhibit bits of register 0, then the sprites of
+ * that line over it, into the index buffer at that row -- with the
+ * display off, the row is filled with the border colour and neither the
+ * name table nor the attribute table is read; on the delivered path, no
+ * pixel, only the two sprite bits of the line off the per-line table
+ * (vdp_sprite_scan), and a line with the display off marked for the
+ * backdrop.
  * Then the semantics of TotalSMS/src/core/sms_vdp.c:1466-1513 transposed
  * to the scanline grain: the line count steps; on reaching 193 -- the
  * line after the 192 of the picture -- the frame interrupt request rises;

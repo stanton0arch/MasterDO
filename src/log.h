@@ -260,13 +260,16 @@ void log_printf(const char *fmt, ...);
  *
  * The fifth is the page of the background picture the cel engine draws
  * by windows (vdp.h, VDP_DECOR_*): a picture with no page has no
- * background to show.
+ * background to show. The sixth is the page of the sprite sheet and the
+ * small cel blocks (vdp.h, VDP_SHEET_*): without it no sprite and no
+ * priority tile can be drawn.
  */
 #define LOG_E_VDP_VRAM      300
 #define LOG_E_VDP_PIXELS    301
 #define LOG_E_VDP_TILECACHE 302
 #define LOG_E_VDP_LANEORDER 303
 #define LOG_E_VDP_DECOR     304
+#define LOG_E_VDP_SPRITES   305
 
 /*
  * Publishes where the fatal error screen must be painted: the bitmap to draw

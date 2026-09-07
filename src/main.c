@@ -847,20 +847,24 @@ main_profile_emit(const uint32 *sum10,
  *
  * What one presentation does, in order: the ground painted around the
  * picture on the screen that owes it; the colour table set on the screen
- * that owes it; the background picture brought up to date and cut into
- * bands, then each band's windows built and drawn, one draw call per
- * band; the sprite layer drawn over them; the screen bound for the error
- * path and presented. With the older path (common.h, SMS_DECOR_CEL 0)
- * the picture is the one buffer and the one draw call, as before.
+ * that owes it; the picture brought up to date and cut into bands, then
+ * each band's list -- windows of the background, sprites, priority
+ * tiles, backdrop -- built and drawn, one draw call per band; the screen
+ * bound for the error path and presented. With the older path
+ * (common.h, SMS_DECOR_CEL 0) the picture is the one buffer and the one
+ * draw call, as before.
  *
- * The state it shares with the loop -- the cel, the ground, the two
- * countdowns, the measurement accumulators -- is file scope rather than
- * passed nine ways; the loop below is the one other reader and writer.
+ * The state it shares with the loop -- the cel of the older path, the
+ * ground, the two countdowns, the measurement accumulators -- is file
+ * scope rather than passed nine ways; the loop below is the one other
+ * reader and writer.
  * ---------------------------------------------------------------------------
  */
 
-/* The sprite cel -- or the whole picture's on the older path -- read once at boot. */
+#if !SMS_DECOR_CEL
+/* The whole picture's cel on the older path, read once at boot. */
 static CCB *main_cel = NULL;
+#endif
 
 /*
  * The ground painted around the picture, and how many screens still owe
@@ -1088,15 +1092,15 @@ main_present(void)
     }
 
   vdp_list_end();
-#endif /* SMS_DECOR_CEL */
+#else /* !SMS_DECOR_CEL */
 
   /*
-   * The sprite layer over the windows -- or, on the older path, the one
-   * draw call of the whole picture. What the draw accumulator weighs is
-   * the engine's time and nothing else: the presentation that follows
-   * stays outside it, one cold call per frame, the display's business.
-   * A refused draw is traced once and the run goes on: the trace is what
-   * separates a black picture from a dead loop.
+   * The one draw call of the whole picture, background and sprites in
+   * the one buffer. What the draw accumulator weighs is the engine's
+   * time and nothing else: the presentation that follows stays outside
+   * it, one cold call per frame, the display's business. A refused draw
+   * is traced once and the run goes on: the trace is what separates a
+   * black picture from a dead loop.
    */
 #if MAIN_MEASURE
   span_start = sys_usec();
@@ -1108,6 +1112,7 @@ main_present(void)
   if(draw_err < 0)
     LOG_ONCE(LOG_CAT_VDP,LOG_LVL_ERR,
              ("draw failed err=%ld",(long)draw_err));
+#endif /* SMS_DECOR_CEL */
 
   /*
    * The screen the error path would paint on, renewed on every turn so
@@ -1438,6 +1443,10 @@ main(int    argc,
         log_fatal(LOG_CAT_VDP,LOG_E_VDP_DECOR,
                   "no page for the background picture",
                   "64k refused, or the blocks outrun it");
+      else if(err == VDP_ERR_NO_SPRITES)
+        log_fatal(LOG_CAT_VDP,LOG_E_VDP_SPRITES,
+                  "no page for the sprite sheet",
+                  "64k refused for the sheet and the cels");
       else
         log_fatal(LOG_CAT_VDP,LOG_E_VDP_VRAM,
                   "cannot allocate the video ram",
@@ -1604,12 +1613,14 @@ main(int    argc,
    */
   log_set_frame(&main_frame);
 
+#if !SMS_DECOR_CEL
   /*
    * One read of the cel for the whole run: the block never moves after
    * init, so reading it per frame would buy nothing and cost a call on
-   * every turn.
+   * every turn. The list path draws nothing through it.
    */
   main_cel = (CCB *)vdp_cel();
+#endif
 
   /*
    * The ground the picture sits in: the emulated machine's own background

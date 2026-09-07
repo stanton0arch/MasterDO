@@ -285,25 +285,35 @@
  * draws by windows of that one image: a scroll join, a locked row or
  * column, a band of the picture drawn with an older state of the video
  * memory, each is a window with its own source pointer, size and position
- * and the same row pitch. The index buffer then carries the sprites alone,
- * zero for a transparent pixel, drawn over the windows by a cel without
- * the background flag. The picture is presented when line 191 has been
+ * and the same row pitch. The sprites and the priority tiles go through
+ * the same list, in every band, after its windows: a sprite is a window
+ * of a sheet of converted sprite patterns, the highest numbered first so
+ * that the lowest shows on top, cut to the lines the hardware admits it
+ * on; a priority tile is a window of the background image under a second
+ * palette whose colour 0 of either bank is transparent; the lines with
+ * the display off and the masked left column are cels of a backdrop
+ * column, last. No pixel is written by the processor on this path: the
+ * index buffer stays allocated and is neither written nor drawn. The two
+ * sprite bits of the status register are computed per line, without a
+ * pixel, from a table built when the sprite attribute table changes --
+ * the overflow read off it, the collision replayed on the sprites that
+ * share a column. The picture is presented when line 191 has been
  * counted, before the blanking lines, because the writes of those lines
- * belong to the next picture; the windows land inside a clip rectangle
- * set on each screen at init, which is what erases the up to three
- * columns a window has to read before its first pixel to start on a word.
+ * belong to the next picture; the cels land inside a clip rectangle set
+ * on each screen at init, which is what erases the up to three columns a
+ * window has to read before its first pixel to start on a word.
  *
  * 0: the older path. The processor composes every background pixel of
- * every line into the index buffer, and one cel draws the whole buffer,
- * background and sprites, once per frame. Kept selectable until the
- * windows have been seen on the console under every case they must
- * cover; the host bench of the render (tests/vdp-profile/) runs at 0, and
- * the picture check (tests/cel8/) builds both and holds 1 against 0 on
- * every frame of the reference ROM.
+ * every line into the index buffer, the sprites over them, and one cel
+ * draws the whole buffer once per frame. Kept selectable until the list
+ * has been seen on the console under every case it must cover; the host
+ * bench of the render (tests/vdp-profile/) runs at 0, and the picture
+ * check (tests/cel8/) builds both and holds 1 against 0 on every frame
+ * of the reference ROM, the two sprite bits included.
  *
- * Cuts, at 0: the image and its page, the windows, the journal of writes
- * and the bands, and the two lines they print. Leaves: the per-line
- * composition as it was.
+ * Cuts, at 0: the image and its page, the sheet and its page, the
+ * windows and the small cels, the journal of writes and the bands, and
+ * the lines they print. Leaves: the per-line composition as it was.
  */
 #ifndef SMS_DECOR_CEL
 #define SMS_DECOR_CEL 1

@@ -16,16 +16,18 @@
 # a failure, whatever a cycle count says: a format that draws another
 # picture is not cheaper, it is wrong.
 #
-# Since the background moved to the cel engine (src/common.h,
-# SMS_DECOR_CEL), the picture is no longer a buffer the render fills: it
-# is what a list of windows of the background picture makes the engine
-# draw, with the sprite layer over it. The runner reconstitutes that from
-# the blocks the render hands out -- every field held, every window copied
-# as the engine copies it, cut to the picture's area -- and more figures
-# come out: every window sound, no pixel left uncovered, no more pixels
-# read than the picture plus the alignment columns allow, and a set of
-# synthetic scenes for the cases of the journal and the bands the ROM does
-# not reach. All are demanded below.
+# Since the picture moved to the cel engine (src/common.h,
+# SMS_DECOR_CEL), it is no longer a buffer the render fills: it is what a
+# list of cels -- windows of the background picture, sprites, priority
+# tiles, backdrop -- makes the engine draw. The runner reconstitutes that
+# from the blocks the render hands out -- every field held, every block
+# painted as the engine paints it, cut to the picture's area -- and more
+# figures come out: every window sound, no pixel left uncovered, no more
+# pixels read than the picture plus the alignment columns allow, every
+# small cel sound, the two sprite bits raised on the frames the older path
+# raises them, and a set of synthetic scenes for the cases of the journal,
+# the bands and the sprites the ROM does not reach. All are demanded
+# below.
 #
 # Three runs, because the frozen reference holds one picture in sixty and
 # the writes that cut a picture into bands land on a few frames a minute:
@@ -35,7 +37,9 @@
 #   2. the older path writes a reference of EVERY frame into the work
 #      directory;
 #   3. the delivered path (SMS_DECOR_CEL 1) against the frozen reference,
-#      and then against the every-frame one: 1200 pictures, 230400 rows.
+#      and then against the every-frame one: 1200 pictures, 230400 rows,
+#      and the two sprite bits of every frame (which only the every-frame
+#      reference carries: the frozen one keeps its format).
 #
 # It needs the ROM the console runs, which is not distributed with the
 # repository, and it needs it to be THE ROM the reference was taken from,
@@ -50,7 +54,7 @@
 #   sh tests/cel8/check_picture.sh                twenty-one pictures over 1200 frames, then all 1200
 #   PPM=some/dir sh tests/cel8/check_picture.sh   and one PPM per picture of the frozen set
 #   MUTATE=1 sh tests/cel8/check_picture.sh
-#       and then breaks the render eleven ways, on eleven copies of
+#       and then breaks the render twenty-two ways, on twenty-two copies of
 #       src/vdp.c, and demands that each copy turn the every-frame check
 #       red: a check that has not been seen to bite proves nothing
 #       (tests/celprobe/check_list.sh).
@@ -196,7 +200,11 @@ fi
 # green that way. The log of a run that failed is shown before the trap
 # removes it.
 #
-#   judge <binary> <out> <log> <ppm dir or empty> <reference> <every> <want lines> <0|1>
+#   judge <binary> <out> <log> <ppm dir or empty> <reference> <every> <want lines> <0|1> <flags 0|1>
+#
+# The last argument says whether the reference carries the two sprite
+# bits after each picture (the every-frame one the older path mints does,
+# the frozen one does not), and so whether the list path is held to them.
 judge() {
   start=$(date +%s)
   set +e
@@ -329,6 +337,22 @@ judge() {
     return 1
   fi
   echo "  [OK] the ROM's frames journaled $journal_n writes and drew $bands_n bands over $FRAMES frames"
+  # The two sprite bits the program reads, overflow and collision,
+  # raised on the same number of lines per frame as the older path
+  # raises them pixel by pixel, on every frame of the every-frame
+  # reference. The list path computes them from a table and a replay
+  # without a pixel, and this is the only place that holds it to the
+  # pixels.
+  if [ "$9" = 1 ]; then
+    if ! grep -qE '^sprite flags ([1-9][0-9]*)/\1$' "$2"; then
+      tables
+      grep 'flags differ' "$3" || true
+      echo "  [FAIL] the sprite overflow or collision bit is not raised on the frames the older path raises it"
+      return 1
+    fi
+    echo "  [OK] the sprite overflow and collision bits agree with the older path on every frame"
+  fi
+
   # The synthetic scenes: the journal, the bands, the cap, the full
   # journal, register 2, the fine scroll, the lock, the full arena --
   # every expectation held. The runner names the first that was not.
@@ -339,12 +363,32 @@ judge() {
     return 1
   fi
   echo "  [OK] every synthetic scene of the journal and the bands holds"
-
-  # The cel the sprite layer is drawn through, as the boot trace names it:
-  # eight bits, WITHOUT the background flag -- with it a zero pixel of the
-  # layer would paint over the windows instead of showing them -- and the
-  # preamble the render computes by hand agreeing with the pair the library
-  # stub computes for a coded cel of eight bits (tests/cel8/romrun.c,
+  # The small cels of the list -- sprites, priority runs, backdrop -- every
+  # one sound on every band of every frame and every scene: its fields as
+  # the engine reads them, its place in the chain, a sprite against the
+  # list the runner derives from the attribute table by the documented
+  # rules, a priority run against the priority bits of the tiles the
+  # windows show, a backdrop block against the lines the runner saw the
+  # display off on. The runner names the first fault.
+  if ! grep -qE '^list cels ([1-9][0-9]*)/\1$' "$2"; then
+    tables
+    grep 'list cel unsound' "$3" || true
+    echo "  [FAIL] a small cel of the list is not what the engine must read"
+    return 1
+  fi
+  echo "  [OK] every small cel of the list is sound, every frame"
+  # The reserve never spent: a refused cel is a sprite or a tile the
+  # console would not draw, with a warning and nothing else to show it.
+  if ! grep -qE '^list cels max=[0-9]+ refused=0$' "$2"; then
+    tables
+    echo "  [FAIL] the reserve of small cels ran out on some presentation"
+    return 1
+  fi
+  echo "  [OK] $(grep '^list cels max=' "$2") -- no cel refused"
+  # The cel of the older path as the boot trace still names it: eight
+  # bits, WITHOUT the background flag on this path, and the preamble the
+  # render computes by hand agreeing with the pair the library stub
+  # computes for a coded cel of eight bits (tests/cel8/romrun.c,
   # CreateCel). Both are written from the same reading of the field, so
   # this holds the render to that reading and not to the library: the
   # arbiter with the real library is the console's own "cel pre lib= calc="
@@ -360,7 +404,13 @@ judge() {
     grep 'preamble' "$3"
     return 1
   fi
-  echo "  [OK] the sprite cel is coded at eight bits, transparent on zero, and the hand-computed preamble is the stub's (the console line is the arbiter)"
+  echo "  [OK] the cel is coded at eight bits, transparent on zero, and the hand-computed preamble is the stub's (the console line is the arbiter)"
+  if ! grep -q 'sprites and priority tiles via cel list' "$3"; then
+    echo "  [FAIL] the boot trace does not name the sprite sheet and the cel reserve (log follows)"
+    cat "$3"
+    return 1
+  fi
+  echo "  [OK] the boot trace names the sprites and the priority tiles drawn through the list"
   return 0
 }
 
@@ -381,7 +431,7 @@ run_judge() {
 }
 
 echo "== 1. the older path, $FRAMES frames, one picture every $EVERY, row against the frozen reference =="
-run_judge "$WORK/romrun_old" "$WORK/old.out" "$WORK/old.log" "" "$REF" "$EVERY" "$WANT_LINES" 0
+run_judge "$WORK/romrun_old" "$WORK/old.out" "$WORK/old.log" "" "$REF" "$EVERY" "$WANT_LINES" 0 0
 
 echo "== 2. the older path writes a reference of every frame =="
 if ! mint "$WORK/romrun_old" "$WORK/every.fnv" 1 "working-tree" "$WORK/mint.log"; then
@@ -391,10 +441,10 @@ fi
 echo "  $(head -c 120 "$WORK/every.fnv" | head -1)"
 
 echo "== 3a. the delivered path, one picture every $EVERY, row against the frozen reference =="
-run_judge "$WORK/romrun" "$WORK/out" "$WORK/log" "${PPM:-}" "$REF" "$EVERY" "$WANT_LINES" 1
+run_judge "$WORK/romrun" "$WORK/out" "$WORK/log" "${PPM:-}" "$REF" "$EVERY" "$WANT_LINES" 1 0
 
 echo "== 3b. the delivered path, every frame, row against the older path =="
-run_judge "$WORK/romrun" "$WORK/every.out" "$WORK/every.log" "" "$WORK/every.fnv" 1 "$ALL_LINES" 1
+run_judge "$WORK/romrun" "$WORK/every.out" "$WORK/every.log" "" "$WORK/every.fnv" 1 "$ALL_LINES" 1 1
 
 if [ "${MUTATE:-0}" != 1 ]; then
   echo "failed=0"
@@ -416,7 +466,7 @@ mutate() {
   fi
   build "$WORK/$1/vdp.c" "$WORK/romrun_$1" 1
   set +e
-  judge "$WORK/romrun_$1" "$WORK/$1.out" "$WORK/$1.log" "" "$WORK/every.fnv" 1 "$ALL_LINES" 1 >"$WORK/$1.verdict" 2>&1
+  judge "$WORK/romrun_$1" "$WORK/$1.out" "$WORK/$1.log" "" "$WORK/every.fnv" 1 "$ALL_LINES" 1 1 >"$WORK/$1.verdict" 2>&1
   jrc=$?
   set -e
   if [ "$jrc" = 3 ]; then
@@ -433,12 +483,12 @@ mutate() {
   return 0
 }
 
-echo "== the render broken, eleven ways =="
+echo "== the render broken, twenty-two ways =="
 fail=0
 # Every window one pixel to the right: the picture shifts, and screen
 # column 0 is covered by no window wherever the scroll is a multiple of
 # four.
-mutate shift 's/c->ccb_XPos = (Coord)(((int32)xa - (int32)f) \* 65536L);/c->ccb_XPos = (Coord)(((int32)xa - (int32)f + 1) * 65536L);/' \
+mutate shift 's/^  x = (int32)xa - (int32)f;$/  x = (int32)xa - (int32)f + 1;/' \
        "every window one pixel to the right" || fail=1
 # One tile of the picture never converted: its place in the picture keeps
 # the zeroes of the boot whatever the name table names there.
@@ -466,17 +516,50 @@ mutate toplock 's/(ra < 16UL)/(ra < 8UL)/;s/rb = (b < 16UL) ? b : 16UL;/rb = (b 
 # The locked right columns take the vertical scroll.
 mutate vlock 's/vdp_list_region(ya,yb,split,VDP_PIX_WIDTH,hs,0UL,0UL);/vdp_list_region(ya,yb,split,VDP_PIX_WIDTH,hs,1UL,sms.vdp.vscroll);/' \
        "the locked right columns scroll vertically" || fail=1
-# The first window of a band no longer loads the palette.
-mutate plut 's/arena\[vdp_band_first\].ccb_Flags |= CCB_LDPLUT;/;/' \
-       "no window loads the palette" || fail=1
-# The sprite layer: the priority mask forgets whether the background
-# pixel is opaque, so a sprite hides behind a transparent priority tile.
-mutate opaque 's/pdw\[0\] = VDP_LANE_OPAQUE(e0);/pdw[0] = 0;/;s/pdw\[1\] = VDP_LANE_OPAQUE(e1);/pdw[1] = 0;/' \
-       "the priority mask drops the opacity of the background" || fail=1
-# The sprite layer: a row painted with the border while the display was
-# off is not marked used, and stays painted once the display is back.
-mutate offrow '/out\[x\] = borderw;/{n;s/sms.vdp.row_used\[y\] = 1;/;/}' \
-       "a row of the display-off border is never cleared" || fail=1
+# The first block of a band no longer loads the palette.
+mutate plut 's/vdp_chain_head->ccb_Flags |= CCB_LDPLUT;/;/' \
+       "no block loads the palette" || fail=1
+# The sprites drawn from the lowest numbered entry to the highest: where
+# two overlap, the wrong one shows on top.
+mutate order 's/^      i = (alive - 1UL) - k;$/      i = k;/' \
+       "the sprites drawn in table order, the last one on top" || fail=1
+# The priority palette keeps entry 16 opaque: colour 0 of the second bank
+# covers the sprites under a priority tile.
+mutate plut16 's/^  sms.vdp.plut_prio\[16\] = 0;$/  ;/' \
+       "entry 16 of the priority palette left opaque" || fail=1
+# A magnified sprite drawn at its natural width.
+mutate zoom 's/^  hdx = (int32)((1UL << zoom) << 20);$/  hdx = 1L << 20;/' \
+       "a magnified sprite drawn one pixel per pixel" || fail=1
+# The ninth sprite of a line admitted and drawn, the overflow never raised.
+mutate ninth 's/^            sms.vdp.spr_ovf_line\[y\] = 1;$/            sms.vdp.spr_adm[y][i >> 5] |= 1UL << (i \& 31UL);/' \
+       "the ninth sprite of a line admitted, the overflow bit never raised" || fail=1
+# The priority runs drawn before the sprites: the sprites cover them.
+mutate prio_first '/^  vdp_list_sprites(a,b);$/{N;s/  vdp_list_sprites(a,b);\n  vdp_list_prio();/  vdp_list_prio();\n  vdp_list_sprites(a,b);/}' \
+       "the priority tiles drawn before the sprites" || fail=1
+# The background flag on every sprite: its colour 0 paints over the picture.
+mutate bgnd_spr 's/^#define VDP_SPRITE_BGND 0UL$/#define VDP_SPRITE_BGND CCB_BGND/' \
+       "the background flag set on every sprite" || fail=1
+# The collision never raised.
+mutate no_col '/^              sms.vdp.spr_collision = 1;$/{N;s/              sms.vdp.spr_collision = 1;\n              VDP_COUNT(spr_col);/              ;/}' \
+       "the collision bit never raised" || fail=1
+# The backdrop column not refilled when register 7 moves.
+mutate column7 's/^      vdp_column_fill();$/      ;/' \
+       "the backdrop column keeps the boot backdrop after register 7 moves" || fail=1
+# The watch bytes not rebuilt when register 5 moves the table.
+mutate watch5 '/^  if((number == 5UL)/,/^    }$/{s/^      vdp_decor_watch_rebuild();$/      ;/}' \
+       "the moved sprite table is not watched" || fail=1
+# Register 6 moving the pattern base leaves the per-line table standing.
+mutate dirty6 's/^  if((number == 6UL) .*$/  if(0)/' \
+       "a move of the sprite pattern base leaves the per-line table standing" || fail=1
+# A tall sprite named by its odd pattern drawn from that pattern, not the pair.
+mutate tall '/^vdp_list_sprites(uint32 a,$/,/^}$/{s/^        p &= ~1UL;$/        ;/}' \
+       "a tall sprite named by its odd pattern drawn from the wrong place" || fail=1
+# The last line of a magnified run on the first line of its row: dropped.
+mutate ztail 's/^  if(((d1 & 1UL) != 0UL) && (la < lb))$/  if(0)/' \
+       "the last line of a magnified sprite cut on a row dropped" || fail=1
+# The patterns of the previous sprite table unwatched inside the picture.
+mutate named_hot '/^vdp_sprite_scan(uint32 from)$/,/^}$/{s/^      if(from != 0UL)$/      if(0)/}' \
+       "a pattern of the previous sprite table unwatched inside the picture" || fail=1
 
 echo
 if [ "$fail" = 0 ]; then

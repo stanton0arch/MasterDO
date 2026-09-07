@@ -7,14 +7,16 @@
  * palette index per pixel, 192 rows of 256, read as the row lies: byte 0
  * is pixel 0 on both machines, which is what the cel reads.
  *
- * With the background drawn by the cel engine (the delivered form,
+ * With the picture drawn by the cel engine (the delivered form,
  * src/common.h SMS_DECOR_CEL 1) there is no such buffer: the picture is
- * what a LIST of windows makes the engine draw, and this runner
- * reconstitutes it from the blocks the render hands out, field by field,
- * then lays the sprite layer over it -- see "the picture as the list
- * draws it" below. Three more lines come out of that, and the script
- * demands them: every window sound, no pixel left uncovered, no more
- * pixels read than the picture plus the alignment columns allow.
+ * what a LIST of cels makes the engine draw -- windows of the background,
+ * sprites, priority tiles, backdrop -- and this runner reconstitutes it
+ * from the blocks the render hands out, field by field, in their order
+ * -- see "the picture as the list draws it" below. More lines come out
+ * of that, and the script demands them: every window sound, no pixel
+ * left uncovered, no more pixels read than the picture plus the
+ * alignment columns allow, every small cel sound, and the two sprite
+ * bits raised on the same lines as the older path raised them.
  *
  * Two modes. "compare" plays the frames and holds every row of every
  * picture against a REFERENCE: a text file of one digest per row, taken
@@ -208,24 +210,32 @@ static void take(void)
   CCB *c = (CCB *)vdp_cel();
   memcpy(pic,c->ccb_SourcePtr,(size_t)PIC_BYTES);
 }
+#define line_step() vdp_line()
 #else
 
-/* ---- the picture as the LIST draws it: the windows, then the sprites ----
+/* ---- the picture as the LIST draws it ----
  *
  * With the background drawn by the cel engine (src/common.h,
- * SMS_DECOR_CEL), the render composes no background pixel: it keeps a
- * picture of the whole name table up to date and hands the frame loop,
- * band by band, a chain of cel control blocks that each draw a window of
- * that picture. What the console shows is what the engine reads off those
- * blocks, so that is what is reconstituted here: every field of every
- * block is held against what a sound window of the picture is, and the
- * window is then copied the way the engine copies it -- from the source
- * pointer, at the block's position, cut to the picture's area of the
- * screen (the clip rectangle src/main.c sets on every screen; the folio
- * takes (0,0) as its corner, docs/3do/3do_portfolio_2.5.md:10984), every
- * pixel painted, zero included (CCB_BGND). The sprite layer -- the index
- * buffer, zero where the background shows -- goes over it, every non-zero
- * pixel, as the sprite cel draws it without the background flag.
+ * SMS_DECOR_CEL), the render composes no pixel at all: it keeps a picture
+ * of the whole name table and a sheet of the sprite patterns up to date
+ * and hands the frame loop, band by band, a chain of cel control blocks
+ * -- windows of the picture, then the sprites as windows of the sheet,
+ * then the priority tiles as windows of the picture under a second
+ * palette, then the backdrop column over the lines switched off and the
+ * masked left column. What the console shows is what the engine reads
+ * off those blocks, so that is what is reconstituted here: every field of
+ * every block is held against what a sound block of its kind is, the
+ * chain against the order the kinds must come in, the sprite blocks
+ * against a list this file derives on its own from the attribute table
+ * and the documented admission rule, the priority blocks against the
+ * priority bits of the tiles the windows show, the backdrop blocks
+ * against the lines this file saw the display off on; and each block is
+ * then painted the way the engine paints it -- source pixel through the
+ * block's palette, a 000 entry transparent unless the background flag
+ * stands (docs/3do/3do_portfolio_2.5.md:3783-3784), the horizontal and
+ * vertical steps doubling pixels, cut to the picture's area of the screen
+ * (the clip rectangle src/main.c sets on every screen; the folio takes
+ * (0,0) as its corner, docs/3do/3do_portfolio_2.5.md:10984).
  *
  * Presented when line 191 has been counted, as src/main.c presents: the
  * writes of the blanking lines belong to the next picture, and the
@@ -233,130 +243,395 @@ static void take(void)
  * after the processor's quota of line y).
  *
  * Counted over every frame played, not only the pictures taken: windows
- * seen and windows sound, pixels read against what a frame is allowed to
- * read -- the picture's area plus at most three alignment columns per
- * window, since a source pointer is a word address -- pixels no window
- * covered, journal entries and bands. */
+ * seen and windows sound, pixels read by the windows against what a
+ * frame is allowed to read -- the picture's area plus at most three
+ * alignment columns per window, since a source pointer is a word address
+ * -- pixels no window covered, journal entries and bands, small cels seen
+ * and sound, the most small cels one presentation took. */
+
+/* The kinds of a block, in the order a band's chain must hold them. */
+#define K_WINDOW 0
+#define K_SPRITE 1
+#define K_PRIO   2
+#define K_BACK   3
 
 /* How many windows each pixel of the picture's area received this frame. */
 static unsigned char cover[PIC_BYTES];
+/* Per band: whether the window's pixel belongs to a tile with the priority
+   bit, how many priority blocks and how many backdrop blocks painted it. */
+static unsigned char prio_want[PIC_BYTES];
+static unsigned char prio_got[PIC_BYTES];
+static unsigned char back_got[PIC_BYTES];
+static unsigned char band_cover[PIC_BYTES];
+/* The lines this file saw the display off on when they were counted. */
+static unsigned char off_line[PIC_H];
 
 static unsigned long win_seen = 0, win_ok = 0;
 static unsigned long decor_read = 0, decor_limit = 0, gaps = 0;
 static unsigned long journal_total = 0, bands_total = 0;
+static unsigned long cel_seen = 0, cel_ok = 0, cel_max = 0;
 
-/* The first window found unsound, named once so that a reader knows which
+/* The first block found unsound, named once so that a reader knows which
    field to look at; the count is what the script judges. */
 static void window_fault(const char *what, long frame, long band, long n)
 {
   static int said = 0;
   if(said) return;
   said = 1;
-  fprintf(stderr,"decor window unsound: %s (frame %ld band %ld window %ld)\n",
+  fprintf(stderr,"list cel unsound: %s (frame %ld band %ld cel %ld)\n",
           what,frame,band,n);
 }
 
+/* One line of the picture counted, the display bit read first: what the
+   backdrop blocks of the band are held against. */
+static void line_step(void)
+{
+  uint32 y = sms.vdp.vcount;
+  if(y < (uint32)PIC_H)
+    off_line[y] = (unsigned char)(((sms.vdp.reg[1] & 0x40U) == 0U) ? 1 : 0);
+  vdp_line();
+}
+
+/* ---- the sprite blocks a band must hold, derived from the attribute table
+ * as the video memory stands at the band, by the documented rules alone:
+ * the walk stops on $D0, the screen line is the byte plus one and turns
+ * negative past 224, the first eight entries touching a line are admitted
+ * on it (docs/sms_gg/SMSOfficialDocs.md:393-397, 443-446), the higher
+ * numbered entry is drawn first so that the lower one shows on top, the
+ * horizontal position takes the shift of register 0 bit 3, the pattern
+ * takes the base of register 6 bit 2 and is forced even when the sprites
+ * are tall (:846-852). A sprite is drawn on the maximal runs of its
+ * admitted lines inside the band, each run one block of the sheet, from
+ * the pattern's place (src/vdp.h, VDP_SHEET_X and VDP_SHEET_Y); magnified,
+ * a run whose first line is the second line of its doubled row, or whose
+ * last line is the first line of its row, gives that line a block of one
+ * row and one line, VDY at one. ---- */
+
+typedef struct { long sx, sy, w, h, x, y, hdx, vdy; } spr_cel_t;
+static spr_cel_t want[1024];
+static long want_n = 0, want_i = 0;
+
+static void want_cel(long sx, long sy, long h, long x, long y, long hdx, long vdy)
+{
+  if(want_n >= (long)(sizeof want / sizeof want[0]))
+    {
+      window_fault("the runner's sprite oracle is full, its list cut short",-3,0,0);
+      return;
+    }
+  want[want_n].sx = sx; want[want_n].sy = sy; want[want_n].w = 8; want[want_n].h = h;
+  want[want_n].x = x; want[want_n].y = y; want[want_n].hdx = hdx; want[want_n].vdy = vdy;
+  want_n++;
+}
+
+static void want_run(long sx, long sy, long x, long top, long la, long lb, int zoom)
+{
+  long d0 = la - top, d1 = lb - top;
+  long hdx = (zoom ? 2L : 1L) << 20;
+  int tail = 0;
+  if(!zoom)
+    {
+      want_cel(sx,sy + d0,lb - la,x,la,hdx,1L << 16);
+      return;
+    }
+  if(d0 & 1) { want_cel(sx,sy + (d0 >> 1),1,x,la,hdx,1L << 16); la++; d0++; }
+  if((d1 & 1) && la < lb) { tail = 1; lb--; d1--; }
+  if(la < lb) want_cel(sx,sy + (d0 >> 1),(d1 - d0) >> 1,x,la,hdx,2L << 16);
+  if(tail) want_cel(sx,sy + (d1 >> 1),1,x,lb,hdx,1L << 16);
+}
+
+static void oracle(long a, long b)
+{
+  static unsigned char adm[PIC_H][64];
+  static long top[64];
+  const uint8 *sat = sms.vdp.vram + (((uint32)sms.vdp.reg[5] & 0x7EUL) << 7);
+  int zoom = (sms.vdp.reg[1] & 1) != 0, tall = (sms.vdp.reg[1] & 2) != 0;
+  long height = (tall ? 16L : 8L) << zoom, width = 8L << zoom;
+  long base = (sms.vdp.reg[6] & 4) ? 256L : 0L, shift = (sms.vdp.reg[0] & 8) ? 8L : 0L;
+  long alive, i, y, n, x, p, sx, sy, ya, yb, la;
+
+  memset(adm,0,sizeof adm);
+  for(alive = 0; alive < 64 && sat[alive] != 0xD0; alive++)
+    {
+      top[alive] = (long)sat[alive] + 1;
+      if(top[alive] > 224) top[alive] -= 256;
+    }
+  for(y = 0; y < PIC_H; y++)
+    {
+      n = 0;
+      for(i = 0; i < alive; i++)
+        if(y >= top[i] && y < top[i] + height)
+          {
+            if(n < 8) adm[y][i] = 1;
+            n++;
+          }
+    }
+
+  want_n = 0;
+  want_i = 0;
+  for(i = alive - 1; i >= 0; i--)
+    {
+      x = (long)sat[128 + 2 * i] - shift;
+      if(x + width <= 0) continue;
+      p = (long)sat[129 + 2 * i] + base;
+      if(tall) p &= ~1L;
+      sx = ((p >> 1) & 31) * 8;
+      sy = (p >> 6) * 16 + (p & 1) * 8;
+      ya = (a > top[i]) ? a : top[i];
+      if(ya < 0) ya = 0;
+      yb = (b < top[i] + height) ? b : top[i] + height;
+      y = ya;
+      while(y < yb)
+        {
+          while(y < yb && !adm[y][i]) y++;
+          if(y >= yb) break;
+          la = y;
+          while(y < yb && adm[y][i]) y++;
+          want_run(sx,sy,x,top[i],la,y,zoom);
+        }
+    }
+}
+
+/* The number a palette entry paints, or -1 for 000: entry n of the
+   identity holds n on each of its three five bit components, and so does
+   every entry of the priority palette but the sixteenth. */
+static long plut_number(uint16 e)
+{
+  long v = e & 31;
+  if(e == 0) return -1;
+  if(((e >> 5) & 31) != v || ((e >> 10) & 31) != v) return -2;
+  return v;
+}
+
 /* One block of a band's chain: held against what the engine will read off
-   it -- flags, preamble, source, size, position, 1:1 mapping, the
-   identity palette -- then copied as the engine copies it. Returns 1 when
-   every field is sound; a block whose source lies outside the picture is
-   not copied at all, the engine would read what it should not. */
-static int window(const CCB *c, long frame, long band, long n)
+   it, then painted as the engine paints it. Returns the kind found, or -1
+   when the block could not be placed at all; *ok is cleared on any fault.
+   The palette the engine holds is tracked through *loaded: a block loads
+   its own with CCB_LDPLUT, or must point at the one already loaded. */
+static int cel(const CCB *c, long frame, long band, long n,
+               const void **loaded, int *ok)
 {
   const unsigned char *src = (const unsigned char *)c->ccb_SourcePtr;
-  long off, w, h, x, y, px, py, r, i;
-  int ok = 1;
+  const unsigned char *buf;
+  const uint16 *plut = (const uint16 *)c->ccb_PLUTPtr;
+  const uint8 *nt = sms.vdp.vram + (((uint32)sms.vdp.reg[2] & 0x0EUL) << 10);
+  long w = (long)c->ccb_Width, h = (long)c->ccb_Height;
+  long pitch, bytes, off, x, y, hs, vs, r, i, dx, dy;
+  int kind, bgnd = (c->ccb_Flags & CCB_BGND) != 0;
   const char *why = NULL;
 
-  w = (long)c->ccb_Width;
-  h = (long)c->ccb_Height;
-  off = (long)(src - sms.vdp.decor);
+  /* The column lies in the tail of the picture's page: tested first. */
+  if(src >= sms.vdp.column && src < sms.vdp.column + VDP_COLUMN_BYTES)
+    { kind = K_BACK; buf = sms.vdp.column; pitch = (long)VDP_COLUMN_W; bytes = VDP_COLUMN_BYTES; }
+  else if(src >= sms.vdp.decor && src < sms.vdp.decor + VDP_DECOR_BYTES)
+    { kind = bgnd ? K_WINDOW : K_PRIO; buf = sms.vdp.decor; pitch = PIC_W; bytes = VDP_DECOR_BYTES; }
+  else if(src >= sms.vdp.sheet && src < sms.vdp.sheet + VDP_SHEET_BYTES)
+    { kind = K_SPRITE; buf = sms.vdp.sheet; pitch = (long)VDP_SHEET_W; bytes = VDP_SHEET_BYTES; }
+  else
+    {
+      window_fault("source in no buffer of the list",frame,band,n);
+      *ok = 0;
+      return -1;
+    }
 
-  if((c->ccb_Flags & CCB_BGND) == 0) why = "no CCB_BGND, zero would be transparent";
-  else if((c->ccb_Flags & CCB_CCBPRE) == 0) why = "no CCB_CCBPRE, the preamble is not read";
-  else if(n == 0 && (c->ccb_Flags & CCB_LDPLUT) == 0) why = "first window of the band without CCB_LDPLUT";
-  else if(w < 1 || w > PIC_W + 3 || h < 1 || h > (long)VDP_DECOR_LINES) why = "size (a window is at most the width plus three alignment columns)";
-  else if(c->ccb_PRE0 != (((uint32)(h - 1) << PRE0_VCNT_SHIFT) | PRE0_BPP_8)) why = "PRE0";
-  else if(c->ccb_PRE1 != ((62UL << PRE1_WOFFSET10_SHIFT) | PRE1_TLLSB_PDC0 | (uint32)(w - 1))) why = "PRE1";
-  else if(c->ccb_HDX != (1L << 20) || c->ccb_HDY != 0 || c->ccb_VDX != 0 || c->ccb_VDY != (1L << 16)) why = "not a 1:1 mapping";
-  else if(c->ccb_PLUTPtr != (void *)sms.vdp.plut) why = "not the identity palette";
+  if(c->ccb_Flags & CCB_LDPLUT) *loaded = c->ccb_PLUTPtr;
+  off = (long)(src - buf);
+  x = (long)(c->ccb_XPos / 65536L);
+  y = (long)(c->ccb_YPos / 65536L);
+  hs = (long)(c->ccb_HDX >> 20);
+  vs = (long)(c->ccb_VDY >> 16);
+
+  if((c->ccb_Flags & CCB_CCBPRE) == 0) why = "no CCB_CCBPRE, the preamble is not read";
+  else if(c->ccb_PLUTPtr != *loaded) why = "the block's palette is not the one loaded";
   else if((c->ccb_XPos % 65536L) != 0 || (c->ccb_YPos % 65536L) != 0) why = "position not on a pixel";
+  else if(c->ccb_HDY != 0 || c->ccb_VDX != 0 || c->ccb_HDDX != 0 || c->ccb_HDDY != 0) why = "a skew or perspective step is not zero";
+  else if(c->ccb_PIXC != 0x1F001F00UL) why = "PIXC";
+  else if(w < 1 || h < 1) why = "empty";
+  else if(c->ccb_PRE0 != (((uint32)(h - 1) << PRE0_VCNT_SHIFT) | PRE0_BPP_8)) why = "PRE0";
+  else if(c->ccb_PRE1 != (((uint32)(pitch / 4 - 2) << PRE1_WOFFSET10_SHIFT) | PRE1_TLLSB_PDC0 | (uint32)(w - 1))) why = "PRE1";
+  else if((off % 4) != 0) why = "source not a word address";
+  else if((off % pitch) + w > pitch || off / pitch + h > bytes / pitch) why = "source rectangle runs past its buffer";
+  else if(kind == K_WINDOW)
+    {
+      if(plut != sms.vdp.plut) why = "window not under the identity palette";
+      else if(n == 0 && (c->ccb_Flags & CCB_LDPLUT) == 0) why = "first block of the band without CCB_LDPLUT";
+      else if(w > PIC_W + 3 || h > (long)VDP_DECOR_LINES) why = "window size (at most the width plus three alignment columns)";
+      else if(hs != 1 || vs != 1) why = "window not a 1:1 mapping";
+      else if(x < -3 || x + w > PIC_W || y < 0 || y + h > PIC_H) why = "window outside the picture's area";
+    }
+  else if(kind == K_SPRITE)
+    {
+      int zoom = (sms.vdp.reg[1] & 1) != 0;
+      if(bgnd) why = "CCB_BGND on a sprite";
+      else if(plut != sms.vdp.plut) why = "sprite not under the identity palette";
+      else if(w != 8) why = "sprite not eight pixels wide";
+      else if(hs != (zoom ? 2 : 1)) why = zoom ? "magnified sprite without HDX at two" : "sprite with HDX not one";
+      else if(vs != 1 && !(zoom && vs == 2)) why = "sprite VDY";
+      else if(want_i >= want_n) why = "more sprite blocks than the attribute table admits";
+      else
+        {
+          const spr_cel_t *e = &want[want_i++];
+          if(off % pitch != e->sx) why = "sprite source column (pattern place, or the order of the sprites)";
+          else if(off / pitch != e->sy) why = "sprite source row (rows cut to the admitted lines)";
+          else if(h != e->h) why = "sprite height (rows cut to the admitted lines)";
+          else if(x != e->x) why = "sprite x";
+          else if(y != e->y) why = "sprite y";
+          else if((c->ccb_HDX != e->hdx) || (c->ccb_VDY != e->vdy)) why = "sprite steps (magnification)";
+        }
+    }
+  else if(kind == K_PRIO)
+    {
+      if(plut != sms.vdp.plut_prio) why = "priority run not under the priority palette";
+      else if(hs != 1 || vs != 1) why = "priority run not a 1:1 mapping";
+      else if(x < -3 || x + w > PIC_W || y < 0 || y + h > PIC_H) why = "priority run outside the picture's area";
+    }
+  else
+    {
+      if(!bgnd) why = "backdrop block without CCB_BGND";
+      else if(plut != sms.vdp.plut) why = "backdrop block not under the identity palette";
+      else if(w != (long)VDP_COLUMN_W || x != 0) why = "backdrop block not the column at x 0";
+      else if(vs != 1 || (hs != 1 && hs != (long)(PIC_W / VDP_COLUMN_W))) why = "backdrop steps";
+      else if(y < 0 || y + h > PIC_H) why = "backdrop block outside the picture's area";
+      else if(off / pitch != y) why = "backdrop block not read from its own lines of the column";
+    }
   if(why != NULL)
     {
       window_fault(why,frame,band,n);
-      ok = 0;
+      *ok = 0;
     }
+  if((off % 4) != 0 || (off % pitch) + w > pitch || off / pitch + h > bytes / pitch)
+    return kind;
 
-  if(src < sms.vdp.decor || off >= (long)VDP_DECOR_BYTES || (off % 4) != 0)
-    {
-      window_fault("source outside the picture or not a word address",frame,band,n);
-      return 0;
-    }
-  px = off % PIC_W;
-  py = off / PIC_W;
-  if(px + w > PIC_W || py + h > (long)VDP_DECOR_LINES)
-    {
-      window_fault("source rectangle runs past the picture",frame,band,n);
-      return 0;
-    }
-
-  x = (long)(c->ccb_XPos / 65536L);
-  y = (long)(c->ccb_YPos / 65536L);
-  if(x < -3 || x + w > PIC_W || y < 0 || y + h > PIC_H)
-    {
-      window_fault("position outside the picture's area",frame,band,n);
-      ok = 0;
-    }
-
-  /* The copy, cut to the area: what lands at a column below zero is the
+  /* The paint, cut to the area: what lands at a column below zero is the
      alignment read, and the clip rectangle erases it on the console. */
   for(r = 0; r < h; r++)
+    for(i = 0; i < w; i++)
+      {
+        unsigned s = src[r * pitch + i];
+        long v = (s < 32) ? plut_number(plut[s]) : -2;
+        int paint = 1;
+        if(v == -2)
+          {
+            window_fault("pixel outside the palette, or an entry that is not a number",frame,band,n);
+            *ok = 0;
+            paint = 0;
+          }
+        else if(v == -1)
+          {
+            if(bgnd) v = 0;
+            else paint = 0;
+          }
+        for(dy = 0; dy < vs; dy++)
+          for(dx = 0; dx < hs; dx++)
+            {
+              long sx = x + i * hs + dx, sy = y + r * vs + dy, k;
+              if(sx < 0 || sx >= PIC_W || sy < 0 || sy >= PIC_H) continue;
+              k = sy * PIC_W + sx;
+              if(paint) pic[k] = (unsigned char)v;
+              if(kind == K_WINDOW)
+                {
+                  long srow = off / pitch + r, scol = off % pitch + i;
+                  long t = (srow / 8) * 32 + scol / 8;
+                  cover[k]++;
+                  band_cover[k]++;
+                  prio_want[k] = (unsigned char)((read16_le(nt + t * 2) & 0x1000U) ? 1 : 0);
+                }
+              else if(kind == K_PRIO) prio_got[k]++;
+              else if(kind == K_BACK) back_got[k]++;
+            }
+      }
+  if(kind == K_WINDOW)
     {
-      long sy = y + r;
-      if(sy < 0 || sy >= PIC_H) continue;
-      for(i = 0; i < w; i++)
-        {
-          long sx = x + i;
-          if(sx < 0 || sx >= PIC_W) continue;
-          pic[sy * PIC_W + sx] = src[r * PIC_W + i];
-          cover[sy * PIC_W + sx]++;
-        }
+      decor_read += (unsigned long)(w * h);
+      decor_limit += (unsigned long)(3 * h);
     }
-  decor_read += (unsigned long)(w * h);
-  decor_limit += (unsigned long)(3 * h);
-  return ok;
+  return kind;
+}
+
+/* The coverage of one band held once its chain is painted: every pixel a
+   window showed from a priority tile is painted by exactly one priority
+   run and no other pixel by any; every line the display was off on is
+   painted whole by the backdrop and no other line is, except its first
+   eight columns when register 0 bit 5 masks them. */
+static void band_check(long frame, long band, long a, long b)
+{
+  long y, x, k;
+  int masked = (sms.vdp.reg[0] & 0x20) != 0;
+  for(y = a; y < b; y++)
+    for(x = 0; x < PIC_W; x++)
+      {
+        k = y * PIC_W + x;
+        if(band_cover[k] == 0) continue;
+        if(prio_want[k] != (prio_got[k] != 0) || prio_got[k] > 1)
+          {
+            window_fault("priority coverage: a priority tile's pixel not painted once by a priority run, or another pixel painted by one",frame,band,x + y * 1000L);
+            return;
+          }
+        if(off_line[y])
+          {
+            if(back_got[k] == 0 || (x >= 8 && back_got[k] > 1))
+              {
+                window_fault("a line with the display off not painted once by the backdrop",frame,band,y);
+                return;
+              }
+          }
+        else if(back_got[k] != ((x < 8 && masked) ? 1 : 0))
+          {
+            window_fault(masked ? "the masked left column not painted once by the backdrop, or a pixel beyond it painted"
+                                : "a backdrop block on a line with the display on",frame,band,x + y * 1000L);
+            return;
+          }
+      }
 }
 
 /* The bands of one presentation, between vdp_list_begin and vdp_list_end:
-   each band's chain asked for, held and copied into pic. */
+   each band's chain asked for, held, painted into pic and checked. */
 static void compose_bands(long frame, int32 bands)
 {
   int32 k;
   const CCB *c;
-  long n;
+  const void *loaded;
+  long n, a, b, small = 0;
+  int kind, prev, ok;
 
-  /* What one presentation may read: the picture's area, plus the
-     alignment columns each window adds below. */
+  /* What one presentation may read through its windows: the picture's
+     area, plus the alignment columns each window adds below. */
   decor_limit += (unsigned long)PIC_BYTES;
 
   for(k = 0; k < bands; k++)
     {
+      a = (long)sms.vdp.band_line[k];
+      b = (k + 1 < bands) ? (long)sms.vdp.band_line[k + 1] : PIC_H;
       c = (const CCB *)vdp_list_band(k);
+      memset(prio_want,0,sizeof prio_want);
+      memset(prio_got,0,sizeof prio_got);
+      memset(back_got,0,sizeof back_got);
+      memset(band_cover,0,sizeof band_cover);
+      oracle(a,b);
       if(c == NULL)
         {
-          window_fault("band with no window",frame,(long)k,0);
+          window_fault("band with no block",frame,(long)k,0);
           win_seen++;
           continue;
         }
+      loaded = NULL;
+      prev = K_WINDOW;
       for(n = 0;; n++)
         {
-          win_seen++;
-          if(n >= (long)VDP_LIST_WINDOWS)
+          if(n >= (long)(VDP_LIST_WINDOWS + VDP_LIST_CELS))
             {
-              window_fault("chain longer than the arena",frame,(long)k,n);
+              window_fault("chain longer than the two arenas",frame,(long)k,n);
               break;
             }
-          if(window(c,frame,(long)k,n)) win_ok++;
+          ok = 1;
+          kind = cel(c,frame,(long)k,n,&loaded,&ok);
+          if(kind >= 0 && kind < prev)
+            {
+              window_fault("chain order: windows, then sprites, then priority runs, then backdrop",frame,(long)k,n);
+              ok = 0;
+            }
+          if(kind > prev) prev = kind;
+          if(kind == K_WINDOW || kind < 0) { win_seen++; if(ok) win_ok++; }
+          else { cel_seen++; small++; if(ok) cel_ok++; }
           if(c->ccb_Flags & CCB_LAST) break;
           c = c->ccb_NextPtr;
           if(c == NULL)
@@ -366,19 +641,19 @@ static void compose_bands(long frame, int32 bands)
               break;
             }
         }
+      if(want_i != want_n)
+        window_fault("fewer sprite blocks than the attribute table admits",frame,(long)k,n);
+      band_check(frame,(long)k,a,b);
     }
+  if((unsigned long)small > cel_max) cel_max = (unsigned long)small;
 }
 
 static void present(long frame)
 {
   int32 bands;
   long i;
-  /* The sprite layer is read where the sprite cel reads it, off the
-     block's source pointer: that the block points at the buffer the
-     render writes is one of the things held here. */
-  const unsigned char *spr = (const unsigned char *)((CCB *)vdp_cel())->ccb_SourcePtr;
 
-  /* A pixel no window paints keeps this value, which no index can be:
+  /* A pixel no block paints keeps this value, which no index can be:
      a gap shows in the digests as well as in its own count. */
   memset(pic,0xFF,sizeof pic);
   memset(cover,0,sizeof cover);
@@ -391,10 +666,6 @@ static void present(long frame)
 
   for(i = 0; i < PIC_BYTES; i++)
     if(cover[i] == 0) gaps++;
-
-  /* The sprite layer over the windows: every pixel that is not zero. */
-  for(i = 0; i < PIC_BYTES; i++)
-    if(spr[i] != 0) pic[i] = spr[i];
 }
 
 /* ---- synthetic scenes: the cases of the journal and the bands the ROM
@@ -482,6 +753,653 @@ static void flush(void)
 static long win_off(const CCB *c) { return (long)((const unsigned char *)c->ccb_SourcePtr - sms.vdp.decor); }
 static long win_x(const CCB *c) { return (long)(c->ccb_XPos / 65536L); }
 
+/* ---- the sprite scenes ---- */
+
+/* The n-th block of one kind in a band's chain, or NULL. The kind is read
+   off the source as cel() reads it. */
+static const CCB *nth_kind(const CCB *c, int kind, long n)
+{
+  for(; c != NULL; c = (c->ccb_Flags & CCB_LAST) ? NULL : c->ccb_NextPtr)
+    {
+      const unsigned char *src = (const unsigned char *)c->ccb_SourcePtr;
+      int k;
+      if(src >= sms.vdp.sheet && src < sms.vdp.sheet + VDP_SHEET_BYTES) k = K_SPRITE;
+      else if(src >= sms.vdp.column && src < sms.vdp.column + VDP_COLUMN_BYTES) k = K_BACK;
+      else if(c->ccb_Flags & CCB_BGND) k = K_WINDOW;
+      else k = K_PRIO;
+      if(k != kind) continue;
+      if(n == 0) return c;
+      n--;
+    }
+  return NULL;
+}
+
+static long cel_off(const CCB *c, const unsigned char *buf) { return (long)((const unsigned char *)c->ccb_SourcePtr - buf); }
+static long cel_x(const CCB *c) { return (long)(c->ccb_XPos / 65536L); }
+static long cel_y(const CCB *c) { return (long)(c->ccb_YPos / 65536L); }
+
+/* One entry of the attribute table at $3F00, through the port. */
+static void sat_write(uint32 i, uint32 y, uint32 x, uint32 pattern)
+{
+  vram_write(0x3F00 + i,y);
+  vram_write(0x3F80 + 2 * i,x);
+  vram_write(0x3F81 + 2 * i,pattern);
+}
+
+/* The picture played from line 0 to line 191 as the frame loop plays it,
+   one write landing in the quota of the line given (none when the line
+   is past the picture), then presented into pic. Returns the band count. */
+static uint32 play_addr = 0, play_value = 0;
+static long play_line = 999, play_reg = -1;
+
+static int32 play_and_present(void)
+{
+  int32 bands;
+  long y;
+  sms.vdp.vcount = 0;
+  for(y = 0; y < PIC_H; y++)
+    {
+      if(y == play_line)
+        {
+          if(play_reg >= 0) reg_write((uint32)play_reg,play_value);
+          else vram_write(play_addr,play_value);
+        }
+      line_step();
+    }
+  bands = vdp_list_begin();
+  memset(pic,0xFF,sizeof pic);
+  compose_bands(-2,bands);
+  play_line = 999;
+  play_reg = -1;
+  return bands;
+}
+
+/* The n-th priority run of a chain standing at (x, y), w by h, or NULL. */
+static const CCB *find_prio(const CCB *c, long x, long y, long w, long h)
+{
+  long n;
+  const CCB *p;
+  for(n = 0; (p = nth_kind(c,K_PRIO,n)) != NULL; n++)
+    if(cel_x(p) == x && cel_y(p) == y && p->ccb_Width == w && p->ccb_Height == h)
+      return p;
+  return NULL;
+}
+
+static void sprite_scenes(uint32 pa)
+{
+  uint32 ps, pf, pe, q, i, reg1, reg7, before_ovf, before_col, before, t, word;
+  uint32 saved[4], saved_w[8];
+  int32 bands;
+  const CCB *c;
+  const CCB *s;
+  const CCB *s2;
+  long sx, sy, n;
+
+  /* The table, the pattern base, the size, the display: known. */
+  sms.vdp.latch = 0;
+  sms.vdp.vcount = 200;
+  reg_write(5,0xFF);
+  reg_write(6,0xFB);
+  reg1 = (uint32)sms.vdp.reg[1];
+  reg_write(1,(reg1 | 0x40UL) & ~0x03UL);
+  reg_write(0,(uint32)sms.vdp.reg[0] & ~0x28UL);
+  for(i = 0; i < 64; i++) sat_write(i,0xD0,0,0);
+  /* No priority tile anywhere: a sprite under one would be covered,
+     rightly, and the scenes read the sprite. The one priority scene
+     below raises the bit on its own tile. */
+  for(t = 0; t < VDP_NT_TILES; t++)
+    if(nt_word(t) & 0x1000UL) nt_write(t,nt_word(t) & ~0x1000UL);
+  flush();
+
+  /* A sprite pattern of this file's own: index 2 down column 0 and
+     nothing else, so that a sprite shows 18 at its first column. */
+  ps = free_pattern(0);
+  pf = (ps == 0xFFFFFFFFUL) ? ps : free_pattern(ps + 1);
+  expect(ps != 0xFFFFFFFFUL && pf != 0xFFFFFFFFUL && pf < 256,"two free patterns in the first eight kilobytes exist for the sprites");
+  if(pf == 0xFFFFFFFFUL || pf >= 256) return;
+  sms.vdp.vcount = 200;
+  for(i = 0; i < 32; i++)
+    vram_write(ps * 32 + i,((i & 3) == 1) ? 0x80 : 0);
+  sx = ((ps >> 1) & 31) * 8;
+  sy = (ps >> 6) * 16 + (ps & 1) * 8;
+  flush();
+
+  /* Y past 224: the byte 0xF8 puts the top at -7, so line 0 shows row 7
+     and nothing else of the sprite is drawn -- one block of one row from
+     the pattern's eighth row, at (100, 0). */
+  sat_write(0,0xF8,100,ps);
+  sat_write(1,0xD0,0,0);
+  bands = play_and_present();
+  c = (const CCB *)vdp_list_band(0);
+  s = nth_kind(c,K_SPRITE,0);
+  expect(bands == 1 && s != NULL,"sprite with y past 224: a sprite block in the band");
+  if(s != NULL)
+    expect(cel_off(s,sms.vdp.sheet) == (sy + 7) * PIC_W + sx && s->ccb_Height == 1
+           && cel_x(s) == 100 && cel_y(s) == 0 && nth_kind(c,K_SPRITE,1) == NULL,
+           "sprite with y past 224: one block of row 7 of the pattern, one line, at (100, 0)");
+  expect(pic[0 * PIC_W + 100] == 18,"sprite with y past 224: line 0 shows its colour at column 100");
+  vdp_list_end();
+  flush();
+
+  /* A ninth sprite on a range: entries 0 to 7 on lines 100 to 107, entry
+     8 on lines 96 to 103 -- admitted on 96 to 99 alone, refused on 100
+     to 103 where it is the ninth, the overflow raised on those four
+     lines. Drawn first, being the highest numbered: one block of rows 0
+     to 3 at line 96. No two sprites share a column: no collision. */
+  for(i = 0; i < 8; i++) sat_write(i,99,8 + 16 * i,ps);
+  sat_write(8,95,200,ps);
+  sat_write(9,0xD0,0,0);
+  before_ovf = sms.vdp.cnt_spr_ovf;
+  before_col = sms.vdp.cnt_spr_col;
+  sms.vdp.spr_overflow = 0;
+  bands = play_and_present();
+  expect(sms.vdp.cnt_spr_ovf == before_ovf + 4 && sms.vdp.spr_overflow == 1,
+         "ninth sprite: the overflow is raised on the four lines it is the ninth on");
+  expect(sms.vdp.cnt_spr_col == before_col,"ninth sprite: no column shared, no collision");
+  c = (const CCB *)vdp_list_band(0);
+  s = nth_kind(c,K_SPRITE,0);
+  expect(s != NULL && cel_off(s,sms.vdp.sheet) == sy * PIC_W + sx && s->ccb_Height == 4
+         && cel_x(s) == 200 && cel_y(s) == 96,
+         "ninth sprite: drawn first, rows 0 to 3 at line 96, its refused lines cut off");
+  expect(nth_kind(c,K_SPRITE,8) != NULL && nth_kind(c,K_SPRITE,9) == NULL,
+         "ninth sprite: nine sprite blocks in the band");
+  expect(pic[96 * PIC_W + 200] == 18 && pic[99 * PIC_W + 200] == 18 && pic[100 * PIC_W + 200] != 18
+         && pic[100 * PIC_W + 8] == 18,
+         "ninth sprite: shown on lines 96 to 99, not on line 100, where the first sprite shows");
+  vdp_list_end();
+  flush();
+
+  /* Two sprites sharing a column: entries 0 and 1 both at column 50 on
+     lines 100 to 107, index 2 at their first column -- eight lines of
+     collision, and the first of the table wins the pixel. */
+  sat_write(0,99,50,ps);
+  sat_write(1,99,50,ps);
+  sat_write(2,0xD0,0,0);
+  before_col = sms.vdp.cnt_spr_col;
+  sms.vdp.spr_collision = 0;
+  bands = play_and_present();
+  expect(sms.vdp.cnt_spr_col == before_col + 8 && sms.vdp.spr_collision == 1,
+         "two sprites on one column: the collision is raised on their eight lines");
+  vdp_list_end();
+  flush();
+
+  /* Magnified (register 1 bit 0), with a cut on an odd line: entries 0
+     to 7 from -3 cover lines 0 to 12; entry 8 from line 10 covers 10 to
+     25 and is admitted from 13 on. Line 13 is the second line of its
+     doubled row 1: one block of one row and one line, VDY at one; then
+     rows 2 to 7 doubled from line 14, six rows on twelve lines. Both
+     with HDX at two. */
+  reg_write(1,(uint32)sms.vdp.reg[1] | 0x01UL);
+  for(i = 0; i < 8; i++) sat_write(i,0xFC,8 + 16 * i,ps);
+  sat_write(8,9,200,ps);
+  sat_write(9,0xD0,0,0);
+  before_ovf = sms.vdp.cnt_spr_ovf;
+  bands = play_and_present();
+  expect(sms.vdp.cnt_spr_ovf == before_ovf + 3,"magnified ninth sprite: the overflow is raised on lines 10 to 12");
+  c = (const CCB *)vdp_list_band(0);
+  s = nth_kind(c,K_SPRITE,0);
+  s2 = nth_kind(c,K_SPRITE,1);
+  expect(s != NULL && cel_off(s,sms.vdp.sheet) == (sy + 1) * PIC_W + sx && s->ccb_Height == 1
+         && cel_x(s) == 200 && cel_y(s) == 13 && s->ccb_HDX == (2L << 20) && s->ccb_VDY == (1L << 16),
+         "magnified sprite cut on an odd line: one block of row 1 on line 13, VDY at one, HDX at two");
+  expect(s2 != NULL && cel_off(s2,sms.vdp.sheet) == (sy + 2) * PIC_W + sx && s2->ccb_Height == 6
+         && cel_x(s2) == 200 && cel_y(s2) == 14 && s2->ccb_HDX == (2L << 20) && s2->ccb_VDY == (2L << 16),
+         "magnified sprite: then rows 2 to 7 doubled from line 14");
+  expect(pic[13 * PIC_W + 200] == 18 && pic[13 * PIC_W + 201] == 18 && pic[25 * PIC_W + 201] == 18
+         && pic[12 * PIC_W + 200] != 18 && pic[13 * PIC_W + 202] != 18,
+         "magnified sprite: two pixels wide from line 13 to line 25, nothing on line 12");
+  vdp_list_end();
+
+  /* A magnified sprite cut by the bottom of the picture on the first
+     line of a doubled row: entry 0 from line 177 covers 177 to 192, line
+     191 being the first line of row 7. Rows 0 to 6 doubled from line
+     177, then one block of row 7 on line 191 alone, VDY at one. */
+  sat_write(0,176,100,ps);
+  sat_write(1,0xD0,0,0);
+  bands = play_and_present();
+  c = (const CCB *)vdp_list_band(0);
+  s = nth_kind(c,K_SPRITE,0);
+  s2 = nth_kind(c,K_SPRITE,1);
+  expect(s != NULL && cel_off(s,sms.vdp.sheet) == sy * PIC_W + sx && s->ccb_Height == 7
+         && cel_y(s) == 177 && s->ccb_VDY == (2L << 16),
+         "magnified sprite at the bottom: rows 0 to 6 doubled from line 177");
+  expect(s2 != NULL && cel_off(s2,sms.vdp.sheet) == (sy + 7) * PIC_W + sx && s2->ccb_Height == 1
+         && cel_y(s2) == 191 && s2->ccb_VDY == (1L << 16) && nth_kind(c,K_SPRITE,2) == NULL,
+         "magnified sprite at the bottom: one block of row 7 on line 191, VDY at one");
+  expect(pic[191 * PIC_W + 100] == 18 && pic[191 * PIC_W + 101] == 18 && pic[190 * PIC_W + 100] == 18,
+         "magnified sprite at the bottom: shown on lines 190 and 191");
+  vdp_list_end();
+  reg_write(1,(uint32)sms.vdp.reg[1] & ~0x01UL);
+  flush();
+
+  /* A priority tile of the second bank over a sprite: tile (10, 10) --
+     screen (80, 80) -- shows probe A with bit 12 and bit 11, so column
+     0 draws 17 and the rest 16; the sprite at (81, 80) puts its 18 at
+     tile column 1. The run of priority follows the sprites under the
+     priority palette; 16 passes, the sprite shows through it, 17
+     covers. */
+  t = 10 * 32 + 10;
+  word = nt_word(t);
+  sms.vdp.vcount = 200;
+  nt_write(t,pa | 0x1000UL | 0x800UL);
+  sat_write(0,79,81,ps);
+  sat_write(1,0xD0,0,0);
+  bands = play_and_present();
+  c = (const CCB *)vdp_list_band(0);
+  s = nth_kind(c,K_PRIO,0);
+  expect(s != NULL && s->ccb_PLUTPtr == (void *)sms.vdp.plut_prio && (s->ccb_Flags & CCB_BGND) == 0
+         && nth_kind(c,K_SPRITE,0) != NULL,
+         "priority tile: a run under the priority palette, without the background flag, beside a sprite block");
+  expect(pic[80 * PIC_W + 80] == 17 && pic[80 * PIC_W + 81] == 18 && pic[80 * PIC_W + 82] == 16,
+         "priority tile of bank 1: colour 1 covers, colour 0 (entry 16) lets the sprite through");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  nt_write(t,word);
+  flush();
+
+  /* The sprite's pattern rewritten on line 70 while it is shown on lines
+     66 to 73: the table names it, so the write is journaled and cuts a
+     band; the sprite is two blocks -- rows 0 to 3 from the sheet as it
+     was, rows 4 to 7 from the sheet as it is, the rewritten row 4 showing
+     index 3 where row 0 shows 2. */
+  sat_write(0,65,50,ps);
+  sat_write(1,0xD0,0,0);
+  flush();
+  play_line = 70;
+  play_addr = ps * 32 + 4 * 4;
+  play_value = 0x80;
+  bands = play_and_present();
+  expect(bands == 2 && sms.vdp.band_line[1] == 70,"sprite pattern rewritten on line 70: journaled, a band from line 70");
+  /* The bands asked for again from the head: the journal undone, then
+     replayed band by band, so that band 0 shows the memory of line 0. */
+  vdp_list_begin();
+  c = (const CCB *)vdp_list_band(0);
+  s = nth_kind(c,K_SPRITE,0);
+  expect(s != NULL && cel_off(s,sms.vdp.sheet) == sy * PIC_W + sx && s->ccb_Height == 4 && cel_y(s) == 66,
+         "sprite pattern rewritten on line 70: band 0 draws rows 0 to 3");
+  c = (const CCB *)vdp_list_band(1);
+  s = nth_kind(c,K_SPRITE,0);
+  expect(s != NULL && cel_off(s,sms.vdp.sheet) == (sy + 4) * PIC_W + sx && s->ccb_Height == 4 && cel_y(s) == 70,
+         "sprite pattern rewritten on line 70: band 1 draws rows 4 to 7");
+  expect(pic[66 * PIC_W + 50] == 18 && pic[70 * PIC_W + 50] == 19,
+         "sprite pattern rewritten on line 70: the old row above the line, the new row on it");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  vram_write(ps * 32 + 4 * 4,0);
+  flush();
+
+  /* The attribute table written on line 50: the sprite's y byte moved
+     from 39 (lines 40 to 47) to 54 (lines 55 to 62). Journaled, two
+     bands; the per-line table is rebuilt at line 50 for the lines after
+     it and keeps what lines 40 to 47 admitted: band 0 draws the sprite
+     at line 40, band 1 at line 55. */
+  sat_write(0,39,60,ps);
+  sat_write(1,0xD0,0,0);
+  flush();
+  play_line = 50;
+  play_addr = 0x3F00;
+  play_value = 54;
+  bands = play_and_present();
+  expect(bands == 2 && sms.vdp.band_line[1] == 50,"sprite table written on line 50: journaled, a band from line 50");
+  expect(sms.vdp.spr_dirty == 0 && (sms.vdp.spr_adm[55][0] & 1UL) != 0UL && (sms.vdp.spr_adm[40][0] & 1UL) != 0UL
+         && (sms.vdp.spr_adm[50][0] & 1UL) == 0UL,
+         "sprite table written on line 50: the per-line table rebuilt from line 50, lines before it kept");
+  vdp_list_begin();
+  c = (const CCB *)vdp_list_band(0);
+  s = nth_kind(c,K_SPRITE,0);
+  expect(s != NULL && cel_y(s) == 40 && s->ccb_Height == 8,"sprite table written on line 50: band 0 draws the sprite at line 40");
+  c = (const CCB *)vdp_list_band(1);
+  s = nth_kind(c,K_SPRITE,0);
+  expect(s != NULL && cel_y(s) == 55 && s->ccb_Height == 8,"sprite table written on line 50: band 1 draws the sprite at line 55");
+  expect(pic[40 * PIC_W + 60] == 18 && pic[47 * PIC_W + 60] == 18 && pic[55 * PIC_W + 60] == 18
+         && pic[50 * PIC_W + 60] != 18,
+         "sprite table written on line 50: shown on lines 40 to 47 and 55 to 62");
+  vdp_list_end();
+  flush();
+
+  /* The display off from line 100 to 149 with the left column masked:
+     the backdrop over those lines whole, the column over every other
+     line's first eight pixels, the sprite at column 4 covered; and nine
+     sprites on lines 100 to 107, two of them on one column, raise no
+     flag at all -- a line with the display off reads no sprite. */
+  sat_write(0,19,4,ps);
+  for(i = 1; i < 10; i++) sat_write(i,99,(i < 9) ? 8 + 16 * i : 24,ps);
+  sat_write(10,0xD0,0,0);
+  reg_write(0,(uint32)sms.vdp.reg[0] | 0x20UL);
+  flush();
+  before_ovf = sms.vdp.cnt_spr_ovf;
+  before_col = sms.vdp.cnt_spr_col;
+  sms.vdp.vcount = 0;
+  for(i = 0; i < (uint32)PIC_H; i++)
+    {
+      if(i == 100) reg_write(1,(uint32)sms.vdp.reg[1] & ~0x40UL);
+      if(i == 150) reg_write(1,(uint32)sms.vdp.reg[1] | 0x40UL);
+      line_step();
+    }
+  bands = vdp_list_begin();
+  memset(pic,0xFF,sizeof pic);
+  compose_bands(-2,bands);
+  c = (const CCB *)vdp_list_band(0);
+  s = nth_kind(c,K_BACK,0);
+  s2 = nth_kind(c,K_BACK,1);
+  expect(s != NULL && cel_y(s) == 100 && s->ccb_Height == 50 && s->ccb_HDX == (32L << 20) && (s->ccb_Flags & CCB_BGND) != 0,
+         "display off on lines 100 to 149: one backdrop block of fifty lines, stretched to the width");
+  expect(s2 != NULL && cel_y(s2) == 0 && s2->ccb_Height == PIC_H && s2->ccb_HDX == (1L << 20),
+         "masked left column: one backdrop block of the column over the band, 1:1");
+  expect(pic[120 * PIC_W + 128] == (unsigned char)(16 + (sms.vdp.reg[7] & 15)) && pic[100 * PIC_W + 4] != 18
+         && pic[20 * PIC_W + 4] == (unsigned char)(16 + (sms.vdp.reg[7] & 15)),
+         "display off and masked column: the backdrop index on both, the sprite covered");
+  expect(sms.vdp.cnt_spr_ovf == before_ovf && sms.vdp.cnt_spr_col == before_col,
+         "display off: nine sprites on the off lines, two on one column, raise neither flag");
+  vdp_list_end();
+  reg_write(0,(uint32)sms.vdp.reg[0] & ~0x20UL);
+  flush();
+
+  /* The reserve of small cels spent: one block left for a band that
+     wants a sprite and the masked column. The sprite takes it, the
+     column is refused and counted (the warning is said once, to the
+     log), and the chain still closes on CCB_LAST. */
+  sat_write(0,59,100,ps);
+  sat_write(1,0xD0,0,0);
+  reg_write(0,(uint32)sms.vdp.reg[0] | 0x20UL);
+  flush();
+  /* One picture played whole first, so that the per-line table and the
+     display lines are this scene's; then the presentation asked again
+     with one block left. */
+  bands = play_and_present();
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  bands = vdp_list_begin();
+  sms.vdp.cels_used = VDP_LIST_CELS - 1;
+  before = sms.vdp.cnt_cels_refused;
+  c = (const CCB *)vdp_list_band(0);
+  expect(sms.vdp.cnt_cels_refused == before + 1,"reserve spent: the refused cel is counted");
+  expect(nth_kind(c,K_SPRITE,0) != NULL && nth_kind(c,K_BACK,0) == NULL,
+         "reserve spent: the sprite took the last block, the column was refused");
+  for(n = 0, s = c; s != NULL && n < (long)(VDP_LIST_WINDOWS + VDP_LIST_CELS); n++)
+    {
+      if(s->ccb_Flags & CCB_LAST) break;
+      s = s->ccb_NextPtr;
+    }
+  expect(s != NULL && (s->ccb_Flags & CCB_LAST) != 0,"reserve spent: the chain is closed on CCB_LAST");
+  vdp_list_end();
+  reg_write(0,(uint32)sms.vdp.reg[0] & ~0x20UL);
+  flush();
+
+  /* Register 5 written on line 100 to another table, at $3E00 -- the
+     last rows of the name table, unseen at this scroll: two sprites of
+     the first table share a column on lines 40 to 47, the second table
+     holds one sprite on lines 100 to 107. Counted as written mid-frame;
+     the lines before 100 keep their flags and their admission, the list
+     takes the last table: one sprite block, at line 100. */
+  for(i = 0; i < 4; i++) saved[i] = sms.vdp.vram[0x3E00 + ((i < 2) ? i : 0x7E + i)];
+  sms.vdp.vcount = 200;
+  vram_write(0x3E00,99);
+  vram_write(0x3E01,0xD0);
+  vram_write(0x3E80,120);
+  vram_write(0x3E81,ps);
+  sat_write(0,39,60,ps);
+  sat_write(1,39,60,ps);
+  sat_write(2,0xD0,0,0);
+  flush();
+  before = sms.vdp.cnt_reg_mid;
+  before_col = sms.vdp.cnt_spr_col;
+  play_line = 100;
+  play_reg = 5;
+  play_value = 0xFD;
+  bands = play_and_present();
+  expect(sms.vdp.cnt_reg_mid == before + 1,"register 5 written on line 100: counted as written mid-frame");
+  expect(sms.vdp.cnt_spr_col == before_col + 8 && (sms.vdp.spr_adm[40][0] & 3UL) == 3UL
+         && (sms.vdp.spr_adm[100][0] & 1UL) != 0UL && (sms.vdp.spr_adm[100][0] & 2UL) == 0UL,
+         "register 5 written on line 100: the lines before it keep their collision and their admission");
+  c = (const CCB *)vdp_list_band(0);
+  s = nth_kind(c,K_SPRITE,0);
+  expect(bands == 1 && s != NULL && cel_y(s) == 100 && cel_x(s) == 120 && nth_kind(c,K_SPRITE,1) == NULL,
+         "register 5 written on line 100: the list takes the last table, one sprite at line 100");
+  expect(pic[100 * PIC_W + 120] == 18 && pic[40 * PIC_W + 60] != 18,
+         "register 5 written on line 100: the last table's sprite shows, the first table's does not");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  reg_write(5,0xFF);
+  for(i = 0; i < 4; i++) vram_write(0x3E00 + ((i < 2) ? i : 0x7E + i),saved[i]);
+  flush();
+
+  /* The right edge and the two bits of register 0: a pattern opaque on
+     its eight columns at x 250 shows columns 250 to 255 and nothing
+     past them -- the block stands at 250 and the clip cuts it; with the
+     shift of bit 3 the same block stands at 242. Then two sprites at x
+     0 under the masked column of bit 5: no pixel shown, no collision. */
+  sms.vdp.vcount = 200;
+  for(i = 0; i < 32; i++)
+    vram_write(pf * 32 + i,((i & 3) == 1) ? 0xFF : 0);
+  sat_write(0,59,250,pf);
+  sat_write(1,0xD0,0,0);
+  flush();
+  bands = play_and_present();
+  c = (const CCB *)vdp_list_band(0);
+  s = nth_kind(c,K_SPRITE,0);
+  expect(s != NULL && cel_x(s) == 250 && cel_y(s) == 60 && s->ccb_Height == 8,"sprite at x 250: the block stands at 250");
+  expect(pic[60 * PIC_W + 250] == 18 && pic[60 * PIC_W + 255] == 18 && pic[60 * PIC_W + 249] != 18
+         && pic[61 * PIC_W + 0] != 18 && pic[61 * PIC_W + 1] != 18,
+         "sprite at x 250: columns 250 to 255 shown, nothing before, nothing wrapped onto the next line");
+  vdp_list_end();
+  reg_write(0,(uint32)sms.vdp.reg[0] | 0x08UL);
+  bands = play_and_present();
+  c = (const CCB *)vdp_list_band(0);
+  s = nth_kind(c,K_SPRITE,0);
+  expect(s != NULL && cel_x(s) == 242,"register 0 bit 3: the same sprite stands eight to the left, at 242");
+  expect(pic[60 * PIC_W + 242] == 18 && pic[60 * PIC_W + 249] == 18 && pic[60 * PIC_W + 250] != 18,
+         "register 0 bit 3: shown on columns 242 to 249");
+  vdp_list_end();
+  reg_write(0,((uint32)sms.vdp.reg[0] & ~0x08UL) | 0x20UL);
+  sat_write(0,59,0,pf);
+  sat_write(1,59,0,pf);
+  sat_write(2,0xD0,0,0);
+  before_col = sms.vdp.cnt_spr_col;
+  bands = play_and_present();
+  expect(sms.vdp.cnt_spr_col == before_col,"two sprites at x 0 under the masked column: no collision");
+  for(i = 0, n = 0; i < 8; i++)
+    if(pic[60 * PIC_W + i] == (unsigned char)(16 + (sms.vdp.reg[7] & 15))) n++;
+  expect(n == 8 && pic[60 * PIC_W + 8] != 18,"two sprites at x 0 under the masked column: no pixel of them shown");
+  vdp_list_end();
+  reg_write(0,(uint32)sms.vdp.reg[0] & ~0x20UL);
+  sat_write(0,0xD0,0,0);
+  flush();
+
+  /* A run of four priority tiles, columns 28 to 31 of tile row 5, under
+     a horizontal scroll of 16: the run lands at screen columns 240 to
+     271, so it folds -- two runs of the one source row, tiles 30 and 31
+     at x 0, tiles 28 and 29 at x 240. */
+  for(i = 0; i < 4; i++) { saved_w[i] = nt_word(5 * 32 + 28 + i); saved_w[4 + i] = nt_word(2 * 32 + 28 + i); }
+  sms.vdp.vcount = 200;
+  for(i = 0; i < 4; i++) nt_write(5 * 32 + 28 + i,pa | 0x1000UL);
+  reg_write(8,16);
+  flush();
+  bands = play_and_present();
+  c = (const CCB *)vdp_list_band(0);
+  s = find_prio(c,0,40,16,8);
+  s2 = find_prio(c,240,40,16,8);
+  expect(s != NULL && cel_off(s,sms.vdp.decor) == 40 * PIC_W + 240,
+         "priority run at the fold: tiles 30 and 31 at x 0, from picture column 240, row 40");
+  expect(s2 != NULL && cel_off(s2,sms.vdp.decor) == 40 * PIC_W + 224 && nth_kind(c,K_PRIO,2) == NULL,
+         "priority run at the fold: tiles 28 and 29 at x 240, from picture column 224, and no third run");
+  expect(pic[40 * PIC_W + 240] == 1 && pic[40 * PIC_W + 0] == 1,"priority run at the fold: colour 1 at x 240 and at x 0");
+  vdp_list_end();
+
+  /* The same run on tile row 2 under the top lock (register 0 bit 6)
+     with a vertical scroll of 4: picture rows 16 to 23 land on screen
+     lines 12 to 19, across line 16 where the lock ends. Lines 12 to 15
+     take no horizontal scroll -- one run at x 224, rows 16 to 19 of the
+     picture -- and lines 16 to 19 take the scroll of 16 and fold as
+     above, rows 20 to 23. */
+  sms.vdp.vcount = 200;
+  for(i = 0; i < 4; i++) nt_write(5 * 32 + 28 + i,saved_w[i]);
+  for(i = 0; i < 4; i++) nt_write(2 * 32 + 28 + i,pa | 0x1000UL);
+  reg_write(0,(uint32)sms.vdp.reg[0] | 0x40UL);
+  reg_write(9,4);
+  sms.vdp.vscroll = 4;
+  flush();
+  bands = play_and_present();
+  c = (const CCB *)vdp_list_band(0);
+  s = find_prio(c,224,12,32,4);
+  expect(s != NULL && cel_off(s,sms.vdp.decor) == 16 * PIC_W + 224,
+         "priority run under the top lock: lines 12 to 15 unscrolled, one run at x 224 from picture row 16");
+  s = find_prio(c,0,16,16,4);
+  s2 = find_prio(c,240,16,16,4);
+  expect(s != NULL && cel_off(s,sms.vdp.decor) == 20 * PIC_W + 240 && s2 != NULL
+         && cel_off(s2,sms.vdp.decor) == 20 * PIC_W + 224 && nth_kind(c,K_PRIO,3) == NULL,
+         "priority run under the top lock: lines 16 to 19 scrolled and folded, two runs from picture row 20");
+  expect(pic[12 * PIC_W + 224] == 1 && pic[16 * PIC_W + 240] == 1 && pic[16 * PIC_W + 0] == 1,
+         "priority run under the top lock: colour 1 at (224, 12), (240, 16) and (0, 16)");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  for(i = 0; i < 4; i++) nt_write(2 * 32 + 28 + i,saved_w[4 + i]);
+  reg_write(0,(uint32)sms.vdp.reg[0] & ~0x40UL);
+  reg_write(8,0);
+  reg_write(9,0);
+  sms.vdp.vscroll = 0;
+  flush();
+
+  /* The table rewritten on line 100 to name pf instead of ps, then ps
+     rewritten on line 150: the per-line table rebuilt at line 100 no
+     longer names ps, but lines 40 to 47 drew it and their band replays
+     the table that named it, so the write of line 150 is journaled and
+     undone for that band -- three bands, and line 40 shows the row as
+     it was. */
+  sat_write(0,39,60,ps);
+  sat_write(1,0xD0,0,0);
+  flush();
+  sms.vdp.vcount = 0;
+  for(i = 0; i < (uint32)PIC_H; i++)
+    {
+      if(i == 100) vram_write(0x3F81,pf);
+      if(i == 150) vram_write(ps * 32 + 1,0);
+      line_step();
+    }
+  bands = vdp_list_begin();
+  memset(pic,0xFF,sizeof pic);
+  compose_bands(-2,bands);
+  expect(bands == 3 && sms.vdp.band_line[1] == 100 && sms.vdp.band_line[2] == 150,
+         "pattern of the previous table rewritten on line 150: journaled, three bands");
+  expect(pic[40 * PIC_W + 60] == 18,
+         "pattern of the previous table rewritten on line 150: line 40 shows the row as it was");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  vram_write(ps * 32 + 1,0x80);
+  sat_write(0,0xD0,0,0);
+  flush();
+
+  /* Register 7 moved in the blanking: the backdrop column is refilled,
+     so the masked left column and a line with the display off show the
+     new index. Then put back. */
+  reg7 = (uint32)sms.vdp.reg[7];
+  sms.vdp.vcount = 200;
+  reg_write(7,(reg7 & 0xF0UL) | ((reg7 + 5UL) & 0x0FUL));
+  reg_write(0,(uint32)sms.vdp.reg[0] | 0x20UL);
+  flush();
+  play_line = 180;
+  play_reg = 1;
+  play_value = (uint32)sms.vdp.reg[1] & ~0x40UL;
+  bands = play_and_present();
+  expect(pic[20 * PIC_W + 3] == (unsigned char)(16 + ((reg7 + 5) & 15))
+         && pic[185 * PIC_W + 128] == (unsigned char)(16 + ((reg7 + 5) & 15)),
+         "register 7 moved: the masked column and a line with the display off show the new backdrop");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  reg_write(1,(uint32)sms.vdp.reg[1] | 0x40UL);
+  reg_write(7,reg7);
+  reg_write(0,(uint32)sms.vdp.reg[0] & ~0x20UL);
+  flush();
+
+  /* Register 5 moved in the blanking to a table on eight free chunks
+     outside the name table, never watched before: they are watched from
+     the move, the per-line table owed; put back, they are watched no
+     more. Then register 6 moved to the second bank with the table
+     untouched: the per-line table owed again, since its patterns must
+     be named anew. Nothing is written to the free chunks. */
+  sms.vdp.vcount = 0;
+  for(i = 0; i < (uint32)PIC_H; i++) line_step();
+  flush();
+  expect(sms.vdp.spr_dirty == 0,"a picture played: the per-line table stands");
+  for(q = 0; q < 512; q += 8)
+    {
+      for(i = 0; i < 8; i++)
+        if(sms.vdp.refs[q + i] != 0 || sms.vdp.watch[q + i] != 0) break;
+      if(i == 8) break;
+    }
+  expect(q < 512,"eight free chunks on a table boundary exist for a moved sprite table");
+  if(q < 512)
+    {
+      sms.vdp.vcount = 200;
+      reg_write(5,(q >> 2) | 0x81UL);
+      expect(sms.vdp.spr_dirty != 0 && sms.vdp.sat_base == q * 32 && sms.vdp.watch[q] == 1 && sms.vdp.watch[q + 7] == 1,
+             "register 5 moved to a free table: its eight chunks are watched, the per-line table owed");
+      reg_write(5,0xFF);
+      expect(sms.vdp.watch[q] == 0 && sms.vdp.watch[q + 7] == 0,"register 5 put back: the free chunks are watched no more");
+      sms.vdp.vcount = 0;
+      for(i = 0; i < (uint32)PIC_H; i++) line_step();
+      flush();
+      expect(sms.vdp.spr_dirty == 0,"a picture played after the move: the per-line table stands");
+      sms.vdp.vcount = 200;
+      reg_write(6,0xFF);
+      expect(sms.vdp.spr_dirty != 0,"register 6 moved to the second bank: the per-line table owed");
+      reg_write(6,0xFB);
+      flush();
+    }
+
+  /* Tall sprites (register 1 bit 1): an odd pattern number draws the
+     pair (p - 1, p), sixteen rows from the even pattern's place, and two
+     tall sprites sharing a column collide on the rows of the second
+     pattern as on the first. Pattern pe: index 2 down column 0; pe + 1:
+     index 3 down column 0. */
+  for(pe = 0; pe < 256; pe += 2)
+    if(sms.vdp.refs[pe] == 0 && sms.vdp.watch[pe] == 0
+       && sms.vdp.refs[pe + 1] == 0 && sms.vdp.watch[pe + 1] == 0) break;
+  expect(pe < 256,"an even pair of free patterns exists in the first eight kilobytes for the tall sprites");
+  if(pe < 256)
+    {
+      sms.vdp.vcount = 200;
+      for(i = 0; i < 32; i++) vram_write(pe * 32 + i,((i & 3) == 1) ? 0x80 : 0);
+      for(i = 0; i < 32; i++) vram_write((pe + 1) * 32 + i,((i & 3) <= 1) ? 0x80 : 0);
+      reg_write(1,(uint32)sms.vdp.reg[1] | 0x02UL);
+      sat_write(0,59,100,pe + 1);
+      sat_write(1,0xD0,0,0);
+      flush();
+      bands = play_and_present();
+      c = (const CCB *)vdp_list_band(0);
+      s = nth_kind(c,K_SPRITE,0);
+      expect(s != NULL && cel_off(s,sms.vdp.sheet) == ((pe >> 6) * 16) * PIC_W + ((pe >> 1) & 31) * 8
+             && s->ccb_Height == 16 && cel_y(s) == 60 && nth_kind(c,K_SPRITE,1) == NULL,
+             "tall sprite named by its odd pattern: one block of sixteen rows from the even pattern's place");
+      expect(pic[60 * PIC_W + 100] == 18 && pic[67 * PIC_W + 100] == 18 && pic[68 * PIC_W + 100] == 19
+             && pic[75 * PIC_W + 100] == 19 && pic[76 * PIC_W + 100] != 19,
+             "tall sprite: the even pattern on lines 60 to 67, the odd one on 68 to 75");
+      vdp_list_end();
+      /* Two tall sprites on one column, opaque on their second pattern
+         alone: the collision on lines 68 to 75 alone. */
+      sms.vdp.vcount = 200;
+      for(i = 0; i < 32; i++) vram_write(pe * 32 + i,0);
+      sat_write(1,59,100,pe + 1);
+      sat_write(2,0xD0,0,0);
+      flush();
+      before_col = sms.vdp.cnt_spr_col;
+      bands = play_and_present();
+      expect(sms.vdp.cnt_spr_col == before_col + 8,
+             "two tall sprites on one column, opaque on their second pattern alone: the collision on eight lines");
+      vdp_list_end();
+      sms.vdp.vcount = 200;
+      reg_write(1,(uint32)sms.vdp.reg[1] & ~0x02UL);
+      sat_write(0,0xD0,0,0);
+      flush();
+    }
+
+  /* The table put back to nothing, the registers as they were. */
+  sms.vdp.vcount = 200;
+  for(i = 0; i < 3; i++) sat_write(i,0xD0,0,0);
+  reg_write(1,reg1);
+  flush();
+}
+
 static void scenes(void)
 {
   uint32 nt, addr, old, p, q, t, i, before, reg2, pa, pb;
@@ -489,17 +1407,23 @@ static void scenes(void)
   const CCB *c;
   long n;
 
-  /* A known geometry: no lock, no scroll, the table where register 2
-     left it. The control port's latch dropped first: the ROM may have
-     stopped between the two bytes of a sequence. In the blanking, so
-     that the register writes count as nothing. */
+  /* A known geometry: no lock, no scroll, no masked column, the table
+     where register 2 left it, no sprite -- the ROM's attribute table
+     ended on its first entry -- and one picture played blank so that
+     the per-line table is the ended table's, as a frame would leave it.
+     The control port's latch dropped first: the ROM may have stopped
+     between the two bytes of a sequence. In the blanking, so that the
+     register writes count as nothing. */
   sms.vdp.latch = 0;
   sms.vdp.vcount = 200;
-  reg_write(0,(uint32)sms.vdp.reg[0] & ~0xC0UL);
+  reg_write(0,(uint32)sms.vdp.reg[0] & ~0xE0UL);
   reg_write(8,0);
   reg_write(9,0);
   sms.vdp.hscroll = 0;
   sms.vdp.vscroll = 0;
+  vram_write((((uint32)sms.vdp.reg[5] & 0x7EUL) << 7),0xD0);
+  sms.vdp.vcount = 0;
+  for(i = 0; i < (uint32)PIC_H; i++) line_step();
   flush();
   nt = nt_base();
 
@@ -562,7 +1486,9 @@ static void scenes(void)
              "after the presentation the hot mark fell and the pattern is referenced");
     }
 
-  /* A sprite pattern written on line 70: nothing, no band. */
+  /* A pattern neither the picture shows nor the sprite table names,
+     written on line 70: nothing, no band. (A pattern the table names is
+     the sprite scenes' business, below.) */
   q = free_pattern(0);
   expect(q != 0xFFFFFFFFUL,"a second pattern the picture does not show exists");
   if(q != 0xFFFFFFFFUL)
@@ -570,9 +1496,9 @@ static void scenes(void)
       sms.vdp.vcount = 70;
       addr = q * 32;
       vram_write(addr,sms.vdp.vram[addr] ^ 0xFF);
-      expect(sms.vdp.journal_count == 0,"sprite pattern written on line 70: not journaled");
+      expect(sms.vdp.journal_count == 0,"unused pattern written on line 70: not journaled");
       bands = vdp_list_begin();
-      expect(bands == 1,"sprite pattern written on line 70: one band");
+      expect(bands == 1,"unused pattern written on line 70: one band");
       compose_bands(-1,bands);
       vdp_list_end();
       flush();
@@ -797,6 +1723,13 @@ static void scenes(void)
   sms.vdp.hscroll = 0;
   sms.vdp.vscroll = 0;
   flush();
+
+  /* ---- the sprites and the priority tiles: the cases the ROM does not
+     reach, on a table of this file's own at $3F00, patterns in the first
+     eight kilobytes, no shift, no mask, the display on. The picture is
+     played line by line as the frame loop plays it, so that the per-line
+     table, the flags and the journal are exercised as on the console. ---- */
+  sprite_scenes(pa);
 }
 #endif /* SMS_DECOR_CEL */
 
@@ -1014,6 +1947,12 @@ int main(int argc, char **argv)
   unsigned long take_ok = 0, take_frames = 0, cram_w_seen = 0;
   /* Pictures whose border carries the backdrop number register 7 names. */
   unsigned long backdrop_ok = 0;
+  /* The two sprite bits, as lines raised per frame: the older path writes
+     them after each picture of a reference it mints, the list path holds
+     its own against them -- pictures where both agreed, pictures where the
+     reference carried them at all. */
+  unsigned long ovf_seen = 0, col_seen = 0, ovf_d, col_d;
+  unsigned long flags_ok = 0, flags_seen = 0;
   static unsigned long row_digest[PIC_H];
 
   memset(fine_frames,0,sizeof fine_frames);
@@ -1111,7 +2050,7 @@ int main(int argc, char **argv)
       for(line = 0; line < LINES_PER_FRAME; line++)
         {
           residue = z80_run(TSTATES_PER_LINE - residue);
-          vdp_line();
+          line_step();
 #if SMS_DECOR_CEL
           /* The presentation, once line 191 is counted, as src/main.c
              makes it: the list built, held and copied, on every frame,
@@ -1151,6 +2090,10 @@ int main(int argc, char **argv)
       if(ppmdir != NULL) ppm(ppmdir,fr);
       for(y = 0; y < PIC_H; y++)
         row_digest[y] = digest(pic + (y * PIC_W),(unsigned long)PIC_W);
+      ovf_d = sms.vdp.cnt_spr_ovf - ovf_seen;
+      col_d = sms.vdp.cnt_spr_col - col_seen;
+      ovf_seen = sms.vdp.cnt_spr_ovf;
+      col_seen = sms.vdp.cnt_spr_col;
 
       if(writing)
         {
@@ -1158,6 +2101,13 @@ int main(int argc, char **argv)
           for(y = 0; y < PIC_H; y++)
             fprintf(ref," %08lx",row_digest[y]);
           fputc('\n',ref);
+#if !SMS_DECOR_CEL
+          /* The two sprite bits of the frame, from the path that raises
+             them pixel by pixel: the line the list path is held to. Never
+             written by the list path, so a frozen reference minted from it
+             carries none and the older path is never held to itself. */
+          fprintf(ref,"flags ovf=%lu col=%lu\n",ovf_d,col_d);
+#endif
         }
       else
         {
@@ -1187,6 +2137,32 @@ int main(int argc, char **argv)
                     fprintf(stderr,"  frame %ld line %d differs\n",fr,y);
                 }
             }
+          /* The flags line after the digests, when the reference carries
+             one: the rest of the digest line is consumed, the next line
+             read and put back if it is not one. */
+          {
+            char fl[128];
+            long pos;
+            unsigned long r_ovf, r_col;
+            if(fgets(fl,sizeof fl,ref) != NULL)
+              {
+                pos = ftell(ref);
+                if(fgets(fl,sizeof fl,ref) != NULL)
+                  {
+                    if(sscanf(fl,"flags ovf=%lu col=%lu",&r_ovf,&r_col) == 2)
+                      {
+                        flags_seen++;
+                        if(r_ovf == ovf_d && r_col == col_d)
+                          flags_ok++;
+                        else if(flags_seen - flags_ok <= 8)
+                          fprintf(stderr,"  frame %ld flags differ: ovf %lu/%lu col %lu/%lu\n",
+                                  fr,ovf_d,r_ovf,col_d,r_col);
+                      }
+                    else
+                      fseek(ref,pos,SEEK_SET);
+                  }
+              }
+          }
         }
     }
 
@@ -1227,12 +2203,19 @@ int main(int argc, char **argv)
 #if SMS_DECOR_CEL
   /* The scenes after the ROM's frames and before the windows are
      counted: their windows are held like any other. */
+  /* The reserve refusals of the ROM's frames, read before the scenes:
+     one scene spends the reserve on purpose and holds its own count. */
+  k = sms.vdp.cnt_cels_refused;
   scenes();
   printf("decor windows %lu/%lu\n",win_ok,win_seen);
   printf("decor read=%lu limit=%lu gaps=%lu\n",decor_read,decor_limit,gaps);
   printf("decor journal=%lu bands=%lu\n",journal_total,bands_total);
   printf("decor scenes %lu/%lu\n",scene_ok,scene_want);
+  printf("list cels %lu/%lu\n",cel_ok,cel_seen);
+  printf("list cels max=%lu refused=%lu\n",cel_max,k);
 #endif
+  if(!writing)
+    printf("sprite flags %lu/%lu\n",flags_ok,flags_seen);
 
   if(writing)
     printf("pictures=%lu written\n",pictures);

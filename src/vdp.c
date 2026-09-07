@@ -185,6 +185,7 @@ vdp_profile_reps(uint32 post)
 #endif
 
 
+#if !SMS_DECOR_CEL
 /*
  * ---------------------------------------------------------------------------
  * The sprites of one line, chosen once. The sixty-four entries of the
@@ -459,23 +460,14 @@ vdp_draw_sprites(uint32 y)
            * still holds the background here -- a pixel a sprite already
            * wrote is taken, and left above.
            */
-#if SMS_DECOR_CEL
-          /*
-           * On this path the row holds no background pixel to read, so
-           * the mask was laid with the opacity folded in (vdp_render_line
-           * above, step 4): one byte says it all.
-           */
-          if(prio[xi] != 0)
-            continue;
-#else
           if((prio[xi] != 0) && (((uint32)line[xi] & 15UL) != 0UL))
             continue;
-#endif
 
           line[xi] = (uint8)(16UL + idx);
         }
     }
 }
+#endif /* !SMS_DECOR_CEL */
 
 #if SMS_DECOR_CEL
 /*
@@ -488,18 +480,34 @@ vdp_draw_sprites(uint32 y)
  */
 
 /*
- * The page of the picture and the window blocks, kept across a second
- * init for the reason every block above is.
+ * The page of the picture and the window blocks, and the page of the
+ * sprite sheet and the small cel blocks, kept across a second init for
+ * the reason every block above is.
  */
 static uint8 *vdp_decor_block = NULL;
+static uint8 *vdp_sprite_block = NULL;
 
 /*
- * The first window block of the band being built, so that the block
- * before a new one is chained to it only inside the band: the arena is
- * shared by every band of a presentation and a chain must not run from
- * one band into the next.
+ * The chain of the band being built: its first block and its last, so
+ * that a new block is chained after the last one of THIS band only. The
+ * two arenas are shared by every band of a presentation and a chain must
+ * not run from one band into the next.
  */
-static uint32 vdp_band_first = 0;
+static CCB *vdp_chain_head = NULL;
+static CCB *vdp_chain_tail = NULL;
+
+/*
+ * The four bytes of a lane word tested for opacity, one result byte per
+ * lane: an index is opaque when its low four bits are not zero (vdp.h,
+ * the guard on VDP_PLANES_COUNT), so fifteen is added to each low nibble
+ * and bit 4 of the sum is the answer; a sum of at most thirty carries
+ * into no neighbouring lane.
+ */
+#define VDP_LANE_OPAQUE(e) \
+  (((((e) & 0x0F0F0F0FUL) + 0x0F0F0F0FUL) >> 4) & VDP_TC_LANE_ONE)
+
+/* The flags of every small cel of the list; a sprite adds nothing to them. */
+#define VDP_SPRITE_BGND 0UL
 
 /*
  * One row of the decoded row cache, decoded first if it does not stand:
@@ -544,16 +552,35 @@ vdp_tc_row(uint32 key)
 }
 
 /*
- * Whether chunk c of the video memory is inside the name table: one
- * subtraction against the table's first chunk, the difference read
- * unsigned so that a chunk below the table falls past its length.
+ * Whether chunk c of the video memory is inside the name table, or
+ * inside the sprite attribute table: one subtraction against the table's
+ * first chunk, the difference read unsigned so that a chunk below the
+ * table falls past its length. The sprite table is 256 bytes, eight
+ * chunks (docs/sms_gg/SMSOfficialDocs.md:411-461).
  */
-#define VDP_CHUNK_IN_NT(chunk) (((chunk) - sms.vdp.nt_chunk0) < VDP_NT_CHUNKS)
+#define VDP_CHUNK_IN_NT(chunk)  (((chunk) - sms.vdp.nt_chunk0) < VDP_NT_CHUNKS)
+#define VDP_CHUNK_IN_SAT(chunk) (((chunk) - sms.vdp.sat_chunk0) < (256UL / 32UL))
 
 /*
- * The watch byte of every chunk brought back in line with the three facts
- * it stands for: a pattern the picture shows, a pattern marked hot, or the
- * name table. Cold: init, and a move of the table by register 2.
+ * The watch byte of one chunk from the five facts it stands for: a
+ * pattern the picture shows, a pattern marked hot, a pattern the sprite
+ * table names, the name table, the sprite table. The one spelling of the
+ * union, so that the places that drop a fact cannot drop the others.
+ */
+static uint8
+vdp_watch_of(uint32 chunk)
+{
+  return (uint8)(((sms.vdp.refs[chunk] != 0U)
+                  || (sms.vdp.hot[chunk] != 0U)
+                  || (sms.vdp.spr_named[chunk] != 0U)
+                  || VDP_CHUNK_IN_NT(chunk)
+                  || VDP_CHUNK_IN_SAT(chunk)) ? 1U : 0U);
+}
+
+/*
+ * The watch byte of every chunk brought back in line. Cold: init, a move
+ * of the name table by register 2, a move of the sprite table by
+ * register 5.
  */
 static void
 vdp_decor_watch_rebuild(void)
@@ -561,9 +588,24 @@ vdp_decor_watch_rebuild(void)
   uint32 chunk;
 
   for(chunk = 0; chunk < VDP_CHUNKS; chunk++)
-    sms.vdp.watch[chunk] = (uint8)(((sms.vdp.refs[chunk] != 0U)
-                                || (sms.vdp.hot[chunk] != 0U)
-                                || VDP_CHUNK_IN_NT(chunk)) ? 1U : 0U);
+    sms.vdp.watch[chunk] = vdp_watch_of(chunk);
+}
+
+/*
+ * A pattern marked hot: watched from now to the end of the presentation,
+ * whether or not the picture or the sheet shows it yet, and listed so
+ * that the mark falls without a walk. Each pattern is listed once, which
+ * bounds the list by the chunk count.
+ */
+static void
+vdp_decor_hot(uint32 p)
+{
+  if(sms.vdp.hot[p] == 0U)
+    {
+      sms.vdp.hot[p] = 1;
+      sms.vdp.watch[p] = 1;
+      sms.vdp.hot_list[sms.vdp.hot_count++] = (uint16)p;
+    }
 }
 
 /*
@@ -605,9 +647,8 @@ vdp_decor_tile(uint32 t)
     {
       old &= 0x1FFUL;
       sms.vdp.refs[old]--;
-      if((sms.vdp.refs[old] == 0U) && (sms.vdp.hot[old] == 0U)
-         && !VDP_CHUNK_IN_NT(old))
-        sms.vdp.watch[old] = 0;
+      if(sms.vdp.refs[old] == 0U)
+        sms.vdp.watch[old] = vdp_watch_of(old);
     }
   sms.vdp.refs[pattern]++;
   sms.vdp.watch[pattern] = 1;
@@ -690,6 +731,8 @@ vdp_decor_apply(void)
           if(db[chunk] == 0U)
             continue;
           sms.vdp.dirty_list[n++] = (uint16)chunk;
+          /* The sheet's place of the pattern no longer holds it. */
+          sms.vdp.sheet_valid[chunk] = 0;
           if(sms.vdp.refs[chunk] != 0U)
             {
               sms.vdp.pat_dirty[chunk] = 1;
@@ -780,14 +823,422 @@ vdp_decor_note(uint32 addr,
         word = (uint32)sms.vdp.vram[addr - 1UL] | (value << 8);
       else
         word = value | ((uint32)sms.vdp.vram[addr + 1UL] << 8);
-      p = word & 0x1FFUL;
-      if(sms.vdp.hot[p] == 0U)
+      vdp_decor_hot(word & 0x1FFUL);
+    }
+  /*
+   * Tested on its own and not as the other branch of the name table:
+   * registers 2 and 5 may lay the two tables over each other.
+   */
+  if(VDP_CHUNK_IN_SAT(chunk))
+    {
+      /*
+       * A byte of the sprite table: the per-line table is stale from
+       * the next line on, and a pattern number just written names its
+       * pattern before the rebuild can count it -- both patterns of the
+       * pair when the sprites are tall, since they draw the pair
+       * whichever the byte names (SMSOfficialDocs.md:846-852; the
+       * pattern byte is the odd byte of the second half of the table,
+       * :448-461).
+       */
+      sms.vdp.spr_dirty = 1;
+      if(((addr & 255UL) >= VDP_SPR_XN_OFFSET) && ((addr & 1UL) != 0UL))
         {
-          sms.vdp.hot[p] = 1;
-          sms.vdp.watch[p] = 1;
-          sms.vdp.hot_list[sms.vdp.hot_count++] = (uint16)p;
+          p = value + ((((uint32)sms.vdp.reg[6] & 0x04UL) != 0UL) ? 256UL : 0UL);
+          if(((uint32)sms.vdp.reg[1] & 0x02UL) != 0UL)
+            {
+              vdp_decor_hot(p & ~1UL);
+              vdp_decor_hot(p | 1UL);
+            }
+          else
+            vdp_decor_hot(p);
         }
     }
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * The sprites: the per-line table, the sheet, the flags.
+ * ---------------------------------------------------------------------------
+ */
+
+void
+vdp_sprite_scan(uint32 from)
+{
+  const uint8 *sat;
+  const uint8 *reg;
+  uint32 i;
+  uint32 y;
+  uint32 n;
+  uint32 p;
+  uint32 height;
+  uint32 base;
+  uint32 tall;
+  int32 top;
+  int32 ya;
+  int32 yb;
+
+  reg = sms.vdp.reg;
+  sat = sms.vdp.vram + sms.vdp.sat_base;
+  tall = (uint32)reg[1] & 0x02UL;
+  height = (tall != 0UL) ? 16UL : 8UL;
+  height <<= ((uint32)reg[1] & 0x01UL);
+  base = (((uint32)reg[6] & 0x04UL) != 0UL) ? 256UL : 0UL;
+
+  /*
+   * The lines before the one being counted keep what they had: their
+   * flags have been read and the bands of the presentation draw them
+   * with the memory as it stood then, admission included. Only the
+   * lines from here on take the table as it now stands.
+   */
+  for(y = from; y < VDP_ACTIVE_LINES; y++)
+    {
+      sms.vdp.spr_n[y] = 0;
+      sms.vdp.spr_ovf_line[y] = 0;
+      sms.vdp.spr_adm[y][0] = 0;
+      sms.vdp.spr_adm[y][1] = 0;
+    }
+
+  /*
+   * The named marks of the previous table fall; the ones of this table
+   * are raised below as the walk meets them. Inside the picture the
+   * lines before this one drew the previous table, and the bands of the
+   * presentation replay it for them: a write to one of its patterns
+   * later in the picture must still be journaled, so its mark turns hot
+   * -- kept to the end of the presentation, like a pattern the name
+   * table stopped naming. At line 0 no band to come drew it, and the
+   * watch byte falls at once where nothing else holds it up.
+   */
+  for(i = 0; i < sms.vdp.spr_named_count; i++)
+    {
+      p = sms.vdp.spr_named_list[i];
+      sms.vdp.spr_named[p] = 0;
+      if(from != 0UL)
+        vdp_decor_hot(p);
+      else
+        sms.vdp.watch[p] = vdp_watch_of(p);
+    }
+  sms.vdp.spr_named_count = 0;
+
+  /*
+   * The walk of the older path's vdp_select_sprites, once for every line
+   * instead of once per line: the terminator ends it, the position on
+   * screen is the byte plus one and turns negative past VDP_SPR_Y_WRAP
+   * (SMSOfficialDocs.md:443-446; TotalSMS/src/core/sms_vdp.c:1074,
+   * :1090-1093), an entry touches the lines from its top to its height,
+   * and on each of them the first eight of the table are admitted, the
+   * ninth and every one after it raise the line's overflow mark
+   * (SMSOfficialDocs.md:393-397; sms_vdp.c:1105-1117). The pattern the
+   * entry names is marked for the watch, the pair of it when the sprites
+   * are tall.
+   */
+  for(i = 0; i < VDP_SPR_COUNT; i++)
+    {
+      if(sat[i] == (uint8)VDP_SPR_TERMINATOR)
+        break;
+
+      top = (int32)sat[i] + 1;
+      if(top > (int32)VDP_SPR_Y_WRAP)
+        top -= 256;
+      sms.vdp.sat_top[i] = (int16)top;
+
+      p = (uint32)sat[VDP_SPR_XN_OFFSET + (i << 1) + 1UL] + base;
+      if(tall != 0UL)
+        p &= ~1UL;
+      if(sms.vdp.spr_named[p] == 0U)
+        {
+          sms.vdp.spr_named[p] = 1;
+          sms.vdp.watch[p] = 1;
+          sms.vdp.spr_named_list[sms.vdp.spr_named_count++] = (uint16)p;
+        }
+      if((tall != 0UL) && (sms.vdp.spr_named[p + 1UL] == 0U))
+        {
+          sms.vdp.spr_named[p + 1UL] = 1;
+          sms.vdp.watch[p + 1UL] = 1;
+          sms.vdp.spr_named_list[sms.vdp.spr_named_count++] = (uint16)(p + 1UL);
+        }
+
+      ya = (top < (int32)from) ? (int32)from : top;
+      yb = top + (int32)height;
+      if(yb > (int32)VDP_ACTIVE_LINES)
+        yb = (int32)VDP_ACTIVE_LINES;
+
+      for(y = (uint32)ya; (int32)y < yb; y++)
+        {
+          n = sms.vdp.spr_n[y];
+          if(n < VDP_SPR_MAX_ON_LINE)
+            {
+              sms.vdp.spr_idx[y][n] = (uint8)i;
+              sms.vdp.spr_n[y] = (uint8)(n + 1UL);
+              sms.vdp.spr_adm[y][i >> 5] |= 1UL << (i & 31UL);
+            }
+          else
+            sms.vdp.spr_ovf_line[y] = 1;
+        }
+    }
+
+  sms.vdp.spr_dirty = 0;
+}
+
+/*
+ * The place of pattern p in the sheet converted from the video memory as
+ * it stands: the eight rows read out of the decoded row cache, decoded
+ * on a miss like a tile of the picture, each index moved to the second
+ * bank where it is opaque and left at zero where it is not -- an OR of
+ * sixteen on every lane would make colour 0 opaque, which is the one
+ * thing a sprite pixel must never be. Two words a row, at the pitch of
+ * the picture.
+ */
+static void
+vdp_sheet_tile(uint32 p)
+{
+  uint32 *dst;
+  uint32 *ent;
+  uint32 r;
+  uint32 e0;
+  uint32 e1;
+
+  dst = (uint32 *)(sms.vdp.sheet + (VDP_SHEET_Y(p) * VDP_SHEET_W) + VDP_SHEET_X(p));
+  for(r = 0; r < 8UL; r++)
+    {
+      ent = vdp_tc_row(VDP_TC_KEY_TILE(p,r));
+      e0 = ent[0];
+      e1 = ent[1];
+      dst[0] = e0 | (VDP_LANE_OPAQUE(e0) << 4);
+      dst[1] = e1 | (VDP_LANE_OPAQUE(e1) << 4);
+      dst += VDP_SHEET_W / 4UL;
+    }
+  sms.vdp.sheet_valid[p] = 1;
+}
+
+/*
+ * The backdrop column filled with the backdrop index, four pixels a
+ * word: what the masked left column and the rows with the display off
+ * are drawn from. Init, and a move of register 7.
+ */
+static void
+vdp_column_fill(void)
+{
+  uint32 *w;
+  uint32 v;
+  uint32 i;
+
+  w = (uint32 *)sms.vdp.column;
+  v = VDP_BACKDROP_INDEX() * VDP_TC_LANE_ONE;
+  for(i = 0; i < (VDP_COLUMN_BYTES / 4UL); i++)
+    w[i] = v;
+}
+
+/*
+ * The collision of one line replayed without a pixel written, on the
+ * admitted sprites of the line and only when two of them share a column
+ * -- a lone sprite can take a pixel from no one. Then the rules of the
+ * older path's vdp_draw_sprites, exactly: a sprite wholly left of the
+ * first drawn column takes nothing; a pixel left of that column or past
+ * the right edge takes nothing; index zero takes nothing; a pixel a
+ * sprite already took is the collision, raised whether or not it stood,
+ * counted once per line, and the walk stops there. The priority of the
+ * background plays no part in it (TotalSMS/src/core/sms_vdp.c:1179-1224;
+ * the disagreement between the two sources on who shows on top is
+ * recorded beside the older path and changes nothing here: the taken
+ * mask is written in table order either way). The rows are the decoded
+ * row cache's, the same the picture and the sheet read.
+ */
+static void
+vdp_sprite_collide(uint32 y,
+                   uint32 n)
+{
+  const uint8 *reg;
+  const uint8 *sat;
+  const uint8 *row;
+  uint8 *taken;
+  uint32 *clear;
+  int32 xl[VDP_SPR_MAX_ON_LINE];
+  int32 xr[VDP_SPR_MAX_ON_LINE];
+  uint32 need[VDP_SPR_MAX_ON_LINE];
+  uint32 r;
+  uint32 s;
+  uint32 i;
+  uint32 x;
+  uint32 any;
+  uint32 zoom;
+  uint32 width;
+  uint32 base;
+  uint32 tall;
+  uint32 p;
+  uint32 srow;
+  int32 x0;
+  int32 xi;
+  int32 shift;
+  int32 startx;
+
+  reg = sms.vdp.reg;
+  sat = sms.vdp.vram + sms.vdp.sat_base;
+  zoom = (uint32)reg[1] & 0x01UL;
+  tall = (uint32)reg[1] & 0x02UL;
+  width = 8UL << zoom;
+  base = (((uint32)reg[6] & 0x04UL) != 0UL) ? 256UL : 0UL;
+  shift = (((uint32)reg[0] & 0x08UL) != 0UL) ? 8 : 0;
+  startx = (((uint32)reg[0] & 0x20UL) != 0UL) ? 8 : 0;
+
+  for(r = 0; r < n; r++)
+    {
+      i = sms.vdp.spr_idx[y][r];
+      x0 = (int32)sat[VDP_SPR_XN_OFFSET + (i << 1)] - shift;
+      xl[r] = (x0 < startx) ? startx : x0;
+      xr[r] = ((x0 + (int32)width) > (int32)VDP_PIX_WIDTH)
+              ? (int32)VDP_PIX_WIDTH : (x0 + (int32)width);
+      need[r] = 0;
+    }
+
+  any = 0;
+  for(r = 0; r < n; r++)
+    {
+      for(s = r + 1UL; s < n; s++)
+        {
+          if((xl[r] < xr[s]) && (xl[s] < xr[r]) && (xl[r] < xr[r]) && (xl[s] < xr[s]))
+            {
+              need[r] = 1;
+              need[s] = 1;
+              any = 1;
+            }
+        }
+    }
+  if(any == 0UL)
+    return;
+
+  taken = (uint8 *)sms.vdp.spr_taken;
+  clear = sms.vdp.spr_taken;
+  for(x = 0; x < (VDP_PIX_WIDTH / 4UL); x++)
+    clear[x] = 0;
+
+  for(r = 0; r < n; r++)
+    {
+      if(need[r] == 0UL)
+        continue;
+      i = sms.vdp.spr_idx[y][r];
+      x0 = (int32)sat[VDP_SPR_XN_OFFSET + (i << 1)] - shift;
+      p = (uint32)sat[VDP_SPR_XN_OFFSET + (i << 1) + 1UL] + base;
+      if(tall != 0UL)
+        p &= ~1UL;
+      srow = ((uint32)((int32)y - (int32)sms.vdp.sat_top[i])) >> zoom;
+      row = (const uint8 *)vdp_tc_row(VDP_TC_KEY_TILE(p,srow));
+
+      for(x = 0; x < width; x++)
+        {
+          xi = x0 + (int32)x;
+          if(xi < startx)
+            continue;
+          if(xi >= (int32)VDP_PIX_WIDTH)
+            break;
+          if(row[x >> zoom] == 0U)
+            continue;
+          if(taken[xi] != 0U)
+            {
+              sms.vdp.spr_collision = 1;
+              VDP_COUNT(spr_col);
+              return;
+            }
+          taken[xi] = 1;
+        }
+    }
+}
+
+/*
+ * The one cel factory of the list. Every block of every band -- a window
+ * of the picture, a sprite, a run of priority tiles, a run of the
+ * backdrop column -- is filled here: a coded cel of eight bits, its
+ * source a word address at a row pitch given in words (at least two,
+ * docs/3do/3DO_Development_Notes.md:92-95), w pixels by h rows, at
+ * (x, y) of the clip rectangle, the horizontal step in 12.20 and the
+ * vertical in 16.16 (src_exemple_video_player/renderer.c:56-86), the
+ * palette pointer given, and the background flag given or not: with it
+ * a pixel whose palette entry is 000 is painted, without it that pixel
+ * is transparent (docs/3do/3do_portfolio_2.5.md:3783-3784). The
+ * preamble words are the same arithmetic as the whole-picture cel's,
+ * the row offset in the ten bit field an eight bit depth reads.
+ */
+static void
+vdp_cel_fill(CCB         *c,
+             const uint8 *src,
+             uint32       pitch_words,
+             uint32       w,
+             uint32       h,
+             int32        x,
+             int32        y,
+             int32        hdx,
+             int32        vdy,
+             void        *plut,
+             uint32       bgnd)
+{
+  c->ccb_Flags = CCB_NPABS | CCB_SPABS | CCB_PPABS | CCB_LDSIZE | CCB_LDPRS
+               | CCB_LDPPMP | CCB_CCBPRE | CCB_YOXY | CCB_USEAV | CCB_NOBLK
+               | CCB_ACE | CCB_ACW | CCB_ACCW | bgnd;
+  c->ccb_NextPtr = NULL;
+  c->ccb_SourcePtr = (CelData *)src;
+  c->ccb_PLUTPtr = plut;
+  c->ccb_XPos = (Coord)(x * 65536L);
+  c->ccb_YPos = (Coord)(y * 65536L);
+  c->ccb_HDX = hdx;
+  c->ccb_HDY = 0;
+  c->ccb_VDX = 0;
+  c->ccb_VDY = vdy;
+  c->ccb_HDDX = 0;
+  c->ccb_HDDY = 0;
+  c->ccb_PIXC = 0x1F001F00UL;
+  c->ccb_PRE0 = ((h - PRE0_VCNT_PREFETCH) << PRE0_VCNT_SHIFT) | PRE0_BPP_8;
+  c->ccb_PRE1 = ((pitch_words - PRE1_WOFFSET_PREFETCH) << PRE1_WOFFSET10_SHIFT)
+              | PRE1_TLLSB_PDC0
+              | (w - PRE1_TLHPCNT_PREFETCH);
+  c->ccb_Width = (int32)w;
+  c->ccb_Height = (int32)h;
+}
+
+/* A block chained after the last one of the band, or opening the band. */
+static void
+vdp_chain(CCB *c)
+{
+  if(vdp_chain_head == NULL)
+    vdp_chain_head = c;
+  else
+    vdp_chain_tail->ccb_NextPtr = c;
+  vdp_chain_tail = c;
+}
+
+/*
+ * A small cel from the reserve of the sprite page, filled as above and
+ * chained; NULL, counted and said once when the reserve is spent -- the
+ * band is drawn without it rather than the page overrun.
+ */
+static CCB *
+vdp_small(const uint8 *src,
+          uint32       pitch_words,
+          uint32       w,
+          uint32       h,
+          int32        x,
+          int32        y,
+          int32        hdx,
+          int32        vdy,
+          void        *plut,
+          uint32       bgnd)
+{
+  CCB *blk;
+
+  if(sms.vdp.cels_used >= VDP_LIST_CELS)
+    {
+      VDP_COUNT(cels_refused);
+      LOG_ONCE(LOG_CAT_VDP,LOG_LVL_WARN,
+               ("cel refused: the reserve of %lu blocks is full",
+                (unsigned long)VDP_LIST_CELS));
+      return NULL;
+    }
+
+  blk = (CCB *)sms.vdp.cels + sms.vdp.cels_used;
+  sms.vdp.cels_used++;
+  vdp_cel_fill(blk,src,pitch_words,w,h,x,y,hdx,vdy,plut,bgnd);
+  vdp_chain(blk);
+  VDP_COUNT(cels);
+
+  return blk;
 }
 
 /*
@@ -811,10 +1262,11 @@ vdp_window(uint32 xa,
            uint32 px,
            uint32 py)
 {
-  CCB *c;
+  CCB *blk;
   uint32 f;
   uint32 w;
   uint32 h;
+  int32 x;
 
   if(sms.vdp.list_used >= VDP_LIST_WINDOWS)
     {
@@ -828,37 +1280,30 @@ vdp_window(uint32 xa,
   f = px & 3UL;
   w = (xb - xa) + f;
   h = yb - ya;
+  x = (int32)xa - (int32)f;
 
-  c = (CCB *)sms.vdp.windows + sms.vdp.list_used;
-  c->ccb_Flags = CCB_NPABS | CCB_SPABS | CCB_PPABS | CCB_LDSIZE | CCB_LDPRS
-               | CCB_LDPPMP | CCB_CCBPRE | CCB_YOXY | CCB_USEAV | CCB_NOBLK
-               | CCB_ACE | CCB_ACW | CCB_ACCW | CCB_BGND;
-  c->ccb_NextPtr = NULL;
-  c->ccb_SourcePtr = (CelData *)(sms.vdp.decor + (py * VDP_PIX_ROW_BYTES)
-                                 + (px - f));
-  c->ccb_PLUTPtr = sms.vdp.plut;
-  c->ccb_XPos = (Coord)(((int32)xa - (int32)f) * 65536L);
-  c->ccb_YPos = (Coord)((int32)ya * 65536L);
-  c->ccb_HDX = 1L << 20;
-  c->ccb_HDY = 0;
-  c->ccb_VDX = 0;
-  c->ccb_VDY = 1L << 16;
-  c->ccb_HDDX = 0;
-  c->ccb_HDDY = 0;
-  c->ccb_PIXC = 0x1F001F00UL;
-  c->ccb_PRE0 = ((h - PRE0_VCNT_PREFETCH) << PRE0_VCNT_SHIFT) | PRE0_BPP_8;
-  c->ccb_PRE1 = (((VDP_PIX_ROW_BYTES / 4UL) - PRE1_WOFFSET_PREFETCH)
-                 << PRE1_WOFFSET10_SHIFT)
-              | PRE1_TLLSB_PDC0
-              | (w - PRE1_TLHPCNT_PREFETCH);
-  c->ccb_Width = (int32)w;
-  c->ccb_Height = (int32)h;
-
-  if(sms.vdp.list_used > vdp_band_first)
-    (c - 1)->ccb_NextPtr = c;
-
+  blk = (CCB *)sms.vdp.windows + sms.vdp.list_used;
   sms.vdp.list_used++;
+  vdp_cel_fill(blk,
+               sms.vdp.decor + (py * VDP_PIX_ROW_BYTES) + (px - f),
+               VDP_PIX_ROW_BYTES / 4UL,
+               w,h,x,(int32)ya,1L << 20,1L << 16,
+               sms.vdp.plut,CCB_BGND);
+  vdp_chain(blk);
   VDP_COUNT(list_windows);
+
+  /* Kept for the priority pass, which cuts its runs as the windows are cut. */
+  if(sms.vdp.win_count < VDP_BAND_WINDOWS)
+    {
+      vdp_win_t *r = &sms.vdp.win[sms.vdp.win_count++];
+
+      r->xa = (uint16)xa;
+      r->xb = (uint16)xb;
+      r->ya = (uint16)ya;
+      r->yb = (uint16)yb;
+      r->px = (uint16)px;
+      r->py = (uint16)py;
+    }
 }
 
 /*
@@ -959,23 +1404,366 @@ vdp_list_rows(uint32 ya,
 }
 
 /*
- * The windows of the lines a to b: one row region, or two when register
+ * One admitted run of a sprite, the lines la to lb of the band, as cels
+ * of the sheet from the pattern's place at src: without magnification
+ * one cel of the rows la - top to lb - top, at (x, la). Magnified, a
+ * source row covers two lines, the first line of the run may be the
+ * second line of its row and the last line the first line of its row
+ * (a band boundary, a refused range), and a cel of doubled rows placed
+ * there would draw a line outside the run: those two lines are one cel
+ * of one row and one line each, VDY at one, and the rows between are one
+ * cel of doubled rows. The horizontal step is the caller's, doubled
+ * with the rows. Returns how many cels the run cost, the refused ones
+ * not counted.
+ */
+static uint32
+vdp_list_sprite_run(const uint8 *src,
+                    int32        x,
+                    int32        top,
+                    uint32       la,
+                    uint32       lb,
+                    uint32       zoom,
+                    int32        hdx)
+{
+  uint32 d0;
+  uint32 d1;
+  uint32 n;
+  uint32 tail;
+
+  d0 = (uint32)((int32)la - top);
+  d1 = (uint32)((int32)lb - top);
+
+  if(zoom == 0UL)
+    {
+      return (vdp_small(src + (d0 * VDP_SHEET_W),VDP_SHEET_W / 4UL,8UL,lb - la,
+                        x,(int32)la,hdx,1L << 16,sms.vdp.plut,VDP_SPRITE_BGND)
+              != NULL) ? 1UL : 0UL;
+    }
+
+  n = 0;
+  if((d0 & 1UL) != 0UL)
+    {
+      if(vdp_small(src + ((d0 >> 1) * VDP_SHEET_W),VDP_SHEET_W / 4UL,8UL,1UL,
+                   x,(int32)la,hdx,1L << 16,sms.vdp.plut,VDP_SPRITE_BGND) != NULL)
+        n++;
+      la++;
+      d0++;
+    }
+
+  tail = 0;
+  if(((d1 & 1UL) != 0UL) && (la < lb))
+    {
+      tail = 1;
+      lb--;
+      d1--;
+    }
+
+  if(la < lb)
+    {
+      if(vdp_small(src + ((d0 >> 1) * VDP_SHEET_W),VDP_SHEET_W / 4UL,8UL,(d1 - d0) >> 1,
+                   x,(int32)la,hdx,2L << 16,sms.vdp.plut,VDP_SPRITE_BGND) != NULL)
+        n++;
+    }
+
+  if(tail != 0UL)
+    {
+      if(vdp_small(src + ((d1 >> 1) * VDP_SHEET_W),VDP_SHEET_W / 4UL,8UL,1UL,
+                   x,(int32)lb,hdx,1L << 16,sms.vdp.plut,VDP_SPRITE_BGND) != NULL)
+        n++;
+    }
+
+  return n;
+}
+
+/*
+ * The sprites of the lines a to b, from the highest numbered entry to
+ * the lowest so that the lowest is drawn last and shows on top -- the
+ * older path's "first of the table wins" (its vdp_draw_sprites says why
+ * the reference outranks the document there). The terminator and each
+ * entry before it are read from the attribute table AS THE VIDEO MEMORY
+ * STANDS, replayed to the band's first line -- the per-line table holds
+ * the admission of each line as it was counted, nothing else -- so a
+ * band before a write of the table draws the table it saw: the entry's
+ * screen line, its horizontal position,
+ * eight to the left when register 0 bit 3 asks (SMSOfficialDocs.md:
+ * 379-381), its pattern from the second eight kilobytes when register 6
+ * bit 2 is set and forced even when the sprites are tall
+ * (sms_vdp.c:1148-1165; SMSOfficialDocs.md:846-852), converted into the
+ * sheet if its place is stale. The lines it is drawn on are the lines
+ * of the band it touches AND the hardware admits, read off the per-line
+ * table as a bit per line; every maximal run of them is one run above.
+ * An entry wholly left of the picture costs nothing; one that runs off
+ * the right edge is cut by the clip rectangle.
+ */
+static void
+vdp_list_sprites(uint32 a,
+                 uint32 b)
+{
+  const uint8 *reg;
+  const uint8 *sat;
+  const uint8 *src;
+  uint32 alive;
+  uint32 k;
+  uint32 i;
+  uint32 zoom;
+  uint32 tall;
+  uint32 height;
+  uint32 width;
+  uint32 base;
+  uint32 p;
+  uint32 word;
+  uint32 bit;
+  uint32 y;
+  uint32 ya;
+  uint32 yb;
+  uint32 la;
+  uint32 ncel;
+  int32 top;
+  int32 x;
+  int32 shift;
+  int32 hdx;
+
+  reg = sms.vdp.reg;
+  sat = sms.vdp.vram + sms.vdp.sat_base;
+  zoom = (uint32)reg[1] & 0x01UL;
+  tall = (uint32)reg[1] & 0x02UL;
+  height = ((tall != 0UL) ? 16UL : 8UL) << zoom;
+  width = 8UL << zoom;
+  base = (((uint32)reg[6] & 0x04UL) != 0UL) ? 256UL : 0UL;
+  shift = (((uint32)reg[0] & 0x08UL) != 0UL) ? 8 : 0;
+  hdx = (int32)((1UL << zoom) << 20);
+
+  for(alive = 0; alive < VDP_SPR_COUNT; alive++)
+    {
+      if((uint32)sat[alive] == VDP_SPR_TERMINATOR)
+        break;
+    }
+
+  for(k = 0; k < alive; k++)
+    {
+      i = (alive - 1UL) - k;
+      top = (int32)sat[i] + 1;
+      if(top > (int32)VDP_SPR_Y_WRAP)
+        top -= 256;
+
+      /* The lines of the band the entry touches, in signed arithmetic:
+         an entry wholly above the picture ends below zero. */
+      {
+        int32 la_s = ((int32)a > top) ? (int32)a : top;
+        int32 lb_s = ((int32)b < (top + (int32)height)) ? (int32)b : (top + (int32)height);
+
+        if(la_s >= lb_s)
+          continue;
+        ya = (uint32)la_s;
+        yb = (uint32)lb_s;
+      }
+
+      x = (int32)sat[VDP_SPR_XN_OFFSET + (i << 1)] - shift;
+      if((x + (int32)width) <= 0)
+        continue;
+
+      p = (uint32)sat[VDP_SPR_XN_OFFSET + (i << 1) + 1UL] + base;
+      if(tall != 0UL)
+        p &= ~1UL;
+      if(sms.vdp.sheet_valid[p] == 0U)
+        vdp_sheet_tile(p);
+      if((tall != 0UL) && (sms.vdp.sheet_valid[p + 1UL] == 0U))
+        vdp_sheet_tile(p + 1UL);
+      src = sms.vdp.sheet + (VDP_SHEET_Y(p) * VDP_SHEET_W) + VDP_SHEET_X(p);
+
+      word = i >> 5;
+      bit = 1UL << (i & 31UL);
+      ncel = 0;
+      y = ya;
+      while(y < yb)
+        {
+          while((y < yb) && ((sms.vdp.spr_adm[y][word] & bit) == 0UL))
+            y++;
+          if(y >= yb)
+            break;
+          la = y;
+          while((y < yb) && ((sms.vdp.spr_adm[y][word] & bit) != 0UL))
+            y++;
+          ncel += vdp_list_sprite_run(src,x,top,la,y,zoom,hdx);
+        }
+
+      if(ncel != 0UL)
+        {
+          VDP_COUNT(sprites);
+#if VDP_COUNTERS
+          sms.vdp.cnt_split += ncel - 1UL;
+#endif
+        }
+    }
+}
+
+/*
+ * The priority tiles of the band: for every window the band built, the
+ * tiles of the picture it shows whose name table word carries bit 12
+ * (SMSOfficialDocs.md:474-481), consecutive ones of a tile row as one
+ * window of the picture cut to the window's rectangle, drawn under the
+ * second palette without the background flag: colour 0 of either bank
+ * passes, the fifteen others cover the sprites. The cut is the window's,
+ * so a run stops where the window stops -- the scroll join, a locked
+ * region, the fold of the table -- and the source is aligned as a window
+ * is, the alignment columns standing left of the picture's area. The
+ * first run of the band loads the second palette; the next band's first
+ * window loads the identity back.
+ */
+static void
+vdp_list_prio(void)
+{
+  const uint8 *nt;
+  const vdp_win_t *r;
+  CCB *c;
+  uint32 k;
+  uint32 w;
+  uint32 h;
+  uint32 tr;
+  uint32 tr0;
+  uint32 tr1;
+  uint32 tc;
+  uint32 tc0;
+  uint32 tc1;
+  uint32 r0;
+  uint32 r1;
+  uint32 c0;
+  uint32 c1;
+  uint32 f;
+  uint32 first;
+
+  nt = sms.vdp.vram + (((uint32)sms.vdp.reg[2] & 0x0EUL) << 10);
+  first = 1;
+
+  for(k = 0; k < sms.vdp.win_count; k++)
+    {
+      r = &sms.vdp.win[k];
+      w = (uint32)r->xb - (uint32)r->xa;
+      h = (uint32)r->yb - (uint32)r->ya;
+      tr0 = (uint32)r->py >> 3;
+      tr1 = ((uint32)r->py + h - 1UL) >> 3;
+      tc0 = (uint32)r->px >> 3;
+      tc1 = ((uint32)r->px + w - 1UL) >> 3;
+
+      for(tr = tr0; tr <= tr1; tr++)
+        {
+          r0 = (tr << 3);
+          if(r0 < (uint32)r->py)
+            r0 = r->py;
+          r1 = (tr << 3) + 8UL;
+          if(r1 > ((uint32)r->py + h))
+            r1 = (uint32)r->py + h;
+
+          tc = tc0;
+          while(tc <= tc1)
+            {
+              if((read16_le(nt + (((tr << 5) + tc) << 1)) & 0x1000UL) == 0UL)
+                {
+                  tc++;
+                  continue;
+                }
+              c0 = tc << 3;
+              while((tc <= tc1)
+                    && ((read16_le(nt + (((tr << 5) + tc) << 1)) & 0x1000UL) != 0UL))
+                tc++;
+              c1 = tc << 3;
+              if(c0 < (uint32)r->px)
+                c0 = r->px;
+              if(c1 > ((uint32)r->px + w))
+                c1 = (uint32)r->px + w;
+
+              f = c0 & 3UL;
+              c = vdp_small(sms.vdp.decor + (r0 * VDP_PIX_ROW_BYTES) + (c0 - f),
+                            VDP_PIX_ROW_BYTES / 4UL,
+                            (c1 - c0) + f,r1 - r0,
+                            ((int32)r->xa + (int32)(c0 - (uint32)r->px)) - (int32)f,
+                            (int32)r->ya + (int32)(r0 - (uint32)r->py),
+                            1L << 20,1L << 16,
+                            sms.vdp.plut_prio,0UL);
+              if(c != NULL)
+                {
+                  if(first != 0UL)
+                    {
+                      c->ccb_Flags |= CCB_LDPLUT;
+                      first = 0;
+                    }
+                  VDP_COUNT(prio);
+                }
+            }
+        }
+    }
+}
+
+/*
+ * The backdrop of the band, drawn last: every run of lines the display
+ * was off on, as the column stretched thirty-two times wide, and, when
+ * register 0 bit 5 masks the left column (SMSOfficialDocs.md:787), the
+ * column itself over the band's lines, 1:1. Both painted whole, with
+ * the background flag, and the first loads the identity palette back
+ * after the priority runs.
+ */
+static void
+vdp_list_backdrop(uint32 a,
+                  uint32 b)
+{
+  CCB *c;
+  uint32 y;
+  uint32 ya;
+  uint32 first;
+
+  first = 1;
+  y = a;
+  while(y < b)
+    {
+      if(sms.vdp.row_off[y] == 0U)
+        {
+          y++;
+          continue;
+        }
+      ya = y;
+      while((y < b) && (sms.vdp.row_off[y] != 0U))
+        y++;
+      c = vdp_small(sms.vdp.column + (ya * VDP_COLUMN_W),VDP_COLUMN_W / 4UL,
+                    VDP_COLUMN_W,y - ya,0,(int32)ya,
+                    (int32)((VDP_PIX_WIDTH / VDP_COLUMN_W) << 20),1L << 16,
+                    sms.vdp.plut,CCB_BGND);
+      if((c != NULL) && (first != 0UL))
+        {
+          c->ccb_Flags |= CCB_LDPLUT;
+          first = 0;
+        }
+    }
+
+  if(((uint32)sms.vdp.reg[0] & 0x20UL) != 0UL)
+    {
+      c = vdp_small(sms.vdp.column + (a * VDP_COLUMN_W),VDP_COLUMN_W / 4UL,
+                    VDP_COLUMN_W,b - a,0,(int32)a,1L << 20,1L << 16,
+                    sms.vdp.plut,CCB_BGND);
+      if((c != NULL) && (first != 0UL))
+        c->ccb_Flags |= CCB_LDPLUT;
+    }
+}
+
+/*
+ * The list of the lines a to b, in the order the engine must draw it:
+ * the windows of the background -- one row region, or two when register
  * 0 bit 6 holds the top two rows still (SMSOfficialDocs.md:769) and the
- * band crosses line 16 -- those rows take no horizontal scroll, the rest
- * take the latch. One chain, closed on its last block, its first block
- * loading the palette; NULL when the arena had no block for the band.
+ * band crosses line 16, those rows taking no horizontal scroll, the rest
+ * the latch -- then the sprites, then the priority tiles, then the
+ * backdrop. One chain, closed on its last block, its first block loading
+ * its palette; NULL when no block at all could be had for the band.
  */
 static CCB *
 vdp_list_build(uint32 a,
                uint32 b)
 {
-  CCB *arena;
   uint32 ra;
   uint32 rb;
   uint32 hs;
 
-  arena = (CCB *)sms.vdp.windows;
-  vdp_band_first = sms.vdp.list_used;
+  vdp_chain_head = NULL;
+  vdp_chain_tail = NULL;
+  sms.vdp.win_count = 0;
 
   ra = a;
   while(ra < b)
@@ -994,13 +1782,17 @@ vdp_list_build(uint32 a,
       ra = rb;
     }
 
-  if(sms.vdp.list_used == vdp_band_first)
+  vdp_list_sprites(a,b);
+  vdp_list_prio();
+  vdp_list_backdrop(a,b);
+
+  if(vdp_chain_head == NULL)
     return NULL;
 
-  arena[sms.vdp.list_used - 1UL].ccb_Flags |= CCB_LAST;
-  arena[vdp_band_first].ccb_Flags |= CCB_LDPLUT;
+  vdp_chain_tail->ccb_Flags |= CCB_LAST;
+  vdp_chain_head->ccb_Flags |= CCB_LDPLUT;
 
-  return &arena[vdp_band_first];
+  return vdp_chain_head;
 }
 
 int32
@@ -1067,6 +1859,7 @@ vdp_list_begin(void)
   sms.vdp.band_count = n;
   sms.vdp.journal_replayed = 0;
   sms.vdp.list_used = 0;
+  sms.vdp.cels_used = 0;
 #if VDP_COUNTERS
   sms.vdp.cnt_list_bands += n;
 #endif
@@ -1131,204 +1924,85 @@ vdp_list_end(void)
     {
       p = sms.vdp.hot_list[i];
       sms.vdp.hot[p] = 0;
-      sms.vdp.watch[p] = (uint8)(((sms.vdp.refs[p] != 0U)
-                                  || VDP_CHUNK_IN_NT(p)) ? 1U : 0U);
+      sms.vdp.watch[p] = vdp_watch_of(p);
     }
   sms.vdp.hot_count = 0;
 }
-
-/*
- * The four bytes of a lane word tested for opacity, one result byte per
- * lane: an index is opaque when its low four bits are not zero (vdp.h,
- * the guard on VDP_PLANES_COUNT), so fifteen is added to each low nibble
- * and bit 4 of the sum is the answer; a sum of at most thirty carries
- * into no neighbouring lane.
- */
-#define VDP_LANE_OPAQUE(e) \
-  (((((e) & 0x0F0F0F0FUL) + 0x0F0F0F0FUL) >> 4) & VDP_TC_LANE_ONE)
 #endif /* SMS_DECOR_CEL */
 
 #if SMS_DECOR_CEL
 /*
  * ---------------------------------------------------------------------------
- * One line of the picture with the background drawn by the cel engine:
- * what is composed here is the SPRITE LAYER of row y, in the index buffer
- * -- zero where the background shows through, an index where a sprite
- * pixel, the border of a line with the display off, or the masked left
- * column stands -- and, for the lines that carry a sprite, the priority
- * mask the sprite pass reads. No pixel of the background is written by
- * the processor on this path: the background is the picture the windows
- * draw, and the priority mask is the one thing the sprite pass needs
- * from it, folded with the opacity of the background pixel since the row
- * no longer holds that pixel to read it off.
+ * One line of the picture with the whole of it drawn by the cel engine:
+ * no pixel is written here, and nothing of the line is chosen here. What
+ * a line still owes is the two sprite bits the program reads -- the
+ * overflow and the collision -- which the engine does not raise, and
+ * which must stand at the line they stand at on the hardware because a
+ * program reads the status at lines of its choosing and a bit raised at
+ * the end of the picture would change what it sees, and so the picture.
  *
- * The order of one line, against the six steps of the older path below:
+ * The order of one line, against the older path's steps:
  *
- *   1. Display off: the row is the border colour, as before -- the sprite
- *      layer is opaque there and covers the windows. Nothing else is read.
- *   2. The row is cleared only if an earlier frame laid something in it:
- *      a row no sprite reaches is left alone, and most rows are such.
- *      Then the scroll, the origin of the mask, the table base, the first
- *      still stroke, as before.
- *   3. The sprites of the line chosen, as before.
- *   4. On a line with sprites only: the name table walked stroke by
- *      stroke as before, and for the strokes whose word carries the
- *      priority bit -- and for them alone -- the row read out of the
- *      decoded row cache, flipped as the word asks, and its opacity laid
- *      into the mask, eight pixels at a time, where the stroke's pixels
- *      would have stood: stroke c's pixels start at scratch byte c * 8,
- *      which is picture column (c - 1) * 8 + fine, the column its first
- *      source pixel lands on under the scroll. Every other stroke lays a
- *      mask of zeroes.
- *   5. The masked left column: eight border pixels in the row and eight
- *      mask bytes, as before.
- *   6. The sprites of the line, into the row, where the mask says the
- *      background does not win.
+ *   0. The per-line table rebuilt if a sprite table byte, register 1 or
+ *      register 5 moved since it was built: the table of this line and
+ *      of every line after it.
+ *   1. Display off: the line is marked, and the presentation draws it in
+ *      the backdrop colour over everything else. Nothing else is read,
+ *      so the overflow bit falls on exactly the lines it fell on before.
+ *   2. The overflow of the line, read off the table.
+ *   3. The collision of the line, replayed on the admitted sprites only
+ *      where two of them share a column.
  * ---------------------------------------------------------------------------
  */
 static void
 vdp_render_line(uint32 y)
 {
-  const uint8 *vram;
-  const uint8 *reg;
-  const uint8 *nt;
-  uint8 *prio;
-  uint32 *ent;
-  uint32 *pdw;
-  uint32 *out;
-  uint32 border;
-  uint32 borderw;
-  uint32 hs;
-  uint32 fine;
-  uint32 coarse;
-  uint32 ys;
-  uint32 yy;
-  uint32 c;
-  uint32 vsi_from;
-  uint32 word;
-  uint32 row;
-  uint32 e0;
-  uint32 e1;
-  uint32 rv;
-  uint32 sw;
-  uint32 x;
-  uint32 maskcol;
+  uint32 n;
 
-  reg = sms.vdp.reg;
-  sms.vdp.line_org = VDP_LINE_LEAD;
-  out = (uint32 *)(sms.vdp.pixels[0] + (y * VDP_PIX_ROW_BYTES));
-  border = VDP_BACKDROP_INDEX();
-  borderw = border * VDP_TC_LANE_ONE;
+  if(sms.vdp.spr_dirty != 0UL)
+    vdp_sprite_scan(y);
 
-  if(((uint32)reg[1] & 0x40UL) == 0UL)
+  if(((uint32)sms.vdp.reg[1] & 0x40UL) == 0UL)
     {
-      /* Step 1. */
-      for(x = 0; x < (VDP_PIX_ROW_BYTES / 4UL); x++)
-        out[x] = borderw;
-      sms.vdp.row_used[y] = 1;
+      sms.vdp.row_off[y] = 1;
       return;
     }
+  sms.vdp.row_off[y] = 0;
 
-  /* Step 2. */
-  if(sms.vdp.row_used[y] != 0U)
+  if(sms.vdp.spr_ovf_line[y] != 0U)
     {
-      for(x = 0; x < (VDP_PIX_ROW_BYTES / 4UL); x++)
-        out[x] = 0;
-      sms.vdp.row_used[y] = 0;
+      /*
+       * Raised whether or not it already stood, as the older path does:
+       * a program that never reads the status would otherwise make every
+       * overflow after the first invisible. Counted once per line by
+       * construction.
+       */
+      sms.vdp.spr_overflow = 1;
+      VDP_COUNT(spr_ovf);
     }
 
-  vram = sms.vdp.vram;
-  hs = ((((uint32)reg[0] & 0x40UL) != 0UL) && (y < 16UL))
-       ? 0UL : sms.vdp.hscroll;
-  fine = hs & 7UL;
-  coarse = hs >> 3;
-  sms.vdp.line_org = VDP_LINE_LEAD - fine;
-  prio = VDP_PRIO_BYTES + sms.vdp.line_org;
-  ys = y + sms.vdp.vscroll;
-  if(ys >= VDP_NT_LINES)
-    ys -= VDP_NT_LINES;
-  nt = vram + (((uint32)reg[2] & 0x0EUL) << 10);
-  vsi_from = (((uint32)reg[0] & 0x80UL) != 0UL) ? 25UL : 33UL;
-  maskcol = (uint32)reg[0] & 0x20UL;
-
-  /* Step 3. */
-  VDP_REPEAT_BEGIN(VDP_POST_SPRITES)
-  vdp_select_sprites(y);
-  VDP_REPEAT_END;
-
-  if(sms.vdp.spr_count == 0UL)
-    {
-      VDP_COUNT(line_fast);
-      if(maskcol != 0UL)
-        {
-          out[0] = borderw;
-          out[1] = borderw;
-          sms.vdp.row_used[y] = 1;
-        }
-      return;
-    }
-
-  VDP_COUNT(line_scratch);
-  sms.vdp.row_used[y] = 1;
+  n = sms.vdp.spr_n[y];
+#if VDP_COUNTERS
+  if(n > sms.vdp.cnt_spr_max)
+    sms.vdp.cnt_spr_max = n;
+  if(((uint32)sms.vdp.reg[1] & 0x01UL) != 0UL)
+    sms.vdp.cnt_spr_zoom = 1;
+#endif
 
   /*
-   * Step 4. The background post of the breakdown still wraps this walk:
-   * it is what the line pays for the background on this path, and a
-   * second pass lays the same mask words down again.
+   * The two tallies of the older path kept with their meaning: a line
+   * with no sprite on it, and a line that carries some and so may cost
+   * a collision replay.
    */
-  VDP_REPEAT_BEGIN(VDP_POST_BG)
-  c = (fine != 0UL) ? 0UL : 1UL;
-  pdw = sms.vdp.prio_w + (c * 2UL);
-
-  for(; c <= 32UL; c++)
+  if(n == 0UL)
     {
-      yy = (c >= vsi_from) ? y : ys;
-      word = read16_le(nt + ((yy >> 3) << 6) + (((c - 1UL - coarse) & 31UL) << 1));
-
-      if((word & 0x1000UL) == 0UL)
-        {
-          pdw[0] = 0;
-          pdw[1] = 0;
-          pdw += 2;
-          continue;
-        }
-
-      row = yy & 7UL;
-      if((word & 0x400UL) != 0UL)
-        row = 7UL - row;
-
-      ent = vdp_tc_row(VDP_TC_KEY_TILE(word & 0x1FFUL,row));
-      e0 = ent[0];
-      e1 = ent[1];
-
-      if((word & 0x200UL) != 0UL)
-        {
-          rv = (e0 ^ ((e0 >> 16) | (e0 << 16))) & 0xFF00FFFFUL;
-          sw = ((e0 >> 8) | (e0 << 24)) ^ (rv >> 8);
-          rv = (e1 ^ ((e1 >> 16) | (e1 << 16))) & 0xFF00FFFFUL;
-          e0 = ((e1 >> 8) | (e1 << 24)) ^ (rv >> 8);
-          e1 = sw;
-        }
-
-      pdw[0] = VDP_LANE_OPAQUE(e0);
-      pdw[1] = VDP_LANE_OPAQUE(e1);
-      pdw += 2;
+      VDP_COUNT(line_fast);
+      return;
     }
+  VDP_COUNT(line_scratch);
 
-  /* Step 5. */
-  if(maskcol != 0UL)
-    {
-      out[0] = borderw;
-      out[1] = borderw;
-      for(x = 0; x < 8UL; x++)
-        prio[x] = 1;
-    }
-  VDP_REPEAT_END;
-
-  /* Step 6. */
-  VDP_REPEAT_BEGIN(VDP_POST_SPRITES)
-  vdp_draw_sprites(y);
-  VDP_REPEAT_END;
+  if(n >= 2UL)
+    vdp_sprite_collide(y,n);
 }
 
 #else /* !SMS_DECOR_CEL */
@@ -1993,10 +2667,11 @@ vdp_init(void)
    */
   if(vdp_decor_block == NULL)
     {
-      if((VDP_DECOR_BYTES + (VDP_LIST_WINDOWS * sizeof(CCB))) > VDP_DECOR_PAGE)
+      if((VDP_DECOR_BYTES + (VDP_LIST_WINDOWS * sizeof(CCB)) + VDP_COLUMN_BYTES)
+         > VDP_DECOR_PAGE)
         {
           LOG_ERR(LOG_CAT_VDP,
-                  ("init failed: %lu window blocks of %lu bytes do not follow the picture in one page",
+                  ("init failed: %lu window blocks of %lu bytes and the backdrop column do not follow the picture in one page",
                    (unsigned long)VDP_LIST_WINDOWS,(unsigned long)sizeof(CCB)));
           return VDP_ERR_NO_DECOR;
         }
@@ -2013,6 +2688,37 @@ vdp_init(void)
 
   sms.vdp.decor = vdp_decor_block;
   sms.vdp.windows = (void *)(vdp_decor_block + VDP_DECOR_BYTES);
+  /* The column after the blocks, on a word: a cel source is a word address. */
+  sms.vdp.column = vdp_decor_block
+                 + (((VDP_DECOR_BYTES + (VDP_LIST_WINDOWS * sizeof(CCB))) + 3UL) & ~3UL);
+
+  /*
+   * The page of the sprite sheet and the small cel blocks, on the same
+   * terms. The page was sized for the console's block (vdp.h, the guard
+   * on VDP_SPRITE_PAGE); a host with wider pointers has wider blocks,
+   * and there the block is asked for as large as the reserve needs
+   * rather than refused, since the reserve's count is the contract and
+   * the page is the console's grain.
+   */
+  if(vdp_sprite_block == NULL)
+    {
+      uint32 need = VDP_SHEET_BYTES + (VDP_LIST_CELS * sizeof(CCB));
+
+      if(need < VDP_SPRITE_PAGE)
+        need = VDP_SPRITE_PAGE;
+      vdp_sprite_block = (uint8 *)sys_alloc("vdp_sprites",
+                                            (int32)need,
+                                            MEMTYPE_DRAM | MEMTYPE_FILL);
+      if(vdp_sprite_block == NULL)
+        {
+          LOG_ERR(LOG_CAT_VDP,
+                  ("init failed: no memory for the sprite sheet"));
+          return VDP_ERR_NO_SPRITES;
+        }
+    }
+
+  sms.vdp.sheet = vdp_sprite_block;
+  sms.vdp.cels = (void *)(vdp_sprite_block + VDP_SHEET_BYTES);
 #endif
 
   /*
@@ -2103,14 +2809,54 @@ vdp_init(void)
   sms.vdp.hot_count = 0;
   sms.vdp.decor_sweep_all = 1;
   sms.vdp.nt_chunk0 = (((uint32)sms.vdp.reg[2] & 0x0EUL) << 10) >> 5;
-  vdp_decor_watch_rebuild();
-  for(x = 0; x < VDP_ACTIVE_LINES; x++)
-    sms.vdp.row_used[x] = 0;
   sms.vdp.journal_count = 0;
   sms.vdp.journal_replayed = 0;
   sms.vdp.journal_overflow = 0;
   sms.vdp.band_count = 0;
   sms.vdp.list_used = 0;
+
+  /*
+   * The sprites: the sheet cleared and every place stale, no pattern
+   * named, the per-line table owed to the first line -- the attribute
+   * table follows the power-on register 5 -- no line off, no cel taken,
+   * the second palette the identity with entry 16 at 000, and the
+   * backdrop column filled from the power-on register 7. The watch bytes
+   * are rebuilt once both tables have their first chunk.
+   */
+  {
+    uint32 *sh = (uint32 *)sms.vdp.sheet;
+
+    for(x = 0; x < (VDP_SHEET_BYTES / 4UL); x++)
+      sh[x] = 0;
+  }
+  for(x = 0; x < VDP_CHUNKS; x++)
+    {
+      sms.vdp.sheet_valid[x] = 0;
+      sms.vdp.spr_named[x] = 0;
+    }
+  sms.vdp.spr_named_count = 0;
+  sms.vdp.sat_base = ((uint32)sms.vdp.reg[5] & 0x7EUL) << 7;
+  sms.vdp.sat_chunk0 = sms.vdp.sat_base >> 5;
+  sms.vdp.spr_dirty = 1;
+  for(x = 0; x < VDP_SPR_COUNT; x++)
+    sms.vdp.sat_top[x] = 0;
+  for(x = 0; x < VDP_ACTIVE_LINES; x++)
+    {
+      sms.vdp.spr_adm[x][0] = 0;
+      sms.vdp.spr_adm[x][1] = 0;
+      for(i = 0; i < (int32)VDP_SPR_MAX_ON_LINE; i++)
+        sms.vdp.spr_idx[x][i] = 0;
+      sms.vdp.spr_n[x] = 0;
+      sms.vdp.spr_ovf_line[x] = 0;
+      sms.vdp.row_off[x] = 0;
+    }
+  sms.vdp.cels_used = 0;
+  sms.vdp.win_count = 0;
+  for(i = 0; i < VDP_PLUT_ENTRIES; i++)
+    sms.vdp.plut_prio[i] = (uint16)MakeRGB15(i,i,i);
+  sms.vdp.plut_prio[16] = 0;
+  vdp_column_fill();
+  vdp_decor_watch_rebuild();
 #endif
 
 #if VDP_COUNTERS
@@ -2146,6 +2892,11 @@ vdp_init(void)
   sms.vdp.cnt_journal_full = 0;
   sms.vdp.cnt_list_refused = 0;
   sms.vdp.cnt_reg_mid = 0;
+  sms.vdp.cnt_cels = 0;
+  sms.vdp.cnt_sprites = 0;
+  sms.vdp.cnt_split = 0;
+  sms.vdp.cnt_prio = 0;
+  sms.vdp.cnt_cels_refused = 0;
 #endif
   vdp_irq_seen = 0;
   vdp_backdrop_said = 0;
@@ -2392,6 +3143,16 @@ vdp_init(void)
             (unsigned long)VDP_DECOR_LINES,
             (unsigned long)VDP_LIST_BANDS,
             (unsigned long)VDP_JOURNAL_ENTRIES));
+
+  /*
+   * The sprites and the priority tiles as the engine draws them: the
+   * sheet's size and the reserve of small cels a presentation may take.
+   */
+  LOG_INFO(LOG_CAT_VDP,
+           ("sprites and priority tiles via cel list sheet=%lux%lu cels=%lu",
+            (unsigned long)VDP_SHEET_W,
+            (unsigned long)VDP_SHEET_LINES,
+            (unsigned long)VDP_LIST_CELS));
 #endif
 
   /*
@@ -2560,19 +3321,71 @@ vdp_reg_write(uint32 number,
 
 #if SMS_DECOR_CEL
   /*
-   * The scroll registers and the table base written to another value
-   * while the picture is being scanned: the windows are built once, at
-   * line 191, with the last value, where the line render took each line
-   * with its own. Counted and said once, so that a picture the two paths
-   * draw apart is a picture the trace names rather than one that passes.
+   * A register the list is built from, written to another value while
+   * the picture is being scanned: the scroll registers and the two table
+   * bases, the sprite size and magnification and the display bit of
+   * register 1, the sprite pattern base of register 6, the backdrop of
+   * register 7. The list is built once, at line 191, with the last
+   * value, where the line render took each line with its own; the
+   * per-line flags do take each line's value, and a line with the
+   * display off is drawn off whatever the last value says. Counted and
+   * said once, so that a picture the two paths draw apart is a picture
+   * the trace names rather than one that passes.
    */
-  if(((number == 0UL) || (number == 2UL) || (number == 8UL))
-     && (sms.vdp.vcount < VDP_ACTIVE_LINES)
-     && ((uint32)sms.vdp.reg[number] != value))
+  if(sms.vdp.vcount < VDP_ACTIVE_LINES)
     {
-      VDP_COUNT(reg_mid);
-      LOG_ONCE(LOG_CAT_VDP,LOG_LVL_WARN,
-               ("scroll or table register written mid-frame: windows take the last value"));
+      uint32 moved;
+
+      moved = (uint32)sms.vdp.reg[number] ^ value;
+      switch(number)
+        {
+        case 0UL:
+        case 2UL:
+        case 5UL:
+        case 6UL:
+        case 8UL:
+          break;
+        case 1UL:
+          moved &= 0x43UL;
+          break;
+        case 7UL:
+          moved &= 0x0FUL;
+          break;
+        default:
+          moved = 0;
+          break;
+        }
+      if(moved != 0UL)
+        {
+          VDP_COUNT(reg_mid);
+          LOG_ONCE(LOG_CAT_VDP,LOG_LVL_WARN,
+                   ("register %lu written mid-frame at line %lu: the list takes the last value",
+                    (unsigned long)number,(unsigned long)sms.vdp.vcount));
+        }
+    }
+
+  /*
+   * The sprite side of a register: a size or magnification of register 1
+   * and a pattern base of register 6 leave the per-line table stale; a
+   * move of the attribute table by register 5 moves it, the watch bytes
+   * with it; a move of the backdrop by register 7 refills the column.
+   */
+  if((number == 1UL) && ((((uint32)sms.vdp.reg[1] ^ value) & 0x03UL) != 0UL))
+    sms.vdp.spr_dirty = 1;
+  if((number == 6UL) && ((((uint32)sms.vdp.reg[6] ^ value) & 0x04UL) != 0UL))
+    sms.vdp.spr_dirty = 1;
+  if((number == 5UL) && ((((uint32)sms.vdp.reg[5] ^ value) & 0x7EUL) != 0UL))
+    {
+      sms.vdp.reg[5] = (uint8)value;
+      sms.vdp.sat_base = (value & 0x7EUL) << 7;
+      sms.vdp.sat_chunk0 = sms.vdp.sat_base >> 5;
+      sms.vdp.spr_dirty = 1;
+      vdp_decor_watch_rebuild();
+    }
+  if((number == 7UL) && ((((uint32)sms.vdp.reg[7] ^ value) & 0x0FUL) != 0UL))
+    {
+      sms.vdp.reg[7] = (uint8)value;
+      vdp_column_fill();
     }
 
   /*
@@ -2966,6 +3779,27 @@ vdp_report(void)
                (unsigned long)sms.vdp.cnt_list_refused,
                (unsigned long)sms.vdp.cnt_reg_mid));
     }
+
+  /*
+   * What the small cels of the list cost over the window, when any was
+   * built: cels in all, sprites drawn, the cels a sprite cost past its
+   * first, priority runs, cels the reserve had no block for -- and,
+   * beside them, the bands drawn and the two sprite bits' line counts,
+   * so that one line reads the whole of the list's work.
+   */
+  if((sms.vdp.cnt_cels != 0UL) || (sms.vdp.cnt_cels_refused != 0UL))
+    {
+      LOG_HOT(LOG_CAT_VDP,LOG_LVL_DBG,
+              ("list cels=%lu sprites=%lu split=%lu prio=%lu refused=%lu bands=%lu collide=%lu overflow=%lu",
+               (unsigned long)sms.vdp.cnt_cels,
+               (unsigned long)sms.vdp.cnt_sprites,
+               (unsigned long)sms.vdp.cnt_split,
+               (unsigned long)sms.vdp.cnt_prio,
+               (unsigned long)sms.vdp.cnt_cels_refused,
+               (unsigned long)sms.vdp.cnt_list_bands,
+               (unsigned long)sms.vdp.cnt_spr_col,
+               (unsigned long)sms.vdp.cnt_spr_ovf));
+    }
 #endif
 
   if(sms.vdp.cnt_mode != 0UL)
@@ -3014,6 +3848,11 @@ vdp_report(void)
   sms.vdp.cnt_journal_full = 0;
   sms.vdp.cnt_list_refused = 0;
   sms.vdp.cnt_reg_mid = 0;
+  sms.vdp.cnt_cels = 0;
+  sms.vdp.cnt_sprites = 0;
+  sms.vdp.cnt_split = 0;
+  sms.vdp.cnt_prio = 0;
+  sms.vdp.cnt_cels_refused = 0;
 #endif
   vdp_backdrop_said = 0;
 #endif
