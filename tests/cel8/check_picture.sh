@@ -105,7 +105,7 @@ case "$EVERY"  in ''|*[!0-9]*|0) echo "EVERY must be a positive integer, not '$E
 case "$TOLERATED_MAX" in ''|*[!0-9]*) echo "TOLERATED_MAX must be an integer, not '$TOLERATED_MAX'"; exit 2;; esac
 CC=${CC:-gcc}
 S=src
-H=tests/vdp-profile/3do
+H=tests/cel8/3do
 B=tests/cel8
 
 if [ ! -f "$ROM" ]; then

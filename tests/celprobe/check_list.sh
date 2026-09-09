@@ -29,7 +29,7 @@ cd "$(dirname "$0")/../.."
 
 CC=${CC:-gcc}
 S=src
-H=tests/vdp-profile/3do
+H=tests/cel8/3do
 T=tests/celprobe
 
 # No substitute may shadow a real header of src/ (tests/z80/run_z80.sh).
