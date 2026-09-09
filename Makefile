@@ -339,16 +339,18 @@ endif
 test-z80:
 	sh tests/z80/run_z80.sh
 
-# The host bench of the render profiler: the wrappers that let a post of the
-# render be run a second time, and the arithmetic that turns the windows they
-# displace into a breakdown. Checks that the five variants draw the same frame,
-# that each doubles its own post and no other, and that the form the delivered
-# build compiles renders what the instrumented one measures. Same terms as
-# above: seconds, no console, no ROM, off the default path, cross compiler
+# The host check of the picture: the real core plays the reference ROM on
+# the PC compiler and the list of cels it builds is reconstituted and held,
+# row for row, against the two frozen references beside the script, the
+# every-frame one carrying the two sprite bits. Needs takeme/roms/rom.sms,
+# which the repository does not carry: without it the script says "skipped"
+# and exits 3, which make reports as an error -- on purpose, so that no
+# machine without the ROM ever reads a green from this target. Same terms
+# as above otherwise: no console, off the default path, cross compiler
 # untouched.
-test-vdp:
-	sh tests/vdp-profile/run_profile.sh
+test-picture:
+	sh tests/cel8/check_picture.sh
 
-.PHONY: builddir isodir clean distclean launchme programs libraries install install-libs modbin modbin-launchme banner iso run test-z80 test-vdp
+.PHONY: builddir isodir clean distclean launchme programs libraries install install-libs modbin modbin-launchme banner iso run test-z80 test-picture
 
 -include $(DEPS)

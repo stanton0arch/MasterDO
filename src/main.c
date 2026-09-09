@@ -101,19 +101,6 @@ static uint32 main_io_report_in = MAIN_IO_REPORT_FRAMES;
 #endif
 
 /*
- * The breakdown of the render into posts (common.h, SMS_VDP_PROFILE) is a
- * reading of the measurement, so it exists only where the measurement
- * does. It adds no clock reading of its own: it steps a selector the
- * video part obeys, and reads the cost of a post off the displacement of
- * the figure the periodic line already publishes.
- */
-#if MAIN_MEASURE && SMS_VDP_PROFILE
-#define MAIN_PROFILE 1
-#else
-#define MAIN_PROFILE 0
-#endif
-
-/*
  * The frame loop below is the one executor: it runs the cartridge by
  * scanline quotas, and MAIN_MEASURE alone is what the rest of this file
  * tests.
@@ -362,484 +349,6 @@ main_perf_emit(uint32 usec,
 
 #endif /* MAIN_MEASURE */
 
-#if MAIN_PROFILE
-/*
- * ---------------------------------------------------------------------------
- * The render broken down into posts (common.h, SMS_VDP_PROFILE).
- *
- * The whole method in one sentence: the video part runs one named post a
- * second time per line, and what that costs is read off the vdp= the
- * periodic line already publishes. Four variants -- the control, one per
- * repeatable post, and the two together -- take one measurement window
- * each in turn, so a single run answers four questions. No clock reading
- * is added anywhere; the instrument is the figure that was already there.
- *
- * Repetition rather than removal, because the load is a game that runs:
- * both posts raise bits the emulated program reads, so removing one would
- * make it diverge and the measurement would no longer be of anything.
- * Repeating writes the same bytes twice.
- *
- * What repetition costs in accuracy is one bias, and it has one sign: the
- * second pass finds its data warmer than the first, so every displacement
- * reads LOW. The variant that repeats the two together bounds it -- the
- * sum of the two separate displacements against that one -- and the
- * publication of the table is conditional on that check closing.
- * ---------------------------------------------------------------------------
- */
-
-/*
- * How many healthy windows each variant gathers before a round is
- * published. Four variants at four windows each, one window a second,
- * is a round every SIXTEEN seconds at best -- longer by one second for
- * every window thrown out, and by one more for the window discarded
- * after each round. A two-minute run therefore yields six or seven
- * rounds: enough that the ones taken before the regime settled can be
- * ignored by reading the last, and short enough that several land
- * inside it.
- *
- * The figure is the constant, not the prose: change it here and the
- * cadence follows, which is why the sentence above counts rather than
- * quotes.
- */
-#define MAIN_PROFILE_WINDOWS 4UL
-
-/*
- * How many windows may pass with no round published before the loop says
- * where each variant stands. Twice the nominal round, so a run that is
- * merely slow says nothing and a run whose instrument is stuck says so
- * on its own -- a variant that never gathers a healthy window would
- * otherwise leave the output silent for ever, indistinguishable from a
- * round still in progress.
- */
-#define MAIN_PROFILE_STALL 40UL
-
-/*
- * A window counts only if its parts still add up to its whole: the
- * emulated stretch plus the draw call, against the wall time of a frame.
- * The reference regime reads 0.988 of the frame (the complement is the
- * presentation and the pacing), and the band is set around that rather
- * than around 1. What it throws out is the window a host clock jump
- * poisoned -- those read a frame of seconds against a stretch of
- * milliseconds and land nowhere near.
- */
-#define MAIN_PROFILE_SUM_MIN 90UL
-#define MAIN_PROFILE_SUM_MAX 105UL
-
-/*
- * The additivity gate, in percent: the two separate displacements
- * against the one the grouped variant produces. Outside this band the
- * two do not describe the same thing as the group, and no table is
- * published -- a wrong figure is worth less than no figure.
- *
- * The band is SYMMETRIC, and that is a decision rather than an
- * oversight. The bias named above has a sign and would argue for a wider
- * low side; the answer is that a bias big enough to move the sum by more
- * than a tenth is not a bias to allow for, it is a model that does not
- * hold -- the two posts would not be describing the same work as the
- * group. Widening the low side to fit such a round would publish exactly
- * the figure this gate exists to withhold. Ten percent either way, and a
- * round outside it is reported as it stands, with no table.
- */
-#define MAIN_PROFILE_ADD_MIN 90UL
-#define MAIN_PROFILE_ADD_MAX 110UL
-
-/*
- * The processor's clock, in kilohertz, and the pixels of one picture --
- * calculated from the video part's own constants, never restated as a
- * figure.
- */
-#define MAIN_ARM_CLOCK_KHZ 12500UL
-#define MAIN_FRAME_PIXELS  (VDP_ACTIVE_LINES * VDP_PIX_WIDTH)
-
-/*
- * Weighs one closing window the way main_perf_emit does, and returns
- * whether it is fit to be counted, with the video figure of the window in
- * tenths of a millisecond per frame.
- *
- * The arithmetic is main_perf_emit's, deliberately repeated rather than
- * shared: that function publishes the line the whole project reads, and
- * this story does not touch it. The two must move together -- a change to
- * the share up there is a change to be made here -- and this comment is
- * the only thing that says so.
- *
- * Three ways a window is refused: too short or empty, which is that
- * function's own guard; a share that could not be weighed on both sides,
- * which that function publishes as two zeroes and which would be counted
- * here as a render that cost nothing; and parts that do not add up to the
- * whole.
- */
-static int32
-main_profile_window(uint32  usec,
-                    uint32  frames,
-                    uint32  emul_usec,
-                    uint32  emul_frames,
-                    uint32  z80_usec,
-                    uint32  z80_samples,
-                    uint32  vdp_usec,
-                    uint32  vdp_samples,
-                    uint32  draw_usec,
-                    uint32 *vdp10)
-{
-  uint32 emul10;
-  uint32 z80_mean;
-  uint32 vdp_mean;
-  uint32 share;
-  uint32 z8010;
-  uint32 frame10;
-  uint32 draw10;
-  uint32 sum10;
-  uint32 closes;
-
-  *vdp10 = 0;
-
-  if((frames == 0UL) || (usec < MAIN_PERF_PERIOD_USEC))
-    return 0;
-
-  if((z80_samples == 0UL) || (vdp_samples == 0UL))
-    return 0;
-
-  emul10 = ((emul_frames != 0UL) ? (emul_usec / emul_frames) : 0UL) / 100UL;
-
-  z80_mean = z80_usec / z80_samples;
-  vdp_mean = vdp_usec / vdp_samples;
-  share = z80_mean + vdp_mean;
-
-  if((z80_mean == 0UL) || (vdp_mean == 0UL))
-    return 0;
-
-  z8010 = (emul10 * z80_mean) / share;
-
-  frame10 = (usec / 100UL) / frames;
-  draw10 = (draw_usec / 100UL) / frames;
-  sum10 = emul10 + draw10;
-
-  if(frame10 == 0UL)
-    return 0;
-
-  closes = (sum10 * 100UL) / frame10;
-  if((closes < MAIN_PROFILE_SUM_MIN) || (closes > MAIN_PROFILE_SUM_MAX))
-    return 0;
-
-  *vdp10 = emul10 - z8010;
-  return 1;
-}
-
-/*
- * Tenths of a millisecond per frame into tenths of an ARM cycle per
- * pixel, in integers throughout: the build passes -fpu none, so a real
- * number here would pull software floating point into the diagnostic
- * layer.
- *
- * The chain is cost10 tenths of a millisecond -> times 100, microseconds
- * -> times the clock in kilohertz, divided by a thousand, cycles -> times
- * ten, tenths of a cycle -> divided by the pixels. The three factors 100,
- * 1/1000 and 10 cancel exactly, which leaves the clock in kilohertz as
- * the one multiplier; the division by the pixels comes last, where it
- * costs the least precision. The product holds in a word with room to
- * spare: a post of a whole second would reach 125 million.
- */
-static uint32
-main_profile_cpp10(uint32 cost10)
-{
-  return (cost10 * MAIN_ARM_CLOCK_KHZ) / MAIN_FRAME_PIXELS;
-}
-
-/*
- * The armed variant, by name, for every line that has to say which of the
- * four produced it.
- */
-static const char *
-main_profile_name(uint32 variant)
-{
-  if(variant == VDP_PROFILE_BG)      return "bg";
-  if(variant == VDP_PROFILE_SPRITES) return "sprites";
-  if(variant == VDP_PROFILE_ALL)     return "all";
-  return "control";
-}
-
-/*
- * Where each variant stands: healthy windows kept, and windows thrown
- * out, one figure per variant. Said at the head of every round, and on
- * its own when too many windows have gone by with no round -- which is
- * what makes a stuck instrument diagnose itself instead of falling
- * silent. The tag names the occasion so the two cannot be confused.
- */
-static void
-main_profile_state(const uint32 *win,
-                   const uint32 *dropped,
-                   uint32        frames,
-                   const char   *tag)
-{
-  LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("profile %s win ctrl=%lu bg=%lu spr=%lu all=%lu frames=%lu",
-           tag,(unsigned long)win[VDP_PROFILE_CONTROL],
-           (unsigned long)win[VDP_PROFILE_BG],(unsigned long)win[VDP_PROFILE_SPRITES],
-           (unsigned long)win[VDP_PROFILE_ALL],
-           (unsigned long)frames));
-
-  LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("profile %s dropped ctrl=%lu bg=%lu spr=%lu all=%lu",
-           tag,(unsigned long)dropped[VDP_PROFILE_CONTROL],
-           (unsigned long)dropped[VDP_PROFILE_BG],(unsigned long)dropped[VDP_PROFILE_SPRITES],
-           (unsigned long)dropped[VDP_PROFILE_ALL]));
-}
-
-/*
- * One line of the table.
- *
- * A post whose repeated pass read FASTER than the control has not cost a
- * negative amount of time: it has not been measured. It publishes no
- * cost, and says which it is -- the alternative, a floor at zero, would
- * put a fabricated figure in the one table the stories after this one
- * are meant to quote.
- */
-static void
-main_profile_post(const char *name,
-                  uint32      cost10,
-                  uint32      below,
-                  uint32      ctrl)
-{
-  uint32 cpp10;
-
-  if(below != 0UL)
-    {
-      LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-              ("post %s not measurable this round: the repeated pass read %lu.%lums faster than the control",
-               name,(unsigned long)(cost10 / 10UL),(unsigned long)(cost10 % 10UL)));
-      return;
-    }
-
-  cpp10 = main_profile_cpp10(cost10);
-  LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("post %s cost=%lu.%lums/frame %lu.%lu cycles/pixel share=%lupct of vdp",
-           name,(unsigned long)(cost10 / 10UL),(unsigned long)(cost10 % 10UL),
-           (unsigned long)(cpp10 / 10UL),(unsigned long)(cpp10 % 10UL),
-           (unsigned long)((ctrl != 0UL) ? ((cost10 * 100UL) / ctrl) : 0UL)));
-}
-
-/*
- * Publishes one round.
- *
- * Order of the lines, and it is the order of the reasoning: where the
- * round stands, what the four variants read, what the repetition
- * displaced, what the instrumentation already there costs, whether the
- * displacements add up -- and only then, if they do, the cost of each
- * post. A round that cannot be weighed prints its figures and stops
- * there, saying why.
- *
- * Three ways it stops. A post that read below the control has not been
- * measured, so the sum of the two is missing a term and no percentage
- * of it would mean anything. The sum against the grouped variant may
- * fall outside the gate. And the two may total PAST the published
- * figure, which leaves no residual to speak of and shares that add to
- * more than the whole; the round says so rather than printing a residual
- * of zero and letting the shares pass.
- *
- * The post named "rest" is not measured and is printed as what it is:
- * the published figure less the two that were. Whatever the render
- * does that neither post covers is inside it, the repetition bias
- * included.
- */
-static void
-main_profile_emit(const uint32 *sum10,
-                  const uint32 *win,
-                  const uint32 *dropped,
-                  uint32        frames,
-                  uint32        samples,
-                  uint32        clock_cost)
-{
-  uint32 mean[VDP_PROFILE_VARIANTS];
-  uint32 gap[VDP_PROFILE_VARIANTS];
-  uint32 low[VDP_PROFILE_VARIANTS];
-  /*
-   * The three variants held one per name for the lines below: the compiler
-   * counts the SOURCE lines a macro's argument list spans and warns past
-   * ten, and an indexed argument spelled out is three times as wide as a
-   * name. The aliases are what keep those lists short enough to be built
-   * without a diagnostic.
-   */
-  uint32 m_bg;
-  uint32 m_spr;
-  uint32 m_all;
-  uint32 g_bg;
-  uint32 g_spr;
-  uint32 g_all;
-  uint32 v;
-  uint32 ctrl;
-  uint32 sum2;
-  uint32 closes;
-  uint32 rest;
-  uint32 reads10;
-  uint32 cost10;
-  uint32 unweighed;
-
-  for(v = 0; v < VDP_PROFILE_VARIANTS; v++)
-    {
-      mean[v] = (win[v] != 0UL) ? (sum10[v] / win[v]) : 0UL;
-      gap[v] = 0;
-      low[v] = 0;
-    }
-
-  ctrl = mean[VDP_PROFILE_CONTROL];
-
-  /*
-   * A displacement below zero is noise, not a negative cost: it is kept
-   * as a magnitude with a flag so every line that touches it can show it
-   * rather than a floor of zero hiding it.
-   */
-  for(v = 0; v < VDP_PROFILE_VARIANTS; v++)
-    {
-      if(mean[v] >= ctrl)
-        gap[v] = mean[v] - ctrl;
-      else
-        {
-          gap[v] = ctrl - mean[v];
-          low[v] = 1;
-        }
-    }
-
-  sum2 = gap[VDP_PROFILE_BG] + gap[VDP_PROFILE_SPRITES];
-  unweighed = low[VDP_PROFILE_BG] + low[VDP_PROFILE_SPRITES]
-            + low[VDP_PROFILE_ALL];
-
-  main_profile_state(win,dropped,frames,"round");
-
-  m_bg = mean[VDP_PROFILE_BG];
-  m_spr = mean[VDP_PROFILE_SPRITES];
-  m_all = mean[VDP_PROFILE_ALL];
-  g_bg = gap[VDP_PROFILE_BG];
-  g_spr = gap[VDP_PROFILE_SPRITES];
-  g_all = gap[VDP_PROFILE_ALL];
-
-  LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("profile vdp ctrl=%lu.%lums bg=%lu.%lums spr=%lu.%lums all=%lu.%lums",
-           (unsigned long)(ctrl / 10UL),(unsigned long)(ctrl % 10UL),
-           (unsigned long)(m_bg / 10UL),(unsigned long)(m_bg % 10UL),
-           (unsigned long)(m_spr / 10UL),(unsigned long)(m_spr % 10UL),
-           (unsigned long)(m_all / 10UL),(unsigned long)(m_all % 10UL)));
-
-  /*
-   * Magnitudes only, six arguments, no string among them.
-   *
-   * What the console showed: this line once carried a sign marker before
-   * each of its figures -- twelve arguments, four of them strings --
-   * and the fourth figure came out as the third one's whole part followed
-   * by six junk digits, the same six on every round. What still printed
-   * whole in the same run: the periodic line, twelve arguments and every
-   * one of them a number, and the per-post lines, six arguments with a
-   * single leading string. So the fault sits somewhere in the count and
-   * the interleaving together; which of the two carries it was not
-   * established, and this comment does not claim it was. The shape kept
-   * here is one both surviving lines share, and it is kept for that reason
-   * rather than for a diagnosis.
-   *
-   * Nothing is lost with the markers: a variant reading below the control
-   * ends the round above, named, before this line is reached.
-   */
-  LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("profile gap bg=%lu.%lums spr=%lu.%lums grouped=%lu.%lums",
-           (unsigned long)(g_bg / 10UL),(unsigned long)(g_bg % 10UL),
-           (unsigned long)(g_spr / 10UL),(unsigned long)(g_spr % 10UL),
-           (unsigned long)(g_all / 10UL),(unsigned long)(g_all % 10UL)));
-
-  /*
-   * The price of the instrumentation that was already there, said on
-   * every round so the figures above can be read with it: three readings
-   * per sampled line, taken inside the measured stretch, at the price
-   * this run measured for one reading at boot. This is what closes the
-   * standing question of what the clock readings of a frame cost -- as a
-   * figure, on the run itself, rather than as a supposition.
-   */
-  if(frames != 0UL)
-    {
-      reads10 = (samples * 30UL) / frames;
-      cost10 = ((clock_cost * 3UL * samples) / frames) / 100UL;
-      LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-              ("profile clock reads=%lu.%lu/frame at %luus each -> %lu.%lums/frame inside the stretch",
-               (unsigned long)(reads10 / 10UL),(unsigned long)(reads10 % 10UL),
-               (unsigned long)clock_cost,
-               (unsigned long)(cost10 / 10UL),(unsigned long)(cost10 % 10UL)));
-    }
-
-  /*
-   * A post that read below the control is named, and it ends the round:
-   * the sum of the two is short of a term, so the gate below would be
-   * a percentage of an incomplete sum.
-   */
-  if(unweighed != 0UL)
-    {
-      main_profile_post("bg",g_bg,low[VDP_PROFILE_BG],ctrl);
-      main_profile_post("sprites",g_spr,low[VDP_PROFILE_SPRITES],ctrl);
-      main_profile_post("all",g_all,low[VDP_PROFILE_ALL],ctrl);
-      LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-              ("profile add cannot be weighed: %lu variant(s) read below the control, no table published",
-               (unsigned long)unweighed));
-      return;
-    }
-
-  /*
-   * The additivity control, and the gate on everything below it.
-   */
-  closes = (g_all != 0UL) ? ((sum2 * 100UL) / g_all) : 0UL;
-
-  LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("profile add sum2=%lu.%lums grouped=%lu.%lums close=%lupct",
-           (unsigned long)(sum2 / 10UL),(unsigned long)(sum2 % 10UL),
-           (unsigned long)(g_all / 10UL),(unsigned long)(g_all % 10UL),
-           (unsigned long)closes));
-
-  if((closes < MAIN_PROFILE_ADD_MIN) || (closes > MAIN_PROFILE_ADD_MAX))
-    {
-      LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-              ("profile add does not close: no table published, the figures above stand as read"));
-      return;
-    }
-
-  /*
-   * The share the published figure claims, put against a direct
-   * measurement: the grouped displacement is what the two posts cost,
-   * and it is compared to the whole of vdp=. What is left is the rest,
-   * and the rest is a residual.
-   */
-  main_profile_post("bg",g_bg,0UL,ctrl);
-  main_profile_post("sprites",g_spr,0UL,ctrl);
-
-  if(sum2 > ctrl)
-    {
-      /*
-       * The two measured posts total more than the figure they were
-       * measured against. There is no residual to report -- and the
-       * two shares above already add to more than the whole, which is
-       * the reader's warning that the round describes nothing.
-       */
-      LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-              ("profile posts overrun the published figure by %lu.%lums: the shares total past 100pct",
-               (unsigned long)((sum2 - ctrl) / 10UL),
-               (unsigned long)((sum2 - ctrl) % 10UL)));
-      LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-              ("post rest not interpretable this round: the two posts already overrun vdp"));
-    }
-  else
-    {
-      rest = ctrl - sum2;
-      LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-              ("post rest cost=%lu.%lums/frame %lu.%lu cycles/pixel share=%lupct of vdp (residual, not measured)",
-               (unsigned long)(rest / 10UL),(unsigned long)(rest % 10UL),
-               (unsigned long)(main_profile_cpp10(rest) / 10UL),
-               (unsigned long)(main_profile_cpp10(rest) % 10UL),
-               (unsigned long)((ctrl != 0UL) ? ((rest * 100UL) / ctrl) : 0UL)));
-    }
-
-  LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("post total vdp=%lu.%lums/frame %lu.%lu cycles/pixel over %lu pixels",
-           (unsigned long)(ctrl / 10UL),(unsigned long)(ctrl % 10UL),
-           (unsigned long)(main_profile_cpp10(ctrl) / 10UL),
-           (unsigned long)(main_profile_cpp10(ctrl) % 10UL),
-           (unsigned long)MAIN_FRAME_PIXELS));
-}
-
-#endif /* MAIN_PROFILE */
-
 /*
  * ---------------------------------------------------------------------------
  * The presentation of a frame: what the loop below does once line 191 has
@@ -859,21 +368,13 @@ main_profile_emit(const uint32 *sum10,
  * that owes it; the picture brought up to date and cut into bands, then
  * each band's list -- windows of the background, sprites, priority
  * tiles, backdrop -- built and drawn, one draw call per band; the screen
- * bound for the error path and presented. With the older path
- * (common.h, SMS_DECOR_CEL 0) the picture is the one buffer and the one
- * draw call, as before.
+ * bound for the error path and presented.
  *
- * The state it shares with the loop -- the cel of the older path, the
- * ground, the two countdowns, the measurement accumulators -- is file
- * scope rather than passed nine ways; the loop below is the one other
- * reader and writer.
+ * The state it shares with the loop -- the ground, the two countdowns,
+ * the measurement accumulators -- is file scope rather than passed nine
+ * ways; the loop below is the one other reader and writer.
  * ---------------------------------------------------------------------------
  */
-
-#if !SMS_DECOR_CEL
-/* The whole picture's cel on the older path, read once at boot. */
-static CCB *main_cel = NULL;
-#endif
 
 /*
  * The ground painted around the picture, and how many screens still owe
@@ -968,11 +469,9 @@ main_present(void)
   uint32 present_start;
   uint32 span_start;
 #endif
-#if SMS_DECOR_CEL
   int32 bands;
   int32 k;
   CCB *band;
-#endif
 
 #if MAIN_MEASURE
   present_start = sys_usec();
@@ -1041,7 +540,6 @@ main_present(void)
   if(vdp_clut_take() != 0)
     main_clut_repaint = sys_screen_count();
 
-#if SMS_DECOR_CEL
   /*
    * A picture whose palette changed on some line: the screen about to
    * be drawn into takes a list of one table per segment, on every such
@@ -1090,21 +588,7 @@ main_present(void)
 #endif
       }
   }
-#else
-  if(main_clut_repaint > 0)
-    {
-#if MAIN_MEASURE
-      span_start = sys_usec();
-#endif
-      if(sys_set_colors(sys_screen_index(),vdp_clut(),(int32)VDP_CLUT_ENTRIES) >= 0)
-        main_clut_repaint--;
-#if MAIN_MEASURE
-      main_perf_span(&main_perf_clut,span_start);
-#endif
-    }
-#endif
 
-#if SMS_DECOR_CEL
   /*
    * The background: the picture brought up to date and cut into bands
    * -- the tiles' span -- then each band's windows built -- the list's
@@ -1152,27 +636,6 @@ main_present(void)
     }
 
   vdp_list_end();
-#else /* !SMS_DECOR_CEL */
-
-  /*
-   * The one draw call of the whole picture, background and sprites in
-   * the one buffer. What the draw accumulator weighs is the engine's
-   * time and nothing else: the presentation that follows stays outside
-   * it, one cold call per frame, the display's business. A refused draw
-   * is traced once and the run goes on: the trace is what separates a
-   * black picture from a dead loop.
-   */
-#if MAIN_MEASURE
-  span_start = sys_usec();
-#endif
-  draw_err = DrawCels(sys_bitmap(),main_cel);
-#if MAIN_MEASURE
-  main_perf_span(&main_perf_draw,span_start);
-#endif
-  if(draw_err < 0)
-    LOG_ONCE(LOG_CAT_VDP,LOG_LVL_ERR,
-             ("draw failed err=%ld",(long)draw_err));
-#endif /* SMS_DECOR_CEL */
 
   /*
    * The screen the error path would paint on, renewed on every turn so
@@ -1270,29 +733,6 @@ main(int    argc,
    */
   uint16 pc_ring[MAIN_PC_RING];
   uint32 pc_ring_n = 0;
-#endif
-#if MAIN_PROFILE
-  /*
-   * The round of the breakdown: which variant the window now closing ran
-   * under, what each variant's kept windows totalled in tenths of a
-   * millisecond of render per frame, how many windows each of them kept,
-   * how many the round threw out, and the frames and line samples those
-   * kept windows covered. The last two price the clock readings and are
-   * read off counters that already existed -- nothing is counted per line
-   * or per frame for the breakdown's sake.
-   */
-  uint32 prof_variant;
-  uint32 prof_sum10[VDP_PROFILE_VARIANTS];
-  uint32 prof_win[VDP_PROFILE_VARIANTS];
-  uint32 prof_drop[VDP_PROFILE_VARIANTS];
-  uint32 prof_frames;
-  uint32 prof_samples;
-  uint32 prof_since;
-  uint32 prof_skip;
-  uint32 prof_i;
-  uint32 prof_vdp10;
-  uint32 prof_lines;
-  uint32 prof_full;
 #endif
 
   (void)argc;
@@ -1458,18 +898,15 @@ main(int    argc,
    * The video part comes after the cartridge boot and before the reset:
    * after, because its init line names the profile that boot has just
    * fixed; before the seal, because it takes its video memory through the
-   * allocator. Either failure is a stop: a program with no video memory has nowhere to put
-   * its first tile, and a picture with no pixel buffer has nowhere to
-   * come out.
+   * allocator. Every refusal it returns is a stop, each with its screen
+   * below: a program with no video memory has nowhere to put its first
+   * tile, and a picture with no page has nowhere to come out.
    */
   /*
-   * The screen text below states the buffer size in prose, and prose does
-   * not follow a constant: the guard makes a change of buffer size refuse
-   * to build until the words are brought back in line.
+   * The screen text below states the cache size in prose, and prose does
+   * not follow a constant: the guard makes a change of size refuse to
+   * build until the words are brought back in line.
    */
-#if VDP_PIX_BUF_BYTES != 49152UL
-#error "the pixel buffer screen text says 48 kilobytes: update it with the new size"
-#endif
 #if VDP_TC_TOTAL_BYTES != 36864UL
 #error "the tile cache screen text says 36 kilobytes: update it with the new size"
 #endif
@@ -1487,18 +924,14 @@ main(int    argc,
        * cache and recorded as such, not one to fix in passing here.
        */
       LOG_ERR(LOG_CAT_VDP,("boot aborted: vdp init err=%ld",(long)err));
-      if(err == VDP_ERR_NO_PIXELS)
-        log_fatal(LOG_CAT_VDP,LOG_E_VDP_PIXELS,
-                  "cannot allocate the pixel buffer",
-                  "the console refused 48 kilobytes");
-      else if(err == VDP_ERR_NO_TILECACHE)
+      if(err == VDP_ERR_NO_TILECACHE)
         log_fatal(LOG_CAT_VDP,LOG_E_VDP_TILECACHE,
                   "cannot allocate the tile cache",
                   "36 kilobytes of decoded tile rows");
       else if(err == VDP_ERR_LANE_ORDER)
         log_fatal(LOG_CAT_VDP,LOG_E_VDP_LANEORDER,
                   "this build has the wrong byte order",
-                  "the render was built for the other one");
+                  "the picture was built for the other one");
       else if(err == VDP_ERR_NO_DECOR)
         log_fatal(LOG_CAT_VDP,LOG_E_VDP_DECOR,
                   "no page for the background picture",
@@ -1674,15 +1107,6 @@ main(int    argc,
    */
   log_set_frame(&main_frame);
 
-#if !SMS_DECOR_CEL
-  /*
-   * One read of the cel for the whole run: the block never moves after
-   * init, so reading it per frame would buy nothing and cost a call on
-   * every turn. The list path draws nothing through it.
-   */
-  main_cel = (CCB *)vdp_cel();
-#endif
-
   /*
    * The ground the picture sits in: the emulated machine's own background
    * colour, the one it shows outside its picture, read from the video
@@ -1724,32 +1148,6 @@ main(int    argc,
    * first line of the next one.
    */
   residue = 0;
-
-#if MAIN_PROFILE
-  /*
-   * Armed before the first measurement window opens, and said before it
-   * too: the line below blocks on the serial port, and a window that
-   * carried it would read the tracing rather than the frame. The first
-   * window runs the control, which is also what the video part renders
-   * when nothing arms it -- the arming here only ever confirms it.
-   */
-  for(prof_i = 0; prof_i < VDP_PROFILE_VARIANTS; prof_i++)
-    {
-      prof_sum10[prof_i] = 0;
-      prof_win[prof_i] = 0;
-      prof_drop[prof_i] = 0;
-    }
-  prof_frames = 0;
-  prof_samples = 0;
-  prof_since = 0;
-  prof_skip = 0;
-  prof_variant = VDP_PROFILE_CONTROL;
-  vdp_profile_select(prof_variant);
-  LOG_INFO(LOG_CAT_PERF,("profile on: %lu variants, %lu healthy windows each, one window a variant",
-                         (unsigned long)VDP_PROFILE_VARIANTS,
-                         (unsigned long)MAIN_PROFILE_WINDOWS));
-  LOG_INFO(LOG_CAT_PERF,("profile run: four windows in five are deliberately slowed, no [PERF] line of this run is a figure to quote"));
-#endif
 
 #if MAIN_MEASURE
   /*
@@ -2075,113 +1473,6 @@ main(int    argc,
                          main_perf_draw,main_perf_clut,
                          main_perf_tiles,main_perf_list,
                          perf_over,main_perf_clk);
-
-#if MAIN_PROFILE
-          /*
-           * The window that has just closed ran under the variant armed
-           * at the previous close, so it is whole: no window ever spans
-           * two variants. It is kept only if its parts still add up to
-           * its whole, and the next variant is armed after that, in this
-           * one place -- the cutting up of a turn and its cadence belong
-           * to this loop and to nothing else.
-           *
-           * The stamp first, and on every window. The [PERF] line above
-           * it is indistinguishable from a development build's, and four
-           * windows in five are deliberately slowed: an excerpt of this
-           * log lifted without its stamp is quotable and wrong. One line
-           * per window, the same for all five, so it weighs on every
-           * variant alike.
-           */
-          LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-                  ("profile window variant=%s (profiling run: the line above is not a figure to quote)",
-                   main_profile_name(prof_variant)));
-
-          if(prof_skip != 0UL)
-            {
-              /*
-               * The window right after a round, or after a sign of life.
-               * Those are ten blocking serial lines and two, and they
-               * land inside THIS window's wall time -- while the
-               * emulated stretch and the draw call, which are measured
-               * spans, know nothing of them. That lowers the ratio of
-               * the parts to the whole, and it does it to the same
-               * variant every time, the round being a whole number of
-               * turns of the rotation. Whether it lowers it enough to
-               * fail the band or merely enough to bias one variant, the
-               * cure is the same and it is one window: this one is
-               * thrown out, counted, and never weighed.
-               */
-              prof_skip = 0;
-              prof_drop[prof_variant]++;
-            }
-          else if(main_profile_window(perf_now - perf_window,perf_frames,
-                                      perf_emul,perf_emul_frames,
-                                      perf_z80,perf_z80_samples,
-                                      perf_vdp,perf_vdp_samples,
-                                      main_perf_draw,&prof_vdp10) != 0)
-            {
-              prof_sum10[prof_variant] += prof_vdp10;
-              prof_win[prof_variant]++;
-              prof_frames += perf_frames;
-              /*
-               * The count of SAMPLED LINES of the window, and the
-               * smaller of the two sides is the honest one: a line is
-               * weighed as two spans and either may be refused on its
-               * own, so the two counters can differ. The line that
-               * prices the clock readings charges three readings per
-               * sampled line; taking the larger count would charge
-               * readings for lines only one half of which was kept.
-               */
-              prof_lines = (perf_z80_samples < perf_vdp_samples)
-                           ? perf_z80_samples : perf_vdp_samples;
-              prof_samples += prof_lines;
-            }
-          else
-            prof_drop[prof_variant]++;
-
-          prof_since++;
-
-          prof_full = 1;
-          for(prof_i = 0; prof_i < VDP_PROFILE_VARIANTS; prof_i++)
-            {
-              if(prof_win[prof_i] < MAIN_PROFILE_WINDOWS)
-                prof_full = 0;
-            }
-
-          if(prof_full != 0UL)
-            {
-              main_profile_emit(prof_sum10,prof_win,prof_drop,
-                                prof_frames,prof_samples,main_perf_clock_cost);
-              for(prof_i = 0; prof_i < VDP_PROFILE_VARIANTS; prof_i++)
-                {
-                  prof_sum10[prof_i] = 0;
-                  prof_win[prof_i] = 0;
-                  prof_drop[prof_i] = 0;
-                }
-              prof_frames = 0;
-              prof_samples = 0;
-              prof_since = 0;
-              prof_skip = 1;
-            }
-          else if(prof_since >= MAIN_PROFILE_STALL)
-            {
-              /*
-               * Too many windows with no round. The totals are NOT
-               * cleared -- the round is still gathering -- only the
-               * count that triggers this, so the same line comes back
-               * every stall's worth of windows and a variant stuck at
-               * zero healthy windows names itself.
-               */
-              main_profile_state(prof_win,prof_drop,prof_frames,"waiting");
-              prof_since = 0;
-              prof_skip = 1;
-            }
-
-          prof_variant++;
-          if(prof_variant >= VDP_PROFILE_VARIANTS)
-            prof_variant = VDP_PROFILE_CONTROL;
-          vdp_profile_select(prof_variant);
-#endif
 
           /*
            * The PC window, at the pace of the measurement line above and on

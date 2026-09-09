@@ -34,7 +34,7 @@
  * does not clear it.
  *
  * The VRAM buffer is the same size and exists to answer one question the
- * allocation sites of the render raise: two of the four video blocks are
+ * allocation sites of the video part raise: two of its blocks are
  * asked for as MEMTYPE_ANY, which is zero (include/3do/mem.h:62), so nothing
  * says they are not in VRAM. If this block cannot be had, its shapes are not
  * measured and say so; the DRAM figures do not depend on it.
@@ -390,7 +390,7 @@ memprobe_cycles_x100(uint32 usec)
 /*
  * Says where a block actually lives, and at what address.
  *
- * The question is not academic: two of the four video blocks are asked for as
+ * The question is not academic: two of the video blocks are asked for as
  * MEMTYPE_ANY, and MEMTYPE_ANY is zero (include/3do/mem.h:62), so the
  * allocator is free to serve them out of VRAM. GetMemType
  * (include/3do/mem.h:214) is the only thing that knows, and it costs one call
@@ -520,8 +520,8 @@ memprobe_measure(void)
   memprobe_where("vdp.vram",sms.vdp.vram);
   memprobe_where("vdp.planes",sms.vdp.planes);
   memprobe_where("vdp.tilecache",sms.vdp.tc);
-  for(i = 0UL; i < (uint32)SMS_VDP_BUFFERS; i++)
-    memprobe_where("vdp.pixels",sms.vdp.pixels[i]);
+  memprobe_where("vdp.decor",sms.vdp.decor);
+  memprobe_where("vdp.sheet",sms.vdp.sheet);
   memprobe_where("probe.dram",memprobe_dram);
   memprobe_where("probe.vram",memprobe_vram);
 

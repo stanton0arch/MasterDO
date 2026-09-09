@@ -1,7 +1,7 @@
 #ifndef CELPROBE_SDK_STUB_H
 #define CELPROBE_SDK_STUB_H
 /*
- * What the host stubs of tests/vdp-profile/3do/ do not declare and the cel
+ * What the host stubs of tests/cel8/3do/ do not declare and the cel
  * probe needs: the display list bits, the colour entry macros, the folio
  * calls it makes and the folio base it reads. Forced in front of the probe
  * by -include, so that the stub headers the probe then includes find every

@@ -1,9 +1,10 @@
 #ifndef BENCH_CELUTILS_H
 #define BENCH_CELUTILS_H
-/* Shim of include/3do/celutils.h for the host bench: the one entry point
- * vdp.c calls, backed by the stub in bench_cart.c. One binary compiles the
- * stub to return NULL so the manual path is proven. Option values verbatim
- * from include/3do/celutils.h:101-105. */
+/* Shim of include/3do/celutils.h for the host checks. vdp.c builds its
+ * cels by hand and includes nothing of it any more; src/celprobe.c still
+ * includes the header, so the celprobe check needs it to resolve. Option
+ * values verbatim from include/3do/celutils.h:101-105; nothing defines
+ * CreateCel on the host, and nothing calls it. */
 #include "types.h"
 #include "hardware.h"
 

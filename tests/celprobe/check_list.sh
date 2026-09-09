@@ -6,7 +6,7 @@
 # A figure the probe publishes is the time of a list; it is the cost the
 # probe names only if the list reads what the probe says it reads. This
 # builds the probe's source on the host compiler against the stub headers
-# of tests/vdp-profile/3do/, calls its builders directly and holds their
+# of tests/cel8/3do/, calls its builders directly and holds their
 # lists against the rules written in list_check.c: every visible pixel read
 # once by the windows of every band case, every pixel of the picture read
 # once by the 896 tiles, sources on word addresses, preamble words the

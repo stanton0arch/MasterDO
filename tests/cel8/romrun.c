@@ -3,38 +3,46 @@
  * Boots src/cart.c, src/z80.c, src/sms.c and src/vdp.c as they stand, on
  * the ROM the console runs, and plays it frame by frame the way src/main.c
  * does -- 262 lines a frame, the processor's quota then the video part.
- * Every so many frames it takes the picture the cel would draw, one
- * palette index per pixel, 192 rows of 256, read as the row lies: byte 0
- * is pixel 0 on both machines, which is what the cel reads.
+ * Every so many frames it takes the picture the console shows, one
+ * palette index per pixel, 192 rows of 256, read as a row lies: byte 0
+ * is pixel 0 on both machines, which is what the engine reads.
  *
- * With the picture drawn by the cel engine (the delivered form,
- * src/common.h SMS_DECOR_CEL 1) there is no such buffer: the picture is
- * what a LIST of cels makes the engine draw -- windows of the background,
- * sprites, priority tiles, backdrop -- and this runner reconstitutes it
- * from the blocks the render hands out, field by field, in their order
- * -- see "the picture as the list draws it" below. More lines come out
- * of that, and the script demands them: every window sound, no pixel
- * left uncovered, no more pixels read than the picture plus the
- * alignment columns allow, every small cel sound, and the two sprite
- * bits raised on the same lines as the older path raised them.
+ * There is no buffer to read it from: the picture is what a LIST of cels
+ * makes the engine draw -- windows of the background, sprites, priority
+ * tiles, backdrop -- and this runner reconstitutes it from the blocks
+ * the video part hands out, field by field, in their order -- see "the
+ * picture as the list draws it" below. More lines come out of that, and
+ * the script demands them: every window sound, no pixel left uncovered,
+ * no more pixels read than the picture plus the alignment columns allow,
+ * every small cel sound, and the two sprite bits raised on the same
+ * lines as the reference says they were.
  *
  * Two modes. "compare" plays the frames and holds every row of every
- * picture against a REFERENCE: a text file of one digest per row, taken
- * once from the build that drew the picture before the format moved to a
- * byte a pixel, and kept beside this file. A row that differs is a
- * failure. "write" takes the same digests from the build it was compiled
- * against and writes them out; that is the only way a reference is ever
- * remade, after a change of picture that was meant, named in the header
- * it writes.
+ * picture against a REFERENCE: a text file of one digest per row, and,
+ * when the reference carries them, the two sprite bits after each
+ * picture. A row that differs is a failure. "write" takes the same
+ * digests and the same two bits from the build it was compiled against
+ * and writes them out; that is the only way a reference is ever remade,
+ * after a change of picture that was meant, named in the header it
+ * writes.
  *
- * The reference kept beside this file was NOT written by this runner: it
- * holds the picture of the build before the format moved, which this
- * runner refuses to compile against. That build's own runner -- this file
- * as it stood at the commit the header names -- played the same frames
- * and wrote its pictures raw, one index per byte once unpacked from six
- * bits; each row of 256 was then digested as below, and the derivation
- * was replayed from the archived tree, row for row, before the reference
- * was kept.
+ * Two references are kept beside this file, and NEITHER was written by
+ * the list. The first, picture-106b64a.fnv, holds twenty-one pictures
+ * of the build before the format moved to a byte a pixel: that build's
+ * own runner -- this file as it stood at the commit the header names --
+ * played the same frames and wrote its pictures raw, one index per byte
+ * once unpacked from six bits; each row of 256 was then digested as
+ * below, and the derivation was replayed from the archived tree, row for
+ * row, before the reference was kept. The second, picture-18a3429-all.fnv,
+ * holds EVERY frame, with the two sprite bits of each: it was written by
+ * the per-pixel render -- the processor composing every line into an
+ * index buffer, the sprites laid over it pixel by pixel, the two bits
+ * raised where the pixels met -- from this file as it stood at the
+ * commit the header names, the last tree that carried that render, on
+ * the day it was seen drawing the console's picture. The list has been
+ * held to it on all 230400 rows and 1200 pairs of bits before the render
+ * left the build, and it is the oracle of the bits from then on: nothing
+ * in the tree computes them pixel by pixel any more.
  *
  * The reference is digests and not pixels, so that it carries nothing of
  * the ROM's imagery; and it names the ROM it was taken from, by size and
@@ -55,9 +63,9 @@
  * Exit status: 0 every row the same, 1 a row differs, 2 the run could not
  * prove anything, 3 the reference is not this ROM's.
  *
- * Stubs follow tests/vdp-profile/bench_profile.c and the cartridge bench
- * that preceded it: the disc is the host file, the allocator is the host's,
- * the log goes to stderr, the cel is a block with the library's two words.
+ * Stubs on the same terms as the processor bench (tests/z80/): the disc
+ * is the host file, the allocator is the host's, the log goes to stderr,
+ * the cel control block is the library's structure and nothing more.
  */
 #include "sms.h"
 #include "cart.h"
@@ -67,7 +75,6 @@
 #include "blockfile.h"
 #include "operror.h"
 #include "filesystem.h"
-#include "celutils.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -94,12 +101,12 @@
 
 static const char *rom_path = NULL;
 
-/* The first row of the picture just presented (list path only; -1 on the older path) that the video part draws
+/* The first row of the picture just presented that the video part draws
    from a state other than its line's, or -1 when it draws every row
    from its own: the fold of the bands past their cap (the last band's
    first line), the fold of the palette past its cap (the last segment's
    first line), a full journal (row 0). The rows from there on are
-   expected to differ from the older path's, and the comparison counts
+   expected to differ from the reference's, and the comparison counts
    them apart -- tolerated, never as a defect -- while the rows before
    are held as strictly as any. */
 static long deg_from = -1;
@@ -149,34 +156,6 @@ int32 sys_width(void) { return 320; }
 int32 sys_height(void) { return 240; }
 Item sys_bitmap(void) { return 0; }
 
-/* One block per call. The two preamble words are the library's for a
-   coded cel of eight bits, as vdp.c's own arbiter expects them: the row
-   offset in the ten bit field. */
-CCB *CreateCel(int32 width, int32 height, int32 bpp, int32 options, void *dataBuf)
-{
-  CCB *c = (CCB *)calloc(1,sizeof(CCB));
-  uint16 *plut = (uint16 *)calloc(32,sizeof(uint16));
-  (void)options;
-  if(c == NULL || plut == NULL)
-    {
-      free(c);
-      free(plut);
-      return NULL;
-    }
-  c->ccb_Flags = CCB_SPABS | CCB_PPABS | CCB_LDSIZE | CCB_LDPRS | CCB_YOXY
-               | CCB_ACW | CCB_ACCW | CCB_ACE | CCB_LAST;
-  c->ccb_SourcePtr = (CelData *)dataBuf;
-  c->ccb_PLUTPtr = plut;
-  c->ccb_Width = width;
-  c->ccb_Height = height;
-  c->ccb_PRE0 = ((uint32)(height - 1) << PRE0_VCNT_SHIFT)
-              | ((bpp == 8) ? PRE0_BPP_8 : PRE0_BPP_6);
-  c->ccb_PRE1 = (bpp == 8)
-              ? ((62UL << PRE1_WOFFSET10_SHIFT) | PRE1_TLLSB_PDC0 | 255UL)
-              : ((46UL << PRE1_WOFFSET8_SHIFT) | PRE1_TLLSB_PDC0 | 255UL);
-  return c;
-}
-
 /* ---- the log: boot in full, then warnings and errors only ---- */
 
 static const char *cat_name[] =
@@ -212,7 +191,7 @@ void log_fatal(int32 cat, int32 code, const char *l1, const char *l2)
 
 static unsigned char pic[PIC_BYTES];
 
-/* ---- what the scenes of both paths drive the video part with ----
+/* ---- what the scenes drive the video part with ----
  *
  * Expectations held are counted against expectations made, and the
  * first that failed is named; a write goes through the same port macro
@@ -304,21 +283,9 @@ static void play_writes(long y)
     }
 }
 
-#if !SMS_DECOR_CEL
-/* The older path: the one buffer is the whole picture, background and
-   sprites, read off the cel's source pointer at the end of the frame. */
-static void take(void)
-{
-  CCB *c = (CCB *)vdp_cel();
-  memcpy(pic,c->ccb_SourcePtr,(size_t)PIC_BYTES);
-}
-#define line_step() vdp_line()
-#else
-
 /* ---- the picture as the LIST draws it ----
  *
- * With the background drawn by the cel engine (src/common.h,
- * SMS_DECOR_CEL), the render composes no pixel at all: it keeps a picture
+ * The video part composes no pixel at all: it keeps a picture
  * of the whole name table and a sheet of the sprite patterns up to date
  * and hands the frame loop, band by band, a chain of cel control blocks
  * -- windows of the picture, then the sprites as windows of the sheet,
@@ -2186,11 +2153,9 @@ static void scenes(void)
   sprite_scenes(pa);
   register_scenes();
 }
-#endif /* SMS_DECOR_CEL */
 
-/* FNV-1a over a run of bytes, the digest the render bench uses too
-   (tests/vdp-profile/bench_profile.c). The reference holds one per row
-   and one for the ROM. */
+/* FNV-1a over a run of bytes. The reference holds one per row and one
+   for the ROM. */
 static unsigned long digest(const unsigned char *p, unsigned long n)
 {
   unsigned long h = 2166136261UL;
@@ -2205,49 +2170,32 @@ static unsigned long digest(const unsigned char *p, unsigned long n)
 }
 
 /* ---- the raster scenes: a register written while the picture is being
- * scanned, on BOTH paths.
+ * scanned.
  *
- * The older path renders each line with the registers as they stand at
- * the end of its quota, the horizontal scroll one line late (the latch,
- * docs/sms_gg/GGOfficialDocs.md:1438); the list path journals the write
- * and cuts a band. Each scene plays one picture with the writes
- * scheduled on their lines, then holds every row against an ORACLE of
- * this file's own -- the background composed from the name table and
- * the planes alone, under the scroll and the mask each line must show
- * -- and digests the whole picture, so that the script can hold the two
- * paths' pictures against each other as well. No sprite (the table
- * ends on its first entry), no lock, the display on. ---- */
+ * The hardware shows each line with the registers as they stand at the
+ * end of its quota, the horizontal scroll one line late (the latch,
+ * docs/sms_gg/GGOfficialDocs.md:1438); the list journals the write and
+ * cuts a band. Each scene plays one picture with the writes scheduled
+ * on their lines, then holds every row against an ORACLE of this file's
+ * own -- the background composed from the name table and the planes
+ * alone, under the scroll and the mask each line must show -- and
+ * digests the whole picture, a figure a reader can hold against an
+ * older run. No sprite (the table ends on its first entry), no lock,
+ * the display on. ---- */
 
 static unsigned long raster_ok = 0, raster_seen = 0, raster_fnv = 2166136261UL;
 
 /* The picture played with the scheduled writes and read into pic: the
-   list path presents it (and leaves the list open), the older path reads
-   its buffer. */
+   list presented, and left open for the scene to look at. */
 static void raster_play(void)
 {
-#if SMS_DECOR_CEL
   play_and_present();
-#else
-  long y;
-  sms.vdp.vcount = 0;
-  for(y = 0; y < PIC_H; y++)
-    {
-      play_writes(y);
-      line_step();
-    }
-  sched_n = 0;
-  take();
-#endif
 }
 
 static void raster_done(void)
 {
-#if SMS_DECOR_CEL
   vdp_list_end();
   flush();
-#else
-  sms.vdp.vcount = 200;
-#endif
 }
 
 /* The row y of the picture as the documentation says it shows: screen
@@ -2306,9 +2254,7 @@ static void raster_hold(long l1, long hs0, long hs1, long l2, long hs2,
 static void raster_scenes(void)
 {
   uint32 base, alt, saved_r0, saved_r1, saved_r2;
-#if SMS_DECOR_CEL
   long y;
-#endif
 
   /* A known geometry, set in the blanking: no lock, no mask, no shift,
      no scroll, the display on, the table ended, and one picture played
@@ -2336,10 +2282,8 @@ static void raster_scenes(void)
   play_at(50,8,0,21);
   play_at(120,8,0,203);
   raster_play();
-#if SMS_DECOR_CEL
   expect(sms.vdp.band_count == 3 && sms.vdp.band_line[1] == 51 && sms.vdp.band_line[2] == 121,
          "register 8 on lines 50 and 120: three bands, from lines 0, 51 and 121");
-#endif
   raster_hold(50,0,21,120,203,999,999,base,base,"register 8 on lines 50 and 120: every row shows the scroll of the line before");
   expect(sms.vdp.reg[8] == 203 && sms.vdp.hscroll == 203,"register 8 on lines 50 and 120: the final value stands after the picture");
   raster_done();
@@ -2352,16 +2296,13 @@ static void raster_scenes(void)
      picture starts from it. */
   play_at(191,8,0,77);
   raster_play();
-#if SMS_DECOR_CEL
   expect(sms.vdp.band_count == 1,"register 8 on line 191: no band opened");
   expect(sms.vdp.journal_count == 1 && sms.vdp.journal[0].line == 192
          && sms.vdp.journal[0].addr == (VDP_JOURNAL_REG | 8UL),
          "register 8 on line 191: one journal entry, on line 192");
-#endif
   raster_hold(999,0,0,999,0,999,999,base,base,"register 8 on line 191: the whole picture shows the old scroll");
   expect(sms.vdp.reg[8] == 77 && sms.vdp.hscroll == 77,"register 8 on line 191: the value stands for the next picture");
   raster_done();
-#if SMS_DECOR_CEL
   /* The same picture, the entry undone at the head of the presentation
      and put back by the last band: the list is asked again. */
   sms.vdp.vcount = 200;
@@ -2378,12 +2319,10 @@ static void raster_scenes(void)
   expect(sms.vdp.reg[8] == 77 && sms.vdp.hscroll == 77,"register 8 on line 191: put back by the last band");
   vdp_list_end();
   flush();
-#endif
   sms.vdp.vcount = 200;
   reg_write(8,0);
   sms.vdp.hscroll = 0;
 
-#if SMS_DECOR_CEL
   /* Register 8 then a video memory byte in the same line, 40: the
      register's entry is dated 41, the byte's 40, and the journal holds
      the byte's first. The byte is the name table entry of tile 0. */
@@ -2411,15 +2350,12 @@ static void raster_scenes(void)
   reg_write(8,0);
   sms.vdp.hscroll = 0;
   flush();
-#endif
 
   /* Register 0 bit 5 set on line 100: the left column is masked from
      line 100 on and not before. */
   play_at(100,0,0,(uint32)sms.vdp.reg[0] | 0x20UL);
   raster_play();
-#if SMS_DECOR_CEL
   expect(sms.vdp.band_count == 2 && sms.vdp.band_line[1] == 100,"register 0 bit 5 on line 100: a band from line 100");
-#endif
   raster_hold(999,0,0,999,0,100,999,base,base,"register 0 bit 5 on line 100: the column masked from line 100 on");
   raster_done();
   sms.vdp.vcount = 200;
@@ -2430,17 +2366,13 @@ static void raster_scenes(void)
   alt = (base >= 0x800UL) ? (base - 0x800UL) : (base + 0x800UL);
   play_at(100,2,0,(uint32)((alt >> 10) | 0xF1UL));
   raster_play();
-#if SMS_DECOR_CEL
   expect(sms.vdp.band_count == 2 && sms.vdp.band_line[1] == 100,"register 2 on line 100: a band from line 100");
-#endif
   raster_hold(999,0,0,999,0,999,100,base,alt,"register 2 on line 100: the rows from 100 on show the other table");
   expect(nt_base() == alt,"register 2 on line 100: the final base stands after the picture");
   raster_done();
   sms.vdp.vcount = 200;
   reg_write(2,saved_r2);
-#if SMS_DECOR_CEL
   flush();
-#endif
 
   /* Put back. */
   sms.vdp.vcount = 200;
@@ -2448,12 +2380,9 @@ static void raster_scenes(void)
   reg_write(1,saved_r1);
   reg_write(8,0);
   sms.vdp.hscroll = 0;
-#if SMS_DECOR_CEL
   flush();
-#endif
 }
 
-#if SMS_DECOR_CEL
 /* ---- the palette segments and the Game Gear crop ---- */
 
 static void palette_scenes(void)
@@ -2604,7 +2533,6 @@ static void gg_scenes(void)
   expect(x == sms.vdp.view_x && y == sms.vdp.view_y && w == PIC_W && h == PIC_H && sms.vdp.pic_x == 0 && sms.vdp.pic_y == 0,
          "master system profile again: the rectangle is the whole picture, no shift");
 }
-#endif /* SMS_DECOR_CEL */
 
 /* ---- the two tables the console turns an index into a colour with ---- */
 
@@ -2634,14 +2562,10 @@ static unsigned long clut_entries(void)
   static const unsigned long level[4] = { 0, 85, 170, 255 };
   const uint32 *clut = vdp_clut();
   unsigned long ok = 0, i, want, c, rgb;
-#if SMS_DECOR_CEL
   /* The table was taken at the presentation, line 191: the colour
      memory as it stood then is what it is held against, since a colour
      written in the blanking belongs to the next picture's table. */
   const unsigned char *cram = cram_line[PIC_H - 1];
-#else
-  const unsigned char *cram = sms.vdp.cram;
-#endif
   for(i = 0; i < VDP_CRAM_SIZE; i++)
     {
       c = cram[i] & 0x3FUL;
@@ -2806,20 +2730,13 @@ int main(int argc, char **argv)
   /* The fewest entries found right, over every picture taken: one bad
      entry on one picture is a failure, whatever the others showed. */
   unsigned long plut_ok = VDP_PLUT_ENTRIES, clut_ok = VDP_CLUT_ENTRIES, k;
-#if !SMS_DECOR_CEL
-  /* Frames on which the rebuild signal the frame loop consumes agreed with
-     the colour write counter: raised when and only when a colour byte was
-     written since the last frame. Counted on every frame, not only the
-     pictures taken. (On the list path the same check runs at the
-     presentation, take_check.) */
-  unsigned long take_ok = 0, take_frames = 0, cram_w_seen = 0;
-#endif
   /* Pictures whose border carries the backdrop number register 7 names. */
   unsigned long backdrop_ok = 0;
-  /* The two sprite bits, as lines raised per frame: the older path writes
-     them after each picture of a reference it mints, the list path holds
-     its own against them -- pictures where both agreed, pictures where the
-     reference carried them at all. */
+  /* The two sprite bits, as lines raised per frame: written after each
+     picture of a reference, held against the reference's when it carries
+     them -- pictures where both agreed, pictures where the reference
+     carried them at all. The every-frame reference beside this file
+     carries the per-pixel render's, which is the oracle (head of file). */
   unsigned long ovf_seen = 0, col_seen = 0, ovf_d, col_d;
   unsigned long flags_ok = 0, flags_seen = 0;
   static unsigned long row_digest[PIC_H];
@@ -2920,39 +2837,20 @@ int main(int argc, char **argv)
         {
           residue = z80_run(TSTATES_PER_LINE - residue);
           line_step();
-#if SMS_DECOR_CEL
           /* The presentation, once line 191 is counted, as src/main.c
              makes it: the list built, held and copied, on every frame,
              so that the journal and the bands are exercised as they are
              on the console and not on the pictures taken alone. */
           if(line == PIC_H - 1) present(fr);
-#endif
         }
       if((sms.vdp.reg[1] & 0x40U) == 0U) off_frames++;
       if((sms.vdp.reg[0] & 0x20U) != 0U) masked_frames++;
       fine_frames[sms.vdp.reg[8] & 7U]++;
 
-#if !SMS_DECOR_CEL
-      /* The end of the frame as src/main.c closed it on this path: the
-         screen table is rebuilt now if a colour moved, so what the
-         picture below is read through is what the console would show.
-         The signal itself is held against the colour write counter: the
-         frame loop rearms its table countdown on it, so a rebuild that
-         stayed silent, or one that fired without a write, would leave
-         the console in the wrong colours while every table here reads
-         right. */
-      k = (sms.vdp.cnt_cram_w != cram_w_seen) ? 1UL : 0UL;
-      cram_w_seen = sms.vdp.cnt_cram_w;
-      if((vdp_clut_take() != 0) == (k != 0UL)) take_ok++;
-      take_frames++;
-#endif
 
       if((fr % every) != 0 && fr != frames - 1)
         continue;
 
-#if !SMS_DECOR_CEL
-      take();
-#endif
       pictures++;
       if(deg_from >= 0) degraded++;
       k = plut_identity();
@@ -2974,13 +2872,12 @@ int main(int argc, char **argv)
           for(y = 0; y < PIC_H; y++)
             fprintf(ref," %08lx",row_digest[y]);
           fputc('\n',ref);
-#if !SMS_DECOR_CEL
-          /* The two sprite bits of the frame, from the path that raises
-             them pixel by pixel: the line the list path is held to. Never
-             written by the list path, so a frozen reference minted from it
-             carries none and the older path is never held to itself. */
+          /* The two sprite bits of the frame as the list computed them.
+             A reference written here is a picture that was meant, not an
+             oracle: the oracle of the bits stays the every-frame reference
+             the per-pixel render wrote (head of file), and a new reference
+             is held to the list as it stood when it was written. */
           fprintf(ref,"flags ovf=%lu col=%lu\n",ovf_d,col_d);
-#endif
         }
       else
         {
@@ -3078,15 +2975,13 @@ int main(int argc, char **argv)
   printf("plut identity %lu/%d\n",plut_ok,(int)VDP_PLUT_ENTRIES);
   printf("clut entries %lu/%d\n",clut_ok,(int)VDP_CLUT_ENTRIES);
   printf("backdrop number %lu/%lu\n",backdrop_ok,pictures);
-#if SMS_DECOR_CEL
   /* The scenes after the ROM's frames and before the windows are
      counted: their windows are held like any other. */
   /* The reserve refusals of the ROM's frames, read before the scenes:
      one scene spends the reserve on purpose and holds its own count. */
   k = sms.vdp.cnt_cels_refused;
-  /* The raster scenes first, on the video memory as the ROM left it --
-     the same on both paths, so that the two digests can be held against
-     each other; the other scenes write patterns and tiles of their own. */
+  /* The raster scenes first, on the video memory as the ROM left it;
+     the other scenes write patterns and tiles of their own. */
   raster_scenes();
   scenes();
   palette_scenes();
@@ -3099,11 +2994,6 @@ int main(int argc, char **argv)
   printf("list cels %lu/%lu\n",cel_ok,cel_seen);
   printf("list cels max=%lu refused=%lu\n",cel_max,k);
   printf("palette lines %lu/%lu\n",pal_lines_ok,pal_lines_seen);
-#else
-  printf("clut take %lu/%lu\n",take_ok,take_frames);
-  raster_scenes();
-  printf("decor scenes %lu/%lu\n",scene_ok,scene_want);
-#endif
   printf("scroll bands %lu/%lu\n",raster_ok,raster_seen);
   printf("scroll bands digest=%08lx\n",raster_fnv);
   if(!writing)

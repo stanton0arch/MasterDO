@@ -246,26 +246,26 @@ void log_printf(const char *fmt, ...);
  */
 
 /*
- * The video range. The first three are allocations refused at boot, and
- * each is a stop rather than a degraded mode: a program writes its tiles
- * into the video memory before it does anything else, a picture with no
- * pixel buffer has nowhere to come out, and the background is composed out
- * of the decoded row cache with no path around it.
+ * The video range. Two are allocations refused at boot, and each is a
+ * stop rather than a degraded mode: a program writes its tiles into the
+ * video memory before it does anything else, and the picture is built
+ * out of the decoded row cache with no path around it. The number 301
+ * was the index buffer of the per-pixel render, which left the build;
+ * it stays spent, by the rule above.
  *
- * The fourth is not an allocation. The render reads pixel indexes out of
- * words, so it is built for one byte order (vdp.h, VDP_LANE_MSB_FIRST);
- * the boot holds that against the machine and stops here when they
- * disagree, because the alternative is a picture scrambled four pixels at
- * a time with nothing saying why.
+ * The next is not an allocation. The picture and the sprite sheet are
+ * written by words of four indexes, so the build names one byte order
+ * (vdp.h, VDP_LANE_MSB_FIRST); the boot holds that against the machine
+ * and stops here when they disagree, because the alternative is a
+ * picture scrambled with nothing saying why.
  *
- * The fifth is the page of the background picture the cel engine draws
- * by windows (vdp.h, VDP_DECOR_*): a picture with no page has no
- * background to show. The sixth is the page of the sprite sheet and the
- * small cel blocks (vdp.h, VDP_SHEET_*): without it no sprite and no
- * priority tile can be drawn.
+ * Then the page of the background picture the cel engine draws by
+ * windows (vdp.h, VDP_DECOR_*): a picture with no page has no
+ * background to show. And the page of the sprite sheet and the small
+ * cel blocks (vdp.h, VDP_SHEET_*): without it no sprite and no priority
+ * tile can be drawn.
  */
 #define LOG_E_VDP_VRAM      300
-#define LOG_E_VDP_PIXELS    301
 #define LOG_E_VDP_TILECACHE 302
 #define LOG_E_VDP_LANEORDER 303
 #define LOG_E_VDP_DECOR     304
