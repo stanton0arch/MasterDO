@@ -229,6 +229,10 @@ uint8 vdp_io_hcounter_read(void)       { return 0; }
    background picture watches, handed to the render to journal -- lands
    here and journals nothing: this bench has no picture. */
 void vdp_decor_note(uint32 addr, uint32 value) { (void)addr; (void)value; }
+/* The other out of line call of the same macro: a colour write that
+   changes a byte mid-picture, handed to the render to open a palette
+   segment. Nothing to open here. */
+void vdp_cram_note(void) {}
 
 /* The mapper, which the shipped build's Z80_WR8 calls on a register address.
    Recorded rather than thrown away: mapper_path_check reads the log back to

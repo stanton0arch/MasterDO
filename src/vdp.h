@@ -474,9 +474,40 @@
 #define VDP_DECOR_LINES     VDP_NT_LINES
 #define VDP_DECOR_BYTES     (VDP_PIX_ROW_BYTES * VDP_DECOR_LINES)
 #define VDP_DECOR_PAGE      65536UL
-#define VDP_LIST_BANDS      8UL
+#define VDP_LIST_BANDS      (SMS_LIST_BANDS * 1UL)
 #define VDP_LIST_WINDOWS    (VDP_LIST_BANDS * 9UL)
 #define VDP_JOURNAL_ENTRIES 256UL
+/*
+ * The tag of a register entry of the journal, in the address halfword:
+ * a video memory address is fourteen bits, so bit 15 names a register,
+ * the low four bits its number. Registers 0, 1, 2, 5, 6, 7 and 8 are
+ * journaled, on the bits the list is built from (vdp_reg_note).
+ */
+#define VDP_JOURNAL_REG     0x8000UL
+/*
+ * The most segments of the palette one picture may have: the table from
+ * line 0, then one more from each distinct line a colour byte changed
+ * on, the eighth taking the rest. One entry of the screen's display list
+ * per segment (sys.c, sys_set_colors_lines), which is where the figure
+ * is bounded: the list is built in a static array of that many entries.
+ */
+#define VDP_PAL_SEGMENTS    8UL
+/*
+ * The Game Gear's window in the 256 by 192 picture: 20 by 18 cells of
+ * 8 pixels, centred, 6 cells left and 3 above (docs/pseudocodes/
+ * 10_gg_delta.md:74-117, from GGOfficialDocs.md:969, :977-981 and the
+ * effective area figure). The same list is drawn and cropped to it:
+ * the clip rectangle takes the window and every cel is shifted by the
+ * window's offset, nothing else changes.
+ */
+#define VDP_GG_VIEW_X       48L
+#define VDP_GG_VIEW_Y       24L
+#define VDP_GG_VIEW_W       160L
+#define VDP_GG_VIEW_H       144L
+
+#if (SMS_LIST_BANDS < 1) || (SMS_LIST_BANDS > 10)
+#error "SMS_LIST_BANDS is a figure from 1 to 10: the picture's page holds nine window blocks per band and ten bands at most"
+#endif
 #define VDP_CCB_BYTES       68UL
 #define VDP_NT_TILES        ((VDP_NT_LINES / 8UL) * 32UL)
 #define VDP_NT_CHUNKS       ((VDP_NT_TILES * 2UL) / 32UL)
@@ -585,7 +616,12 @@ typedef struct
  * the byte the address held and the byte it took. Two words, no pointer,
  * no padding -- the two bytes are held as halfwords so that the entry
  * is a whole number of words on its own and the compiler has nothing to
- * insert; the array is inside the state and costs what it says.
+ * insert; the array is inside the state and costs what it says. A
+ * register entry carries VDP_JOURNAL_REG and the register number in the
+ * address, the register's old and new bytes in the other two, and the
+ * line its effect starts on -- the line of the write, or the line after
+ * for register 8, which the hardware latches at the end of the line
+ * (docs/sms_gg/GGOfficialDocs.md:1438).
  */
 typedef struct
 {
@@ -951,6 +987,21 @@ typedef struct
   int32 view_x;
   int32 view_y;
 
+  /*
+   * The clip rectangle's size, and the offset every cel position takes
+   * inside it: 256 by 192 and zero in the Master System profile; the
+   * 160 by 144 window and its negative origin, VDP_GG_VIEW_*, in the
+   * Game Gear profile, where the rectangle is set on the window and the
+   * cels, positioned relative to it, are shifted back by the window's
+   * offset so that the picture stays where it is and the window shows
+   * its middle (vdp_view_fix). view_x and view_y above stay the
+   * picture's own origin on the bitmap in both profiles.
+   */
+  int32 view_w;
+  int32 view_h;
+  int32 pic_x;
+  int32 pic_y;
+
 #if SMS_DECOR_CEL
   /*
    * The background picture and the window blocks, in one page taken at
@@ -1043,6 +1094,35 @@ typedef struct
   uint32 list_used;
 
   /*
+   * The segments of the palette of the picture being scanned: how many
+   * (0 while no colour changed mid-picture, 2 or more once one did),
+   * the first line of each, and the colour memory each shows -- a copy
+   * taken before the first changing write of the next segment's line,
+   * for every segment but the last, which shows the colour memory as it
+   * stands. Opened by vdp_cram_note, consumed and emptied by
+   * vdp_clut_take; capped at VDP_PAL_SEGMENTS, the cap counted once per
+   * picture through the flag.
+   */
+  uint8  pal_line[VDP_PAL_SEGMENTS];
+  uint8  pal_cram[VDP_PAL_SEGMENTS][VDP_CRAM_SIZE];
+  uint32 pal_count;
+  uint32 pal_capped;
+
+  /*
+   * The tables of those segments as last built, one screen table each
+   * in the form the display takes (clut above), the bitmap line each
+   * starts on (view_y plus the segment's first line), how many there
+   * are, and how many the previous presentation had -- so that a
+   * picture without a segment after one with is a change the frame
+   * loop is told about, since every screen then has its own list to put
+   * back. Read through vdp_clut_segments.
+   */
+  uint32 clut_seg[VDP_PAL_SEGMENTS][VDP_CLUT_ENTRIES];
+  uint8  clut_seg_line[VDP_PAL_SEGMENTS];
+  uint32 clut_seg_count;
+  uint32 clut_seg_prev;
+
+  /*
    * The sheet of converted sprite patterns, the small cel blocks behind
    * it in the same page (VDP_SHEET_*, VDP_LIST_CELS), and the backdrop
    * column in the tail of the picture's page (VDP_COLUMN_*). The blocks
@@ -1077,6 +1157,25 @@ typedef struct
   uint32 sat_base;
   uint32 sat_chunk0;
   uint32 spr_dirty;
+
+  /*
+   * Up when the last rebuild of the per-line table started past line 0
+   * -- the table moved mid-picture, and the lines before the move kept
+   * the admission they had, rightly, for that picture. The next picture
+   * starts on line 0 and owes those lines the table as it stands: the
+   * flag makes the first line rebuild the whole table, whether or not
+   * anything moved since.
+   */
+  uint32 spr_partial;
+
+  /*
+   * Whether this picture is degraded -- its journal full, its bands or
+   * its palette segments folded past their cap, its display list
+   * refused -- raised by whichever happened first and counted once at
+   * the head of the presentation (vdp_list_begin), so that a picture
+   * that met two of them counts as one.
+   */
+  uint32 pic_degraded;
 
   /*
    * The patterns the table names, each once, so that a write of one is
@@ -1219,14 +1318,27 @@ typedef struct
   uint32 cnt_journal_full;
   uint32 cnt_list_refused;
   /*
-   * Register 0, 2, 8, 1 (size, magnification, display), 5, 6 or 7
-   * written to another value while the picture was being scanned. The
-   * list is built once, when line 191 is counted, with the last value;
-   * the line render took each line with the value of its own line. A
-   * picture where this counts is one the two paths can draw apart, and
-   * the figure says so rather than letting it pass.
+   * Register 0, 2, 8, 1 (size, magnification), 5, 6 or 7 written to
+   * another value on the bits the list reads while the picture was
+   * being scanned. Each such write is journaled and cuts a band, so the
+   * figure is a count of raster effects, not of faults; the two beside
+   * it below split it into scroll splits and the rest.
    */
   uint32 cnt_reg_mid;
+
+  /*
+   * What the journal and the palette took mid-picture over the window:
+   * register 8 entries (a scroll split), entries of the other registers,
+   * palette segments opened past the first, segments the cap refused,
+   * and pictures counted degraded -- bands folded past the cap, a
+   * palette past its cap, or a display list the console refused, once
+   * per picture whichever happened.
+   */
+  uint32 cnt_scroll_mid;
+  uint32 cnt_reg_journal;
+  uint32 cnt_pal_seg;
+  uint32 cnt_pal_capped;
+  uint32 cnt_degraded;
 
   /*
    * The small cels of the window: built in all, of which sprite cels,
@@ -1466,6 +1578,31 @@ uint32 vdp_profile_reps(uint32 post);
 #define VDP_DECOR_NOTE(a,v) ((void)0)
 #endif
 
+/*
+ * The palette's share of a colour write, before the byte lands: when the
+ * picture is being scanned and the byte really changes, the write is
+ * handed to vdp_cram_note, which opens a segment of the palette at this
+ * line (or finds the one already open there). One compare on the line
+ * and one on the byte for every colour write; a program that rewrites
+ * its palette in the blanking, which is what most do, pays the first
+ * compare and nothing else. The byte is compared on its six colour
+ * bits, the two the table never reads (vdp_clut_build) opening
+ * nothing. Nothing on the older path, whose table is set once per
+ * frame.
+ */
+#if SMS_DECOR_CEL
+#define VDP_CRAM_NOTE(i,v)                                              \
+  do                                                                    \
+    {                                                                   \
+      if((sms.vdp.vcount < VDP_ACTIVE_LINES)                            \
+         && ((((uint32)sms.vdp.cram[(i)] ^ (uint32)(v)) & 0x3FUL) != 0UL)) \
+        vdp_cram_note();                                                \
+    }                                                                   \
+  while(0)
+#else
+#define VDP_CRAM_NOTE(i,v) ((void)0)
+#endif
+
 #define VDP_IO_DATA_WRITE(v)                                            \
   do                                                                    \
     {                                                                   \
@@ -1473,6 +1610,7 @@ uint32 vdp_profile_reps(uint32 post);
       sms.vdp.read_buf = (uint32)(uint8)(v);                            \
       if(sms.vdp.code == VDP_CODE_CRAM_WRITE)                           \
         {                                                               \
+          VDP_CRAM_NOTE(sms.vdp.addr & VDP_CRAM_MASK,(uint8)(v));       \
           sms.vdp.cram[sms.vdp.addr & VDP_CRAM_MASK] = (uint8)(v);      \
           sms.vdp.cram_dirty = 1;                                       \
           VDP_COUNT(cram_w);                                            \
@@ -1596,9 +1734,16 @@ uint16 vdp_backdrop(void);
  * byte has moved since the last call, and the 32 entries have then been
  * rebuilt from the colour memory, the flag cleared and the rebuild
  * counted; 0 otherwise, with nothing touched. Called once per frame by
- * the frame loop, at the end of the frame, before the draw: a program
- * that writes its whole palette every frame costs one rebuild per frame,
- * one that leaves it alone costs a load and a compare.
+ * the frame loop, at the presentation, before the draw: a program that
+ * writes its whole palette every frame costs one rebuild per frame, one
+ * that leaves it alone costs a load and a compare.
+ *
+ * On the list path it also closes the palette segments of the picture:
+ * one table per segment is built (the last from the colour memory as it
+ * stands), the segments are emptied for the next picture, and the
+ * answer is 1 as well when the segment count differs from the previous
+ * picture's -- a picture without a segment after one with is a change,
+ * since every screen then carries a list of its own to put back.
  *
  * The rebuild is here and not on the write path on purpose: 32 colour
  * writes in a frame are one rebuild and not 32, and the port path keeps
@@ -1637,13 +1782,27 @@ const uint32 *vdp_clut(void);
 void vdp_backdrop_repainted(void);
 
 /*
- * Where the picture sits on the screen and how big it is, in bitmap
- * pixels: the frame loop sets the clip rectangle of every screen on it
- * once, after init. Every cel position this module writes is then
- * relative to that rectangle. Valid from init on; the four are written
- * and never NULL-tested, a caller passes its own four words.
+ * The clip rectangle of the picture on the screen, in bitmap pixels:
+ * the frame loop sets it on every screen once, after init. Every cel
+ * position this module writes is then relative to that rectangle. In
+ * the Master System profile it is the picture's own area, 256 by 192;
+ * in the Game Gear profile it is the 160 by 144 window in the middle of
+ * it (VDP_GG_VIEW_*), and the cels are shifted by the window's offset
+ * so that the same list draws the same picture, cropped. Valid from
+ * init on; the four are written and never NULL-tested, a caller passes
+ * its own four words.
  */
 void vdp_view(int32 *x, int32 *y, int32 *w, int32 *h);
+
+/*
+ * Sets the rectangle and the cel offset from the profile the cartridge
+ * boot fixed (sms.cart.system): the whole picture for the Master
+ * System, the window for the Game Gear. Called by vdp_init once the
+ * picture's origin is known, and traced; callable again after the
+ * profile changed, which the picture check does to hold the two
+ * profiles against each other.
+ */
+void vdp_view_fix(void);
 
 #if SMS_DECOR_CEL
 /*
@@ -1658,6 +1817,39 @@ void vdp_view(int32 *x, int32 *y, int32 *w, int32 *h);
  * too, before the conversion has counted the reference.
  */
 void vdp_decor_note(uint32 addr, uint32 value);
+
+/*
+ * A colour write that changes a byte while the picture is being
+ * scanned, called from the data write macro and from nowhere else, with
+ * the byte not yet stored: opens a segment of the palette at the line
+ * being scanned -- the colour memory as it stands is copied as the table
+ * of the segment before it -- unless one is already open at that line,
+ * or the line is 0 (the table of the whole picture), or the cap of
+ * VDP_PAL_SEGMENTS is reached, which is counted once per picture, said
+ * once, and leaves the lines past the last segment with the final
+ * table. The presentation turns the segments into a display list
+ * through vdp_clut_segments.
+ */
+void vdp_cram_note(void);
+
+/*
+ * The palette segments of the picture just closed by vdp_clut_take: how
+ * many, 0 when the picture had none and the ordinary table applies, 2
+ * or more otherwise; then *tables points at that many screen tables of
+ * VDP_CLUT_ENTRIES packed entries each, one per segment, the last one
+ * the colour memory as it stands, and *lines at that many bitmap lines,
+ * the first line of each segment on the screen (the first is the
+ * picture's origin, view_y). Pointers into this module's own arrays,
+ * valid until the next vdp_clut_take; never written through.
+ */
+uint32 vdp_clut_segments(const uint32 **tables, const uint8 **lines);
+
+/*
+ * The frame loop could not put the segments on the screen: the display
+ * list was refused. Counted as a degraded picture and said once; the
+ * picture is shown through its last table.
+ */
+void vdp_clut_refused(void);
 
 /*
  * The per-line table of the sprites rebuilt from the attribute table as
@@ -1679,17 +1871,23 @@ void vdp_sprite_scan(uint32 from);
  * The presentation of the background, in three calls the frame loop
  * makes when line 191 has been counted and before the blanking lines.
  *
- * vdp_list_begin undoes the journal, so that the video memory stands as
- * it stood when the frame began, converts every tile the frame's writes
- * left stale, and cuts the picture into bands at the distinct lines of
- * the journal -- one band with no write, up to VDP_LIST_BANDS with
- * seven or more, the lines past the seventh merged into the last band
- * and the merge counted. Returns the band count, at least 1. The tile
- * conversions are here and nowhere else in the frame, which is what the
- * frame loop times as the tiles' cost.
+ * vdp_list_begin undoes the journal, so that the video memory and the
+ * journaled registers stand as they stood when the frame began,
+ * converts every tile the frame's writes left stale, and cuts the
+ * picture into bands at the distinct lines of the journal -- one band
+ * with no write, up to VDP_LIST_BANDS with seven or more, the lines
+ * past the seventh merged into the last band, the merge counted and the
+ * picture counted degraded. An entry on line 192 (register 8 written on
+ * line 191) opens no band: it is undone here and put back by the last
+ * band, so that the next picture starts from the final value. Returns
+ * the band count, at least 1. The tile conversions are here and nowhere
+ * else in the frame, which is what the frame loop times as the tiles'
+ * cost.
  *
- * vdp_list_band(k) replays the journal up to the first line of band k,
- * converts what those writes touched, and builds the windows of the
+ * vdp_list_band(k) replays the journal up to the first line of band k
+ * -- the memory bytes and the registers alike, a register through the
+ * same setter the undo used -- converts what those writes touched, and
+ * builds the windows of the
  * band's lines: one chain of cel control blocks ending on CCB_LAST, its
  * head returned as an opaque pointer for the draw call, NULL only when
  * the arena had no block left for the band's first window (counted).

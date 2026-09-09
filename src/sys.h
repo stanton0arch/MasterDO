@@ -175,6 +175,50 @@ Err sys_fill(Color color);
 Err sys_set_colors(int32 index, const uint32 *entries, int32 count);
 
 /*
+ * Sets the colour table of a named screen PER RANGE OF LINES: count
+ * tables of SYS_CLUT_ENTRIES packed entries each (the same form as
+ * above, count times, one after the other), the k-th applying from
+ * bitmap line lines[k] to the line before lines[k + 1], the first from
+ * line 0 whatever lines[0] says and the last to the bottom of the
+ * bitmap. This is the one way to change a colour at a given line: the
+ * display reads the screen's colour table off a display list, one
+ * entry per range of lines, and a screen comes with a list of one
+ * entry (docs/3do/3do_portfolio_2.5.md:9056-9090, SubmitVDL; :9976-9988,
+ * SetVDL). A list is built here from the tables, in the form of the
+ * SDK's own example (examples/original/Portfolio 2.5/ExamplesLib/
+ * vdlutil.c), submitted -- the system copies it, so the array it is
+ * built in is a static one reused on every call -- and set on the
+ * screen; the list the screen carried is kept the first time, being the
+ * system's, and destroyed afterwards, being this module's previous one.
+ * Three folio calls per call, so a caller makes it only on a frame that
+ * needs it, on the screen about to be drawn into -- never on the screen
+ * being displayed, whose list would go black under the beam.
+ *
+ * Count is 1 to SYS_VDL_ENTRIES, the entries the static list holds; a
+ * caller with more ranges than that folds them first. A refusal by the
+ * folio is traced once and handed back with the screen's list
+ * unchanged; the caller decides what it means -- here, the last table
+ * through sys_set_colors. sys_set_colors above puts the system's list
+ * back on a screen that carries one of these before it sets the table,
+ * so the two calls may alternate freely on one screen. The list a
+ * screen carried before is destroyed one call later, on that screen:
+ * a list destroyed while the screen is still displayed through it
+ * blacks the screen (docs/3do/3do_portfolio_2.5.md:10254-10256), and
+ * the frame loop does not wait for the blanking when a frame is late.
+ */
+#define SYS_VDL_ENTRIES 8
+Err sys_set_colors_lines(int32 index, const uint32 *tables, const uint8 *lines, int32 count);
+
+/*
+ * Whether the display accepts a list built as above: proved once at
+ * boot by sys_display_open, which submits a list of one entry and
+ * destroys it (nothing shown, nothing set), and traced -- "palette per
+ * line: vdl accepted", or refused with the error. 1 when it did; when
+ * it did not, the caller keeps to sys_set_colors for the whole run.
+ */
+int32 sys_vdl_ok(void);
+
+/*
  * Sets the clip rectangle of a named screen's bitmap: x, y its top-left
  * corner in the bitmap, w and h its size (SetClipOrigin, SetClipWidth,
  * SetClipHeight: include/3do/graphics.h:821-823; docs/3do/3do_portfolio_2.5.md:

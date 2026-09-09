@@ -3,11 +3,20 @@
 #include "z80.h"
 #include "cart.h"
 #include "vdp.h"
+#include "sms.h"
 #include "dynarec_j0.h"
 #include "dynarec_j1.h"
 #include "dynarec_j2.h"
 #include "memprobe.h"
 #include "celprobe.h"
+
+/*
+ * The segments of a picture's palette go one each into an entry of the
+ * screen's display list: the video part's cap must fit the list's.
+ */
+#if VDP_PAL_SEGMENTS > SYS_VDL_ENTRIES
+#error "more palette segments than the display list holds entries"
+#endif
 
 /*
  * Glyph width of the graphics folio's 8x8 font, used to centre text:
@@ -1032,6 +1041,56 @@ main_present(void)
   if(vdp_clut_take() != 0)
     main_clut_repaint = sys_screen_count();
 
+#if SMS_DECOR_CEL
+  /*
+   * A picture whose palette changed on some line: the screen about to
+   * be drawn into takes a list of one table per segment, on every such
+   * picture (the system copies a list, so a new one is the only way to
+   * change it), inside the table's span. When the display refused the
+   * form at boot, or refuses this list, the screen takes the last table
+   * the ordinary way and the picture is counted degraded. A picture
+   * with no segment after one with is a change the video part reports,
+   * and the countdown below then gives every screen its system list
+   * back with the table.
+   */
+  {
+    const uint32 *seg_tables;
+    const uint8 *seg_lines;
+    uint32 seg_count;
+
+    seg_count = vdp_clut_segments(&seg_tables,&seg_lines);
+    if((seg_count > 1UL) && (sys_vdl_ok() == 0))
+      vdp_clut_refused();
+    if((seg_count > 1UL) && (sys_vdl_ok() != 0))
+      {
+#if MAIN_MEASURE
+        span_start = sys_usec();
+#endif
+        if(sys_set_colors_lines(sys_screen_index(),seg_tables,seg_lines,
+                                (int32)seg_count) < 0)
+          {
+            vdp_clut_refused();
+            (void)sys_set_colors(sys_screen_index(),vdp_clut(),
+                                 (int32)VDP_CLUT_ENTRIES);
+          }
+#if MAIN_MEASURE
+        main_perf_span(&main_perf_clut,span_start);
+#endif
+        main_clut_repaint = sys_screen_count();
+      }
+    else if(main_clut_repaint > 0)
+      {
+#if MAIN_MEASURE
+        span_start = sys_usec();
+#endif
+        if(sys_set_colors(sys_screen_index(),vdp_clut(),(int32)VDP_CLUT_ENTRIES) >= 0)
+          main_clut_repaint--;
+#if MAIN_MEASURE
+        main_perf_span(&main_perf_clut,span_start);
+#endif
+      }
+  }
+#else
   if(main_clut_repaint > 0)
     {
 #if MAIN_MEASURE
@@ -1043,6 +1102,7 @@ main_present(void)
       main_perf_span(&main_perf_clut,span_start);
 #endif
     }
+#endif
 
 #if SMS_DECOR_CEL
   /*
@@ -1478,9 +1538,10 @@ main(int    argc,
         if(sys_clip(screen,view_x,view_y,view_w,view_h) < 0)
           LOG_ERR(LOG_CAT_VDP,("view clip refused on screen %ld",(long)screen));
       }
-    LOG_INFO(LOG_CAT_VDP,("view clip %ldx%ld at %ld,%ld set on %ld screens",
+    LOG_INFO(LOG_CAT_VDP,("view clip %ldx%ld at %ld,%ld set on %ld screens profile=%s",
                           (long)view_w,(long)view_h,(long)view_x,(long)view_y,
-                          (long)sys_screen_count()));
+                          (long)sys_screen_count(),
+                          cart_system_name(sms.cart.system)));
   }
 
   /*

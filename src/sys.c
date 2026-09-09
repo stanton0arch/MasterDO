@@ -89,6 +89,72 @@ static int32 sys_clip_w[SYS_NUM_SCREENS];
 static int32 sys_clip_h[SYS_NUM_SCREENS];
 
 /*
+ * The display list a screen's colour table is read off, when this
+ * module builds one (sys_set_colors_lines): the form is the SDK
+ * example's, examples/original/Portfolio 2.5/ExamplesLib/vdlutil.c,
+ * which is the one form the system has been seen to accept. One entry
+ * per range of lines, SYS_VDL_WORDS words each (include/3do/form3do.h:
+ * 238-250, VDL_REC): the DMA control word, the address of the range's
+ * first line in the bitmap, the address of the line before it, the
+ * offset to the next entry, the display control word on the first
+ * entry alone, the 32 colours, the background entry, and two words of
+ * padding the hardware wants. The DMA word names SYS_VDL_DMA_WORDS
+ * words to load -- the four control words and the two of padding do
+ * not count (vdlutil.h:33-36, :44; vdlutil.c:170-171) -- and the
+ * offset to the next entry is RELATIVE, the length of the entry past
+ * its four control words (vdlutil.c:187): the system fixes the last
+ * one up itself. An absolute pointer there is what the folio proofs
+ * out (GRAFERR_PROOF_ERR), which is how the first attempt at this list
+ * was refused.
+ *
+ * SYS_VDL_ENTRIES entries at most (sys.h): the array is static, since
+ * the system copies the list at submission (docs/3do/
+ * 3do_portfolio_2.5.md:9065) and nothing of it is kept here past the
+ * call. Per screen: the item of the list this module set on it, 0
+ * while the screen carries the system's own; that system list, taken
+ * the first time one of ours replaced it, so that it can be put back;
+ * and the list of ours the screen carried before its current one,
+ * destroyed at the next call on that screen -- by then the screen has
+ * been displayed through its current list and replaced, and the old
+ * one has been under no beam since. Destroyed at once it might still
+ * be: the screen about to be drawn into stops being displayed at the
+ * blanking that follows the other screen's DisplayScreen, which the
+ * frame loop does not wait for when a frame is late, and a list
+ * deleted under the beam blacks the screen (:10254-10256). Whether the
+ * display accepts the form at all, proved once at boot.
+ */
+#define SYS_VDL_WORDS     40
+#define SYS_VDL_CTRL_WORDS 4
+#define SYS_VDL_FILL_WORDS 2
+#define SYS_VDL_DMA_WORDS (SYS_VDL_WORDS - SYS_VDL_CTRL_WORDS - SYS_VDL_FILL_WORDS)
+#define SYS_VDL_NEXT_BYTES ((SYS_VDL_WORDS - SYS_VDL_CTRL_WORDS) * 4)
+
+#if SYS_VDL_WORDS != (SYS_VDL_CTRL_WORDS + 1 + SYS_CLUT_ENTRIES + SYS_VDL_FILL_WORDS)
+#error "a display list entry is four control words, the display word, the colours and two of padding"
+#endif
+
+static uint32 sys_vdl_words[SYS_VDL_ENTRIES * SYS_VDL_WORDS];
+static Item   sys_vdl_item[SYS_NUM_SCREENS];
+static Item   sys_vdl_system[SYS_NUM_SCREENS];
+static Item   sys_vdl_old[SYS_NUM_SCREENS];
+static int32  sys_vdl_accepted = 0;
+
+/* The previous list of a screen, destroyed one call later (above). */
+static void
+sys_vdl_release_old(int32 index)
+{
+  if(sys_vdl_old[index] != 0)
+    {
+      (void)DeleteVDL(sys_vdl_old[index]);
+      sys_vdl_old[index] = 0;
+    }
+}
+
+/* Built with the colour calls below, needed by the probe at open. */
+static int32 sys_vdl_build(const Bitmap *bm, const uint32 *tables,
+                           const uint8 *lines, int32 count);
+
+/*
  * The instruments of the sound path, loaded in this order and released in the
  * reverse one. square.dsp is the square wave generator the emulated sound chip
  * needs, one instance per voice once voices are driven; the mixer sums them to
@@ -293,6 +359,48 @@ sys_display_type_name(int32 display_type)
 }
 #endif /* LOG_ENABLE */
 
+/*
+ * The proof, at boot, that the display takes a list of the form built
+ * above: one entry of a linear table over the whole bitmap of screen 0,
+ * submitted and destroyed, never set on a screen -- nothing is shown,
+ * nothing is changed, and the answer is what the frame loop reads
+ * before it ever builds one for a picture. Said either way.
+ */
+static void
+sys_vdl_probe(void)
+{
+  uint32 table[SYS_CLUT_ENTRIES];
+  uint8 line0;
+  int32 i;
+  Item vdl;
+
+  sys_vdl_accepted = 0;
+  if(sys_ctx->sc_Bitmaps[0] == NULL)
+    return;
+
+  for(i = 0; i < SYS_CLUT_ENTRIES - 1; i++)
+    table[i] = MakeCLUTColorEntry(i,i << 3,i << 3,i << 3);
+  table[SYS_CLUT_ENTRIES - 1] = MakeCLUTBackgroundEntry(0,0,0);
+  line0 = 0;
+
+  if(sys_vdl_build(sys_ctx->sc_Bitmaps[0],table,&line0,1) < 0)
+    {
+      LOG_WARN(LOG_CAT_SYS,("palette per line: vdl not built for the probe"));
+      return;
+    }
+
+  vdl = SubmitVDL((VDLEntry *)sys_vdl_words,SYS_VDL_WORDS,VDLTYPE_FULL);
+  if(vdl < 0)
+    {
+      LOG_WARN(LOG_CAT_SYS,("palette per line: vdl refused err=%ld",(long)vdl));
+      return;
+    }
+
+  (void)DeleteVDL(vdl);
+  sys_vdl_accepted = 1;
+  LOG_INFO(LOG_CAT_SYS,("palette per line: vdl accepted"));
+}
+
 Err
 sys_display_open(void)
 {
@@ -430,6 +538,14 @@ sys_display_open(void)
   sys_ctx->sc_CurrentScreen = 0;
   sys_display_used = display_type;
 
+  for(i = 0; i < SYS_NUM_SCREENS; i++)
+    {
+      sys_vdl_item[i] = 0;
+      sys_vdl_system[i] = 0;
+      sys_vdl_old[i] = 0;
+    }
+  sys_vdl_probe();
+
   LOG_INFO(LOG_CAT_SYS,("screen init ok %ldx%ld",
                         (long)sys_bm_width,(long)sys_bm_height));
 
@@ -452,6 +568,34 @@ sys_display_close(void)
 
   if(sys_ctx == NULL)
     return 0;
+
+  /*
+   * The screens given their system lists back and this module's lists
+   * destroyed, before the screens go: a list of ours left on a screen
+   * the group deletes would be an item nobody owns any more.
+   */
+  {
+    int32 i;
+
+    for(i = 0; i < (int32)SYS_NUM_SCREENS; i++)
+      {
+        sys_vdl_release_old(i);
+        if(sys_vdl_item[i] != 0)
+          {
+            /*
+             * A list the system would not take off the screen stays
+             * on it: destroyed, it would leave the screen pointing at
+             * nothing while the group goes.
+             */
+            if(SetVDL(sys_ctx->sc_ScreenItems[i],sys_vdl_system[i]) < 0)
+              LOG_WARN(LOG_CAT_SYS,("screen %ld: system vdl not put back, list left",(long)i));
+            else
+              (void)DeleteVDL(sys_vdl_item[i]);
+            sys_vdl_item[i] = 0;
+            sys_vdl_system[i] = 0;
+          }
+      }
+  }
 
   err = DeleteBasicDisplay(sys_ctx);
   if(err < 0)
@@ -755,6 +899,30 @@ sys_set_colors(int32         index,
     }
 
   /*
+   * A screen that carries a list of this module's gets the system's
+   * back first, and the list of ours is kept to be destroyed at the
+   * next call on this screen, when it can no longer be under the beam
+   * (the previous one, if any, is destroyed now): the table set below
+   * is the system list's, one table for every line, which is what the
+   * caller means by a table with no lines.
+   */
+  if(sys_vdl_item[index] != 0)
+    {
+      err = SetVDL(screen,sys_vdl_system[index]);
+      if(err < 0)
+        {
+          LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+                   ("sys_set_colors: system vdl not put back err=%ld",(long)err));
+          return err;
+        }
+      sys_vdl_release_old(index);
+      sys_vdl_old[index] = sys_vdl_item[index];
+      sys_vdl_item[index] = 0;
+    }
+  else
+    sys_vdl_release_old(index);
+
+  /*
    * The folio reads the entries and does not write them; its prototype
    * says uint32 * all the same (include/3do/graphics.h:829), hence the
    * cast, here and nowhere else.
@@ -765,6 +933,161 @@ sys_set_colors(int32         index,
              ("sys_set_colors: SetScreenColors err=%ld",(long)err));
 
   return err;
+}
+
+/*
+ * The address of line y of a bitmap, as the SDK example computes it for
+ * the display list (vdlutil.c:174-183): the lines are stored in pairs,
+ * even and odd interleaved two bytes apart, a pair every width times
+ * four bytes.
+ */
+static uint32
+sys_vdl_line_addr(const Bitmap *bm,
+                  int32         y)
+{
+  return (uint32)bm->bm_Buffer
+       + ((uint32)(y / 2) * (uint32)bm->bm_Width * 4UL)
+       + ((uint32)(y & 1) * 2UL);
+}
+
+/*
+ * The list of count entries built into the static array from the
+ * tables and the lines, for a bitmap: entry k covers the lines from l0
+ * to the line before l1. The DMA word is vdlutil.c:27-57 -- the two
+ * address words loaded, the length, the line count, the relative link
+ * and the video DMA on every entry but the last; the display mode bit
+ * for a PAL raster (:32-33, the field at include/3do/hardware.h:22-47).
+ * The display control word on the first entry is the one the system's
+ * own list gives a screen, less the two averaging bits this program
+ * cuts on every screen at open (a pixel carries a colour number, and an
+ * average of two numbers is a colour of nothing); VDL_NOP on the others
+ * (vdlutil.c:190, :212-214). Then the colours, the background entry,
+ * and the two padding words as VDL_NOP (:192-201).
+ */
+static int32
+sys_vdl_build(const Bitmap *bm,
+              const uint32 *tables,
+              const uint8  *lines,
+              int32         count)
+{
+  uint32 *e;
+  int32 k;
+  int32 i;
+  int32 l0;
+  int32 l1;
+  uint32 mode;
+
+  /*
+   * The SDK's example sets the display mode bit on either PAL type
+   * (vdlutil.c:41-42, PAL_DISPLAY); the display is opened as PAL1 for
+   * both (sys_display_open), so the one compare covers them.
+   */
+  mode = (sys_display_used == DI_TYPE_PAL1) ? VDL_DISPMOD_384 : VDL_DISPMOD_320;
+
+  for(k = 0; k < count; k++)
+    {
+      e = sys_vdl_words + (k * SYS_VDL_WORDS);
+      l0 = (k == 0) ? 0 : (int32)lines[k];
+      l1 = (k + 1 < count) ? (int32)lines[k + 1] : bm->bm_Height;
+      if((l1 <= l0) || (l1 > bm->bm_Height))
+        return -1;
+
+      e[0] = VDL_LDCUR | VDL_LDPREV | mode
+           | ((uint32)SYS_VDL_DMA_WORDS << VDL_LEN_SHIFT)
+           | ((uint32)(l1 - l0) << VDL_LINE_SHIFT);
+      if(k + 1 < count)
+        e[0] |= VDL_RELSEL | VDL_ENVIDDMA;
+      e[1] = sys_vdl_line_addr(bm,l0);
+      e[2] = (l0 == 0) ? e[1] : sys_vdl_line_addr(bm,l0 - 1);
+      e[3] = (uint32)SYS_VDL_NEXT_BYTES;
+      e[4] = (k == 0)
+           ? (uint32)(DEFAULT_DISPCTRL & ~(VDL_HINTEN | VDL_VINTEN))
+           : (uint32)VDL_NOP;
+      for(i = 0; i < SYS_CLUT_ENTRIES; i++)
+        e[5 + i] = tables[(k * SYS_CLUT_ENTRIES) + i];
+      e[5 + SYS_CLUT_ENTRIES] = VDL_NOP;
+      e[6 + SYS_CLUT_ENTRIES] = VDL_NOP;
+    }
+
+  return 0;
+}
+
+Err
+sys_set_colors_lines(int32         index,
+                     const uint32 *tables,
+                     const uint8  *lines,
+                     int32         count)
+{
+  Item screen;
+  Item vdl;
+  Item old;
+
+  if((sys_ctx == NULL) || (index < 0) || (index >= (int32)SYS_NUM_SCREENS))
+    {
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+               ("sys_set_colors_lines: no such screen, or display not open"));
+      return -1;
+    }
+
+  if((tables == NULL) || (lines == NULL) || (count <= 0) || (count > SYS_VDL_ENTRIES))
+    {
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+               ("sys_set_colors_lines: refused count=%ld",(long)count));
+      return -1;
+    }
+
+  screen = sys_ctx->sc_ScreenItems[index];
+  if((screen == 0) || (sys_ctx->sc_Bitmaps[index] == NULL))
+    {
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+               ("sys_set_colors_lines: no screen item, display not open"));
+      return -1;
+    }
+
+  if(sys_vdl_build(sys_ctx->sc_Bitmaps[index],tables,lines,count) < 0)
+    {
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+               ("sys_set_colors_lines: lines not increasing inside the bitmap"));
+      return -1;
+    }
+
+  vdl = SubmitVDL((VDLEntry *)sys_vdl_words,count * SYS_VDL_WORDS,VDLTYPE_FULL);
+  if(vdl < 0)
+    {
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+               ("sys_set_colors_lines: SubmitVDL err=%ld",(long)vdl));
+      return (Err)vdl;
+    }
+
+  old = SetVDL(screen,vdl);
+  if(old < 0)
+    {
+      (void)DeleteVDL(vdl);
+      LOG_ONCE(LOG_CAT_SYS,LOG_LVL_ERR,
+               ("sys_set_colors_lines: SetVDL err=%ld",(long)old));
+      return (Err)old;
+    }
+
+  /*
+   * The list the screen carried: the system's the first time, kept to
+   * be put back; one of ours afterwards, kept to be destroyed at the
+   * next call on this screen -- it may still be under the beam now --
+   * while the one kept from the previous call is destroyed here.
+   */
+  sys_vdl_release_old(index);
+  if(sys_vdl_item[index] == 0)
+    sys_vdl_system[index] = old;
+  else
+    sys_vdl_old[index] = old;
+  sys_vdl_item[index] = vdl;
+
+  return 0;
+}
+
+int32
+sys_vdl_ok(void)
+{
+  return sys_vdl_accepted;
 }
 
 Err

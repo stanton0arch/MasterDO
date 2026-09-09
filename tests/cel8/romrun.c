@@ -93,6 +93,16 @@
 /* ---- the disc: one file, the ROM named on the command line ---- */
 
 static const char *rom_path = NULL;
+
+/* The first row of the picture just presented (list path only; -1 on the older path) that the video part draws
+   from a state other than its line's, or -1 when it draws every row
+   from its own: the fold of the bands past their cap (the last band's
+   first line), the fold of the palette past its cap (the last segment's
+   first line), a full journal (row 0). The rows from there on are
+   expected to differ from the older path's, and the comparison counts
+   them apart -- tolerated, never as a defect -- while the rows before
+   are held as strictly as any. */
+static long deg_from = -1;
 static long rom_size = 0;
 
 Err OpenBlockFile(char *name, BlockFilePtr bf)
@@ -202,6 +212,98 @@ void log_fatal(int32 cat, int32 code, const char *l1, const char *l2)
 
 static unsigned char pic[PIC_BYTES];
 
+/* ---- what the scenes of both paths drive the video part with ----
+ *
+ * Expectations held are counted against expectations made, and the
+ * first that failed is named; a write goes through the same port macro
+ * and the same control sequence the processor uses. */
+
+static unsigned long scene_want = 0, scene_ok = 0;
+
+static void expect(int held, const char *what)
+{
+  scene_want++;
+  if(held) scene_ok++;
+  else fprintf(stderr,"decor scene failed: %s\n",what);
+}
+
+/* One byte into the video memory through the port, at the address given:
+   any code but the colour memory's writes the video memory. */
+static void vram_write(uint32 addr, uint32 v)
+{
+  sms.vdp.code = 0;
+  sms.vdp.addr = addr & VDP_VRAM_MASK;
+  VDP_IO_DATA_WRITE(v);
+}
+
+/* One byte into the colour memory through the port, at the entry given. */
+static void cram_write(uint32 i, uint32 v)
+{
+  sms.vdp.code = VDP_CODE_CRAM_WRITE;
+  sms.vdp.addr = i & VDP_CRAM_MASK;
+  VDP_IO_DATA_WRITE(v);
+}
+
+/* One register, through the control port as the processor sets it: the
+   value, then the register number under code 2 (docs/sms_gg/SMSOfficialDocs.md
+   register write; vdp_io_ctrl_write). */
+static void reg_write(uint32 n, uint32 v)
+{
+  vdp_io_ctrl_write((uint8)v);
+  vdp_io_ctrl_write((uint8)(0x80 | (n & 0xF)));
+}
+
+static uint32 nt_base(void) { return ((uint32)sms.vdp.reg[2] & 0x0EUL) << 10; }
+
+/* One pixel of one tile as a name table word draws it, from the planes
+   alone (docs/sms_gg/SMSOfficialDocs.md:321-334, 474-481): the render's
+   own picture owes this nothing. */
+static unsigned tile_pixel(uint32 word, int r, int c)
+{
+  const uint8 *row;
+  unsigned idx = 0;
+  int k;
+  if(word & 0x400) r = 7 - r;
+  if(word & 0x200) c = 7 - c;
+  row = sms.vdp.vram + (word & 0x1FF) * 32 + r * 4;
+  for(k = 0; k < 4; k++) idx |= ((row[k] >> (7 - c)) & 1) << k;
+  if(word & 0x800) idx += 16;
+  return idx;
+}
+
+/* The writes a played picture makes, each in the quota of its line:
+   a register (reg 0 to 10), a video memory byte (reg -1) or a colour
+   byte (reg -2). Emptied by the play. */
+typedef struct { long line; int reg; uint32 addr, value; } play_t;
+static play_t sched[16];
+static int sched_n = 0;
+
+static void play_at(long line, int reg, uint32 addr, uint32 value)
+{
+  if(sched_n >= (int)(sizeof sched / sizeof sched[0]))
+    {
+      expect(0,"play_at: the schedule of writes is full, a scene lost one");
+      return;
+    }
+  sched[sched_n].line = line;
+  sched[sched_n].reg = reg;
+  sched[sched_n].addr = addr;
+  sched[sched_n].value = value;
+  sched_n++;
+}
+
+static void play_writes(long y)
+{
+  int i;
+  for(i = 0; i < sched_n; i++)
+    {
+      if(sched[i].line != y) continue;
+      if(sched[i].reg >= 0) reg_write((uint32)sched[i].reg,sched[i].value);
+      else if(sched[i].reg == -1) vram_write(sched[i].addr,sched[i].value);
+      else cram_write(sched[i].addr,sched[i].value);
+    }
+}
+
 #if !SMS_DECOR_CEL
 /* The older path: the one buffer is the whole picture, background and
    sprites, read off the cel's source pointer at the end of the frame. */
@@ -282,13 +384,22 @@ static void window_fault(const char *what, long frame, long band, long n)
           what,frame,band,n);
 }
 
-/* One line of the picture counted, the display bit read first: what the
-   backdrop blocks of the band are held against. */
+/* The colour memory as each line of the picture was counted: what the
+   palette segments of the presentation are held against, line by line
+   (palette_lines below). */
+static unsigned char cram_line[PIC_H][VDP_CRAM_SIZE];
+
+/* One line of the picture counted, the display bit and the colour
+   memory read first: what the backdrop blocks of the band and the
+   palette segments are held against. */
 static void line_step(void)
 {
   uint32 y = sms.vdp.vcount;
   if(y < (uint32)PIC_H)
-    off_line[y] = (unsigned char)(((sms.vdp.reg[1] & 0x40U) == 0U) ? 1 : 0);
+    {
+      off_line[y] = (unsigned char)(((sms.vdp.reg[1] & 0x40U) == 0U) ? 1 : 0);
+      memcpy(cram_line[y],sms.vdp.cram,VDP_CRAM_SIZE);
+    }
   vdp_line();
 }
 
@@ -435,8 +546,12 @@ static int cel(const CCB *c, long frame, long band, long n,
 
   if(c->ccb_Flags & CCB_LDPLUT) *loaded = c->ccb_PLUTPtr;
   off = (long)(src - buf);
-  x = (long)(c->ccb_XPos / 65536L);
-  y = (long)(c->ccb_YPos / 65536L);
+  /* The positions are relative to the clip rectangle and shifted by the
+     profile's offset (zero for the Master System, the window's for the
+     Game Gear): the shift is taken off, and the picture is held in its
+     own coordinates on both profiles. */
+  x = (long)(c->ccb_XPos / 65536L) - (long)sms.vdp.pic_x;
+  y = (long)(c->ccb_YPos / 65536L) - (long)sms.vdp.pic_y;
   hs = (long)(c->ccb_HDX >> 20);
   vs = (long)(c->ccb_VDY >> 16);
 
@@ -648,6 +763,81 @@ static void compose_bands(long frame, int32 bands)
   if((unsigned long)small > cel_max) cel_max = (unsigned long)small;
 }
 
+/* ---- the palette, line by line ----
+ *
+ * The screen table a line is shown through: the table of the segment
+ * the line falls in when the picture has segments (vdp_clut_segments,
+ * the first segment from line 0, each next one from the bitmap line it
+ * names less the picture's origin), the one table of the picture
+ * otherwise. Held against the conversion of the colour memory as it
+ * stood when the line was counted, computed here from that copy alone.
+ * Returns how many of the 192 lines hold; the count of every picture
+ * played is the figure the script demands. */
+
+static unsigned long pal_lines_ok = 0, pal_lines_seen = 0;
+
+static void clut_expected(const unsigned char *cram, unsigned long *want)
+{
+  static const unsigned long level[4] = { 0, 85, 170, 255 };
+  unsigned long i, c, rgb;
+  for(i = 0; i < VDP_CRAM_SIZE; i++)
+    {
+      c = cram[i] & 0x3FUL;
+      want[i] = (i << 24) | (level[c & 3] << 16) | (level[(c >> 2) & 3] << 8)
+              | level[(c >> 4) & 3];
+    }
+  c = cram[0] & 0x3FUL;
+  rgb = (level[c & 3] << 16) | (level[(c >> 2) & 3] << 8) | level[(c >> 4) & 3];
+  want[VDP_CRAM_SIZE] = 0xE0000000UL | rgb;
+}
+
+static unsigned long palette_lines(void)
+{
+  const uint32 *tables;
+  const uint8 *lines;
+  const uint32 *table;
+  unsigned long want[VDP_CLUT_ENTRIES];
+  unsigned long ok = 0, k, i, seg;
+  uint32 n;
+  long y;
+
+  n = vdp_clut_segments(&tables,&lines);
+  for(y = 0; y < PIC_H; y++)
+    {
+      if(n == 0)
+        table = vdp_clut();
+      else
+        {
+          seg = 0;
+          for(k = 1; k < n; k++)
+            if((long)lines[k] - (long)sms.vdp.view_y <= y) seg = k;
+          table = tables + seg * VDP_CLUT_ENTRIES;
+        }
+      clut_expected(cram_line[y],want);
+      for(i = 0; i < VDP_CLUT_ENTRIES; i++)
+        if((unsigned long)table[i] != want[i]) break;
+      if(i == VDP_CLUT_ENTRIES) ok++;
+    }
+  return ok;
+}
+
+/* The rebuild signal the frame loop rearms its table countdown on, held
+   against what this file saw: a colour byte written since the last
+   take, or a segment count other than the previous picture's. Counted
+   on every picture presented. */
+static unsigned long take_ok = 0, take_frames = 0, cram_w_seen = 0, seg_prev = 0;
+
+static void take_check(void)
+{
+  unsigned long written = (sms.vdp.cnt_cram_w != cram_w_seen) ? 1UL : 0UL;
+  unsigned long segs = sms.vdp.pal_count;
+  int changed = (written != 0UL) || (segs != seg_prev);
+  cram_w_seen = sms.vdp.cnt_cram_w;
+  seg_prev = segs;
+  if((vdp_clut_take() != 0) == changed) take_ok++;
+  take_frames++;
+}
+
 static void present(long frame)
 {
   int32 bands;
@@ -658,9 +848,33 @@ static void present(long frame)
   memset(pic,0xFF,sizeof pic);
   memset(cover,0,sizeof cover);
 
-  journal_total += sms.vdp.journal_count;
-  bands = vdp_list_begin();
-  bands_total += (unsigned long)bands;
+  /* What the picture folded, read before the take and the head of the
+     list reset it: the row the tolerance starts from. */
+  {
+    unsigned long capped_before = sms.vdp.cnt_bands_capped;
+
+    deg_from = -1;
+    if(sms.vdp.journal_overflow != 0UL)
+      deg_from = 0;
+    else if(sms.vdp.pal_capped != 0UL)
+      deg_from = (long)sms.vdp.pal_line[VDP_PAL_SEGMENTS - 1UL];
+
+    /* The palette closed first, as src/main.c closes it at the
+       presentation: the table, or the tables of the segments, are what
+       the picture below is shown through. */
+    take_check();
+    pal_lines_ok += palette_lines();
+    pal_lines_seen += (unsigned long)PIC_H;
+
+    journal_total += sms.vdp.journal_count;
+    bands = vdp_list_begin();
+    bands_total += (unsigned long)bands;
+    if(sms.vdp.cnt_bands_capped != capped_before)
+      {
+        long fold = (long)sms.vdp.band_line[bands - 1];
+        if(deg_from < 0 || fold < deg_from) deg_from = fold;
+      }
+  }
   compose_bands(frame,bands);
   vdp_list_end();
 
@@ -677,55 +891,11 @@ static void present(long frame)
  * empty. Expectations held are counted against expectations made, and the
  * first that failed is named. ---- */
 
-static unsigned long scene_want = 0, scene_ok = 0;
-
-static void expect(int held, const char *what)
-{
-  scene_want++;
-  if(held) scene_ok++;
-  else fprintf(stderr,"decor scene failed: %s\n",what);
-}
-
-/* One byte into the video memory through the port, at the address given:
-   any code but the colour memory's writes the video memory. */
-static void vram_write(uint32 addr, uint32 v)
-{
-  sms.vdp.code = 0;
-  sms.vdp.addr = addr & VDP_VRAM_MASK;
-  VDP_IO_DATA_WRITE(v);
-}
-
-/* One register, through the control port as the processor sets it: the
-   value, then the register number under code 2 (docs/sms_gg/SMSOfficialDocs.md
-   register write; vdp_io_ctrl_write). */
-static void reg_write(uint32 n, uint32 v)
-{
-  vdp_io_ctrl_write((uint8)v);
-  vdp_io_ctrl_write((uint8)(0x80 | (n & 0xF)));
-}
-
-static uint32 nt_base(void) { return ((uint32)sms.vdp.reg[2] & 0x0EUL) << 10; }
 static uint32 nt_word(uint32 t) { return read16_le(sms.vdp.vram + nt_base() + t * 2); }
 static void nt_write(uint32 t, uint32 word)
 {
   vram_write(nt_base() + t * 2,word & 0xFF);
   vram_write(nt_base() + t * 2 + 1,word >> 8);
-}
-
-/* One pixel of one tile as a name table word draws it, from the planes
-   alone (docs/sms_gg/SMSOfficialDocs.md:321-334, 474-481): the render's
-   own picture owes this nothing. */
-static unsigned tile_pixel(uint32 word, int r, int c)
-{
-  const uint8 *row;
-  unsigned idx = 0;
-  int k;
-  if(word & 0x400) r = 7 - r;
-  if(word & 0x200) c = 7 - c;
-  row = sms.vdp.vram + (word & 0x1FF) * 32 + r * 4;
-  for(k = 0; k < 4; k++) idx |= ((row[k] >> (7 - c)) & 1) << k;
-  if(word & 0x800) idx += 16;
-  return idx;
 }
 
 /* A pattern the picture neither shows nor watches, from the one given on:
@@ -787,11 +957,9 @@ static void sat_write(uint32 i, uint32 y, uint32 x, uint32 pattern)
 }
 
 /* The picture played from line 0 to line 191 as the frame loop plays it,
-   one write landing in the quota of the line given (none when the line
-   is past the picture), then presented into pic. Returns the band count. */
-static uint32 play_addr = 0, play_value = 0;
-static long play_line = 999, play_reg = -1;
-
+   the scheduled writes landing in the quota of their line (play_at),
+   the palette closed, then presented into pic, the list left open for
+   the scene to read its bands. Returns the band count. */
 static int32 play_and_present(void)
 {
   int32 bands;
@@ -799,18 +967,14 @@ static int32 play_and_present(void)
   sms.vdp.vcount = 0;
   for(y = 0; y < PIC_H; y++)
     {
-      if(y == play_line)
-        {
-          if(play_reg >= 0) reg_write((uint32)play_reg,play_value);
-          else vram_write(play_addr,play_value);
-        }
+      play_writes(y);
       line_step();
     }
+  sched_n = 0;
+  take_check();
   bands = vdp_list_begin();
   memset(pic,0xFF,sizeof pic);
   compose_bands(-2,bands);
-  play_line = 999;
-  play_reg = -1;
   return bands;
 }
 
@@ -909,6 +1073,27 @@ static void sprite_scenes(uint32 pa)
   vdp_list_end();
   flush();
 
+  /* The table ended on line 100 while nine sprites stand on lines 10 to
+     17: this picture keeps their admission and their overflow, rightly,
+     since the write came after those lines; the NEXT picture, with
+     nothing written, must read the ended table on every line -- the
+     per-line table is rebuilt whole at its line 0. */
+  for(i = 0; i < 9; i++) sat_write(i,9,8 + 16 * i,ps);
+  sat_write(9,0xD0,0,0);
+  bands = play_and_present();
+  vdp_list_end();
+  before_ovf = sms.vdp.cnt_spr_ovf;
+  play_at(100,-1,0x3F00,0xD0);
+  bands = play_and_present();
+  vdp_list_end();
+  expect(sms.vdp.cnt_spr_ovf == before_ovf + 8,"table ended on line 100: this picture keeps the overflow of lines 10 to 17");
+  before_ovf = sms.vdp.cnt_spr_ovf;
+  bands = play_and_present();
+  vdp_list_end();
+  expect(sms.vdp.cnt_spr_ovf == before_ovf && sms.vdp.spr_n[10] == 0,
+         "table ended on line 100: the next picture reads the ended table on its first lines");
+  flush();
+
   /* Two sprites sharing a column: entries 0 and 1 both at column 50 on
      lines 100 to 107, index 2 at their first column -- eight lines of
      collision, and the first of the table wins the pixel. */
@@ -1005,9 +1190,7 @@ static void sprite_scenes(uint32 pa)
   sat_write(0,65,50,ps);
   sat_write(1,0xD0,0,0);
   flush();
-  play_line = 70;
-  play_addr = ps * 32 + 4 * 4;
-  play_value = 0x80;
+  play_at(70,-1,ps * 32 + 4 * 4,0x80);
   bands = play_and_present();
   expect(bands == 2 && sms.vdp.band_line[1] == 70,"sprite pattern rewritten on line 70: journaled, a band from line 70");
   /* The bands asked for again from the head: the journal undone, then
@@ -1036,9 +1219,7 @@ static void sprite_scenes(uint32 pa)
   sat_write(0,39,60,ps);
   sat_write(1,0xD0,0,0);
   flush();
-  play_line = 50;
-  play_addr = 0x3F00;
-  play_value = 54;
+  play_at(50,-1,0x3F00,54);
   bands = play_and_present();
   expect(bands == 2 && sms.vdp.band_line[1] == 50,"sprite table written on line 50: journaled, a band from line 50");
   expect(sms.vdp.spr_dirty == 0 && (sms.vdp.spr_adm[55][0] & 1UL) != 0UL && (sms.vdp.spr_adm[40][0] & 1UL) != 0UL
@@ -1129,9 +1310,10 @@ static void sprite_scenes(uint32 pa)
   /* Register 5 written on line 100 to another table, at $3E00 -- the
      last rows of the name table, unseen at this scroll: two sprites of
      the first table share a column on lines 40 to 47, the second table
-     holds one sprite on lines 100 to 107. Counted as written mid-frame;
-     the lines before 100 keep their flags and their admission, the list
-     takes the last table: one sprite block, at line 100. */
+     holds one sprite on lines 100 to 107. Counted and journaled: the
+     lines before 100 keep their flags and their admission, and the
+     picture is two bands -- band 0 draws the two sprites of the first
+     table at line 40, band 1 the second table's sprite at line 100. */
   for(i = 0; i < 4; i++) saved[i] = sms.vdp.vram[0x3E00 + ((i < 2) ? i : 0x7E + i)];
   sms.vdp.vcount = 200;
   vram_write(0x3E00,99);
@@ -1144,20 +1326,29 @@ static void sprite_scenes(uint32 pa)
   flush();
   before = sms.vdp.cnt_reg_mid;
   before_col = sms.vdp.cnt_spr_col;
-  play_line = 100;
-  play_reg = 5;
-  play_value = 0xFD;
+  play_at(100,5,0,0xFD);
   bands = play_and_present();
   expect(sms.vdp.cnt_reg_mid == before + 1,"register 5 written on line 100: counted as written mid-frame");
   expect(sms.vdp.cnt_spr_col == before_col + 8 && (sms.vdp.spr_adm[40][0] & 3UL) == 3UL
          && (sms.vdp.spr_adm[100][0] & 1UL) != 0UL && (sms.vdp.spr_adm[100][0] & 2UL) == 0UL,
          "register 5 written on line 100: the lines before it keep their collision and their admission");
+  expect(bands == 2 && sms.vdp.band_line[1] == 100,"register 5 written on line 100: journaled, a band from line 100");
+  /* The bands asked for again from the head: the journal undone, the
+     register with it, then replayed band by band. */
+  vdp_list_begin();
   c = (const CCB *)vdp_list_band(0);
   s = nth_kind(c,K_SPRITE,0);
-  expect(bands == 1 && s != NULL && cel_y(s) == 100 && cel_x(s) == 120 && nth_kind(c,K_SPRITE,1) == NULL,
-         "register 5 written on line 100: the list takes the last table, one sprite at line 100");
-  expect(pic[100 * PIC_W + 120] == 18 && pic[40 * PIC_W + 60] != 18,
-         "register 5 written on line 100: the last table's sprite shows, the first table's does not");
+  s2 = nth_kind(c,K_SPRITE,1);
+  expect(s != NULL && s2 != NULL && cel_y(s) == 40 && cel_x(s) == 60 && cel_y(s2) == 40
+         && nth_kind(c,K_SPRITE,2) == NULL && sms.vdp.sat_base == 0x3F00UL,
+         "register 5 written on line 100: band 0 draws the first table's two sprites at line 40");
+  c = (const CCB *)vdp_list_band(1);
+  s = nth_kind(c,K_SPRITE,0);
+  expect(s != NULL && cel_y(s) == 100 && cel_x(s) == 120 && nth_kind(c,K_SPRITE,1) == NULL
+         && sms.vdp.sat_base == 0x3E00UL,
+         "register 5 written on line 100: band 1 draws the second table's sprite at line 100");
+  expect(pic[100 * PIC_W + 120] == 18 && pic[40 * PIC_W + 60] == 18,
+         "register 5 written on line 100: both tables' sprites show, each on its lines");
   vdp_list_end();
   sms.vdp.vcount = 200;
   reg_write(5,0xFF);
@@ -1297,9 +1488,7 @@ static void sprite_scenes(uint32 pa)
   reg_write(7,(reg7 & 0xF0UL) | ((reg7 + 5UL) & 0x0FUL));
   reg_write(0,(uint32)sms.vdp.reg[0] | 0x20UL);
   flush();
-  play_line = 180;
-  play_reg = 1;
-  play_value = (uint32)sms.vdp.reg[1] & ~0x40UL;
+  play_at(180,1,0,(uint32)sms.vdp.reg[1] & ~0x40UL);
   bands = play_and_present();
   expect(pic[20 * PIC_W + 3] == (unsigned char)(16 + ((reg7 + 5) & 15))
          && pic[185 * PIC_W + 128] == (unsigned char)(16 + ((reg7 + 5) & 15)),
@@ -1400,12 +1589,275 @@ static void sprite_scenes(uint32 pa)
   flush();
 }
 
+/* ---- the registers written while the picture is being scanned, one
+ * at a time: each is journaled with its tag on its line, opens a band
+ * there, is undone at the head of the presentation and put back by the
+ * band, and its effect on the list follows from that line. The
+ * registers that touch nothing the list reads are journaled not at
+ * all. ---- */
+
+/* The oracle row of the raster scenes, defined with them below. */
+static int raster_row(long y, long hs, long vs, uint32 base, int masked);
+
+/* One register written on line v while a picture plays: the one entry
+   of the journal, the band from v, the undo and the replay -- on the
+   register's journaled bits (mask). Leaves the list open on band 1,
+   pic composed. */
+static void reg_mid(uint32 n, uint32 mask, long v, uint32 value, const char *what)
+{
+  uint32 old = sms.vdp.reg[n];
+  char msg[200];
+  int32 bands;
+
+  play_at(v,(int)n,0,value);
+  bands = play_and_present();
+  sprintf(msg,"%s: one journal entry with the register tag on line %ld",what,v);
+  expect(sms.vdp.journal_count == 1 && (long)sms.vdp.journal[0].line == v
+         && sms.vdp.journal[0].addr == (VDP_JOURNAL_REG | n)
+         && sms.vdp.journal[0].old == old && sms.vdp.journal[0].val == value,msg);
+  sprintf(msg,"%s: a band from line %ld",what,v);
+  expect(bands == 2 && (long)sms.vdp.band_line[1] == v,msg);
+  vdp_list_begin();
+  sprintf(msg,"%s: undone at the head of the presentation",what);
+  expect(((uint32)sms.vdp.reg[n] & mask) == (old & mask),msg);
+  vdp_list_band(0);
+  sprintf(msg,"%s: the old value stands for band 0",what);
+  expect(((uint32)sms.vdp.reg[n] & mask) == (old & mask),msg);
+  vdp_list_band(1);
+  sprintf(msg,"%s: put back by band 1",what);
+  expect(((uint32)sms.vdp.reg[n] & mask) == (value & mask),msg);
+}
+
+/* The first window of a band's chain held: its x, width, height and
+   source offset in the picture. */
+static int first_window_is(const CCB *c, long x, long w, long h, long off)
+{
+  return c != NULL && win_x(c) == x && c->ccb_Width == w && c->ccb_Height == h && win_off(c) == off;
+}
+
+static void register_scenes(void)
+{
+  uint32 r0, r1, r7, r10, ps, pe, p6, i, base;
+  const CCB *c;
+  const CCB *s;
+  long y, ok;
+  int32 bands;
+
+  /* A known geometry: no lock, no mask, no shift, small sprites, the
+     display on, the tables where power-on leaves them, no scroll, the
+     sprite table ended. */
+  sms.vdp.latch = 0;
+  sms.vdp.vcount = 200;
+  r0 = (uint32)sms.vdp.reg[0] & ~0xE8UL;
+  r1 = ((uint32)sms.vdp.reg[1] | 0x40UL) & ~0x03UL;
+  r7 = sms.vdp.reg[7];
+  r10 = sms.vdp.reg[10];
+  reg_write(0,r0);
+  reg_write(1,r1);
+  reg_write(5,0xFF);
+  reg_write(6,0xFB);
+  reg_write(8,0);
+  reg_write(9,0);
+  sms.vdp.hscroll = 0;
+  sms.vdp.vscroll = 0;
+  for(i = 0; i < 64; i++) sat_write(i,0xD0,0,0);
+  flush();
+  base = nt_base();
+
+  /* Patterns of this file's own: ps draws index 2 down column 0; the
+     even pair pe (2) and pe + 1 (3) for the tall sprites; p6 (2) with
+     p6 + 256 (4) for the pattern base. */
+  ps = free_pattern(0);
+  for(pe = (ps == 0xFFFFFFFFUL) ? 256 : ((ps + 2) & ~1UL); pe < 256; pe += 2)
+    if(sms.vdp.refs[pe] == 0 && sms.vdp.watch[pe] == 0
+       && sms.vdp.refs[pe + 1] == 0 && sms.vdp.watch[pe + 1] == 0) break;
+  for(p6 = 0; p6 < 256; p6++)
+    if(p6 != ps && p6 != pe && p6 != pe + 1
+       && sms.vdp.refs[p6] == 0 && sms.vdp.watch[p6] == 0
+       && sms.vdp.refs[p6 + 256] == 0 && sms.vdp.watch[p6 + 256] == 0) break;
+  expect(ps < 256 && pe < 256 && p6 < 256,"free patterns exist for the register scenes");
+  if(ps >= 256 || pe >= 256 || p6 >= 256) return;
+  sms.vdp.vcount = 200;
+  for(i = 0; i < 32; i++)
+    {
+      vram_write(ps * 32 + i,((i & 3) == 1) ? 0x80 : 0);
+      vram_write(pe * 32 + i,((i & 3) == 1) ? 0x80 : 0);
+      vram_write((pe + 1) * 32 + i,((i & 3) <= 1) ? 0x80 : 0);
+      vram_write(p6 * 32 + i,((i & 3) == 1) ? 0x80 : 0);
+      vram_write((p6 + 256) * 32 + i,((i & 3) == 2) ? 0x80 : 0);
+    }
+  flush();
+
+  /* Register 0 bit 7 on line 100: the right columns locked from line
+     100 on -- band 1 starts with their window, columns 192 to 255 from
+     picture column 192, row 100; band 0 is one window of the width. No
+     scroll, so every row still shows the plain picture. */
+  reg_mid(0,0xE8,100,r0 | 0x80UL,"register 0 bit 7 on line 100");
+  vdp_list_begin();
+  c = (const CCB *)vdp_list_band(0);
+  expect(first_window_is(c,0,256,100,0),"register 0 bit 7 on line 100: band 0 is one window of the width, 100 lines");
+  c = (const CCB *)vdp_list_band(1);
+  expect(first_window_is(c,192,64,92,100 * PIC_W + 192),"register 0 bit 7 on line 100: band 1 starts with the locked columns' window");
+  for(y = 0, ok = 0; y < PIC_H; y++) ok += raster_row(y,0,0,base,0);
+  expect(ok == PIC_H,"register 0 bit 7 on line 100: every row shows the picture (no scroll)");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  reg_write(0,r0);
+  flush();
+
+  /* Register 0 bit 6 on line 8 under a scroll of 5: rows 8 to 15 take
+     no horizontal scroll from line 8 on -- band 1 starts with one
+     window of the width, 8 lines, from picture row 8 -- and rows 0 to
+     7 and 16 on show the scroll. */
+  sms.vdp.vcount = 200;
+  reg_write(8,5);
+  sms.vdp.hscroll = 5;
+  flush();
+  reg_mid(0,0xE8,8,r0 | 0x40UL,"register 0 bit 6 on line 8");
+  vdp_list_begin();
+  vdp_list_band(0);
+  c = (const CCB *)vdp_list_band(1);
+  expect(first_window_is(c,0,256,8,8 * PIC_W),"register 0 bit 6 on line 8: band 1 starts with the unscrolled rows 8 to 15");
+  for(y = 0, ok = 0; y < PIC_H; y++)
+    ok += raster_row(y,(y >= 8 && y < 16) ? 0 : 5,0,base,0);
+  expect(ok == PIC_H,"register 0 bit 6 on line 8: rows 8 to 15 unscrolled, every other row scrolled by 5");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  reg_write(0,r0);
+  reg_write(8,0);
+  sms.vdp.hscroll = 0;
+  flush();
+
+  /* Register 0 bit 3 on line 60: two sprites at column 100, lines 40 to
+     47 and 80 to 87; the second is shifted eight to the left. */
+  sat_write(0,39,100,ps);
+  sat_write(1,79,100,ps);
+  sat_write(2,0xD0,0,0);
+  flush();
+  reg_mid(0,0xE8,60,r0 | 0x08UL,"register 0 bit 3 on line 60");
+  expect(pic[40 * PIC_W + 100] == 18 && pic[80 * PIC_W + 92] == 18 && pic[80 * PIC_W + 100] != 18,
+         "register 0 bit 3 on line 60: the sprite above stands at 100, the sprite below at 92");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  reg_write(0,r0);
+  flush();
+
+  /* Register 1 bit 1 on line 60: the sprites named by pe + 1 are 8 by 8
+     above -- the odd pattern, 8 rows -- and 8 by 16 below -- the pair
+     from the even pattern, 16 rows: the per-line admission of lines 80
+     to 95 follows the size from line 60, the block is 16 rows. */
+  sat_write(0,39,100,pe + 1);
+  sat_write(1,79,100,pe + 1);
+  sat_write(2,0xD0,0,0);
+  flush();
+  reg_mid(1,0x03,60,r1 | 0x02UL,"register 1 bit 1 on line 60");
+  expect(pic[40 * PIC_W + 100] == 19 && pic[47 * PIC_W + 100] == 19 && pic[48 * PIC_W + 100] != 19,
+         "register 1 bit 1 on line 60: the sprite above is 8 rows of the odd pattern");
+  expect(pic[80 * PIC_W + 100] == 18 && pic[87 * PIC_W + 100] == 18 && pic[88 * PIC_W + 100] == 19
+         && pic[95 * PIC_W + 100] == 19 && pic[96 * PIC_W + 100] != 19,
+         "register 1 bit 1 on line 60: the sprite below is the pair, 16 rows");
+  vdp_list_begin();
+  c = (const CCB *)vdp_list_band(0);
+  s = nth_kind(c,K_SPRITE,0);
+  expect(s != NULL && s->ccb_Height == 8 && cel_y(s) == 40,"register 1 bit 1 on line 60: band 0 draws an 8 row sprite block");
+  c = (const CCB *)vdp_list_band(1);
+  s = nth_kind(c,K_SPRITE,0);
+  expect(s != NULL && s->ccb_Height == 16 && cel_y(s) == 80,"register 1 bit 1 on line 60: band 1 draws a 16 row sprite block");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  reg_write(1,r1);
+  flush();
+
+  /* Register 1 bit 0 on line 60: the sprite above 1:1, the sprite below
+     doubled -- two pixels wide, sixteen lines, HDX at two. */
+  sat_write(0,39,100,ps);
+  sat_write(1,79,100,ps);
+  sat_write(2,0xD0,0,0);
+  flush();
+  reg_mid(1,0x03,60,r1 | 0x01UL,"register 1 bit 0 on line 60");
+  expect(pic[40 * PIC_W + 100] == 18 && pic[40 * PIC_W + 101] != 18 && pic[47 * PIC_W + 100] == 18
+         && pic[48 * PIC_W + 100] != 18,
+         "register 1 bit 0 on line 60: the sprite above is drawn 1:1");
+  expect(pic[80 * PIC_W + 100] == 18 && pic[80 * PIC_W + 101] == 18 && pic[95 * PIC_W + 101] == 18
+         && pic[96 * PIC_W + 100] != 18,
+         "register 1 bit 0 on line 60: the sprite below is doubled, two wide and sixteen lines");
+  vdp_list_begin();
+  vdp_list_band(0);
+  c = (const CCB *)vdp_list_band(1);
+  s = nth_kind(c,K_SPRITE,0);
+  expect(s != NULL && s->ccb_HDX == (2L << 20) && s->ccb_VDY == (2L << 16),"register 1 bit 0 on line 60: band 1's sprite block steps by two");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  reg_write(1,r1);
+  flush();
+
+  /* Register 6 on line 60: the sprites named by p6 draw the first bank's
+     pattern above and the second bank's, p6 + 256, below. */
+  sat_write(0,39,100,p6);
+  sat_write(1,79,100,p6);
+  sat_write(2,0xD0,0,0);
+  flush();
+  reg_mid(6,0xFF,60,0xFF,"register 6 on line 60");
+  expect(pic[40 * PIC_W + 100] == 18 && pic[80 * PIC_W + 100] == 20,
+         "register 6 on line 60: the sprite above from the first bank, the sprite below from the second");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  reg_write(6,0xFB);
+  sat_write(0,0xD0,0,0);
+  flush();
+
+  /* Register 7 on line 100 with the left column masked: the column
+     shows the old backdrop above line 100 and the new one from it, the
+     backdrop column refilled at the undo and at the replay. */
+  sms.vdp.vcount = 200;
+  reg_write(0,r0 | 0x20UL);
+  flush();
+  reg_mid(7,0x0F,100,(r7 & 0xF0UL) | ((r7 + 3UL) & 0x0FUL),"register 7 on line 100");
+  expect(pic[50 * PIC_W + 3] == (unsigned char)(16 + (r7 & 15)) && pic[150 * PIC_W + 3] == (unsigned char)(16 + ((r7 + 3) & 15)),
+         "register 7 on line 100: the masked column shows the old backdrop above, the new one from line 100");
+  expect(sms.vdp.column[0] == (uint8)(16 + ((r7 + 3) & 15)),"register 7 on line 100: the column holds the new backdrop after band 1");
+  vdp_list_begin();
+  vdp_list_band(0);
+  expect(sms.vdp.column[0] == (uint8)(16 + (r7 & 15)),"register 7 on line 100: the column holds the old backdrop for band 0");
+  vdp_list_band(1);
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  reg_write(7,r7);
+  reg_write(0,r0);
+  flush();
+
+  /* Registers 9 and 10, register 0 bit 4, register 1 bits 5 and 6,
+     written mid-picture: nothing journaled, one band. */
+  play_at(50,9,0,7);
+  play_at(60,10,0,0x10);
+  play_at(70,0,0,r0 ^ 0x10UL);
+  play_at(80,1,0,r1 ^ 0x20UL);
+  play_at(90,1,0,(r1 ^ 0x20UL) & ~0x40UL);
+  bands = play_and_present();
+  expect(sms.vdp.journal_count == 0 && bands == 1,
+         "registers 9, 10, 0 bit 4, 1 bits 5 and 6 written mid-picture: nothing journaled, one band");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  reg_write(9,0);
+  sms.vdp.vscroll = 0;
+  reg_write(10,r10);
+  reg_write(0,r0);
+  reg_write(1,r1);
+  flush();
+}
+
 static void scenes(void)
 {
-  uint32 nt, addr, old, p, q, t, i, before, reg2, pa, pb;
+  uint32 nt, addr, old, p, q, t, i, before, before_deg, reg2, pa, pb;
   int32 bands;
   const CCB *c;
   long n;
+
+  /* The Master System profile, whatever cartridge was played: the
+     scenes read the positions of the blocks raw, in the picture's own
+     coordinates, and the Game Gear scene sets its profile itself. */
+  sms.cart.system = SYS_SMS;
+  vdp_view_fix();
 
   /* A known geometry: no lock, no scroll, no masked column, the table
      where register 2 left it, no sprite -- the ROM's attribute table
@@ -1572,6 +2024,7 @@ static void scenes(void)
     }
   flush();
   before = sms.vdp.cnt_bands_capped;
+  before_deg = sms.vdp.cnt_degraded;
   for(i = 0; i < 9; i++)
     {
       t = (i * 2) * 32 + 3;
@@ -1582,6 +2035,7 @@ static void scenes(void)
   bands = vdp_list_begin();
   expect(bands == 8 && sms.vdp.band_line[7] == 70,"nine distinct lines: eight bands, the last from line 70");
   expect(sms.vdp.cnt_bands_capped == before + 1,"nine distinct lines: the cap counted once");
+  expect(sms.vdp.cnt_degraded == before_deg + 1,"nine distinct lines: the picture counted degraded once");
   memset(pic,0xFF,sizeof pic);
   compose_bands(-1,bands);
   expect(pic[0 * PIC_W + 24] == 1,"band 0 shows tile row 0 as it stood before its write on line 10");
@@ -1730,6 +2184,7 @@ static void scenes(void)
      played line by line as the frame loop plays it, so that the per-line
      table, the flags and the journal are exercised as on the console. ---- */
   sprite_scenes(pa);
+  register_scenes();
 }
 #endif /* SMS_DECOR_CEL */
 
@@ -1748,6 +2203,408 @@ static unsigned long digest(const unsigned char *p, unsigned long n)
     }
   return h;
 }
+
+/* ---- the raster scenes: a register written while the picture is being
+ * scanned, on BOTH paths.
+ *
+ * The older path renders each line with the registers as they stand at
+ * the end of its quota, the horizontal scroll one line late (the latch,
+ * docs/sms_gg/GGOfficialDocs.md:1438); the list path journals the write
+ * and cuts a band. Each scene plays one picture with the writes
+ * scheduled on their lines, then holds every row against an ORACLE of
+ * this file's own -- the background composed from the name table and
+ * the planes alone, under the scroll and the mask each line must show
+ * -- and digests the whole picture, so that the script can hold the two
+ * paths' pictures against each other as well. No sprite (the table
+ * ends on its first entry), no lock, the display on. ---- */
+
+static unsigned long raster_ok = 0, raster_seen = 0, raster_fnv = 2166136261UL;
+
+/* The picture played with the scheduled writes and read into pic: the
+   list path presents it (and leaves the list open), the older path reads
+   its buffer. */
+static void raster_play(void)
+{
+#if SMS_DECOR_CEL
+  play_and_present();
+#else
+  long y;
+  sms.vdp.vcount = 0;
+  for(y = 0; y < PIC_H; y++)
+    {
+      play_writes(y);
+      line_step();
+    }
+  sched_n = 0;
+  take();
+#endif
+}
+
+static void raster_done(void)
+{
+#if SMS_DECOR_CEL
+  vdp_list_end();
+  flush();
+#else
+  sms.vdp.vcount = 200;
+#endif
+}
+
+/* The row y of the picture as the documentation says it shows: screen
+   column x shows picture column (x - hs) & 255 of picture row y + vs
+   (docs/sms_gg/SMSOfficialDocs.md:870-895), from the name table at base;
+   the first eight columns show the backdrop when masked (:787). Returns
+   1 when row y of pic is that row. */
+static int raster_row(long y, long hs, long vs, uint32 base, int masked)
+{
+  long x, col, row, t;
+  uint32 word;
+  unsigned want;
+  row = (y + vs) % (long)VDP_NT_LINES;
+  for(x = 0; x < PIC_W; x++)
+    {
+      if(masked && x < 8)
+        want = 16 + (sms.vdp.reg[7] & 15);
+      else
+        {
+          col = (x - hs) & 255;
+          t = (row / 8) * 32 + col / 8;
+          word = read16_le(sms.vdp.vram + base + t * 2);
+          want = tile_pixel(word,(int)(row & 7),(int)(col & 7));
+        }
+      if(pic[y * PIC_W + x] != want) return 0;
+    }
+  return 1;
+}
+
+/* Every row held against the oracle: the scroll of a line is the value
+   register 8 held at the end of the line before (hs0 up to and including
+   line l1, hs1 up to and including l2, hs2 after), the mask from line lm
+   on, the table base b1 from line lb on. Counted into the figure. */
+static void raster_hold(long l1, long hs0, long hs1, long l2, long hs2,
+                        long lm, long lb, uint32 b0, uint32 b1, const char *what)
+{
+  long y, ok = 0, said = 0;
+  for(y = 0; y < PIC_H; y++)
+    {
+      long hs = (y <= l1) ? hs0 : (y <= l2) ? hs1 : hs2;
+      if(raster_row(y,hs,0,(y < lb) ? b0 : b1,(y >= lm)))
+        ok++;
+      else if(!said)
+        {
+          said = 1;
+          fprintf(stderr,"raster scene %s: row %ld differs from the oracle\n",what,y);
+        }
+    }
+  raster_ok += (unsigned long)ok;
+  raster_seen += (unsigned long)PIC_H;
+  raster_fnv = digest(pic,(unsigned long)PIC_BYTES) ^ (raster_fnv * 31UL);
+  raster_fnv &= 0xFFFFFFFFUL;
+  expect(ok == PIC_H,what);
+}
+
+static void raster_scenes(void)
+{
+  uint32 base, alt, saved_r0, saved_r1, saved_r2;
+#if SMS_DECOR_CEL
+  long y;
+#endif
+
+  /* A known geometry, set in the blanking: no lock, no mask, no shift,
+     no scroll, the display on, the table ended, and one picture played
+     blank so that whatever the ROM left per line is this scene's. */
+  sms.vdp.latch = 0;
+  sms.vdp.vcount = 200;
+  saved_r0 = sms.vdp.reg[0];
+  saved_r1 = sms.vdp.reg[1];
+  saved_r2 = sms.vdp.reg[2];
+  reg_write(0,(uint32)sms.vdp.reg[0] & ~0xE8UL);
+  reg_write(1,(uint32)sms.vdp.reg[1] | 0x40UL);
+  reg_write(8,0);
+  reg_write(9,0);
+  sms.vdp.hscroll = 0;
+  sms.vdp.vscroll = 0;
+  vram_write((((uint32)sms.vdp.reg[5] & 0x7EUL) << 7),0xD0);
+  base = nt_base();
+  raster_play();
+  raster_done();
+
+  /* Register 8 at three values: 0, then 21 written on line 50, then 203
+     written on line 120. Line 50 still shows 0 and line 51 shows 21;
+     line 120 shows 21 and line 121 shows 203: the list cuts its bands
+     on 51 and 121. */
+  play_at(50,8,0,21);
+  play_at(120,8,0,203);
+  raster_play();
+#if SMS_DECOR_CEL
+  expect(sms.vdp.band_count == 3 && sms.vdp.band_line[1] == 51 && sms.vdp.band_line[2] == 121,
+         "register 8 on lines 50 and 120: three bands, from lines 0, 51 and 121");
+#endif
+  raster_hold(50,0,21,120,203,999,999,base,base,"register 8 on lines 50 and 120: every row shows the scroll of the line before");
+  expect(sms.vdp.reg[8] == 203 && sms.vdp.hscroll == 203,"register 8 on lines 50 and 120: the final value stands after the picture");
+  raster_done();
+  sms.vdp.vcount = 200;
+  reg_write(8,0);
+  sms.vdp.hscroll = 0;
+
+  /* Register 8 written on line 191, the last of the picture: no line of
+     this picture shows it -- the list opens no band -- and the next
+     picture starts from it. */
+  play_at(191,8,0,77);
+  raster_play();
+#if SMS_DECOR_CEL
+  expect(sms.vdp.band_count == 1,"register 8 on line 191: no band opened");
+  expect(sms.vdp.journal_count == 1 && sms.vdp.journal[0].line == 192
+         && sms.vdp.journal[0].addr == (VDP_JOURNAL_REG | 8UL),
+         "register 8 on line 191: one journal entry, on line 192");
+#endif
+  raster_hold(999,0,0,999,0,999,999,base,base,"register 8 on line 191: the whole picture shows the old scroll");
+  expect(sms.vdp.reg[8] == 77 && sms.vdp.hscroll == 77,"register 8 on line 191: the value stands for the next picture");
+  raster_done();
+#if SMS_DECOR_CEL
+  /* The same picture, the entry undone at the head of the presentation
+     and put back by the last band: the list is asked again. */
+  sms.vdp.vcount = 200;
+  reg_write(8,0);
+  sms.vdp.hscroll = 0;
+  play_at(191,8,0,77);
+  sms.vdp.vcount = 0;
+  for(y = 0; y < PIC_H; y++) { play_writes(y); line_step(); }
+  sched_n = 0;
+  take_check();
+  vdp_list_begin();
+  expect(sms.vdp.reg[8] == 0 && sms.vdp.hscroll == 0,"register 8 on line 191: undone at the head of the presentation");
+  vdp_list_band(0);
+  expect(sms.vdp.reg[8] == 77 && sms.vdp.hscroll == 77,"register 8 on line 191: put back by the last band");
+  vdp_list_end();
+  flush();
+#endif
+  sms.vdp.vcount = 200;
+  reg_write(8,0);
+  sms.vdp.hscroll = 0;
+
+#if SMS_DECOR_CEL
+  /* Register 8 then a video memory byte in the same line, 40: the
+     register's entry is dated 41, the byte's 40, and the journal holds
+     the byte's first. The byte is the name table entry of tile 0. */
+  sms.vdp.vcount = 200;
+  flush();
+  play_at(40,8,0,5);
+  play_at(40,-1,base,sms.vdp.vram[base] ^ 1);
+  sms.vdp.vcount = 0;
+  for(y = 0; y < PIC_H; y++) { play_writes(y); line_step(); }
+  sched_n = 0;
+  expect(sms.vdp.journal_count == 2 && sms.vdp.journal[0].line == 40
+         && sms.vdp.journal[0].addr == base
+         && sms.vdp.journal[1].line == 41 && sms.vdp.journal[1].addr == (VDP_JOURNAL_REG | 8UL),
+         "register 8 then a byte on line 40: the journal holds the byte at 40 before the register at 41");
+  take_check();
+  vdp_list_begin();
+  expect(sms.vdp.band_count == 3 && sms.vdp.band_line[1] == 40 && sms.vdp.band_line[2] == 41,
+         "register 8 then a byte on line 40: bands from 0, 40 and 41");
+  /* The bands built so that the journal is replayed to its final state
+     before the list is closed: the byte is then put back through the port. */
+  for(y = 0; y < (long)sms.vdp.band_count; y++) vdp_list_band((int32)y);
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  vram_write(base,sms.vdp.vram[base] ^ 1);
+  reg_write(8,0);
+  sms.vdp.hscroll = 0;
+  flush();
+#endif
+
+  /* Register 0 bit 5 set on line 100: the left column is masked from
+     line 100 on and not before. */
+  play_at(100,0,0,(uint32)sms.vdp.reg[0] | 0x20UL);
+  raster_play();
+#if SMS_DECOR_CEL
+  expect(sms.vdp.band_count == 2 && sms.vdp.band_line[1] == 100,"register 0 bit 5 on line 100: a band from line 100");
+#endif
+  raster_hold(999,0,0,999,0,100,999,base,base,"register 0 bit 5 on line 100: the column masked from line 100 on");
+  raster_done();
+  sms.vdp.vcount = 200;
+  reg_write(0,(uint32)sms.vdp.reg[0] & ~0x20UL);
+
+  /* Register 2 moved on line 100 to another table -- the one 2 kilobytes
+     below, whatever it holds: the rows from 100 on show that table. */
+  alt = (base >= 0x800UL) ? (base - 0x800UL) : (base + 0x800UL);
+  play_at(100,2,0,(uint32)((alt >> 10) | 0xF1UL));
+  raster_play();
+#if SMS_DECOR_CEL
+  expect(sms.vdp.band_count == 2 && sms.vdp.band_line[1] == 100,"register 2 on line 100: a band from line 100");
+#endif
+  raster_hold(999,0,0,999,0,999,100,base,alt,"register 2 on line 100: the rows from 100 on show the other table");
+  expect(nt_base() == alt,"register 2 on line 100: the final base stands after the picture");
+  raster_done();
+  sms.vdp.vcount = 200;
+  reg_write(2,saved_r2);
+#if SMS_DECOR_CEL
+  flush();
+#endif
+
+  /* Put back. */
+  sms.vdp.vcount = 200;
+  reg_write(0,saved_r0);
+  reg_write(1,saved_r1);
+  reg_write(8,0);
+  sms.vdp.hscroll = 0;
+#if SMS_DECOR_CEL
+  flush();
+#endif
+}
+
+#if SMS_DECOR_CEL
+/* ---- the palette segments and the Game Gear crop ---- */
+
+static void palette_scenes(void)
+{
+  const uint32 *tables;
+  const uint8 *lines;
+  uint32 n, old3, old5, i, before_seg, before_cap, before_deg;
+  unsigned long want[VDP_CLUT_ENTRIES], held;
+  unsigned char cram_now[VDP_CRAM_SIZE];
+
+  sms.vdp.latch = 0;
+  sms.vdp.vcount = 200;
+  flush();
+  memcpy(cram_now,sms.vdp.cram,VDP_CRAM_SIZE);
+
+  /* Colour 3 written on line 96 to another value: two segments, the
+     second from line 96, the first table the old colour, the second the
+     new; every line held. */
+  old3 = sms.vdp.cram[3];
+  before_seg = sms.vdp.cnt_pal_seg;
+  play_at(96,-2,3,(old3 ^ 0x15UL) & 0x3FUL);
+  play_and_present();
+  n = vdp_clut_segments(&tables,&lines);
+  expect(n == 2 && sms.vdp.pal_line[1] == 96 && lines[0] == (uint8)sms.vdp.view_y
+         && lines[1] == (uint8)(sms.vdp.view_y + 96),
+         "colour 3 on line 96: two segments, the second from line 96");
+  expect(sms.vdp.cnt_pal_seg == before_seg + 1,"colour 3 on line 96: one segment counted");
+  cram_now[3] = (unsigned char)old3;
+  clut_expected(cram_now,want);
+  expect(n == 2 && (unsigned long)tables[3] == want[3],"colour 3 on line 96: the first table holds the old colour");
+  cram_now[3] = (unsigned char)((old3 ^ 0x15UL) & 0x3FUL);
+  clut_expected(cram_now,want);
+  expect(n == 2 && (unsigned long)tables[VDP_CLUT_ENTRIES + 3] == want[3]
+         && (unsigned long)vdp_clut()[3] == want[3],
+         "colour 3 on line 96: the second table and the picture's table hold the new colour");
+  held = palette_lines();
+  expect(held == (unsigned long)PIC_H,"colour 3 on line 96: every line shows the table of its segment");
+  pal_lines_ok += held;
+  pal_lines_seen += (unsigned long)PIC_H;
+  vdp_list_end();
+  flush();
+
+  /* The next picture, no colour written: no segment, and the change of
+     count reported so that the screens get their one table back. */
+  play_and_present();
+  n = vdp_clut_segments(&tables,&lines);
+  expect(n == 0,"the picture after: no segment");
+  expect(take_ok == take_frames,"the picture after: the rebuild signal reports the change of segment count");
+  vdp_list_end();
+  flush();
+
+  /* A colour written on line 0: the table of the whole picture, no
+     segment. */
+  play_at(0,-2,3,old3);
+  before_seg = sms.vdp.cnt_pal_seg;
+  play_and_present();
+  n = vdp_clut_segments(&tables,&lines);
+  expect(n == 0 && sms.vdp.cnt_pal_seg == before_seg,"colour 3 on line 0: no segment");
+  held = palette_lines();
+  expect(held == (unsigned long)PIC_H,"colour 3 on line 0: every line shows the picture's table");
+  pal_lines_ok += held;
+  pal_lines_seen += (unsigned long)PIC_H;
+  vdp_list_end();
+  flush();
+
+  /* A colour written on the same line twice, and on a line to the same
+     value: one segment for the line, none for the unchanged byte. */
+  old5 = sms.vdp.cram[5];
+  play_at(60,-2,5,(old5 + 1UL) & 0x3FUL);
+  play_at(60,-2,5,(old5 + 2UL) & 0x3FUL);
+  play_at(120,-2,5,(old5 + 2UL) & 0x3FUL);
+  play_and_present();
+  n = vdp_clut_segments(&tables,&lines);
+  expect(n == 2 && sms.vdp.pal_line[1] == 60,"two writes on line 60 and an unchanged byte on 120: one segment, from 60");
+  vdp_list_end();
+  flush();
+
+  /* Nine distinct lines, 10 to 90, each moving colour 5: eight segments,
+     the ninth line folded into the last, counted once and the picture
+     counted degraded; the lines from 70 to 89 then show the last table
+     instead of their own, twenty lines wrong, said by the figure. */
+  for(i = 0; i < 9; i++)
+    play_at(10 * (long)(i + 1),-2,5,(old5 + 3UL + i) & 0x3FUL);
+  before_cap = sms.vdp.cnt_pal_capped;
+  before_deg = sms.vdp.cnt_degraded;
+  play_and_present();
+  n = vdp_clut_segments(&tables,&lines);
+  expect(n == 8 && sms.vdp.pal_line[7] == 70,"nine colour lines: eight segments, the last from line 70");
+  expect(sms.vdp.cnt_pal_capped == before_cap + 1 && sms.vdp.cnt_degraded == before_deg + 1,
+         "nine colour lines: the cap counted once, the picture counted degraded once");
+  held = palette_lines();
+  expect(held == (unsigned long)PIC_H - 20UL,"nine colour lines: the twenty lines past the cap show the last table");
+  vdp_list_end();
+  flush();
+
+  /* Put back. */
+  sms.vdp.vcount = 200;
+  cram_write(5,old5);
+  flush();
+}
+
+static void gg_scenes(void)
+{
+  int32 x, y, w, h;
+  /* The profile the scenes run in (scenes forces the Master System's,
+     whatever cartridge played), given back at the end. */
+  int32 sys_saved = sms.cart.system;
+  const CCB *c;
+  long xs, ys;
+  unsigned long fnv_sms, fnv_gg;
+
+  sms.vdp.latch = 0;
+  sms.vdp.vcount = 200;
+  flush();
+
+  /* The picture as the Master System profile draws it: the digest, and
+     where the first block of the first band stands. */
+  play_and_present();
+  fnv_sms = digest(pic,(unsigned long)PIC_BYTES);
+  c = (const CCB *)vdp_list_band(0);
+  xs = (c != NULL) ? (long)(c->ccb_XPos / 65536L) : 0;
+  ys = (c != NULL) ? (long)(c->ccb_YPos / 65536L) : 0;
+  vdp_list_end();
+  flush();
+
+  /* The Game Gear profile: the rectangle is the window, centred, and the
+     cels are shifted by its offset; the composition, read back in the
+     picture's own coordinates, is the same. */
+  sms.cart.system = SYS_GG;
+  vdp_view_fix();
+  vdp_view(&x,&y,&w,&h);
+  expect(x == sms.vdp.view_x + 48 && y == sms.vdp.view_y + 24 && w == 160 && h == 144,
+         "game gear profile: the rectangle is the 160 by 144 window at (48, 24) of the picture");
+  expect(sms.vdp.pic_x == -48 && sms.vdp.pic_y == -24,"game gear profile: the cels are shifted by (-48, -24)");
+  play_and_present();
+  fnv_gg = digest(pic,(unsigned long)PIC_BYTES);
+  c = (const CCB *)vdp_list_band(0);
+  expect(c != NULL && (long)(c->ccb_XPos / 65536L) == xs - 48 && (long)(c->ccb_YPos / 65536L) == ys - 24,
+         "game gear profile: the first block stands 48 to the left and 24 above its master system place");
+  expect(fnv_gg == fnv_sms,"game gear profile: the same composition as the master system profile");
+  vdp_list_end();
+  flush();
+
+  /* Back. */
+  sms.cart.system = sys_saved;
+  vdp_view_fix();
+  vdp_view(&x,&y,&w,&h);
+  expect(x == sms.vdp.view_x && y == sms.vdp.view_y && w == PIC_W && h == PIC_H && sms.vdp.pic_x == 0 && sms.vdp.pic_y == 0,
+         "master system profile again: the rectangle is the whole picture, no shift");
+}
+#endif /* SMS_DECOR_CEL */
 
 /* ---- the two tables the console turns an index into a colour with ---- */
 
@@ -1777,14 +2634,22 @@ static unsigned long clut_entries(void)
   static const unsigned long level[4] = { 0, 85, 170, 255 };
   const uint32 *clut = vdp_clut();
   unsigned long ok = 0, i, want, c, rgb;
+#if SMS_DECOR_CEL
+  /* The table was taken at the presentation, line 191: the colour
+     memory as it stood then is what it is held against, since a colour
+     written in the blanking belongs to the next picture's table. */
+  const unsigned char *cram = cram_line[PIC_H - 1];
+#else
+  const unsigned char *cram = sms.vdp.cram;
+#endif
   for(i = 0; i < VDP_CRAM_SIZE; i++)
     {
-      c = sms.vdp.cram[i] & 0x3FUL;
+      c = cram[i] & 0x3FUL;
       want = (i << 24) | (level[c & 3] << 16) | (level[(c >> 2) & 3] << 8)
            | level[(c >> 4) & 3];
       if((unsigned long)clut[i] == want) ok++;
     }
-  c = sms.vdp.cram[0] & 0x3FUL;
+  c = cram[0] & 0x3FUL;
   rgb = (level[c & 3] << 16) | (level[(c >> 2) & 3] << 8) | level[(c >> 4) & 3];
   if((unsigned long)clut[VDP_CRAM_SIZE] == (0xE0000000UL | rgb)) ok++;
   return ok;
@@ -1930,6 +2795,7 @@ int main(int argc, char **argv)
   int line;
   int32 residue = 0;
   unsigned long pictures = 0, lines = 0, identical = 0, different = 0;
+  unsigned long tolerated = 0, degraded = 0, tol0;
   unsigned long want_pictures = 0;
   unsigned long rom_fnv;
   /* What the run exercised, per frame, so the figures say what they cover:
@@ -1940,11 +2806,14 @@ int main(int argc, char **argv)
   /* The fewest entries found right, over every picture taken: one bad
      entry on one picture is a failure, whatever the others showed. */
   unsigned long plut_ok = VDP_PLUT_ENTRIES, clut_ok = VDP_CLUT_ENTRIES, k;
+#if !SMS_DECOR_CEL
   /* Frames on which the rebuild signal the frame loop consumes agreed with
      the colour write counter: raised when and only when a colour byte was
      written since the last frame. Counted on every frame, not only the
-     pictures taken. */
+     pictures taken. (On the list path the same check runs at the
+     presentation, take_check.) */
   unsigned long take_ok = 0, take_frames = 0, cram_w_seen = 0;
+#endif
   /* Pictures whose border carries the backdrop number register 7 names. */
   unsigned long backdrop_ok = 0;
   /* The two sprite bits, as lines raised per frame: the older path writes
@@ -2063,17 +2932,20 @@ int main(int argc, char **argv)
       if((sms.vdp.reg[0] & 0x20U) != 0U) masked_frames++;
       fine_frames[sms.vdp.reg[8] & 7U]++;
 
-      /* The end of the frame as src/main.c closes it: the screen table is
-         rebuilt now if a colour moved, so what the picture below is read
-         through is what the console would show. The signal itself is held
-         against the colour write counter: the frame loop rearms its table
-         countdown on it, so a rebuild that stayed silent, or one that
-         fired without a write, would leave the console in the wrong
-         colours while every table here reads right. */
+#if !SMS_DECOR_CEL
+      /* The end of the frame as src/main.c closed it on this path: the
+         screen table is rebuilt now if a colour moved, so what the
+         picture below is read through is what the console would show.
+         The signal itself is held against the colour write counter: the
+         frame loop rearms its table countdown on it, so a rebuild that
+         stayed silent, or one that fired without a write, would leave
+         the console in the wrong colours while every table here reads
+         right. */
       k = (sms.vdp.cnt_cram_w != cram_w_seen) ? 1UL : 0UL;
       cram_w_seen = sms.vdp.cnt_cram_w;
       if((vdp_clut_take() != 0) == (k != 0UL)) take_ok++;
       take_frames++;
+#endif
 
       if((fr % every) != 0 && fr != frames - 1)
         continue;
@@ -2082,6 +2954,7 @@ int main(int argc, char **argv)
       take();
 #endif
       pictures++;
+      if(deg_from >= 0) degraded++;
       k = plut_identity();
       if(k < plut_ok) plut_ok = k;
       k = clut_entries();
@@ -2118,6 +2991,7 @@ int main(int argc, char **argv)
               fclose(ref);
               return 2;
             }
+          tol0 = tolerated;
           for(y = 0; y < PIC_H; y++)
             {
               unsigned long h;
@@ -2130,6 +3004,8 @@ int main(int argc, char **argv)
               lines++;
               if(h == row_digest[y])
                 identical++;
+              else if(deg_from >= 0 && (long)y >= deg_from)
+                tolerated++;
               else
                 {
                   different++;
@@ -2137,6 +3013,9 @@ int main(int argc, char **argv)
                     fprintf(stderr,"  frame %ld line %d differs\n",fr,y);
                 }
             }
+          if(tolerated != tol0)
+            fprintf(stderr,"  frame %ld degraded from row %ld: %lu rows differ there, tolerated\n",
+                    fr,deg_from,tolerated - tol0);
           /* The flags line after the digests, when the reference carries
              one: the rest of the digest line is consumed, the next line
              read and put back if it is not one. */
@@ -2199,29 +3078,42 @@ int main(int argc, char **argv)
   printf("plut identity %lu/%d\n",plut_ok,(int)VDP_PLUT_ENTRIES);
   printf("clut entries %lu/%d\n",clut_ok,(int)VDP_CLUT_ENTRIES);
   printf("backdrop number %lu/%lu\n",backdrop_ok,pictures);
-  printf("clut take %lu/%lu\n",take_ok,take_frames);
 #if SMS_DECOR_CEL
   /* The scenes after the ROM's frames and before the windows are
      counted: their windows are held like any other. */
   /* The reserve refusals of the ROM's frames, read before the scenes:
      one scene spends the reserve on purpose and holds its own count. */
   k = sms.vdp.cnt_cels_refused;
+  /* The raster scenes first, on the video memory as the ROM left it --
+     the same on both paths, so that the two digests can be held against
+     each other; the other scenes write patterns and tiles of their own. */
+  raster_scenes();
   scenes();
+  palette_scenes();
+  gg_scenes();
+  printf("clut take %lu/%lu\n",take_ok,take_frames);
   printf("decor windows %lu/%lu\n",win_ok,win_seen);
   printf("decor read=%lu limit=%lu gaps=%lu\n",decor_read,decor_limit,gaps);
   printf("decor journal=%lu bands=%lu\n",journal_total,bands_total);
   printf("decor scenes %lu/%lu\n",scene_ok,scene_want);
   printf("list cels %lu/%lu\n",cel_ok,cel_seen);
   printf("list cels max=%lu refused=%lu\n",cel_max,k);
+  printf("palette lines %lu/%lu\n",pal_lines_ok,pal_lines_seen);
+#else
+  printf("clut take %lu/%lu\n",take_ok,take_frames);
+  raster_scenes();
+  printf("decor scenes %lu/%lu\n",scene_ok,scene_want);
 #endif
+  printf("scroll bands %lu/%lu\n",raster_ok,raster_seen);
+  printf("scroll bands digest=%08lx\n",raster_fnv);
   if(!writing)
     printf("sprite flags %lu/%lu\n",flags_ok,flags_seen);
 
   if(writing)
     printf("pictures=%lu written\n",pictures);
   else
-    printf("pictures=%lu lines=%lu identical=%lu different=%lu\n",
-           pictures,lines,identical,different);
+    printf("pictures=%lu lines=%lu identical=%lu different=%lu tolerated=%lu degraded=%lu\n",
+           pictures,lines,identical,different,tolerated,degraded);
   if(pictures == 0 || pictures != want_pictures || (!writing && lines == 0))
     {
       fprintf(stderr,"nothing taken, or not what the header says: the run proves nothing\n");

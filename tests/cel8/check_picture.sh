@@ -53,9 +53,13 @@
 #
 #   sh tests/cel8/check_picture.sh                twenty-one pictures over 1200 frames, then all 1200
 #   PPM=some/dir sh tests/cel8/check_picture.sh   and one PPM per picture of the frozen set
+#   TOLERATED_MAX=8 ROM=some/rom.gg FROZEN=0 sh tests/cel8/check_picture.sh
+#       rows that may differ inside the fold of a degraded picture (bands
+#       or palette segments past their cap): counted apart, never as a
+#       defect, and bounded so that the tolerance stays honest
 #   MUTATE=1 sh tests/cel8/check_picture.sh
-#       and then breaks the render twenty-two ways, on twenty-two copies of
-#       src/vdp.c, and demands that each copy turn the every-frame check
+#       and then breaks the render thirty-three ways, on thirty-three copies
+#       of src/vdp.c, and demands that each copy turn the every-frame check
 #       red: a check that has not been seen to bite proves nothing
 #       (tests/celprobe/check_list.sh).
 #   WRITE=some/file TAKEN=<commit> sh tests/cel8/check_picture.sh
@@ -63,6 +67,14 @@
 #       instead of comparing. Only ever after a change of picture that was
 #       meant: name the commit in TAKEN=, and say in the story what changed
 #       and why.
+#   ROM=some/rom.sms FROZEN=0 sh tests/cel8/check_picture.sh
+#       plays ANOTHER ROM than the reference's: the two runs against the
+#       frozen reference (1 and 3a) are left out, since they would refuse
+#       it, and the older path stays the oracle of every frame (2 and 3b),
+#       with the scenes and the mutations. What this proves is the list
+#       against the older path on that ROM; what it does not prove is the
+#       older path against its own frozen picture, and the verdict says
+#       so. For the day the reference ROM is not on the disc.
 #
 set -e
 
@@ -71,15 +83,26 @@ set -e
 case "${WRITE:-}" in ''|/*) ;; *) WRITE="$PWD/$WRITE";; esac
 case "${PPM:-}"   in ''|/*) ;; *) PPM="$PWD/$PPM";; esac
 case "${REF:-}"   in ''|/*) ;; *) REF="$PWD/$REF";; esac
+case "${ROM:-}"   in ''|/*) ;; *) ROM="$PWD/$ROM";; esac
 
 cd "$(dirname "$0")/../.."
 
-ROM=takeme/roms/rom.sms
+ROM=${ROM:-takeme/roms/rom.sms}
 REF=${REF:-tests/cel8/picture-106b64a.fnv}
+FROZEN=${FROZEN:-1}
 FRAMES=${FRAMES:-1200}
 EVERY=${EVERY:-60}
+# The rows a run may draw other than the older path inside the fold of a
+# degraded picture -- bands or palette segments folded past their cap, a
+# journal full: from the fold line on, the rows are drawn from the final
+# state on purpose, and the runner counts the ones that differ there
+# apart, tolerated. A bound keeps that tolerance from hiding a defect:
+# none by default (the reference ROM folds one picture, frame 106, and
+# differs on no row of it); a ROM that folds visibly gets its figure.
+TOLERATED_MAX=${TOLERATED_MAX:-0}
 case "$FRAMES" in ''|*[!0-9]*|0) echo "FRAMES must be a positive integer, not '$FRAMES'"; exit 2;; esac
 case "$EVERY"  in ''|*[!0-9]*|0) echo "EVERY must be a positive integer, not '$EVERY'"; exit 2;; esac
+case "$TOLERATED_MAX" in ''|*[!0-9]*) echo "TOLERATED_MAX must be an integer, not '$TOLERATED_MAX'"; exit 2;; esac
 CC=${CC:-gcc}
 S=src
 H=tests/vdp-profile/3do
@@ -229,11 +252,18 @@ judge() {
     cat "$3"
     return 1
   fi
-  if ! grep -q " lines=$7 identical=$7 different=0\$" "$2"; then
-    echo "  [FAIL] the figures above are not $7 rows compared and found identical"
+  if ! grep -q " lines=$7 identical=[0-9]* different=0 tolerated=[0-9]* degraded=[0-9]*\$" "$2"; then
+    echo "  [FAIL] the figures above are not $7 rows compared and found identical outside the degraded pictures"
     return 1
   fi
-  echo "  [OK] every row the render composes is the row the reference holds ($7 rows)"
+  deg_n=$(sed -n 's/^pictures=.* degraded=\([0-9]*\)$/\1/p' "$2")
+  tol_n=$(sed -n 's/^pictures=.* tolerated=\([0-9]*\) .*$/\1/p' "$2")
+  if [ "${tol_n:-0}" -gt "$TOLERATED_MAX" ]; then
+    grep 'degraded from row' "$3" | head -8 || true
+    echo "  [FAIL] $tol_n rows differ inside the fold of degraded pictures, more than TOLERATED_MAX=$TOLERATED_MAX allows"
+    return 1
+  fi
+  echo "  [OK] every row the render composes is the row the reference holds ($7 rows; $deg_n pictures degraded, $tol_n rows tolerated inside their fold)"
 
   # The two tables between an index and a colour, checked on every picture
   # and reported as the fewest entries found right. The cel's palette must
@@ -279,6 +309,20 @@ judge() {
     return 1
   fi
   echo "  [OK] the rebuild signal fires on exactly the frames that wrote a colour"
+  # A register written while the picture is being scanned -- the scroll
+  # on two lines, on the last line, the masked column, the table base --
+  # played on both paths and every row held against the runner's own
+  # composition of the documented rule: the scroll of a line is the value
+  # the register held at the end of the line before. The older path
+  # proves the oracle, the list path is held to it; and the digest of the
+  # scenes' pictures is printed by both, for the comparison below.
+  if ! grep -qE '^scroll bands ([1-9][0-9]*)/\1$' "$2"; then
+    tables
+    grep 'raster scene' "$3" || true
+    echo "  [FAIL] a raster scene draws a row other than the documented scroll or mask of that line"
+    return 1
+  fi
+  echo "  [OK] $(grep '^scroll bands [0-9]' "$2") -- every row of the raster scenes shows its own line's registers"
 
   if [ "$8" = 0 ]; then
     # The older path: one cel of the whole picture, WITH the background
@@ -363,6 +407,16 @@ judge() {
     return 1
   fi
   echo "  [OK] every synthetic scene of the journal and the bands holds"
+  # The palette per line: on every picture presented, every line held
+  # against the table of the segment it falls in, the conversion of the
+  # colour memory as it stood when the line was counted -- the ROM's
+  # frames, which have no segment, and the scenes that open some.
+  if ! grep -qE '^palette lines ([1-9][0-9]*)/\1$' "$2"; then
+    tables
+    echo "  [FAIL] a line is shown through another table than the colour memory of its line"
+    return 1
+  fi
+  echo "  [OK] $(grep '^palette lines' "$2") -- every line shows the table of its segment"
   # The small cels of the list -- sprites, priority runs, backdrop -- every
   # one sound on every band of every frame and every scene: its fields as
   # the engine reads them, its place in the chain, a sprite against the
@@ -430,8 +484,12 @@ run_judge() {
   fi
 }
 
-echo "== 1. the older path, $FRAMES frames, one picture every $EVERY, row against the frozen reference =="
-run_judge "$WORK/romrun_old" "$WORK/old.out" "$WORK/old.log" "" "$REF" "$EVERY" "$WANT_LINES" 0 0
+if [ "$FROZEN" = 1 ]; then
+  echo "== 1. the older path, $FRAMES frames, one picture every $EVERY, row against the frozen reference =="
+  run_judge "$WORK/romrun_old" "$WORK/old.out" "$WORK/old.log" "" "$REF" "$EVERY" "$WANT_LINES" 0 0
+else
+  echo "== 1. (left out: FROZEN=0, the frozen reference is not compared) =="
+fi
 
 echo "== 2. the older path writes a reference of every frame =="
 if ! mint "$WORK/romrun_old" "$WORK/every.fnv" 1 "working-tree" "$WORK/mint.log"; then
@@ -440,14 +498,39 @@ if ! mint "$WORK/romrun_old" "$WORK/every.fnv" 1 "working-tree" "$WORK/mint.log"
 fi
 echo "  $(head -c 120 "$WORK/every.fnv" | head -1)"
 
-echo "== 3a. the delivered path, one picture every $EVERY, row against the frozen reference =="
-run_judge "$WORK/romrun" "$WORK/out" "$WORK/log" "${PPM:-}" "$REF" "$EVERY" "$WANT_LINES" 1 0
+if [ "$FROZEN" = 1 ]; then
+  echo "== 3a. the delivered path, one picture every $EVERY, row against the frozen reference =="
+  run_judge "$WORK/romrun" "$WORK/out" "$WORK/log" "${PPM:-}" "$REF" "$EVERY" "$WANT_LINES" 1 0
+else
+  echo "== 3a. (left out: FROZEN=0) =="
+  # The older path still judged on its own figures -- the raster scenes
+  # against the oracle among them -- against the every-frame reference
+  # it has just written, which it trivially matches row for row.
+  echo "== 3a'. the older path, every frame, its own figures =="
+  run_judge "$WORK/romrun_old" "$WORK/old.out" "$WORK/old.log" "" "$WORK/every.fnv" 1 "$ALL_LINES" 0 0
+fi
 
 echo "== 3b. the delivered path, every frame, row against the older path =="
 run_judge "$WORK/romrun" "$WORK/every.out" "$WORK/every.log" "" "$WORK/every.fnv" 1 "$ALL_LINES" 1 1
 
+# The raster scenes' pictures, digested by both paths: the list must draw
+# what the older path drew, register by register and line by line, over
+# and above the oracle each was held to.
+old_fnv=$(grep '^scroll bands digest=' "$WORK/old.out" | head -1)
+new_fnv=$(grep '^scroll bands digest=' "$WORK/every.out" | head -1)
+if [ -z "$old_fnv" ] || [ "$old_fnv" != "$new_fnv" ]; then
+  echo "  [FAIL] the raster scenes digest apart on the two paths (older: ${old_fnv:-none}; list: ${new_fnv:-none})"
+  echo "failed=1"
+  exit 1
+fi
+echo "  [OK] the raster scenes digest the same on both paths ($old_fnv)"
+
 if [ "${MUTATE:-0}" != 1 ]; then
-  echo "failed=0"
+  if [ "$FROZEN" = 1 ]; then
+    echo "failed=0"
+  else
+    echo "failed=0 (FROZEN=0: the frozen reference was not compared)"
+  fi
   exit 0
 fi
 
@@ -483,7 +566,7 @@ mutate() {
   return 0
 }
 
-echo "== the render broken, twenty-two ways =="
+echo "== the render broken, thirty-three ways =="
 fail=0
 # Every window one pixel to the right: the picture shifts, and screen
 # column 0 is covered by no window wherever the scroll is a multiple of
@@ -499,7 +582,7 @@ mutate stale 's/^  old = sms.vdp.decor_word\[t\];$/  old = sms.vdp.decor_word[t]
 mutate replay 's/((uint32)sms.vdp.journal\[i\].line <= a)/((uint32)sms.vdp.journal[i].line < a)/' \
        "the write of a band's first line replayed one band late" || fail=1
 # A write journaled one line later than it landed: the boundary moves.
-mutate late 's/j->line = (uint16)sms.vdp.vcount;/j->line = (uint16)(sms.vdp.vcount + 1UL);/' \
+mutate late 's/^    vdp_journal_add(sms.vdp.vcount,addr,(uint32)sms.vdp.vram\[addr\],value);$/    vdp_journal_add(sms.vdp.vcount + 1UL,addr,(uint32)sms.vdp.vram[addr],value);/' \
        "every journaled write one line late" || fail=1
 # No band at all: everything folded into band 0, every visible write
 # shown from line 0.
@@ -543,7 +626,7 @@ mutate bgnd_spr 's/^#define VDP_SPRITE_BGND 0UL$/#define VDP_SPRITE_BGND CCB_BGN
 mutate no_col '/^              sms.vdp.spr_collision = 1;$/{N;s/              sms.vdp.spr_collision = 1;\n              VDP_COUNT(spr_col);/              ;/}' \
        "the collision bit never raised" || fail=1
 # The backdrop column not refilled when register 7 moves.
-mutate column7 's/^      vdp_column_fill();$/      ;/' \
+mutate column7 's/^          vdp_column_fill();$/          ;/' \
        "the backdrop column keeps the boot backdrop after register 7 moves" || fail=1
 # The watch bytes not rebuilt when register 5 moves the table.
 mutate watch5 '/^  if((number == 5UL)/,/^    }$/{s/^      vdp_decor_watch_rebuild();$/      ;/}' \
@@ -560,6 +643,50 @@ mutate ztail 's/^  if(((d1 & 1UL) != 0UL) && (la < lb))$/  if(0)/' \
 # The patterns of the previous sprite table unwatched inside the picture.
 mutate named_hot '/^vdp_sprite_scan(uint32 from)$/,/^}$/{s/^      if(from != 0UL)$/      if(0)/}' \
        "a pattern of the previous sprite table unwatched inside the picture" || fail=1
+# Register 8 journaled on the line of its write instead of the line
+# after: the line of the write shows the new scroll one line early.
+mutate late8 's/^  line = (number == 8UL) ? (sms.vdp.vcount + 1UL) : sms.vdp.vcount;$/  line = sms.vdp.vcount;/' \
+       "register 8 journaled on its own line, not the line after" || fail=1
+# No register journaled at all: a register written mid-picture shows
+# its last value from line 0.
+mutate noreg 's/^          vdp_reg_note(number,(uint32)sms.vdp.reg\[number\],value);$/          ;/' \
+       "no register journaled, the list takes the last value" || fail=1
+# The journal no longer sorted: a byte written after register 8 on the
+# same line lands after the register's entry, dated one line later.
+mutate unsorted 's/^  while((i > 0UL) \&\& ((uint32)sms.vdp.journal\[i - 1UL\].line > line))$/  while(0)/' \
+       "the journal no longer sorted by line" || fail=1
+# The palette segments capped at two: a picture with more colour lines
+# shows the last table from the second line on.
+mutate segfold 's/^  if(k >= VDP_PAL_SEGMENTS)$/  if(k >= 2UL)/' \
+       "the palette segments folded past the second" || fail=1
+# A colour written on line 0 opens a segment: an entry of no lines.
+mutate seg0 '/^vdp_cram_note(void)$/,/^}$/{s/^  if(line == 0UL)$/  if(0)/}' \
+       "a colour written on line 0 opens a segment" || fail=1
+# The Game Gear profile sets the window but shifts no cel: the window
+# shows the top-left of the picture, not its middle.
+mutate ggshift 's/^      sms.vdp.pic_x = -VDP_GG_VIEW_X;$/      sms.vdp.pic_x = 0;/' \
+       "the game gear window without the cel shift" || fail=1
+# A register entry not undone at the head of the presentation: band 0
+# draws with the final value of a register written mid-picture.
+mutate undo_reg 's/^\( *\)vdp_reg_apply((uint32)j->addr & 0x0FUL,(uint32)j->old);$/\1;/' \
+       "register entries not undone before the first band" || fail=1
+# The entries past the picture (register 8 on line 191) not put back
+# after the last band: the next picture starts from the old value.
+mutate tail_reg '/^    if(all != 0UL)$/,/^        sms.vdp.journal_replayed = i;$/{s/^\( *\)vdp_reg_apply((uint32)j->addr & 0x0FUL,(uint32)j->val);$/\1;/}' \
+       "the entries past the picture never put back" || fail=1
+# A segment count other than the previous picture's not reported as a
+# change: a picture without a segment after one with leaves the screens
+# on their lists.
+mutate same_k 's/^    if(n != sms.vdp.clut_seg_prev)$/    if(0)/' \
+       "a change of segment count not reported" || fail=1
+# A partial sweep of the sprite table not marked: the lines before it
+# keep last picture's table on the next picture.
+mutate partial 's/^  sms.vdp.spr_partial = (from != 0UL) ? 1UL : 0UL;$/  sms.vdp.spr_partial = 0;/' \
+       "a partial sweep of the sprite table forgotten" || fail=1
+# The bitmap line of a segment without the view's origin: every segment
+# starts view_y lines too high on the screen.
+mutate seg_y 's/^        sms.vdp.clut_seg_line\[k\] = (uint8)(sms.vdp.view_y$/        sms.vdp.clut_seg_line[k] = (uint8)(0/' \
+       "the segment lines without the view origin" || fail=1
 
 echo
 if [ "$fail" = 0 ]; then

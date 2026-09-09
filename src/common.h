@@ -303,6 +303,19 @@
  * on each screen at init, which is what erases the up to three columns a
  * window has to read before its first pixel to start on a word.
  *
+ * The writes that land while the picture is being scanned enter one
+ * journal, in line order: video memory bytes and the registers the list
+ * is built from (0, 1, 2, 5, 6, 7 and 8 -- register 8 one line later,
+ * as the hardware latches it), so that the picture is drawn in bands,
+ * each with the memory and the registers as they stood at its first
+ * line. The palette goes another way: a colour written mid-picture opens
+ * a segment of lines, and the frame loop hands the screen a display list
+ * with one colour table per segment (sys.c, sys_set_colors_lines) --
+ * the one thing that can change a colour at a given line, since a pixel
+ * carries its number and not its colour. The Game Gear profile draws the
+ * same list and crops it: the clip rectangle is set on the 160 by 144
+ * window and every cel is shifted by the window's offset, nothing else.
+ *
  * 0: the older path. The processor composes every background pixel of
  * every line into the index buffer, the sprites over them, and one cel
  * draws the whole buffer once per frame. Kept selectable until the list
@@ -317,6 +330,26 @@
  */
 #ifndef SMS_DECOR_CEL
 #define SMS_DECOR_CEL 1
+#endif
+
+/*
+ * SMS_LIST_BANDS -- how many bands a presentation may cut the picture into.
+ *
+ * A band is a range of lines drawn with the video memory and the registers
+ * as they stood at its first line (SMS_DECOR_CEL above): one band from
+ * line 0, then one from each distinct line the journal holds a write on.
+ * A picture with more distinct lines than this folds the rest into the
+ * last band, counted and said once, and that picture is counted degraded
+ * -- its later lines are drawn from a state that came a few lines too
+ * early. The ceiling is a cost: a band costs about 95 microseconds of the
+ * console's drawing and nine window blocks of the picture's page, and the
+ * page holds ten bands at most (vdp.h refuses more). Eight by default,
+ * which is what the picture check of tests/cel8/ was measured at; the
+ * policy that picks the figure belongs to the degradation stage and is
+ * not decided here.
+ */
+#ifndef SMS_LIST_BANDS
+#define SMS_LIST_BANDS 8
 #endif
 
 /*

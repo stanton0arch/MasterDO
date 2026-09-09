@@ -99,6 +99,11 @@ uint32 sys_usec(void) { return 0; }
 Err cart_init(void) { return 0; }
 Err cart_boot(void) { return 0; }
 void cart_io_report(void) {}
+/* The world, which main.c names for the profile of the cartridge loaded
+ * (the clip line of the init); no module of the core is linked here, so
+ * the instance is this bench's, zeroed, and the profile reads as none. */
+sms_t sms;
+const char *cart_system_name(int32 system) { (void)system; return "none"; }
 
 Err z80_init(void) { return 0; }
 void z80_reset(void) {}
@@ -124,6 +129,16 @@ int32 vdp_clut_take(void) { return 0; }
 const uint32 *vdp_clut(void) { return NULL; }
 Err sys_set_colors(int32 index, const uint32 *entries, int32 count)
 { (void)index; (void)entries; (void)count; return 0; }
+/* The palette per range of lines (SMS_DECOR_CEL 1): main.c calls none of
+ * the three on this path, the stubs stay so that a build of either path
+ * links here. */
+Err sys_set_colors_lines(int32 index, const uint32 *tables, const uint8 *lines, int32 count)
+{ (void)index; (void)tables; (void)lines; (void)count; return 0; }
+int32 sys_vdl_ok(void) { return 0; }
+uint32 vdp_clut_segments(const uint32 **tables, const uint8 **lines)
+{ *tables = NULL; *lines = NULL; return 0; }
+void vdp_clut_refused(void) {}
+void vdp_view_fix(void) {}
 void vdp_profile_select(uint32 v) { (void)v; }
 uint32 vdp_profile_reps(uint32 p) { (void)p; return 1UL; }
 

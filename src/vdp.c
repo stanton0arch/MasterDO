@@ -124,29 +124,30 @@ static uint32 vdp_clut_rgb[64];
 static const uint8 vdp_level[4] = { 0, 85, 170, 255 };
 
 /*
- * The rebuild of the screen table from the colour memory: one conversion
+ * The rebuild of a screen table from a colour memory: one conversion
  * per entry, the index put in the high byte here since the table above
  * has none. Then the display's background entry, the colour it shows for
  * a zero word: a pixel of index 0 leaves the identity palette as 0x0000,
  * so that entry is given the same three components as colour 0 and the
  * pixel shows as colour 0 whichever way the display reads it. Called at
- * init and by vdp_clut_take, and it is the one place the entries are
- * written.
+ * init and by vdp_clut_take -- for the table of the picture, and on the
+ * list path for the table of each palette segment from its own copy of
+ * the colour memory -- and it is the one place the entries are written.
  */
 static void
-vdp_clut_build(void)
+vdp_clut_build(uint32      *dst,
+               const uint8 *src)
 {
   int32 i;
   uint32 c0;
 
   for(i = 0; i < VDP_CRAM_SIZE; i++)
-    sms.vdp.clut[i] = ((uint32)i << 24) |
-                      vdp_clut_rgb[sms.vdp.cram[i] & 0x3FU];
+    dst[i] = ((uint32)i << 24) | vdp_clut_rgb[src[i] & 0x3FU];
 
-  c0 = vdp_clut_rgb[sms.vdp.cram[0] & 0x3FU];
-  sms.vdp.clut[VDP_CRAM_SIZE] = MakeCLUTBackgroundEntry((c0 >> 16) & 0xFFU,
-                                                        (c0 >> 8) & 0xFFU,
-                                                        c0 & 0xFFU);
+  c0 = vdp_clut_rgb[src[0] & 0x3FU];
+  dst[VDP_CRAM_SIZE] = MakeCLUTBackgroundEntry((c0 >> 16) & 0xFFU,
+                                               (c0 >> 8) & 0xFFU,
+                                               c0 & 0xFFU);
 }
 
 #if VDP_PROFILE
@@ -496,6 +497,9 @@ static uint8 *vdp_sprite_block = NULL;
 static CCB *vdp_chain_head = NULL;
 static CCB *vdp_chain_tail = NULL;
 
+/* Defined with the sprites below, called by the register setter above them. */
+static void vdp_column_fill(void);
+
 /*
  * The four bytes of a lane word tested for opacity, one result byte per
  * lane: an index is opaque when its low four bits are not zero (vdp.h,
@@ -782,38 +786,67 @@ vdp_decor_apply(void)
     sms.vdp.pat_dirty[sms.vdp.dirty_list[i]] = 0;
 }
 
+/*
+ * One entry into the journal, kept sorted by line. The writes land in
+ * line order but for one: a register 8 entry is dated one line later
+ * than the write (the hardware latches the scroll at the end of the
+ * line, docs/sms_gg/GGOfficialDocs.md:1438), so a write of the same
+ * line that follows it must be put before it. The walk back is at most
+ * over the entries of one line, and nothing at all on the common case.
+ * When the journal is full the first lost write says so once and raises
+ * the overflow: the picture is then presented in one band from its
+ * final state, memory and registers alike (vdp.h, journal_overflow).
+ */
+static void
+vdp_journal_add(uint32 line,
+                uint32 addr,
+                uint32 old,
+                uint32 val)
+{
+  vdp_journal_t *j;
+  uint32 i;
+
+  if(sms.vdp.journal_count >= VDP_JOURNAL_ENTRIES)
+    {
+      if(sms.vdp.journal_overflow == 0UL)
+        {
+          sms.vdp.journal_overflow = 1;
+          sms.vdp.pic_degraded = 1;
+          VDP_COUNT(journal_full);
+          LOG_ONCE(LOG_CAT_VDP,LOG_LVL_WARN,
+                   ("decor journal full: the picture shows its final state in one band"));
+        }
+      return;
+    }
+
+  i = sms.vdp.journal_count;
+  while((i > 0UL) && ((uint32)sms.vdp.journal[i - 1UL].line > line))
+    {
+      j = &sms.vdp.journal[i - 1UL];
+      sms.vdp.journal[i].line = j->line;
+      sms.vdp.journal[i].addr = j->addr;
+      sms.vdp.journal[i].old = j->old;
+      sms.vdp.journal[i].val = j->val;
+      i--;
+    }
+  j = &sms.vdp.journal[i];
+  j->line = (uint16)line;
+  j->addr = (uint16)addr;
+  j->old = (uint16)old;
+  j->val = (uint16)val;
+  sms.vdp.journal_count++;
+}
+
 void
 vdp_decor_note(uint32 addr,
                uint32 value)
 {
-  vdp_journal_t *j;
   uint32 chunk;
   uint32 word;
   uint32 p;
 
   if(sms.vdp.vcount < VDP_ACTIVE_LINES)
-    {
-      if(sms.vdp.journal_count < VDP_JOURNAL_ENTRIES)
-        {
-          j = &sms.vdp.journal[sms.vdp.journal_count++];
-          j->line = (uint16)sms.vdp.vcount;
-          j->addr = (uint16)addr;
-          j->old = (uint16)sms.vdp.vram[addr];
-          j->val = (uint16)value;
-        }
-      else if(sms.vdp.journal_overflow == 0UL)
-        {
-          /*
-           * The first write the journal has no room for: the picture is
-           * presented in one band from its final state, said once, and
-           * counted once per picture.
-           */
-          sms.vdp.journal_overflow = 1;
-          VDP_COUNT(journal_full);
-          LOG_ONCE(LOG_CAT_VDP,LOG_LVL_WARN,
-                   ("decor journal full: the picture shows its final state in one band"));
-        }
-    }
+    vdp_journal_add(sms.vdp.vcount,addr,(uint32)sms.vdp.vram[addr],value);
 
   chunk = addr >> 5;
   if(VDP_CHUNK_IN_NT(chunk))
@@ -853,6 +886,177 @@ vdp_decor_note(uint32 addr,
             vdp_decor_hot(p);
         }
     }
+}
+
+/*
+ * The bits of a register the list is built from, and so the bits a
+ * write mid-picture is journaled on and the bits an undo or a replay
+ * puts back -- the other bits keep the live value throughout, so that a
+ * display bit of register 1 written mid-picture and not journaled is
+ * not clobbered by the replay of a size bit written earlier. Register
+ * 0: the two locks, the masked column, the sprite shift
+ * (SMSOfficialDocs.md:764-772); register 1: size and magnification
+ * (:779-783; the display bit is per line already, row_off); registers
+ * 2 its name table bits, 5 its sprite table bits, 6 its pattern base
+ * bit (:801-860) -- the bits the list reads and the live write compares,
+ * so that a program rewriting the unused bits, as many do, cuts no
+ * band; register 8 whole (:872); register 7 its low four bits
+ * (:861-864). Registers 3, 4, 9 and 10 are never journaled: 9 is latched
+ * in the blanking (:895), 10 and the interrupt bits are per line, 3 and
+ * 4 draw nothing in mode 4.
+ */
+static uint32
+vdp_reg_journal_mask(uint32 number)
+{
+  switch(number)
+    {
+    case 0UL:
+      return 0xE8UL;
+    case 1UL:
+      return 0x03UL;
+    case 2UL:
+      return 0x0EUL;
+    case 5UL:
+      return 0x7EUL;
+    case 6UL:
+      return 0x04UL;
+    case 8UL:
+      return 0xFFUL;
+    case 7UL:
+      return 0x0FUL;
+    default:
+      return 0UL;
+    }
+}
+
+/*
+ * A register put to a value, on its journaled bits, with the effect the
+ * list reads off it: register 8 moves the horizontal latch with it (the
+ * presentation has no line between two bands, so the latch is the
+ * register); register 5 moves the sprite table; register 7 refills the
+ * backdrop column; register 2 moves the name table and marks every tile
+ * of the picture for conversion, as the live write does. What it does
+ * NOT do is the live write's own business: the per-line sprite table
+ * is not owed again and the watch bytes are not rebuilt -- both follow
+ * the final state, which the live write already gave them. Called by
+ * the live write for its shared part, and by the undo and the replay of
+ * the presentation for the whole of theirs.
+ */
+static void
+vdp_reg_apply(uint32 number,
+              uint32 value)
+{
+  uint32 mask;
+  uint32 v;
+
+  mask = vdp_reg_journal_mask(number);
+  v = ((uint32)sms.vdp.reg[number] & ~mask) | (value & mask);
+
+  if(number == 2UL)
+    {
+      if((((uint32)sms.vdp.reg[2] ^ v) & 0x0EUL) != 0UL)
+        {
+          uint32 i;
+
+          sms.vdp.nt_chunk0 = ((v & 0x0EUL) << 10) >> 5;
+          for(i = 0; i < VDP_NT_TILES; i++)
+            sms.vdp.decor_word[i] = 0xFFFFU;
+          for(i = 0; i < VDP_CHUNKS; i++)
+            sms.vdp.refs[i] = 0;
+          sms.vdp.decor_sweep_all = 1;
+        }
+    }
+  else if(number == 5UL)
+    {
+      sms.vdp.sat_base = (v & 0x7EUL) << 7;
+      sms.vdp.sat_chunk0 = sms.vdp.sat_base >> 5;
+    }
+  else if(number == 7UL)
+    {
+      if((((uint32)sms.vdp.reg[7] ^ v) & 0x0FUL) != 0UL)
+        {
+          sms.vdp.reg[7] = (uint8)v;
+          vdp_column_fill();
+        }
+    }
+  else if(number == 8UL)
+    {
+      sms.vdp.hscroll = v;
+    }
+
+  sms.vdp.reg[number] = (uint8)v;
+}
+
+/*
+ * A register the list is built from, written mid-picture to another
+ * value on its journaled bits: one entry of the journal, dated the line
+ * of the write, or the line after for register 8 (the latch at the end
+ * of the line, GGOfficialDocs.md:1438: the line being scanned still
+ * shows the old scroll, the next one the new). An entry on line 192
+ * opens no band and is put back by the last band. Counted apart as a
+ * scroll split or another register.
+ */
+static void
+vdp_reg_note(uint32 number,
+             uint32 old,
+             uint32 value)
+{
+  uint32 line;
+
+  line = (number == 8UL) ? (sms.vdp.vcount + 1UL) : sms.vdp.vcount;
+  vdp_journal_add(line,VDP_JOURNAL_REG | number,old,value);
+  if(number == 8UL)
+    VDP_COUNT(scroll_mid);
+  else
+    VDP_COUNT(reg_journal);
+}
+
+void
+vdp_cram_note(void)
+{
+  uint32 line;
+  uint32 k;
+  uint32 i;
+
+  line = sms.vdp.vcount;
+  if(line == 0UL)
+    return;
+
+  k = sms.vdp.pal_count;
+  if(k == 0UL)
+    {
+      sms.vdp.pal_line[0] = 0;
+      k = 1;
+    }
+  if((uint32)sms.vdp.pal_line[k - 1UL] == line)
+    {
+      sms.vdp.pal_count = k;
+      return;
+    }
+  if(k >= VDP_PAL_SEGMENTS)
+    {
+      /*
+       * The cap: the lines from here on show the final table, counted
+       * once per picture and said once for the run.
+       */
+      sms.vdp.pal_count = k;
+      if(sms.vdp.pal_capped == 0UL)
+        {
+          sms.vdp.pal_capped = 1;
+          sms.vdp.pic_degraded = 1;
+          VDP_COUNT(pal_capped);
+          LOG_ONCE(LOG_CAT_VDP,LOG_LVL_WARN,
+                   ("palette segments capped at %lu: later lines take the last table",
+                    (unsigned long)VDP_PAL_SEGMENTS));
+        }
+      return;
+    }
+
+  for(i = 0; i < VDP_CRAM_SIZE; i++)
+    sms.vdp.pal_cram[k - 1UL][i] = sms.vdp.cram[i];
+  sms.vdp.pal_line[k] = (uint8)line;
+  sms.vdp.pal_count = k + 1UL;
+  VDP_COUNT(pal_seg);
 }
 
 /*
@@ -977,6 +1181,7 @@ vdp_sprite_scan(uint32 from)
     }
 
   sms.vdp.spr_dirty = 0;
+  sms.vdp.spr_partial = (from != 0UL) ? 1UL : 0UL;
 }
 
 /*
@@ -1154,8 +1359,11 @@ vdp_sprite_collide(uint32 y,
  * palette pointer given, and the background flag given or not: with it
  * a pixel whose palette entry is 000 is painted, without it that pixel
  * is transparent (docs/3do/3do_portfolio_2.5.md:3783-3784). The
- * preamble words are the same arithmetic as the whole-picture cel's,
- * the row offset in the ten bit field an eight bit depth reads.
+ * position is shifted by the profile's offset (pic_x, pic_y: zero for
+ * the Master System, the window's negative origin for the Game Gear),
+ * the one place the crop touches the list. The preamble words are the
+ * same arithmetic as the whole-picture cel's, the row offset in the ten
+ * bit field an eight bit depth reads.
  */
 static void
 vdp_cel_fill(CCB         *c,
@@ -1176,8 +1384,8 @@ vdp_cel_fill(CCB         *c,
   c->ccb_NextPtr = NULL;
   c->ccb_SourcePtr = (CelData *)src;
   c->ccb_PLUTPtr = plut;
-  c->ccb_XPos = (Coord)(x * 65536L);
-  c->ccb_YPos = (Coord)(y * 65536L);
+  c->ccb_XPos = (Coord)((x + sms.vdp.pic_x) * 65536L);
+  c->ccb_YPos = (Coord)((y + sms.vdp.pic_y) * 65536L);
   c->ccb_HDX = hdx;
   c->ccb_HDY = 0;
   c->ccb_VDX = 0;
@@ -1823,6 +2031,11 @@ vdp_list_begin(void)
   for(i = sms.vdp.journal_count; i > 0UL; i--)
     {
       j = &sms.vdp.journal[i - 1UL];
+      if(((uint32)j->addr & VDP_JOURNAL_REG) != 0UL)
+        {
+          vdp_reg_apply((uint32)j->addr & 0x0FUL,(uint32)j->old);
+          continue;
+        }
       sms.vdp.vram[j->addr] = (uint8)j->old;
       sms.vdp.tc_valid[VDP_TC_KEY(j->addr)] = 0;
       VDP_DECOR_DIRTY[(uint32)j->addr >> 5] = 1;
@@ -1832,9 +2045,11 @@ vdp_list_begin(void)
 
   /*
    * The bands: one from line 0, then one from each distinct journal line
-   * after it, in the order the writes landed, which is line order. A
-   * write on line 0 opens no band -- band 0 already starts there -- and
-   * lines past the capacity are folded into the last band, counted.
+   * after it, in line order, which the journal keeps. A write on line 0
+   * opens no band -- band 0 already starts there -- an entry past the
+   * picture (register 8 on line 191) opens none either, and lines past
+   * the capacity are folded into the last band, counted, the picture
+   * counted degraded.
    */
   sms.vdp.band_line[0] = 0;
   n = 1;
@@ -1844,9 +2059,12 @@ vdp_list_begin(void)
       line = sms.vdp.journal[i].line;
       if(line == last)
         continue;
+      if(line >= VDP_ACTIVE_LINES)
+        break;
       if(n >= VDP_LIST_BANDS)
         {
           VDP_COUNT(bands_capped);
+          sms.vdp.pic_degraded = 1;
           LOG_ONCE(LOG_CAT_VDP,LOG_LVL_WARN,
                    ("decor bands capped at %lu: later lines fold into the last band",
                     (unsigned long)VDP_LIST_BANDS));
@@ -1863,6 +2081,18 @@ vdp_list_begin(void)
 #if VDP_COUNTERS
   sms.vdp.cnt_list_bands += n;
 #endif
+
+  /*
+   * The picture counted degraded once, whatever raised it: the flag
+   * stands from the first -- a full journal or a palette past its cap
+   * while the picture played, the display's refusal or the fold above
+   * at the presentation -- and falls here.
+   */
+  if(sms.vdp.pic_degraded != 0UL)
+    {
+      VDP_COUNT(degraded);
+      sms.vdp.pic_degraded = 0;
+    }
 
   return (int32)n;
 }
@@ -1890,24 +2120,50 @@ vdp_list_band(int32 k)
 
   /*
    * The writes up to this band's first line put back, in order; the
-   * last band takes everything left, which is what the fold of the
-   * lines past the capacity means. Then the picture follows them.
+   * last band takes everything left inside the picture, which is what
+   * the fold of the lines past the capacity means. Then the picture
+   * follows them. An entry past the picture -- register 8 written on
+   * line 191, dated 192 -- is put back by the last band too, but after
+   * its list is built: no line of this picture shows it, the next one
+   * starts from it.
    */
   i = sms.vdp.journal_replayed;
   while((i < sms.vdp.journal_count)
-        && ((all != 0UL) || ((uint32)sms.vdp.journal[i].line <= a)))
+        && (((all != 0UL) && ((uint32)sms.vdp.journal[i].line < VDP_ACTIVE_LINES))
+            || ((uint32)sms.vdp.journal[i].line <= a)))
     {
       j = &sms.vdp.journal[i];
+      i++;
+      if(((uint32)j->addr & VDP_JOURNAL_REG) != 0UL)
+        {
+          vdp_reg_apply((uint32)j->addr & 0x0FUL,(uint32)j->val);
+          continue;
+        }
       sms.vdp.vram[j->addr] = (uint8)j->val;
       sms.vdp.tc_valid[VDP_TC_KEY(j->addr)] = 0;
       VDP_DECOR_DIRTY[(uint32)j->addr >> 5] = 1;
-      i++;
     }
   sms.vdp.journal_replayed = i;
 
   vdp_decor_apply();
 
-  return (void *)vdp_list_build(a,b);
+  {
+    CCB *head = vdp_list_build(a,b);
+
+    if(all != 0UL)
+      {
+        while(i < sms.vdp.journal_count)
+          {
+            j = &sms.vdp.journal[i];
+            i++;
+            if(((uint32)j->addr & VDP_JOURNAL_REG) != 0UL)
+              vdp_reg_apply((uint32)j->addr & 0x0FUL,(uint32)j->val);
+          }
+        sms.vdp.journal_replayed = i;
+      }
+
+    return (void *)head;
+  }
 }
 
 void
@@ -1959,7 +2215,13 @@ vdp_render_line(uint32 y)
 {
   uint32 n;
 
-  if(sms.vdp.spr_dirty != 0UL)
+  /*
+   * The per-line table owed: a table byte or a register moved since it
+   * was built, or the last build started past line 0 and the lines
+   * before it still hold the previous picture's admission (vdp.h,
+   * spr_partial) -- on line 0, the whole table is rebuilt then.
+   */
+  if((sms.vdp.spr_dirty != 0UL) || ((y == 0UL) && (sms.vdp.spr_partial != 0UL)))
     vdp_sprite_scan(y);
 
   if(((uint32)sms.vdp.reg[1] & 0x40UL) == 0UL)
@@ -2814,6 +3076,15 @@ vdp_init(void)
   sms.vdp.journal_overflow = 0;
   sms.vdp.band_count = 0;
   sms.vdp.list_used = 0;
+  sms.vdp.pal_count = 0;
+  sms.vdp.pal_capped = 0;
+  sms.vdp.clut_seg_count = 0;
+  sms.vdp.clut_seg_prev = 0;
+  for(x = 0; x < VDP_PAL_SEGMENTS; x++)
+    {
+      sms.vdp.pal_line[x] = 0;
+      sms.vdp.clut_seg_line[x] = 0;
+    }
 
   /*
    * The sprites: the sheet cleared and every place stale, no pattern
@@ -2838,6 +3109,8 @@ vdp_init(void)
   sms.vdp.sat_base = ((uint32)sms.vdp.reg[5] & 0x7EUL) << 7;
   sms.vdp.sat_chunk0 = sms.vdp.sat_base >> 5;
   sms.vdp.spr_dirty = 1;
+  sms.vdp.spr_partial = 0;
+  sms.vdp.pic_degraded = 0;
   for(x = 0; x < VDP_SPR_COUNT; x++)
     sms.vdp.sat_top[x] = 0;
   for(x = 0; x < VDP_ACTIVE_LINES; x++)
@@ -2892,6 +3165,11 @@ vdp_init(void)
   sms.vdp.cnt_journal_full = 0;
   sms.vdp.cnt_list_refused = 0;
   sms.vdp.cnt_reg_mid = 0;
+  sms.vdp.cnt_scroll_mid = 0;
+  sms.vdp.cnt_reg_journal = 0;
+  sms.vdp.cnt_pal_seg = 0;
+  sms.vdp.cnt_pal_capped = 0;
+  sms.vdp.cnt_degraded = 0;
   sms.vdp.cnt_cels = 0;
   sms.vdp.cnt_sprites = 0;
   sms.vdp.cnt_split = 0;
@@ -2919,7 +3197,7 @@ vdp_init(void)
                                          vdp_level[(i >> 2) & 3],
                                          vdp_level[(i >> 4) & 3]);
 
-  vdp_clut_build();
+  vdp_clut_build(sms.vdp.clut,sms.vdp.cram);
   sms.vdp.cram_dirty = 0;
 
   for(i = 0; i < VDP_PLUT_ENTRIES; i++)
@@ -2981,6 +3259,7 @@ vdp_init(void)
     py = 0;
   sms.vdp.view_x = px;
   sms.vdp.view_y = py;
+  vdp_view_fix();
 
   if(vdp_cel_block == NULL)
     {
@@ -3115,7 +3394,8 @@ vdp_init(void)
    * it, and a reader of an old trace beside a new one needs the change
    * said in the trace itself.
    */
-  LOG_INFO(LOG_CAT_VDP,("init ok mode=4 view=256x192 profile=%s",
+  LOG_INFO(LOG_CAT_VDP,("init ok mode=4 view=%ldx%ld profile=%s",
+                        (long)sms.vdp.view_w,(long)sms.vdp.view_h,
                         cart_system_name(sms.cart.system)));
   LOG_INFO(LOG_CAT_VDP,("irq line owner=vdp (test source keeps nmi only)"));
   LOG_INFO(LOG_CAT_VDP,("palette via screen clut (%lu entries + background), cel plut identity",
@@ -3237,10 +3517,51 @@ vdp_view(int32 *x,
          int32 *w,
          int32 *h)
 {
-  *x = sms.vdp.view_x;
-  *y = sms.vdp.view_y;
-  *w = (int32)VDP_PIX_WIDTH;
-  *h = (int32)VDP_ACTIVE_LINES;
+  *x = sms.vdp.view_x - sms.vdp.pic_x;
+  *y = sms.vdp.view_y - sms.vdp.pic_y;
+  *w = sms.vdp.view_w;
+  *h = sms.vdp.view_h;
+}
+
+void
+vdp_view_fix(void)
+{
+  /*
+   * The window is the list's: its cels take the shift (vdp_cel_fill).
+   * The older path draws its one cel of the whole picture at the origin
+   * of the rectangle and knows nothing of a window, so it keeps the
+   * full view on either profile, as it did.
+   */
+#if SMS_DECOR_CEL
+  if(sms.cart.system == SYS_GG)
+    {
+      sms.vdp.view_w = VDP_GG_VIEW_W;
+      sms.vdp.view_h = VDP_GG_VIEW_H;
+      sms.vdp.pic_x = -VDP_GG_VIEW_X;
+      sms.vdp.pic_y = -VDP_GG_VIEW_Y;
+    }
+  else
+#endif
+    {
+      sms.vdp.view_w = (int32)VDP_PIX_WIDTH;
+      sms.vdp.view_h = (int32)VDP_ACTIVE_LINES;
+      sms.vdp.pic_x = 0;
+      sms.vdp.pic_y = 0;
+    }
+
+  /*
+   * The profile and the rectangle it draws in, once: the window's size
+   * and where it sits on the bitmap. The Game Gear's colours are the
+   * Master System's table for now (vdp.h, colour memory), and a Game
+   * Gear program may show wrong colours through it; the window is
+   * right.
+   */
+  LOG_INFO(LOG_CAT_VDP,("profile=%s view=%ldx%ld clip=%ld,%ld,%ld,%ld",
+                        cart_system_name(sms.cart.system),
+                        (long)sms.vdp.view_w,(long)sms.vdp.view_h,
+                        (long)(sms.vdp.view_x - sms.vdp.pic_x),
+                        (long)(sms.vdp.view_y - sms.vdp.pic_y),
+                        (long)sms.vdp.view_w,(long)sms.vdp.view_h));
 }
 
 uint16
@@ -3255,13 +3576,53 @@ vdp_backdrop(void)
 int32
 vdp_clut_take(void)
 {
-  if(sms.vdp.cram_dirty == 0UL)
-    return 0;
+  int32 changed;
 
-  sms.vdp.cram_dirty = 0;
-  vdp_clut_build();
-  VDP_COUNT(clut_upd);
-  return 1;
+  changed = 0;
+  if(sms.vdp.cram_dirty != 0UL)
+    {
+      sms.vdp.cram_dirty = 0;
+      vdp_clut_build(sms.vdp.clut,sms.vdp.cram);
+      VDP_COUNT(clut_upd);
+      changed = 1;
+    }
+
+#if SMS_DECOR_CEL
+  /*
+   * The segments of the picture closed: one table each, the last one
+   * the table just rebuilt (a segment exists only after a byte changed,
+   * so it was), the bitmap line of each, and the count -- which, moving
+   * from or to zero or between two values, is a change of the screens'
+   * lists whether or not a byte moved this picture.
+   */
+  {
+    uint32 k;
+    uint32 n;
+    uint32 i;
+
+    n = sms.vdp.pal_count;
+    for(k = 0; k < n; k++)
+      {
+        if(k + 1UL < n)
+          vdp_clut_build(sms.vdp.clut_seg[k],sms.vdp.pal_cram[k]);
+        else
+          {
+            for(i = 0; i < VDP_CLUT_ENTRIES; i++)
+              sms.vdp.clut_seg[k][i] = sms.vdp.clut[i];
+          }
+        sms.vdp.clut_seg_line[k] = (uint8)(sms.vdp.view_y
+                                           + (int32)sms.vdp.pal_line[k]);
+      }
+    if(n != sms.vdp.clut_seg_prev)
+      changed = 1;
+    sms.vdp.clut_seg_prev = n;
+    sms.vdp.clut_seg_count = n;
+    sms.vdp.pal_count = 0;
+    sms.vdp.pal_capped = 0;
+  }
+#endif
+
+  return changed;
 }
 
 const uint32 *
@@ -3269,6 +3630,25 @@ vdp_clut(void)
 {
   return sms.vdp.clut;
 }
+
+#if SMS_DECOR_CEL
+uint32
+vdp_clut_segments(const uint32 **tables,
+                  const uint8  **lines)
+{
+  *tables = &sms.vdp.clut_seg[0][0];
+  *lines = sms.vdp.clut_seg_line;
+  return sms.vdp.clut_seg_count;
+}
+
+void
+vdp_clut_refused(void)
+{
+  sms.vdp.pic_degraded = 1;
+  LOG_ONCE(LOG_CAT_VDP,LOG_LVL_WARN,
+           ("palette per line refused by the display: the picture takes its last table"));
+}
+#endif
 
 void
 vdp_backdrop_repainted(void)
@@ -3321,54 +3701,37 @@ vdp_reg_write(uint32 number,
 
 #if SMS_DECOR_CEL
   /*
-   * A register the list is built from, written to another value while
-   * the picture is being scanned: the scroll registers and the two table
-   * bases, the sprite size and magnification and the display bit of
-   * register 1, the sprite pattern base of register 6, the backdrop of
-   * register 7. The list is built once, at line 191, with the last
-   * value, where the line render took each line with its own; the
-   * per-line flags do take each line's value, and a line with the
-   * display off is drawn off whatever the last value says. Counted and
-   * said once, so that a picture the two paths draw apart is a picture
-   * the trace names rather than one that passes.
+   * A register the list is built from, written to another value on the
+   * bits the list reads while the picture is being scanned: the scroll
+   * register, the two table bases, the sprite size and magnification of
+   * register 1, the sprite pattern base of register 6, the locks, the
+   * masked column and the sprite shift of register 0, the backdrop of
+   * register 7. Journaled with the line, so that the presentation draws
+   * the lines before it with the old value and the lines from it with
+   * the new, as the line render did (vdp_reg_note); counted. The
+   * display bit of register 1 is per line already (row_off) and the
+   * interrupt bits, register 9 and register 10 are read per line or
+   * latched in the blanking: none of them is journaled.
    */
   if(sms.vdp.vcount < VDP_ACTIVE_LINES)
     {
       uint32 moved;
 
-      moved = (uint32)sms.vdp.reg[number] ^ value;
-      switch(number)
-        {
-        case 0UL:
-        case 2UL:
-        case 5UL:
-        case 6UL:
-        case 8UL:
-          break;
-        case 1UL:
-          moved &= 0x43UL;
-          break;
-        case 7UL:
-          moved &= 0x0FUL;
-          break;
-        default:
-          moved = 0;
-          break;
-        }
+      moved = ((uint32)sms.vdp.reg[number] ^ value)
+            & vdp_reg_journal_mask(number);
       if(moved != 0UL)
         {
           VDP_COUNT(reg_mid);
-          LOG_ONCE(LOG_CAT_VDP,LOG_LVL_WARN,
-                   ("register %lu written mid-frame at line %lu: the list takes the last value",
-                    (unsigned long)number,(unsigned long)sms.vdp.vcount));
+          vdp_reg_note(number,(uint32)sms.vdp.reg[number],value);
         }
     }
 
   /*
    * The sprite side of a register: a size or magnification of register 1
    * and a pattern base of register 6 leave the per-line table stale; a
-   * move of the attribute table by register 5 moves it, the watch bytes
-   * with it; a move of the backdrop by register 7 refills the column.
+   * move of the attribute table by register 5 moves it (the setter), the
+   * watch bytes with it; a move of the backdrop by register 7 refills
+   * the column (the setter).
    */
   if((number == 1UL) && ((((uint32)sms.vdp.reg[1] ^ value) & 0x03UL) != 0UL))
     sms.vdp.spr_dirty = 1;
@@ -3376,43 +3739,30 @@ vdp_reg_write(uint32 number,
     sms.vdp.spr_dirty = 1;
   if((number == 5UL) && ((((uint32)sms.vdp.reg[5] ^ value) & 0x7EUL) != 0UL))
     {
-      sms.vdp.reg[5] = (uint8)value;
-      sms.vdp.sat_base = (value & 0x7EUL) << 7;
-      sms.vdp.sat_chunk0 = sms.vdp.sat_base >> 5;
+      vdp_reg_apply(5UL,value);
       sms.vdp.spr_dirty = 1;
       vdp_decor_watch_rebuild();
     }
-  if((number == 7UL) && ((((uint32)sms.vdp.reg[7] ^ value) & 0x0FUL) != 0UL))
-    {
-      sms.vdp.reg[7] = (uint8)value;
-      vdp_column_fill();
-    }
+  if(number == 7UL)
+    vdp_reg_apply(7UL,value);
 
   /*
    * Register 2 moving the name table: every tile of the picture is then
    * a tile of another table, so all 896 are marked never converted, the
-   * reference counts start over with them, the watch bytes follow the
-   * new table, and the next presentation sweeps everything. The hot
-   * marks and their list keep standing -- they fall at the next
+   * reference counts start over with them (the setter), the watch bytes
+   * follow the new table, and the next presentation sweeps everything.
+   * The hot marks and their list keep standing -- they fall at the next
    * vdp_list_end, as always -- and the pattern marks of the dirty sweep
    * clear at the next vdp_decor_apply, which the full sweep makes
    * harmless: every tile is looked at whatever they say. Only on a
    * move: a program that writes the same base every frame pays a
-   * compare. Written mid-picture it takes effect at the presentation,
-   * a case the bands do not cut on yet (counted above).
+   * compare. Written mid-picture it is journaled above and cuts a band,
+   * the picture converted whole once for the undo and once per replay.
    */
   if((number == 2UL)
      && (((uint32)sms.vdp.reg[2] & 0x0EUL) != (value & 0x0EUL)))
     {
-      uint32 i;
-
-      sms.vdp.reg[2] = (uint8)value;
-      sms.vdp.nt_chunk0 = ((value & 0x0EUL) << 10) >> 5;
-      for(i = 0; i < VDP_NT_TILES; i++)
-        sms.vdp.decor_word[i] = 0xFFFFU;
-      for(i = 0; i < VDP_CHUNKS; i++)
-        sms.vdp.refs[i] = 0;
-      sms.vdp.decor_sweep_all = 1;
+      vdp_reg_apply(2UL,value);
       vdp_decor_watch_rebuild();
     }
 #endif
@@ -3800,6 +4150,28 @@ vdp_report(void)
                (unsigned long)sms.vdp.cnt_spr_col,
                (unsigned long)sms.vdp.cnt_spr_ovf));
     }
+
+  /*
+   * What changed mid-picture over the window and what it cost: the
+   * bands drawn, the scroll splits (register 8 journaled), the other
+   * registers journaled, the palette segments opened, the pictures
+   * whose segments passed their cap, and the pictures counted degraded
+   * -- bands or segments past their cap, a full journal, a display
+   * list refused, once each. Emitted whenever a picture was presented, so that a
+   * window where nothing changed reads as zeros beside its bands rather
+   * than as silence.
+   */
+  if(sms.vdp.cnt_list_bands != 0UL)
+    {
+      LOG_HOT(LOG_CAT_VDP,LOG_LVL_DBG,
+              ("raster bands=%lu scroll_changes=%lu reg_changes=%lu clut_changes=%lu clut_capped=%lu degraded=%lu",
+               (unsigned long)sms.vdp.cnt_list_bands,
+               (unsigned long)sms.vdp.cnt_scroll_mid,
+               (unsigned long)sms.vdp.cnt_reg_journal,
+               (unsigned long)sms.vdp.cnt_pal_seg,
+               (unsigned long)sms.vdp.cnt_pal_capped,
+               (unsigned long)sms.vdp.cnt_degraded));
+    }
 #endif
 
   if(sms.vdp.cnt_mode != 0UL)
@@ -3848,6 +4220,11 @@ vdp_report(void)
   sms.vdp.cnt_journal_full = 0;
   sms.vdp.cnt_list_refused = 0;
   sms.vdp.cnt_reg_mid = 0;
+  sms.vdp.cnt_scroll_mid = 0;
+  sms.vdp.cnt_reg_journal = 0;
+  sms.vdp.cnt_pal_seg = 0;
+  sms.vdp.cnt_pal_capped = 0;
+  sms.vdp.cnt_degraded = 0;
   sms.vdp.cnt_cels = 0;
   sms.vdp.cnt_sprites = 0;
   sms.vdp.cnt_split = 0;
