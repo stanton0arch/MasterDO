@@ -364,6 +364,22 @@ test-z80:
 test-picture:
 	sh tests/cel8/check_picture.sh
 
-.PHONY: builddir isodir clean distclean launchme programs libraries install install-libs modbin modbin-launchme banner iso run test-z80 test-picture
+# The host check of the translated code: every ROM of takeme/roms/ is
+# translated into a work directory (src/rom_code.c is never written), the
+# real core plays it twice on one binary -- translated code armed, then
+# the interpreter alone on the same per-line quotas -- and the registers
+# of every line and the memory, video part and counters of every frame
+# are held equal. The first difference names the frame, the line, the
+# block that started at the line's entry PC when one does ("none"
+# otherwise) and how many blocks the line ran. Unlike test-picture, a
+# machine without a ROM gets "skipped" and exit 0: the public repository
+# carries no ROM, and this target must be runnable and green on every
+# checkout, saying "skipped" unmistakably when it compared nothing. Same
+# terms as above otherwise: no console, off the default path, cross
+# compiler untouched.
+test-z80c:
+	sh tests/z80c/run_z80c.sh
+
+.PHONY: builddir isodir clean distclean launchme programs libraries install install-libs modbin modbin-launchme banner iso run test-z80 test-picture test-z80c
 
 -include $(DEPS)
