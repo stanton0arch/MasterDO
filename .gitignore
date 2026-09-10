@@ -18,6 +18,11 @@ core
 # and tests/z80/ is a tracked directory.
 /tests/z80/z80_bench
 
+# The translated cartridge code: written locally by tests/z80c/translate.sh
+# from a ROM, so never published. `make` copies the empty table there when
+# the file is missing.
+/src/rom_code.c
+
 # --- Python ---
 __pycache__/
 *.py[cod]

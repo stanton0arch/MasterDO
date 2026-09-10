@@ -1,6 +1,7 @@
 #include "sys.h"
 #include "log.h"
 #include "z80.h"
+#include "z80c.h"
 #include "cart.h"
 #include "vdp.h"
 #include "sms.h"
@@ -345,6 +346,13 @@ main_perf_emit(uint32 usec,
            (unsigned long)(draw10 / 10UL),(unsigned long)(draw10 % 10UL),
            (unsigned long)clut_per_frame,(unsigned long)tiles_per_frame,
            (unsigned long)list_per_frame,(unsigned long)over,(unsigned long)clk));
+
+  /*
+   * The translated code's own line beside this one, at the same pace:
+   * blocks run and hand-backs to the interpreter over the window.
+   * Nothing while the core interprets alone.
+   */
+  z80c_report();
 }
 
 #endif /* MAIN_MEASURE */
@@ -985,6 +993,13 @@ main(int    argc,
    * z80_init does not reset (z80.h).
    */
   z80_reset();
+
+  /*
+   * The translated code paired with the cartridge just loaded, after the
+   * reset and before the footprint: it allocates nothing, and its one
+   * line says whether the core will run blocks or interpret alone.
+   */
+  z80c_init();
 
   /*
    * Every steady allocation is now in place -- the screen above, the sound

@@ -323,12 +323,20 @@ void z80_reset(void);
  * straddles the end of the quota runs to completion, and what it spent past
  * the boundary comes back as the return value, for the caller to subtract from
  * the quota it hands over next. The value is never negative, and never above
- * one less than the dearest instruction: a quota has to have at least one
- * T-state left in it for that instruction to have been started at all. The
- * bound therefore rises as prefixes are opened. It was 18 while only the
- * unprefixed set existed, whose dearest instruction costs 19; then 20, a
- * repeated block transfer at 21 being the dearest of the two sets; it is 22
- * now that an index prefix can reach a read-modify-write costing 23.
+ * one less than the dearest thing the core runs whole: a quota has to have
+ * at least one T-state left in it for that thing to have been started at
+ * all. For the interpreter alone that thing is an instruction, and the
+ * bound rose as prefixes were opened -- 18 while only the unprefixed set
+ * existed, whose dearest instruction costs 19; then 20, a repeated block
+ * transfer at 21 being the dearest of the two sets; 22 once an index prefix
+ * could reach a read-modify-write costing 23. With translated code armed
+ * (z80c.h) the thing run whole is a BLOCK, which closes as soon as its
+ * static sum reaches 64 T-states and ends at the latest on a call costing
+ * 17: a block spends at most 80, and the bound is then 79, well inside a
+ * scanline of 228. A block is never cut in half either, and the sampling
+ * below sees a boundary between two blocks exactly as it sees one between
+ * two instructions. The empty table leaves the interpreter's bound in
+ * force.
  *
  * Returns 0 once the core has stopped, and stops for good the first time it
  * meets an opcode it cannot execute: an incomplete instruction set is the

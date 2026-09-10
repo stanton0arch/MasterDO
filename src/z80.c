@@ -2,6 +2,7 @@
 #include "sms.h"
 #include "vdp.h"
 #include "z80_ops.h"
+#include "z80c.h"
 #include "sys.h"
 #include "log.h"
 
@@ -697,7 +698,11 @@ z80_nmi_line(void)
  * lean on exactly that, composing or writing both homes of R where they
  * stand. Every reader outside z80_run runs outside those windows, because
  * z80_run has synchronised on every path that leaves it. Code added inside
- * the loop lives on the locals, or pays a boundary of its own.
+ * the loop lives on the locals, or pays a boundary of its own -- which is
+ * what the translated-code probe at the head of the loop does, and only
+ * on a hit: the lookup reads the local PC and the tables, and the flush,
+ * the blocks on the structure and the reload happen when a block starts
+ * at PC (z80c.h).
  * ---------------------------------------------------------------------------
  */
 #undef Z80_PC
@@ -988,6 +993,35 @@ z80_run(int32 quota)
 
   while(Z80_TSTATES > 0)
     {
+      /*
+       * The translated code first. When the table is armed and a block
+       * starts at PC, the window is flushed, the blocks run on the
+       * structure until the quota is spent or no block follows
+       * (z80c_run), and the five residents are reloaded from the
+       * structure -- the entry copy above, plus the counter, which the
+       * blocks decrement in the structure. That is the one boundary
+       * paid inside the loop, and it is paid on a hit alone: the lookup
+       * reads the local PC and the tables (z80c_find), and the empty
+       * table never arms, so the interpreter alone pays one load and
+       * one branch per instruction here.
+       */
+      if(z80c_armed)
+        {
+          z80c_fn z80c_block = z80c_find(Z80_PC);
+
+          if(z80c_block != NULL)
+            {
+              Z80_RESIDENT_FLUSH();
+              z80c_run(z80c_block);
+              Z80_PC      = Z80_PC_STATE;
+              Z80_R       = Z80_R_STATE;
+              Z80_A       = Z80_A_STATE;
+              Z80_F       = Z80_F_STATE;
+              Z80_TSTATES = Z80_TSTATES_STATE;
+              continue;
+            }
+        }
+
       op = Z80_RD8(Z80_PC);
       Z80_PC = (uint16)(Z80_PC + 1);
       Z80_TICK_R();

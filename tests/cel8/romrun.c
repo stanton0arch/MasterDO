@@ -71,6 +71,7 @@
 #include "cart.h"
 #include "vdp.h"
 #include "z80.h"
+#include "z80c.h"
 #include "log.h"
 #include "blockfile.h"
 #include "operror.h"
@@ -2783,9 +2784,52 @@ int main(int argc, char **argv)
   if(cart_boot() < 0) return 2;
   if(vdp_init() < 0) return 2;
   z80_reset();
+  /* The translated code, paired as src/main.c pairs it: the empty table
+     by default, a generated one when the script links it (Z80C=). */
+  z80c_init();
+  /* The lookup held on the table just paired, at reset, when slots 0 and
+     1 show banks 0 and 1 (src/cart.c): every block below position 0x8000
+     is found by its own address, and a page that is not the image never
+     answers a block -- the work RAM and its mirror (the high 16
+     kilobytes) are the pages a program could run from, and the core
+     interprets them. With the empty table nothing is found either way,
+     and the line says how many entries were held. */
+  {
+    unsigned long i, held = 0;
+
+    for(i = 0; z80c_armed && i < z80c_block_count; i++)
+      if(z80c_table[i].pos < 0x8000UL)
+        {
+          if(z80c_find((uint16)z80c_table[i].pos) != z80c_table[i].fn)
+            {
+              printf("FAIL: z80c_find misses the block at position %06lx\n",
+                     (unsigned long)z80c_table[i].pos);
+              return 2;
+            }
+          held++;
+        }
+    if(z80c_find(0xC000U) != NULL || z80c_find(0xE000U) != NULL ||
+       z80c_find(0xFFFFU) != NULL)
+      {
+        printf("FAIL: z80c_find answers a block on a RAM page\n");
+        return 2;
+      }
+    printf("z80c table entries found=%lu ram pages none\n",held);
+  }
   booted = 1;
 
   rom_fnv = digest(sms.cart.rom,(unsigned long)sms.cart.size);
+  /* The console pairs the table by size alone until the loader checks the
+     digest; this runner has the digest in hand, so a generated table
+     written from another image of the same size is refused here rather
+     than judged against pictures it never drew. */
+  if(z80c_armed && (unsigned long)z80c_rom_fnv != rom_fnv)
+    {
+      printf("FAIL: the table of translated code is another image's "
+             "(rom_fnv %08lx, table %08lx)\n",
+             rom_fnv,(unsigned long)z80c_rom_fnv);
+      return 2;
+    }
 
   /* Written to a temporary name beside the final one and renamed at the
      end, once the run has proved it took what the header says: a run that
@@ -2836,6 +2880,19 @@ int main(int argc, char **argv)
       for(line = 0; line < LINES_PER_FRAME; line++)
         {
           residue = z80_run(TSTATES_PER_LINE - residue);
+          /* The overrun z80_run hands back is bounded by the contract in
+             z80.h: below one instruction with the interpreter alone, and
+             below one block with translated code armed -- a block spends
+             at most Z80C_BLOCK_TSTATES - 1 + 17 (a call), started with at
+             least one T-state left. Held on every line, since the quota
+             arithmetic of the scanline loop rests on it. */
+          if(residue > (int32)(Z80C_BLOCK_TSTATES + 15))
+            {
+              printf("FAIL: z80_run overran the quota by %ld T-states "
+                     "(frame %lu line %d)\n",
+                     (long)residue,(unsigned long)fr,line);
+              return 2;
+            }
           line_step();
           /* The presentation, once line 191 is counted, as src/main.c
              makes it: the list built, held and copied, on every frame,
@@ -2999,6 +3056,17 @@ int main(int argc, char **argv)
   if(!writing)
     printf("sprite flags %lu/%lu\n",flags_ok,flags_seen);
 
+#if LOG_ENABLE && SMS_TELEMETRY
+  {
+    /* What the translated code ran, over the whole run: blocks executed
+       and hand-backs to the interpreter. Zero on both with the empty
+       table; a generated table linked must show the first above zero. */
+    uint32 z80c_exec, z80c_fallback;
+    z80c_counts(&z80c_exec,&z80c_fallback);
+    printf("z80c exec=%lu fallback=%lu\n",
+           (unsigned long)z80c_exec,(unsigned long)z80c_fallback);
+  }
+#endif
   if(writing)
     printf("pictures=%lu written\n",pictures);
   else

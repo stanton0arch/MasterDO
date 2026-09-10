@@ -138,7 +138,7 @@ LIBS =						\
 #	$(LIBPATH)/3do/obsoletelib3do.lib	\
 
 # ===== Flat source files in src/ become the LaunchMe boot binary =====
-LAUNCHME_SRCS_C   = $(wildcard src/*.c)
+LAUNCHME_SRCS_C   = $(sort $(wildcard src/*.c) src/rom_code.c)
 LAUNCHME_SRCS_CXX = $(wildcard src/*.cpp)
 LAUNCHME_SRCS_S   = $(wildcard src/*.s)
 LAUNCHME_OBJS     = $(LAUNCHME_SRCS_S:src/%.s=build/%.s.o) $(LAUNCHME_SRCS_C:src/%.c=build/%.c.o) $(LAUNCHME_SRCS_CXX:src/%.cpp=build/%.cpp.o)
@@ -310,6 +310,19 @@ build/%.c.o: src/%.c | build $(SUBDIR_BUILD_DIRS)
 build/%.cpp.o: src/%.cpp | build $(SUBDIR_BUILD_DIRS)
 	armcpp $(INCFLAGS) $(DEFFLAGS) $(CXXFLAGS) -M $< -o $@ > ${@:.o=.d}
 	armcpp $(INCFLAGS) $(DEFFLAGS) $(CXXFLAGS) -c $< -o $@
+
+# The translated cartridge code the boot binary links. The file is not
+# tracked: the host tool (sh tests/z80c/translate.sh <rom>) writes it from
+# a ROM, and nothing derived from a ROM is published. When it is missing
+# the empty table is copied there, and the core runs the interpreter
+# alone. No prerequisite on purpose: a generated file is never written
+# over by this rule, and `clean` leaves it where it is.
+src/rom_code.c:
+ifeq ($(IS_POSIX_SHELL),1)
+	cp tests/z80c/rom_code_none.c $@
+else
+	copy /Y tests\z80c\rom_code_none.c $(subst /,\,$@)
+endif
 
 clean:
 ifeq ($(IS_POSIX_SHELL),1)

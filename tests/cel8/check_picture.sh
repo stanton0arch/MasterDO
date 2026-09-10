@@ -82,6 +82,12 @@
 #       TAKEN=, and say in the story what changed and why. Such a
 #       reference holds the list to itself; the oracle of the two bits
 #       stays 18a3429, which no run can remake.
+#   Z80C=src/rom_code.c sh tests/cel8/check_picture.sh
+#       links a GENERATED table of translated code (tests/z80c/
+#       translate.sh) in place of the empty one, so that the blocks the
+#       tool wrote are held to the same pictures as the interpreter: the
+#       judge of the translation on the real ROM. The runner prints the
+#       blocks it ran as "z80c exec=".
 #   ROM=some/rom.sms FROZEN=0 sh tests/cel8/check_picture.sh
 #       plays ANOTHER ROM than the references': neither is compared,
 #       since both would refuse it. The list writes a take of every frame
@@ -99,10 +105,15 @@ case "${PPM:-}"   in ''|/*) ;; *) PPM="$PWD/$PPM";; esac
 case "${REF:-}"   in ''|/*) ;; *) REF="$PWD/$REF";; esac
 case "${ALL:-}"   in ''|/*) ;; *) ALL="$PWD/$ALL";; esac
 case "${ROM:-}"   in ''|/*) ;; *) ROM="$PWD/$ROM";; esac
+case "${Z80C:-}"  in ''|/*) ;; *) Z80C="$PWD/$Z80C";; esac
 
 cd "$(dirname "$0")/../.."
 
 ROM=${ROM:-takeme/roms/rom.sms}
+# The table of translated code the core is linked with: the empty one,
+# which never arms and leaves the interpreter alone, unless the caller
+# names a generated file.
+Z80C=${Z80C:-tests/z80c/rom_code_none.c}
 REF=${REF:-tests/cel8/picture-106b64a.fnv}
 ALL=${ALL:-tests/cel8/picture-18a3429-all.fnv}
 FROZEN=${FROZEN:-1}
@@ -192,10 +203,15 @@ $CC -O1 -std=gnu89 -Wall -Wextra $PINS -I"$H" -I"$S" -c -o "$WORK/romrun.o" "$B/
 #   build <vdp.c> <binary>
 build() {
   $CC -O1 -std=gnu89 -w $PINS -I"$H" -I"$S" -o "$2" "$WORK/romrun.o" \
-      "$S/cart.c" "$S/sms.c" "$1" "$S/z80.c"
+      "$S/cart.c" "$S/sms.c" "$1" "$S/z80.c" "$S/z80c.c" "$Z80C"
 }
 
-echo "== building the list =="
+if [ ! -f "$Z80C" ]; then
+  echo "FAIL: no table of translated code at $Z80C"
+  exit 1
+fi
+
+echo "== building the list (translated code: $Z80C) =="
 build "$S/vdp.c" "$WORK/romrun"
 
 if [ -n "${PPM:-}" ]; then
@@ -293,6 +309,30 @@ judge() {
     return 1
   fi
   echo "  [OK] every row the list draws is the row the reference holds ($7 rows; $deg_n pictures degraded, $tol_n rows tolerated inside their fold)"
+
+  # What the translated code did is held to the table linked: a generated
+  # table must have run blocks (a table that did not pair, or a core that
+  # never arms, would let the interpreter draw every row right and prove
+  # nothing about the translation), and the empty table must have run
+  # none. The runner prints the line when it carries the counters.
+  case "$Z80C" in
+    */tests/z80c/rom_code_none.c|tests/z80c/rom_code_none.c) z80c_empty=1;;
+    *) z80c_empty=0;;
+  esac
+  if [ "$z80c_empty" = 1 ]; then
+    if grep -q '^z80c exec=' "$2" && ! grep -q '^z80c exec=0 fallback=0$' "$2"; then
+      grep '^z80c exec=' "$2"
+      echo "  [FAIL] the empty table ran translated code"
+      return 1
+    fi
+  else
+    if ! grep -q '^z80c exec=[1-9]' "$2"; then
+      grep '^z80c ' "$2" || true
+      echo "  [FAIL] the generated table ran no block: the pictures above judge the interpreter alone"
+      return 1
+    fi
+    echo "  [OK] the generated table ran blocks ($(sed -n 's/^z80c exec=\([0-9]*\) .*/\1/p' "$2"))"
+  fi
 
   # The two tables between an index and a colour, checked on every picture
   # and reported as the fewest entries found right. The cels' palette must

@@ -89,7 +89,12 @@ O=$(mktemp -d)
 trap 'rm -rf "$tmp" "$O"' EXIT
 
 objs=""
-for src in "$B/bench_z80.c" "$B/zexall_tests.c" "$S/z80.c" "$S/sms.c"; do
+# The core brings its translated-code module and the EMPTY table: the
+# bench judges the interpreter, which the empty table leaves alone, and a
+# core that could not link without a table would be a core the bench
+# never sees whole.
+for src in "$B/bench_z80.c" "$B/zexall_tests.c" "$S/z80.c" "$S/sms.c" \
+           "$S/z80c.c" "$B/../z80c/rom_code_none.c"; do
   obj="$O/$(basename "$src" .c).o"
   $CC $STD $CFLAGS $PINS -I"$B/3do" -I"$S" -I"$B" -c "$src" -o "$obj"
   objs="$objs $obj"
