@@ -15,3 +15,8 @@ const uint32 z80c_code_bytes  = 0UL;
 const uint32 z80c_block_count = 0UL;
 
 const z80c_entry_t z80c_table[1] = { { 0UL, 0 } };
+
+#if Z80C_HITS
+uint32 z80c_hits[1];
+uint32 z80c_tstates[1];
+#endif

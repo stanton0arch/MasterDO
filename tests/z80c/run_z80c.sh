@@ -10,28 +10,43 @@
 # line's entry PC when one does ("none" otherwise), how many blocks the
 # line ran, and both states.
 #
-# A green run in which no translated block ran is not green: the runner
-# says so in its own line and this script refuses it -- the interpreter
-# judged against itself proves nothing.
+# The proof is the translator's own (tests/z80c/translate.sh): the whole
+# table first, then the table chosen under the budget from the counts of
+# that first run -- two PASS lines per ROM, or a FAIL and nothing
+# written. This script runs it with the output in the work directory,
+# reads its verdict, and then, on request, breaks the chosen table.
 #
-# The repository carries no ROM: without one this script says "skipped"
-# unmistakably and exits 0, so that the target is runnable and green on
-# every checkout. With several ROMs every one is translated into its own
-# directory and judged; the exit status is 1 if any fails.
+# A green run in which no translated block ran is not green: the runner
+# says so in its own line and the translator refuses it -- the
+# interpreter judged against itself proves nothing.
+#
+# The repository carries no ROM, but it does carry one cartridge it
+# writes itself (tests/z80c/rom_bank.c): a handful of instructions that
+# move the very window they run in, which is the one case a real ROM
+# never produces and the only thing the epoch of the mapper guards
+# against. That image is generated into the work directory and judged
+# first, on every checkout, so the target is never green on nothing.
+# Without a real ROM beside it the script says so unmistakably and judges
+# the written cartridge alone. With several ROMs every one is translated
+# into its own directory and judged; the exit status is 1 if any fails.
 #
 # Nothing derived from a ROM lands in the tree: the C the translator
 # writes goes to the work directory, never to src/rom_code.c, and the
 # work directory is removed at the end. The trace of a ROM weighs about
 # 10.5 kilobytes per frame (31.5 megabytes at 3000 frames); it is removed
-# as soon as its replay has passed and kept, in the work directory, while
-# the script runs, when it has not.
+# as soon as its replay has passed, and the work directory takes the rest
+# with it on the way out -- a red proof leaves no trace behind to open,
+# only the lines it printed. Replay the failing ROM by hand to get one.
 #
 #   sh tests/z80c/run_z80c.sh               every ROM, 3000 frames each
 #   FRAMES=600 sh tests/z80c/run_z80c.sh    fewer frames
-#   MUTATE=1 sh tests/z80c/run_z80c.sh      after the green: the emitted C
-#                                           broken three ways, each seen
-#                                           red, then the frame digest
-#                                           seen red on its own
+#   MUTATE=1 sh tests/z80c/run_z80c.sh      after the green: the chosen
+#                                           table's C broken six ways,
+#                                           each seen red, then the frame
+#                                           digest seen red on its own;
+#                                           and, on the written cartridge,
+#                                           the epoch of the mapper taken
+#                                           out of the core and seen red
 #
 set -e
 
@@ -46,6 +61,7 @@ CC=${CC:-gcc}
 S=src
 H=tests/cel8/3do
 B=tests/z80c
+export FRAMES EVERY CC
 
 # The ROMs, .sms and .gg, whatever their names: none means nothing to
 # compare, and that is said rather than counted as a pass.
@@ -55,8 +71,7 @@ for r in "$@"; do
   [ -f "$r" ] && found=1
 done
 if [ "$found" -eq 0 ]; then
-  echo "z80c: skipped: no rom in $ROMS (nothing compared, nothing proved)"
-  exit 0
+  echo "z80c: no rom in $ROMS: the written cartridge is judged alone"
 fi
 
 # No substitute may shadow a real header of src/: the -I of the stubs comes
@@ -69,71 +84,27 @@ for h in "$H"/*.h; do
   fi
 done
 
-# The same pins as the picture check: the host has no assembler for the
-# recompiled cores, the interrupt test source is off, and the counters
-# the video part and the translated code keep are on -- the runner
-# records them.
-PINS="-DLOG_LEVEL=2 -DSMS_IRQ_TEST_SOURCE=0 -DSMS_TELEMETRY=1 \
-      -DSMS_DYNAREC_J0=0 -DSMS_DYNAREC_J1=0 -DSMS_DYNAREC_J2=0"
+. "$B/play.sh"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-# The runner is the only host file here, and this is the only place a
-# second compiler reads it: its warnings are kept, the core's are not
-# (they are the SDK headers' and are counted elsewhere). The dialect is
-# gnu89 and not overridable: the runner formats its states with snprintf,
-# which C89 does not declare (tests/z80/run_z80.sh says the same).
-echo "== building the runner =="
-$CC -O1 -std=gnu89 -Wall -Wextra $PINS -I"$H" -I"$S" -c -o "$WORK/sidebyside.o" "$B/sidebyside.c"
+# The cartridge this repository writes itself, generated into the work
+# directory and judged before the real ROMs. It is built with the
+# strictness of the tools, not of the console: it never leaves the PC.
+FIXTURE=$WORK/bankswitch.sms
+$CC -O1 -std=c89 -Wall -Wextra -Werror -o "$WORK/rom_bank" "$B/rom_bank.c"
+"$WORK/rom_bank" "$FIXTURE"
+set -- "$FIXTURE" "$@"
 
-# The core linked as it stands with a named table of translated code: the
-# one the translator wrote for the ROM, or one of the broken copies below.
-#
-#   build <rom_code.c> <binary>
-build() {
-  $CC -O1 -std=gnu89 -w $PINS -I"$H" -I"$S" -o "$2" "$WORK/sidebyside.o" \
-      "$S/cart.c" "$S/sms.c" "$S/vdp.c" "$S/z80.c" "$S/z80c.c" "$1"
-}
-
-# One binary played twice: recorded with the translated code armed, then
-# replayed by the interpreter on the recorded quotas. Prints the runner's
-# lines; returns its status -- 0 the same, 1 a difference, 2 nothing
-# proved, 3 the table is not the ROM's. The replay mode is the caller's:
-# "replay" judges, "replay-poke" is the self-check of the frame path.
-#
-#   play <binary> <rom> <dir> <replay mode>
-play() {
-  rc=0; t_rec=; t_rep=; start=
-  set +e
-  start=$(date +%s)
-  "$1" "$2" "$FRAMES" "$EVERY" record "$3/trace.bin" >"$3/record.out" 2>"$3/record.log"
-  rc=$?
-  t_rec=$(( $(date +%s) - start ))
-  cat "$3/record.out"
-  if [ "$rc" -ne 0 ]; then
-    set -e
-    grep -E 'ERR|WARN' "$3/record.log" || true
-    return "$rc"
-  fi
-  start=$(date +%s)
-  "$1" "$2" "$FRAMES" "$EVERY" "$4" "$3/trace.bin" >"$3/replay.out" 2>"$3/replay.log"
-  rc=$?
-  t_rep=$(( $(date +%s) - start ))
-  set -e
-  cat "$3/replay.out"
-  [ "$rc" -eq 0 ] || grep -E 'ERR|WARN' "$3/replay.log" || true
-  return "$rc"
-}
-
-# The check seen to bite: copies of the emitted C, each broken one way a
-# wrong translation would be, each played through the same two runs,
-# each expected red. Global -- every occurrence of the form -- because a
-# block nobody runs proves nothing, and the first executed block of the
-# form is what bites. A copy that stays green is a failure of THIS script;
-# a pattern that no longer matches is refused rather than played intact;
-# a copy that does not compile is reported, not died on. Each is the
-# ROM's verdict: the next ROM is still judged.
+# The check seen to bite: copies of the chosen table's C, each broken one
+# way a wrong translation would be, each played through the same two
+# runs, each expected red. Global -- every occurrence of the form --
+# because a block nobody runs proves nothing, and the first executed
+# block of the form is what bites. A copy that stays green is a failure
+# of THIS script; a pattern that no longer matches is refused rather than
+# played intact; a copy that does not compile is reported, not died on.
+# Each is the ROM's verdict: the next ROM is still judged.
 #
 #   mutate <name> <sed> <why> <rom_code.c> <rom> <dir>
 mutate() {
@@ -143,15 +114,16 @@ mutate() {
     echo "FAIL: mutation $1 changed nothing, its pattern no longer matches"
     return 1
   fi
-  if ! build "$6/$1/rom_code.c" "$6/$1/sidebyside" 2>"$6/$1/build.log"; then
+  if ! z80c_build "$6/$1/rom_code.c" "$6/$1/sidebyside" "$WORK/sidebyside.o" 2>"$6/$1/build.log"; then
     echo "  [FAIL] mutation $1 ($3) does not compile"
     cat "$6/$1/build.log"
     return 1
   fi
   set +e
-  play "$6/$1/sidebyside" "$5" "$6/$1" replay >"$6/$1/verdict" 2>&1
+  z80c_play "$6/$1/sidebyside" "$5" "$6/$1" replay >"$6/$1/verdict" 2>&1
   mrc=$?
   set -e
+  rm -f "$6/$1/trace.bin"
   if [ "$mrc" -eq 0 ]; then
     echo "  [FAIL] mutation $1 ($3) left the check green"
     cat "$6/$1/verdict"
@@ -166,18 +138,18 @@ mutate() {
   return 0
 }
 
-# The frame path seen to bite on the intact binary: the emitted C of
-# 12.1's instruction set stores nothing but the push of a call, so no
-# mutation above reaches the digest; the runner flips one byte of the
-# work RAM on frame 0 instead, and the digest must say so.
+# The frame path seen to bite on the intact binary, on its own terms:
+# the runner flips one byte of the work RAM on frame 0, and the digest
+# must say so.
 #
 #   poke <binary> <rom> <dir>
 poke() {
   mkdir -p "$3/poke"
   set +e
-  play "$1" "$2" "$3/poke" replay-poke >"$3/poke/verdict" 2>&1
+  z80c_play "$1" "$2" "$3/poke" replay-poke >"$3/poke/verdict" 2>&1
   prc=$?
   set -e
+  rm -f "$3/poke/trace.bin"
   if [ "$prc" -eq 0 ]; then
     echo "  [FAIL] one byte of the work RAM flipped left the check green"
     cat "$3/poke/verdict"
@@ -192,6 +164,44 @@ poke() {
   return 0
 }
 
+# The same, on a file of the core instead of the emitted C: the copy
+# takes the place of the original in the link, the table stays intact.
+# A guard of the core that no ROM in the work list makes bite is a guard
+# nobody has seen work.
+#
+#   mutate_core <name> <sed> <why> <core file> <rom_code.c> <rom> <dir>
+mutate_core() {
+  mkdir -p "$7/$1"
+  copy=$7/$1/$(basename "$4")
+  sed "$2" "$4" > "$copy"
+  if cmp -s "$4" "$copy"; then
+    echo "FAIL: mutation $1 changed nothing, its pattern no longer matches"
+    return 1
+  fi
+  if ! z80c_build "$5" "$7/$1/sidebyside" "$WORK/sidebyside.o" "$copy" 2>"$7/$1/build.log"; then
+    echo "  [FAIL] mutation $1 ($3) does not compile"
+    cat "$7/$1/build.log"
+    return 1
+  fi
+  set +e
+  z80c_play "$7/$1/sidebyside" "$6" "$7/$1" replay >"$7/$1/verdict" 2>&1
+  mrc=$?
+  set -e
+  rm -f "$7/$1/trace.bin"
+  if [ "$mrc" -eq 0 ]; then
+    echo "  [FAIL] mutation $1 ($3) left the check green"
+    cat "$7/$1/verdict"
+    return 1
+  fi
+  if [ "$mrc" -ne 1 ]; then
+    echo "  [FAIL] mutation $1 ($3) proved nothing (status $mrc)"
+    cat "$7/$1/verdict"
+    return 1
+  fi
+  echo "  [OK] mutation $1 ($3) turns the check red: $(grep -m1 'MISMATCH' "$7/$1/verdict")"
+  return 0
+}
+
 fail=0
 for rom in "$@"; do
   [ -f "$rom" ] || continue
@@ -199,54 +209,61 @@ for rom in "$@"; do
   name=$(basename "$rom" | sed 's/\./_/g')
   dir=$WORK/$name
   mkdir -p "$dir"
-  echo "== $name: translating =="
+  echo "== $name: translating, proving the whole table, choosing, proving the chosen table =="
   # The translator's file goes to the work directory and nowhere else:
   # src/rom_code.c stays whatever the tree holds.
-  if ! OUT="$dir/rom_code.c" sh "$B/translate.sh" "$rom" >"$dir/translate.out" 2>&1; then
-    cat "$dir/translate.out"
-    echo "FAIL: $name: the translator refused the rom"
+  set +e
+  OUT="$dir/rom_code.c" sh "$B/translate.sh" "$rom" >"$dir/translate.out" 2>&1
+  trc=$?
+  set -e
+  cat "$dir/translate.out"
+  if [ "$trc" -ne 0 ] || [ "$(grep -c '^z80c: PASS [0-9]*/[0-9]* frames$' "$dir/translate.out")" -ne 2 ] \
+     || ! grep -q "^written: " "$dir/translate.out"; then
+    echo "FAIL: $name: the two proofs did not both pass, or nothing was written"
     fail=1
     continue
   fi
-  report=$(grep -m1 '^z80c: rom ' "$dir/translate.out" | sed 's/ insns=.*//')
-  echo "== $name: building =="
-  build "$dir/rom_code.c" "$dir/sidebyside"
-  echo "== $name: translated code armed, then the interpreter on its quotas =="
-  if play "$dir/sidebyside" "$rom" "$dir" replay; then
-    echo "$report frames=$FRAMES translated=${t_rec}s interp=${t_rep}s"
-  else
-    echo "$report frames=$FRAMES translated=${t_rec:-?}s interp=${t_rep:-?}s"
-    echo "FAIL: $name: the two runs differ, or nothing was proved"
-    fail=1
-    continue
-  fi
-  # What the core said of the table at boot, if it said anything: a
-  # "none, interpreter only" here is what the next check refuses.
-  grep 'WARN.*translated code' "$dir/record.log" || true
-  # The same guard as the picture check: a run the translated code took
-  # no part in judged the interpreter against itself.
-  if ! grep -q '^z80c: recorded [0-9]* frames exec=[1-9]' "$dir/record.out"; then
-    echo "FAIL: $name: no translated block ran, the interpreter was judged against itself"
-    fail=1
-    continue
-  fi
-  rm -f "$dir/trace.bin"
 
   [ "${MUTATE:-0}" = 1 ] || continue
 
-  echo "== $name: the emitted C broken, three ways =="
-  # Every compare of an immediate leaves the carry flag inverted: the
-  # next conditional branch of the interpreter goes the other way.
-  mutate cp 's/^\(  Z80_OP_CP(0x[0-9A-F]*U);\)\( \/\* cp n \*\/\)$/\1 Z80_F ^= 0x01U;\2/' \
-         "the carry flag inverted after every cp n" "$dir/rom_code.c" "$rom" "$dir" || fail=1
-  # Every block charges one T-state too many: the interpreter given the
-  # recorded quota stops one instruction short of the block's end.
-  mutate spend 's/^  Z80_SPEND(\([0-9]*\));$/  Z80_SPEND(\1 + 1);/' \
-         "every block one T-state dearer" "$dir/rom_code.c" "$rom" "$dir" || fail=1
-  # Every relative jump lands one byte past its target.
-  mutate jr 's/^\(  Z80_PC = (uint16)(z80_pc0 + 0x[0-9A-F]*U\)); \/\* jr /\1 + 1U); \/* jr /' \
-         "every jr one byte past its target" "$dir/rom_code.c" "$rom" "$dir" || fail=1
+  z80c_runner "$WORK/sidebyside.o"
+
+  # The written cartridge answers for the core's own guard and for
+  # nothing else: its handful of instructions match none of the six
+  # patterns below, which are forms only a real program carries.
+  if [ "$rom" = "$FIXTURE" ]; then
+    echo "== $name: the epoch of the mapper taken out of the core =="
+    # Without it the chain trusts the successor a block rendered while
+    # the bank behind that address was being turned: the block of the
+    # bank that has just left runs in place of the one now there.
+    mutate_core epoch 's/^\( *\)z80c_map_epoch++;$/\1;/' \
+         "the mapper no longer steps the epoch" "$S/cart.c" \
+         "$dir/rom_code.c" "$rom" "$dir" || fail=1
+  else
+    echo "== $name: the chosen table's C broken, six ways =="
+    # Every compare of an immediate leaves the carry flag inverted: the
+    # next conditional branch of the interpreter goes the other way.
+    mutate cp 's/^\(  Z80_OP_CP(0x[0-9A-F]*U);\)\( \/\* cp n \*\/\)$/\1 Z80_F ^= 0x01U;\2/' \
+           "the carry flag inverted after every cp n" "$dir/rom_code.c" "$rom" "$dir" || fail=1
+    # Every exit of every block charges one T-state too few: the
+    # interpreter given the recorded quota stops short of the block's end.
+    mutate spend 's/^\(  *Z80_SPEND(\)\([0-9]*\)\();\)$/\1\2 - 1\3/' \
+           "every block one T-state cheaper" "$dir/rom_code.c" "$rom" "$dir" || fail=1
+    # Every relative jump lands one byte past its target.
+    mutate jr 's/^\(  *Z80_PC = (uint16)(z80_pc0 + 0x[0-9A-F]*U\)); \/\* jr /\1 + 1U); \/* jr /' \
+           "every jr one byte past its target" "$dir/rom_code.c" "$rom" "$dir" || fail=1
+    # Every block that loads B loads it from the field of C.
+    mutate load 's/^\(  uint8 z80c_b\) = Z80_B_STATE;$/\1 = Z80_C_STATE;/' \
+           "register b loaded from the field of c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
+    # Every rendered successor is the entry after the right one.
+    mutate succ 's/&z80c_table\[\([0-9]*\)\]/\&z80c_table[(\1 + 1UL) % z80c_block_count]/g' \
+           "every successor shifted by one entry" "$dir/rom_code.c" "$rom" "$dir" || fail=1
+    # Every taken branch forgets its surcharge.
+    mutate cc 's/^\(      Z80_SPEND([0-9]*\) + [0-9]*);$/\1);/' \
+           "the surcharge of every taken branch dropped" "$dir/rom_code.c" "$rom" "$dir" || fail=1
+  fi
   echo "== $name: the frame digest, one byte of the work ram flipped =="
+  z80c_build "$dir/rom_code.c" "$dir/sidebyside" "$WORK/sidebyside.o"
   poke "$dir/sidebyside" "$rom" "$dir" || fail=1
 done
 

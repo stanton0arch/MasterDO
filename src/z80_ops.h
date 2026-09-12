@@ -16,10 +16,12 @@
  * of the world structure (sms.h) -- a global, readable from any module,
  * z80.c being its only writer by declared rule of sms.h rather than by
  * constraint of the compiler, the price of letting other modules read the
- * processor's state without a pointer in between -- and two static
- * functions of z80.c, the ones that carry a byte to and from a port: they
- * are what the input and output instructions expand into, and they are not
- * state.
+ * processor's state without a pointer in between -- and two functions of
+ * z80.c, declared in z80.h, the ones that carry a byte to and from a
+ * port: they are what the input and output instructions expand into, and
+ * they are not state. The generated file of translated code (z80c.h)
+ * includes this header too: its blocks are the interpreter's own
+ * operations, retargeted onto locals.
  *
  * Nothing here is a function, and that is a budget decision. The processor
  * budget is 3.49 ARM cycles per emulated T-state; an uncached call costs 29 to
@@ -188,37 +190,58 @@
  *
  * Naming and split follow TotalSMS/src/core/sms_z80.c:106-131.
  *
- * FIVE OF THESE NAMES HAVE TWO HOMES, and the second home is the point. PC,
- * the T-state counter, R, A and F are read or written on every instruction,
- * or on nearly every one -- and a field of the global structure can never
- * stay in a machine register across an emulated memory write: a store through
- * z80_wmap could, as far as the compiler can prove, land on sms.z80 itself,
- * so every such store forces the fields back to memory and reloads them
- * after. A local variable whose address is never taken cannot be aliased by
- * any store, and so can be held in a register across the whole body of the
- * loop.
+ * EVERY REGISTER NAME BELOW HAS TWO HOMES, and the second home is the
+ * point. A field of the global structure can never stay in a machine
+ * register across an emulated memory write: a store through z80_wmap
+ * could, as far as the compiler can prove, land on sms.z80 itself, so
+ * every such store forces the fields back to memory and reloads them
+ * after. A local variable whose address is never taken cannot be aliased
+ * by any store, and so can be held in a register across the whole body of
+ * the code that uses it.
  *
- * Hence the pair of names. Z80_x_STATE is the field of the structure, always.
- * Z80_x defaults to it, and z80.c retargets the five hot names onto locals of
- * z80_run for the extent of that function's body, restoring them afterwards;
- * the _STATE names are what the synchronisation at z80_run's boundaries reads
- * and writes. Everything else -- every operation, every cold function -- keeps
- * saying Z80_x and never needs to know which home is live where it stands.
+ * Hence the pair of names. Z80_x_STATE is the field of the structure,
+ * always. Z80_x defaults to it, and two resident windows retarget it:
  *
- * The restore block after z80_run re-states these five default definitions
+ *   z80_run (z80.c) retargets the five hot names -- PC, the T-state
+ *   counter, R, A and F, read or written on every instruction or nearly
+ *   -- onto locals for the extent of that function's body, and restores
+ *   them afterwards.
+ *
+ *   a translated block (src/rom_code.c, written by tests/z80c/translate.c
+ *   and described in z80c.h) retargets the thirteen register names -- A,
+ *   F, B, C, D, E, H, L, the four index halves and SP -- onto locals of
+ *   the block for the length of the generated file: the block loads the
+ *   ones it reads at its entry and stores the ones it wrote at its exits,
+ *   and every operation in between works on registers. PC, the counter
+ *   and R stay on the structure there.
+ *
+ * The _STATE names are what the synchronisation at either window's
+ * boundaries reads and writes. Everything else -- every operation, every
+ * cold function -- keeps saying Z80_x and never needs to know which home
+ * is live where it stands. The names with no _STATE twin -- I, the
+ * alternate set, the flip-flops, the mode, the halt -- have one home.
+ *
+ * The restore block after z80_run re-states its five default definitions
  * verbatim: a change to any of them is a change in two places, here and
- * there, and the two must be kept in agreement by hand.
+ * there, and the two must be kept in agreement by hand. The generated
+ * file re-states nothing: it is regenerated from this header.
  * ---------------------------------------------------------------------------
  */
 #define Z80_A_STATE sms.z80.main.a
 #define Z80_F_STATE sms.z80.main.f
+#define Z80_B_STATE sms.z80.main.b
+#define Z80_C_STATE sms.z80.main.c
+#define Z80_D_STATE sms.z80.main.d
+#define Z80_E_STATE sms.z80.main.e
+#define Z80_H_STATE sms.z80.main.h
+#define Z80_L_STATE sms.z80.main.l
 
-#define Z80_B sms.z80.main.b
-#define Z80_C sms.z80.main.c
-#define Z80_D sms.z80.main.d
-#define Z80_E sms.z80.main.e
-#define Z80_H sms.z80.main.h
-#define Z80_L sms.z80.main.l
+#define Z80_B Z80_B_STATE
+#define Z80_C Z80_C_STATE
+#define Z80_D Z80_D_STATE
+#define Z80_E Z80_E_STATE
+#define Z80_H Z80_H_STATE
+#define Z80_L Z80_L_STATE
 #define Z80_A Z80_A_STATE
 #define Z80_F Z80_F_STATE
 
@@ -232,14 +255,20 @@
 #define Z80_F_ALT sms.z80.alt.f
 
 #define Z80_PC_STATE sms.z80.pc
+#define Z80_SP_STATE sms.z80.sp
 
 #define Z80_PC Z80_PC_STATE
-#define Z80_SP sms.z80.sp
+#define Z80_SP Z80_SP_STATE
 
-#define Z80_IXH sms.z80.ixh
-#define Z80_IXL sms.z80.ixl
-#define Z80_IYH sms.z80.iyh
-#define Z80_IYL sms.z80.iyl
+#define Z80_IXH_STATE sms.z80.ixh
+#define Z80_IXL_STATE sms.z80.ixl
+#define Z80_IYH_STATE sms.z80.iyh
+#define Z80_IYL_STATE sms.z80.iyl
+
+#define Z80_IXH Z80_IXH_STATE
+#define Z80_IXL Z80_IXL_STATE
+#define Z80_IYH Z80_IYH_STATE
+#define Z80_IYL Z80_IYL_STATE
 
 #define Z80_R_STATE       sms.z80.r
 #define Z80_TSTATES_STATE sms.z80.tstates

@@ -371,12 +371,13 @@ test-picture:
 # of every line and the memory, video part and counters of every frame
 # are held equal. The first difference names the frame, the line, the
 # block that started at the line's entry PC when one does ("none"
-# otherwise) and how many blocks the line ran. Unlike test-picture, a
-# machine without a ROM gets "skipped" and exit 0: the public repository
-# carries no ROM, and this target must be runnable and green on every
-# checkout, saying "skipped" unmistakably when it compared nothing. Same
-# terms as above otherwise: no console, off the default path, cross
-# compiler untouched.
+# otherwise) and how many blocks the line ran. The public repository
+# carries no ROM, so the target also writes one of its own
+# (tests/z80c/rom_bank.c) and judges it first: a machine without a ROM is
+# still green, but on that written cartridge alone, which proves the
+# epoch of the mapper and a handful of opcodes and says so. Same terms as
+# above otherwise: no console, off the default path, cross compiler
+# untouched.
 test-z80c:
 	sh tests/z80c/run_z80c.sh
 

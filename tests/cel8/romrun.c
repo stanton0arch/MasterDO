@@ -2800,7 +2800,7 @@ int main(int argc, char **argv)
     for(i = 0; z80c_armed && i < z80c_block_count; i++)
       if(z80c_table[i].pos < 0x8000UL)
         {
-          if(z80c_find((uint16)z80c_table[i].pos) != z80c_table[i].fn)
+          if(z80c_find((uint16)z80c_table[i].pos) != &z80c_table[i])
             {
               printf("FAIL: z80c_find misses the block at position %06lx\n",
                      (unsigned long)z80c_table[i].pos);
@@ -3058,11 +3058,13 @@ int main(int argc, char **argv)
 
 #if LOG_ENABLE && SMS_TELEMETRY
   {
-    /* What the translated code ran, over the whole run: blocks executed
-       and hand-backs to the interpreter. Zero on both with the empty
-       table; a generated table linked must show the first above zero. */
-    uint32 z80c_exec, z80c_fallback;
-    z80c_counts(&z80c_exec,&z80c_fallback);
+    /* What the translated code ran, over the whole run: blocks executed,
+       and every instruction the interpreter executed while the table was
+       armed -- not the hand-backs, which are no longer counted. Zero on
+       both with the empty table; a generated table linked must show the
+       first above zero. */
+    uint32 z80c_exec, z80c_fallback, z80c_insns, z80c_ram;
+    z80c_counts(&z80c_exec,&z80c_fallback,&z80c_insns,&z80c_ram);
     printf("z80c exec=%lu fallback=%lu\n",
            (unsigned long)z80c_exec,(unsigned long)z80c_fallback);
   }

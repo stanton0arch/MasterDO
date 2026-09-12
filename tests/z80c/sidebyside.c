@@ -11,8 +11,14 @@
  *            written to the trace, with the T-states the line spent, the
  *            block that started at the line's entry PC and how many blocks
  *            the line ran; after every frame, a digest of the state (see
- *            "the frame record" below) and the counters. Prints one line
- *            at the end; <every> does not apply.
+ *            "the frame record" below) and the counters. Prints two lines
+ *            at the end -- the four counters, then how many blocks of the
+ *            table ran at all -- and, when a sixth argument names a file,
+ *            writes the hits of every block there (one line per block:
+ *            position, how often it was entered, the T-states its exits
+ *            charged; after a header naming the frames and the T-states
+ *            the run spent): what the translator chooses a table under a
+ *            budget from. <every> does not apply.
  *   replay   the table disarmed after z80c_init: the interpreter alone,
  *            reading the trace. Every line is given as its quota exactly
  *            what the translated run spent on it, so that it stops on the
@@ -29,11 +35,9 @@
  *            and both states.
  *   replay-poke  replay, with one byte of the work RAM flipped on frame 0
  *            just before the frame's digest is taken. This is the check
- *            of the frame path itself: the instructions the tool emits
- *            store nothing to memory but the push of a call, so no
- *            mutation of the emitted C reaches the digest -- the three
- *            mutations the script plays all bite on the line path -- and
- *            the digest would stay unproved. Expected: a MISMATCH on
+ *            of the frame path itself, on its own terms: the mutations
+ *            the script plays bite on the line path first, so the digest
+ *            is seen to bite here, without them. Expected: a MISMATCH on
  *            frame 0, line 261, exit 1.
  *
  * What the comparison measures is the C the tool emitted and nothing
@@ -55,7 +59,7 @@
  * identically in both runs; it is asked once per frame and a stopped
  * core is a failure, never a pass.
  *
- *   sidebyside <rom> <frames> <every> record|replay|replay-poke <trace>
+ *   sidebyside <rom> <frames> <every> record|replay|replay-poke <trace> [counts]
  *
  * Exit status: 0 every line and every frame the same, 1 a difference,
  * 2 the run could not prove anything (arguments, boot, overrun of the
@@ -88,6 +92,9 @@
 #endif
 #if !SMS_TELEMETRY
 #error "sidebyside needs SMS_TELEMETRY=1: z80c_counts lives under it"
+#endif
+#if !Z80C_HITS
+#error "sidebyside needs Z80C_HITS=1: the hits per block live under it"
 #endif
 #if !VDP_COUNTERS
 #error "sidebyside needs the video counters (VDP_COUNTERS)"
@@ -395,9 +402,9 @@ static unsigned long state_digest(void)
 
 static void frame_take(unsigned char *f)
 {
-  uint32 z80c_exec, z80c_fallback;
+  uint32 z80c_exec, z80c_fallback, z80c_insns, z80c_ram;
 
-  z80c_counts(&z80c_exec,&z80c_fallback);
+  z80c_counts(&z80c_exec,&z80c_fallback,&z80c_insns,&z80c_ram);
   put32(f,state_digest());
   put32(f + 4,(unsigned long)sms.cart.io_unrouted_reads);
   put32(f + 8,(unsigned long)sms.cart.io_unrouted_writes);
@@ -418,16 +425,12 @@ static void frame_format(char *out, size_t cap, const unsigned char *f)
            get32(f + 12),get32(f + 16),get32(f + 20),get32(f + 24));
 }
 
-/* The block's position for a function, read off the table: the lookup
-   answers a function, and the position is what names it. */
-static unsigned long block_pos(z80c_fn fn)
+/* The block's position for a table entry: the lookup answers the entry,
+   and the position is what names it. */
+static unsigned long block_pos(const z80c_entry_t *e)
 {
-  unsigned long i;
-  if(fn == NULL) return NO_BLOCK;
-  for(i = 0; i < z80c_block_count; i++)
-    if(z80c_table[i].fn == fn)
-      return (unsigned long)z80c_table[i].pos;
-  return NO_BLOCK;
+  if(e == NULL) return NO_BLOCK;
+  return (unsigned long)e->pos;
 }
 
 static void block_name(char *out, size_t cap, unsigned long pos)
@@ -474,15 +477,20 @@ int main(int argc, char **argv)
   unsigned long rom_fnv;
   int32 residue = 0;
   long total_exec = 0;
+  unsigned long spent_total = 0;
+  const char *counts_path = NULL;
   char a[256], b[256], name[16];
 
-  if(argc != 6)
+  if(argc != 6 && argc != 7)
     {
       fprintf(stderr,"usage: sidebyside <rom> <frames> <every> "
-              "record|replay|replay-poke <trace>\n"
-              "  every: the frames between two progress lines of a replay\n");
+              "record|replay|replay-poke <trace> [counts]\n"
+              "  every: the frames between two progress lines of a replay\n"
+              "  counts: where a record writes the hits per block\n");
       return 2;
     }
+  if(argc == 7)
+    counts_path = argv[6];
   rom_path = argv[1];
   frames = count_arg(argv[2]);
   every = count_arg(argv[3]);
@@ -577,13 +585,13 @@ int main(int argc, char **argv)
       for(line = 0; line < LINES_PER_FRAME; line++)
         {
           int32 quota;
-          uint32 exec0, exec1, fb;
+          uint32 exec0, exec1, fb, ins, ram;
           unsigned long pc_entry = (unsigned long)sms.z80.pc;
 
           if(recording)
             {
               quota = (int32)TSTATES_PER_LINE - residue;
-              z80c_counts(&exec0,&fb);
+              z80c_counts(&exec0,&fb,&ins,&ram);
               put16(rec + 32,pc_entry);
               put32(rec + 36,block_pos(z80c_find((uint16)pc_entry)));
             }
@@ -606,10 +614,10 @@ int main(int argc, char **argv)
           /* The overrun z80_run hands back is bounded by the contract in
              z80.h: below one instruction with the interpreter alone, and
              below one block with translated code armed -- a block spends
-             at most Z80C_BLOCK_TSTATES - 1 + 17 (a call), started with at
-             least one T-state left. Held on every line, since the quota
-             arithmetic of the scanline loop rests on it. */
-          if(residue > (int32)(Z80C_BLOCK_TSTATES + 15))
+             at most Z80C_BLOCK_TSTATES_MAX, started with at least one
+             T-state left. Held on every line, since the quota arithmetic
+             of the scanline loop rests on it. */
+          if(residue >= (int32)Z80C_BLOCK_TSTATES_MAX)
             {
               printf("FAIL: z80_run overran the quota by %ld T-states "
                      "(frame %lu line %d)\n",
@@ -620,7 +628,8 @@ int main(int argc, char **argv)
           if(recording)
             {
               regs_take(rec,(long)quota + (long)residue);
-              z80c_counts(&exec1,&fb);
+              spent_total += (unsigned long)((long)quota + (long)residue);
+              z80c_counts(&exec1,&fb,&ins,&ram);
               put16(rec + 34,(unsigned long)(exec1 - exec0));
               fwrite(rec,1,LINE_REC,tr);
             }
@@ -689,13 +698,75 @@ int main(int argc, char **argv)
 
   if(recording)
     {
+      uint32 z80c_exec, z80c_fallback, z80c_insns, z80c_ram;
+      unsigned long i, hit = 0;
+
       if(fclose(tr) != 0)
         {
           fprintf(stderr,"cannot finish the trace %s\n",argv[5]);
           return 2;
         }
-      printf("z80c: recorded %lu frames exec=%lu fallback=%lu\n",
-             (unsigned long)frames,get32(frec + 28),get32(frec + 32));
+      z80c_counts(&z80c_exec,&z80c_fallback,&z80c_insns,&z80c_ram);
+      printf("z80c: recorded %lu frames exec=%lu fallback=%lu insns=%lu ram_exec=%lu\n",
+             (unsigned long)frames,(unsigned long)z80c_exec,
+             (unsigned long)z80c_fallback,(unsigned long)z80c_insns,
+             (unsigned long)z80c_ram);
+      /* The hits per block: how many of the table ran at all, and the
+         file the translator chooses from. */
+      for(i = 0; i < z80c_block_count; i++)
+        if(z80c_hits[i] != 0UL)
+          hit++;
+      printf("z80c: hits %lu/%lu blocks ran\n",hit,(unsigned long)z80c_block_count);
+      /*
+       * The chain seen to be followed. A block hands the core the entry
+       * of its successor so that the next one runs with no lookup; when
+       * that hand-off is lost -- a successor rendered as 0, an epoch
+       * that never matches, a chain that returns after its first block
+       * -- nothing else here changes: the core's loop finds every block
+       * again through z80c_find and the two runs still agree, because
+       * the interpreter is right either way. Only the time changes, and
+       * the time is what this path exists for. So a run in which no
+       * chain ever ran a second block is refused, the way a run in which
+       * no block ran at all is refused: it proves the translation, not
+       * the chain.
+       */
+      if(z80c_block_count != 0UL)
+        {
+          uint32 chains = z80c_chains();
+
+          printf("z80c: chains %lu entered, %lu blocks, %lu.%02lu blocks a chain\n",
+                 (unsigned long)chains,(unsigned long)z80c_exec,
+                 chains != 0UL ? (unsigned long)(z80c_exec / chains) : 0UL,
+                 chains != 0UL
+                   ? (unsigned long)(((z80c_exec % chains) * 100UL) / chains)
+                   : 0UL);
+          if(z80c_exec <= chains)
+            {
+              printf("FAIL: no chain ran a second block (%lu blocks for %lu chains):"
+                     " the successors are not being followed\n",
+                     (unsigned long)z80c_exec,(unsigned long)chains);
+              return 2;
+            }
+        }
+      if(counts_path != NULL)
+        {
+          FILE *cf = fopen(counts_path,"w");
+
+          if(cf == NULL)
+            {
+              fprintf(stderr,"cannot write the counts %s\n",counts_path);
+              return 2;
+            }
+          fprintf(cf,"z80c-counts frames=%lu tstates=%lu\n",(unsigned long)frames,spent_total);
+          for(i = 0; i < z80c_block_count; i++)
+            fprintf(cf,"%06lx %lu %lu\n",(unsigned long)z80c_table[i].pos,
+                    (unsigned long)z80c_hits[i],(unsigned long)z80c_tstates[i]);
+          if(fclose(cf) != 0)
+            {
+              fprintf(stderr,"cannot finish the counts %s\n",counts_path);
+              return 2;
+            }
+        }
       return 0;
     }
 

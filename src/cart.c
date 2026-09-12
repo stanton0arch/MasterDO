@@ -6,6 +6,11 @@
 /* For the page tables and their shape: this module is their one writer (cart.h, z80.h). */
 #include "z80.h"
 
+/* For the epoch the translated code reads: stepped here each time a page
+   moves, so that a chain of blocks stops trusting its static successors
+   (z80c.h). */
+#include "z80c.h"
+
 /*
  * Block-level file access of the utility library: open, size, close
  * (include/3do/blockfile.h:49-51) and the whole-file load into a caller's
@@ -1090,6 +1095,7 @@ cart_mapper_write(uint16 addr, uint8 value)
       if(bank == sms.cart.mapper_fffd)
         return;
       sms.cart.mapper_fffd = bank;
+      z80c_map_epoch++;
       LOG_DBG(LOG_CAT_BUS,("bank slot=0 value=0x%02lx masked=0x%02lx",
                            (unsigned long)value,(unsigned long)bank));
       /* Pages 1..15 of the slot, from the bank's second kilobyte on. */
@@ -1101,6 +1107,7 @@ cart_mapper_write(uint16 addr, uint8 value)
       if(bank == sms.cart.mapper_fffe)
         return;
       sms.cart.mapper_fffe = bank;
+      z80c_map_epoch++;
       LOG_DBG(LOG_CAT_BUS,("bank slot=1 value=0x%02lx masked=0x%02lx",
                            (unsigned long)value,(unsigned long)bank));
       cart_mapper_project(CART_BUS_SLOT1_PAGE,CART_BUS_SLOT_PAGES,bank,0UL);
@@ -1110,6 +1117,7 @@ cart_mapper_write(uint16 addr, uint8 value)
       if(bank == sms.cart.mapper_ffff)
         return;
       sms.cart.mapper_ffff = bank;
+      z80c_map_epoch++;
       LOG_DBG(LOG_CAT_BUS,("bank slot=2 value=0x%02lx masked=0x%02lx",
                            (unsigned long)value,(unsigned long)bank));
       /* Remembered always, projected only while the ROM holds the slot. */
@@ -1121,6 +1129,7 @@ cart_mapper_write(uint16 addr, uint8 value)
       /* $FFFC, the only other address Z80_WR8 sends here. */
       if((uint32)value == sms.cart.mapper_fffc)
         return;
+      z80c_map_epoch++;
       cart_mapper_write_fffc((uint32)value);
       break;
     }
@@ -1208,6 +1217,7 @@ cart_mapper_write(uint16 addr, uint8 value)
   if(bank == *reg)
     return;
   *reg = bank;
+  z80c_map_epoch++;
   LOG_DBG(LOG_CAT_BUS,("bank slot=%lu value=0x%02lx masked=0x%02lx",
                        (unsigned long)slot,(unsigned long)value,
                        (unsigned long)bank));

@@ -348,11 +348,12 @@ main_perf_emit(uint32 usec,
            (unsigned long)list_per_frame,(unsigned long)over,(unsigned long)clk));
 
   /*
-   * The translated code's own line beside this one, at the same pace:
-   * blocks run and hand-backs to the interpreter over the window.
-   * Nothing while the core interprets alone.
+   * The translated code's own lines beside this one, at the same pace,
+   * out of the processor share just published: the ARM cycles a T-state
+   * cost, the part of the instructions that ran translated, and, while
+   * a table is armed, its four counters over the window.
    */
-  z80c_report();
+  z80c_report(z8010);
 }
 
 #endif /* MAIN_MEASURE */

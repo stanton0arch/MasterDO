@@ -328,23 +328,25 @@ static const uint8 z80_cycles_ddfd[256] =
  *
  * ONE OBLIGATION. Both functions are called from inside z80_run's resident
  * window, where the five hot fields of sms.z80 -- pc, tstates, r, a, f --
- * are stale: neither function, nor anything the two macros expand to, may
- * read or write processor state through the structure. The accumulator
- * crosses by value, in the argument and in the return, and that is the
- * whole of the traffic. The bus's own fields (sms.cart) are not the
- * processor's and are free to be touched here. A hook that one day needs
- * more either keeps this property or the call sites in z80_run grow a
- * flush/reload boundary of their own.
+ * are stale, and from a translated block (z80c.h), where the thirteen
+ * register names are locals of the block: neither function, nor anything
+ * the two macros expand to, may read or write processor state through the
+ * structure. The accumulator crosses by value, in the argument and in the
+ * return, and that is the whole of the traffic. The bus's own fields
+ * (sms.cart) are not the processor's and are free to be touched here. A
+ * hook that one day needs more either keeps this property or the call
+ * sites in z80_run and the generated code grow a flush/reload boundary of
+ * their own. Published in z80.h for the generated file's sake.
  * ---------------------------------------------------------------------------
  */
-static void
+void
 z80_io_write(uint8 port,
              uint8 value)
 {
   CART_IO_WRITE(port,value);
 }
 
-static uint8
+uint8
 z80_io_read(uint8 port)
 {
   uint8 value;
@@ -1004,22 +1006,49 @@ z80_run(int32 quota)
        * reads the local PC and the tables (z80c_find), and the empty
        * table never arms, so the interpreter alone pays one load and
        * one branch per instruction here.
+       *
+       * One lookup per miss, not one per turn: when the chain of blocks
+       * ended because no block starts at PC, z80c_run has already
+       * searched that address and left it in z80c_miss_pc, and the head
+       * of the loop does not search it again while PC stays there. One
+       * thing keeps PC on one address for many turns of this loop: a
+       * repeated block instruction, which backs PC up onto itself for
+       * every iteration. A halt does not -- it is answered above, before
+       * the loop, and its own case spends the rest of the quota without
+       * coming back here. Any other address is searched as any other.
+       *
+       * The mark is an address, and what lives at an address depends on
+       * the bank the mapper has turned in; a bank turned while PC stays
+       * put therefore leaves a mark that is stale. It costs a chain that
+       * could have been entered, never a wrong answer: the interpreter
+       * is right at that address either way (deferred-work.md).
+       *
+       * Under the telemetry, every instruction the interpreter executes
+       * while the table is armed is counted, and among those the ones
+       * whose page is not the image (z80c.h): that is what the
+       * translated share of the run is computed from.
        */
       if(z80c_armed)
         {
-          z80c_fn z80c_block = z80c_find(Z80_PC);
-
-          if(z80c_block != NULL)
+          if(z80c_miss_pc != (uint32)Z80_PC)
             {
-              Z80_RESIDENT_FLUSH();
-              z80c_run(z80c_block);
-              Z80_PC      = Z80_PC_STATE;
-              Z80_R       = Z80_R_STATE;
-              Z80_A       = Z80_A_STATE;
-              Z80_F       = Z80_F_STATE;
-              Z80_TSTATES = Z80_TSTATES_STATE;
-              continue;
+              const z80c_entry_t *z80c_block = z80c_find(Z80_PC);
+
+              if(z80c_block != NULL)
+                {
+                  Z80_RESIDENT_FLUSH();
+                  z80c_run(z80c_block);
+                  Z80_PC      = Z80_PC_STATE;
+                  Z80_R       = Z80_R_STATE;
+                  Z80_A       = Z80_A_STATE;
+                  Z80_F       = Z80_F_STATE;
+                  Z80_TSTATES = Z80_TSTATES_STATE;
+                  continue;
+                }
+              z80c_miss_pc = (uint32)Z80_PC;
             }
+
+          Z80C_INTERPRETED(Z80_PC);
         }
 
       op = Z80_RD8(Z80_PC);

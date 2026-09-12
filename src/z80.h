@@ -330,13 +330,15 @@ void z80_reset(void);
  * existed, whose dearest instruction costs 19; then 20, a repeated block
  * transfer at 21 being the dearest of the two sets; 22 once an index prefix
  * could reach a read-modify-write costing 23. With translated code armed
- * (z80c.h) the thing run whole is a BLOCK, which closes as soon as its
- * static sum reaches 64 T-states and ends at the latest on a call costing
- * 17: a block spends at most 80, and the bound is then 79, well inside a
- * scanline of 228. A block is never cut in half either, and the sampling
- * below sees a boundary between two blocks exactly as it sees one between
- * two instructions. The empty table leaves the interpreter's bound in
- * force.
+ * (z80c.h) the thing run whole is a BLOCK, and the tool that writes the
+ * blocks closes each one on the sum of the DEAREST price of its
+ * instructions -- the taken branch, the repeating iteration -- as soon as
+ * that sum reaches 64, and never takes an instruction that would carry it
+ * past 80: a block spends at most 80 T-states whatever exit it takes, and
+ * the bound is then 79, well inside a scanline of 228. A block is never
+ * cut in half either, and the sampling below sees a boundary between two
+ * blocks exactly as it sees one between two instructions. The empty
+ * table leaves the interpreter's bound in force.
  *
  * Returns 0 once the core has stopped, and stops for good the first time it
  * meets an opcode it cannot execute: an incomplete instruction set is the
@@ -354,6 +356,19 @@ void z80_reset(void);
  * back, so the caller's loop keeps sampling at every boundary.
  */
 int32 z80_run(int32 quota);
+
+/*
+ * The two ends of the input and output space, one byte each way: the
+ * port decoded on the bus's map (cart.h, CART_IO_READ / CART_IO_WRITE)
+ * and handed to the part that owns it. Neither reads nor writes the
+ * processor state -- the accumulator crosses by value, in the argument
+ * and in the return -- which is what lets both be called from inside
+ * z80_run's resident window, where the hot fields of sms.z80 are stale,
+ * and from a translated block (z80c.h), where the register names are
+ * locals of the block. The contract is argued at their definition.
+ */
+void  z80_io_write(uint8 port, uint8 value);
+uint8 z80_io_read(uint8 port);
 
 /*
  * Executes one instruction.
