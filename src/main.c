@@ -102,6 +102,17 @@ static uint32 main_io_report_in = MAIN_IO_REPORT_FRAMES;
 #endif
 
 /*
+ * The measurement reads the video part's counters, so the two switches
+ * have to be the one switch. They are written from the same condition in
+ * two files, and outside both of them here: a check placed inside the
+ * measurement would be compiled out by the very build it exists to
+ * refuse.
+ */
+#if MAIN_MEASURE != VDP_COUNTERS
+#error "the measurement and the counters it reads must be compiled together"
+#endif
+
+/*
  * The frame loop below is the one executor: it runs the cartridge by
  * scanline quotas, and MAIN_MEASURE alone is what the rest of this file
  * tests.
@@ -138,6 +149,68 @@ static uint32 main_io_report_in = MAIN_IO_REPORT_FRAMES;
 #define MAIN_PERF_FRAMES_MAX 400000UL
 
 /*
+ * A window total said per frame to a tenth, as the two arguments a %lu.%lu
+ * pair wants. Integers throughout, for the reason main_perf_emit gives:
+ * this processor has no floating point unit and the build passes none in.
+ *
+ * Quotient and remainder, never the total scaled by ten first: a count of
+ * line slots over a long window reaches hundreds of millions, and ten
+ * times that is past what 32 bits hold -- the figure would not be coarse,
+ * it would be wrong, and wrong in silence. The remainder is bounded by
+ * the divisor, so its scaling cannot overflow at any window this loop can
+ * hold.
+ *
+ * Both arguments are read more than once, so neither may carry a side
+ * effect -- the uses below pass a field and a count.
+ */
+#define MAIN_PERF_TENTHS(n,f)                            \
+  (unsigned long)((n) / (f)),                            \
+  (unsigned long)((((n) % (f)) * 10UL) / (f))
+
+/*
+ * A price and its age, as the two arguments a value/age pair wants.
+ */
+#define MAIN_PERF_PRICE(p,i)                             \
+  (unsigned long)(p)[(i)].value,(unsigned long)(p)[(i)].age
+
+/*
+ * The four prices, and the order they are held in.
+ */
+#define MAIN_PRICE_MARK  0
+#define MAIN_PRICE_SCAN  1
+#define MAIN_PRICE_RECT  2
+#define MAIN_PRICE_PIX   3
+#define MAIN_PRICE_COUNT 4
+
+/*
+ * A mark priced above this is a bad reading, not a slow mark, and the
+ * bound is derived and not guessed. The mark is one byte stored, two
+ * bytes read and a compare; on this processor a register operation costs
+ * 1.05 cycles, a read 5.25 and a write 6.30, and the part runs at
+ * 12.5 MHz -- about eighteen cycles, some 1.4 microseconds. The lot is
+ * VDP_MARK_PRICE_LOT of them, so the difference the probe reads is around
+ * seven tenths of a millisecond: twenty-five times what one reading of
+ * the clock costs, which is what makes the probe able to resolve anything
+ * at all.
+ *
+ * Ten times the expected price is past any plausible slow path and well
+ * short of a clock that jumped by seconds. It is also what keeps the
+ * product of a frame's writes by this price inside 32 bits: twenty
+ * thousand writes at this bound is four hundred million nanoseconds.
+ */
+#define MAIN_MARK_NSEC_MAX 20000UL
+
+/*
+ * The same idea for the two probes priced in microseconds: a rebuild of
+ * the per-line sprite table walks sixty-four entries and fills up to as
+ * many line slots each, and a collision replay walks at most a line of
+ * pixels. Neither can honestly reach a tenth of a second; past this they
+ * are a clock that jumped, and the bound keeps their products inside 32
+ * bits at any count a window can hold.
+ */
+#define MAIN_PRICE_USEC_MAX 10000UL
+
+/*
  * The clock is not trusted blindly. Read on the console, the sampling call
  * (sys.h, sys_usec) now and then returns a reading off by whole seconds --
  * 1.4 to 12 of them in the runs that showed it -- and one such reading
@@ -149,12 +222,13 @@ static uint32 main_io_report_in = MAIN_IO_REPORT_FRAMES;
  * counted as such (clk= on the periodic line) instead of averaged in.
  *
  * The line bound is per SIDE and not per line: a sampled line is weighed
- * as two spans, the quota and the video call, and each is compared to the
- * bound on its own, so a whole sampled line is refused only past two
- * tenths of a second. That is deliberate -- the bound exists to catch a
- * clock that jumped by seconds, not to cap a slow render -- and it is
- * what makes the two sides refusable one without the other, which the
- * per-side counting of clk= then reports.
+ * as three spans, the quota, the sprites' share of the video call and the
+ * end of the line, and each is compared to the bound on its own, so a
+ * whole sampled line is refused only past three tenths of a second. That
+ * is deliberate -- the bound exists to catch a clock that jumped by
+ * seconds, not to cap a slow render -- and it is what makes the sides
+ * refusable one without the other, which the per-side counting of clk=
+ * then reports.
  *
  * A whole line is a fifth of a millisecond, a frame's stretch a few tens
  * of them; nothing legitimate reaches the bounds.
@@ -178,6 +252,18 @@ static uint32 main_io_report_in = MAIN_IO_REPORT_FRAMES;
  * figure for the processor that is measured rather than deduced by
  * subtraction.
  *
+ * Two spans and not three, and that is a decision taken with a figure in
+ * hand. A third reading, cutting the video call between the sprites and
+ * the end of the line, was tried: the end of the line is a handful of
+ * compares, some hundreds of nanoseconds, against a reading that costs
+ * twenty-seven microseconds. The span it would have measured is a hundred
+ * times under the resolution of the instrument, so it published nothing
+ * and the reading it cost inflated the very stretch every share is taken
+ * from. What the sprites cost is answered by counts times measured prices
+ * instead (vdp.h, the three probes), which no clock reading can be too
+ * coarse for. The readings that remain are themselves published as a
+ * post: probe= on the decomposition line.
+ *
  * A power of two, and it has to be: the line that carries the sample is
  * picked with a mask and the phase is wrapped with the same mask, both
  * cheaper than a remainder on a path that runs 262 times a frame. A value
@@ -185,6 +271,37 @@ static uint32 main_io_report_in = MAIN_IO_REPORT_FRAMES;
  * would select the wrong lines silently.
  */
 #define MAIN_PERF_SAMPLE_STRIDE 32UL
+
+/*
+ * What one reading of the clock costs, priced once at the head of the
+ * loop as the mean of a few back-to-back pairs, and taken out of every
+ * span: a span read between two calls into the operating system
+ * otherwise carries one call's worth, tens of microseconds on this
+ * console -- more than an empty line, a few percent of a rendered one.
+ * Declared here, above its first reader: the periodic line takes it off
+ * the two means it forms and off the stretch those means are shares of.
+ */
+static uint32 main_perf_clock_cost = 0;
+
+/*
+ * The refusals, running and never cleared, each said on the line that
+ * owns it -- and apart from clk=, which counts readings of the clock that
+ * were impossible and nothing else. A reader has to be able to tell which
+ * of them moved.
+ *
+ * main_perf_clamp: a post that came out larger than the whole it is taken
+ * out of, floored at zero. Every such floor is a fact -- a sum that fell
+ * just short reads as a zero remainder, and without this count it would
+ * be indistinguishable from a decomposition that closed exactly.
+ *
+ * main_perf_price_bad: a price the probe could not take -- a reading
+ * refused as impossible, a lot that came out no dearer than the empty
+ * lot, or a lot that moved a counter it had no business moving. The
+ * window then republishes the price it already had, which is why the
+ * published prices carry their age.
+ */
+static uint32 main_perf_clamp = 0;
+static uint32 main_perf_price_bad = 0;
 
 /*
  * Emits the periodic measurement.
@@ -200,6 +317,19 @@ static uint32 main_io_report_in = MAIN_IO_REPORT_FRAMES;
  * the clock bounds the window and starts the next one, leaving no gap between
  * two of them for frames to fall into.
  */
+/*
+ * What one price is worth and how old it is: the figure the probes below
+ * measured, and how many windows have closed since. Age zero is a price
+ * taken in the window being published; anything else is a price carried
+ * forward because that window's probe was refused, and the reader has to
+ * be able to see that rather than take a stale figure for a fresh one.
+ */
+typedef struct main_price_s
+{
+  uint32 value;
+  uint32 age;
+} main_price_t;
+
 static void
 main_perf_emit(uint32 usec,
                uint32 frames,
@@ -209,12 +339,16 @@ main_perf_emit(uint32 usec,
                uint32 z80_samples,
                uint32 vdp_usec,
                uint32 vdp_samples,
+               uint32 line_samples,
+               uint32 present_usec,
                uint32 draw_usec,
                uint32 clut_usec,
                uint32 tiles_usec,
                uint32 list_usec,
                uint32 over,
-               uint32 clk)
+               uint32 clk,
+               const main_price_t *price,
+               const vdp_perf_t *cnt)
 {
   uint32 fps10;
   uint32 frame10;
@@ -228,6 +362,19 @@ main_perf_emit(uint32 usec,
   uint32 clut_per_frame;
   uint32 tiles_per_frame;
   uint32 list_per_frame;
+  uint32 probe_pf;
+  uint32 emul_pf;
+  uint32 vdp_pf;
+  uint32 scan_pf;
+  uint32 col_pf;
+  uint32 tail_pf;
+  uint32 mark_pf;
+  uint32 pres_pf;
+  uint32 pres_rest_pf;
+  uint32 spans_pf;
+  uint32 frame_pf;
+  uint32 sum_pf;
+  uint32 other_pf;
 
   /*
    * Guard, and the divisors below rest on it: a window of at least a second
@@ -250,12 +397,35 @@ main_perf_emit(uint32 usec,
     fps10 = (frames / (usec / 1000000UL)) * 10UL;
 
   /*
+   * The cost of the instrument inside the stretch it measures, taken out
+   * of that stretch and published as a post of its own. Three readings of
+   * the clock on each sampled line and one closing the frame, at the
+   * price one reading was measured to cost at boot: some two hundred
+   * microseconds a frame, which is a fifth of what this story went
+   * looking for and would otherwise have been shared out silently between
+   * the processor and the video call. Two of the three readings of a
+   * sampled line are already taken off the two means below, but those
+   * corrections touch the RATIO, not the stretch: the stretch carries all
+   * of them and is corrected here, once.
+   */
+  probe_pf = (((line_samples * 3UL) + frames) * main_perf_clock_cost) / frames;
+
+  emul_pf = (emul_frames != 0UL) ? (emul_usec / emul_frames) : 0UL;
+  if(probe_pf > emul_pf)
+    {
+      probe_pf = emul_pf;
+      main_perf_clamp++;
+    }
+  emul_pf -= probe_pf;
+
+  /*
    * The emulated stretch of one frame, in tenths of a millisecond: the
    * measured quantity, read around the whole line loop with the lines
-   * included. Frames whose stretch was a bad reading are not in
-   * emul_frames; a window where every reading was bad reports zero.
+   * included, less the instrument above. Frames whose stretch was a bad
+   * reading are not in emul_frames; a window where every reading was bad
+   * reports zero.
    */
-  emul10 = ((emul_frames != 0UL) ? (emul_usec / emul_frames) : 0UL) / 100UL;
+  emul10 = emul_pf / 100UL;
 
   /*
    * The two halves of that stretch, and they are a SHARE of it and not
@@ -274,31 +444,46 @@ main_perf_emit(uint32 usec,
    * of picture and blank lines each frame -- falls on both sides at once
    * and cancels in the ratio.
    *
+   * The price of the reading that closes each span is taken off ONCE, at
+   * the mean, and not off each sample: a span shorter than one reading --
+   * which the end of a blank line is -- would be floored to zero sample
+   * after sample, and a post that is really small would be published as a
+   * post that is really zero. Subtracted from the total, the same span
+   * lands where it belongs: small, and measured. A total that does not
+   * even cover the readings it contains is not a small post, it is a
+   * reading that cannot be trusted, and that side is then refused
+   * outright.
+   *
    * The means and not the raw totals, and that is the overflow guard the
    * scaling above uses in its own way: a total grows with the window and
    * would carry the product past 32 bits, where a mean is bounded by
    * MAIN_CLK_MAX_LINE_USEC. Tenths of a millisecond per frame times a
    * bounded mean holds with room to spare.
    *
-   * A share needs both of its sides, and the condition below asks for
-   * both of them twice over: a sample kept on each side, and a mean that
-   * is not zero on each side. One side alone would divide the whole
-   * stretch by itself and hand it all to that side, which is exactly the
-   * shape this arrangement exists to make impossible -- a processor
-   * figure of zero beside a video figure carrying the frame. That shape
-   * is reachable two ways: every reading of one side refused as
-   * impossible, and a side whose mean falls to zero once the price of a
-   * clock reading is taken off it. Both are refused here, and the two
-   * figures are then published as zero together. A window that could not
-   * weigh both sides says so by weighing neither; it must never read as a
-   * window that measured everything on one side.
+   * A share needs both of its sides, and a side is had only when it was
+   * sampled at all, when its total stands clear of the readings inside
+   * it, and when what is left is not zero. One side alone would divide
+   * the whole stretch by itself and hand it all to that side, which is
+   * exactly the shape this arrangement exists to make impossible -- a
+   * processor figure of zero beside a video figure carrying the frame.
+   * Both sides are therefore refused together, and the two figures
+   * published as zero together. A window that could not weigh both sides
+   * says so by weighing neither; it must never read as a window that
+   * measured everything on one side.
    */
-  z80_mean = (z80_samples != 0UL) ? (z80_usec / z80_samples) : 0UL;
-  vdp_mean = (vdp_samples != 0UL) ? (vdp_usec / vdp_samples) : 0UL;
+  z80_mean = 0;
+  if((z80_samples != 0UL)
+     && (z80_usec > (z80_samples * main_perf_clock_cost)))
+    z80_mean = (z80_usec - (z80_samples * main_perf_clock_cost)) / z80_samples;
+
+  vdp_mean = 0;
+  if((vdp_samples != 0UL)
+     && (vdp_usec > (vdp_samples * main_perf_clock_cost)))
+    vdp_mean = (vdp_usec - (vdp_samples * main_perf_clock_cost)) / vdp_samples;
+
   share = z80_mean + vdp_mean;
 
-  if((z80_samples != 0UL) && (vdp_samples != 0UL) &&
-     (z80_mean != 0UL) && (vdp_mean != 0UL))
+  if((z80_mean != 0UL) && (vdp_mean != 0UL))
     {
       z8010 = (emul10 * z80_mean) / share;
       vdp10 = emul10 - z8010;
@@ -334,6 +519,128 @@ main_perf_emit(uint32 usec,
   list_per_frame = list_usec / frames;
 
   /*
+   * ---------------------------------------------------------------------
+   * The decomposition, in microseconds per frame throughout: the posts of
+   * this line are fractions of a millisecond and tenths of a millisecond
+   * would publish 0.0 for most of what they can take.
+   * ---------------------------------------------------------------------
+   *
+   * The video call broken up by counts times prices. The rebuilds of the
+   * per-line sprite table and the collision replays are the two things it
+   * does; what is left over is the end of the line and whatever the two
+   * prices do not describe, and it is published rather than assumed away.
+   * The window's own counts and the prices measured on this console in
+   * this scene: no constant, no estimate from elsewhere.
+   *
+   * The multiplication is done over the window and divided by the frames
+   * afterwards, never the other way round: a count of one rebuild per
+   * frame and a half would otherwise round to one before it was priced.
+   */
+  scan_pf = (cnt->scans * price[MAIN_PRICE_SCAN].value) / frames;
+  col_pf = (((cnt->col_lines - cnt->col_pix) * price[MAIN_PRICE_RECT].value)
+            + (cnt->col_pix * price[MAIN_PRICE_PIX].value)) / frames;
+
+  vdp_pf = vdp10 * 100UL;
+  if((scan_pf + col_pf) > vdp_pf)
+    {
+      /*
+       * The parts outgrew the whole: a price taken in a scene the window
+       * did not spend its frames in, or a count over a window the price
+       * was not taken in. Floored and counted, never published as a
+       * negative remainder dressed up as zero work.
+       */
+      tail_pf = 0UL;
+      main_perf_clamp++;
+    }
+  else
+    tail_pf = vdp_pf - (scan_pf + col_pf);
+
+  /*
+   * What the picture costs inside the processor's quota, and so inside
+   * z80=: every write to the video memory pays the mark that lets the
+   * picture be brought up to date later, and the mark was priced on this
+   * window's own cold side. A count times a measured unit price, which is
+   * the only way to weigh work spread over thousands of writes a frame.
+   *
+   * A FLOOR and named as one: the price is that of the cheap path, the
+   * mark of a write the watch refuses. The writes the watch hands on pay
+   * that and then a journal entry and a pattern mark on top, work that is
+   * counted (note=, hotw=) and not priced -- pricing it would mean
+   * journaling writes that never happened, which would change the
+   * picture. markmin= is therefore a lower bound on the picture's share
+   * of z80=, and the true figure is above it.
+   *
+   * The writes of one frame first, so that the product cannot outgrow
+   * what a 32 bit multiply holds: a window's writes times a price in
+   * nanoseconds would, a frame's writes times the same price cannot.
+   */
+  mark_pf = ((cnt->vram_w / frames) * price[MAIN_PRICE_MARK].value) / 1000UL;
+
+  /*
+   * A part that outgrew its whole is not a measurement, it is a fault:
+   * the mark is paid inside the processor's quota, so a figure above z80=
+   * can only mean a price taken while something else was running. Floored
+   * and counted.
+   *
+   * Only when there IS a whole to hold it against. z8010 is zero whenever
+   * the share was refused, which is a window that weighed neither side --
+   * and a count times a price is a measurement of its own, made in no
+   * part by the share. It is then published unheld, and the reader sees
+   * z80=0.0 on the line above saying exactly that.
+   */
+  if((z8010 != 0UL) && (mark_pf > (z8010 * 100UL)))
+    {
+      mark_pf = 0UL;
+      main_perf_clamp++;
+    }
+
+  /*
+   * The presentation, whole, and the part of it no span describes. The
+   * four spans -- the table set, the tiles converted, the windows built,
+   * the cels drawn -- are closed one before the next opens, but the
+   * presentation also paints the ground, ends the list and binds the
+   * screen, and that work fell into no post until now: it was landing in
+   * the residual, where it could be mistaken for something unexplained.
+   */
+  pres_pf = (emul_frames != 0UL) ? (present_usec / emul_frames) : 0UL;
+  spans_pf = (draw_usec + clut_usec + tiles_usec + list_usec) / frames;
+  if(spans_pf > pres_pf)
+    {
+      pres_rest_pf = 0UL;
+      main_perf_clamp++;
+    }
+  else
+    pres_rest_pf = pres_pf - spans_pf;
+
+  /*
+   * The whole every post is held against, and the part of it that is in
+   * no post at all. frame= is wall time per frame over the window and
+   * takes everything in: the emulated stretch, the presentation, the
+   * pacing wait. The posts are the emulated stretch (z80= and vdp=, which
+   * sum to it), the instrument inside it, and the presentation (its four
+   * spans and pres=). What is left is named rather than left to be
+   * guessed at -- an undecomposed remainder is what this line exists to
+   * abolish.
+   *
+   * markmin=, scan=, col= and tail= are NOT added into the sum: the first
+   * is a part of z80= and the other three are the parts of vdp=. Adding
+   * any of them would count the same microseconds twice.
+   *
+   * Floored at zero and counted when it floors: a zero here without the
+   * count beside it moving would read as a decomposition that closed
+   * exactly, which is the one thing it must never be mistaken for.
+   */
+  frame_pf = usec / frames;
+  sum_pf = emul_pf + probe_pf + pres_pf;
+  if(sum_pf > frame_pf)
+    {
+      other_pf = 0UL;
+      main_perf_clamp++;
+    }
+  else
+    other_pf = frame_pf - sum_pf;
+
+  /*
    * The arguments are packed on few lines on purpose: the compiler warns
    * on a macro call whose arguments run ten lines or more.
    */
@@ -346,6 +653,62 @@ main_perf_emit(uint32 usec,
            (unsigned long)(draw10 / 10UL),(unsigned long)(draw10 % 10UL),
            (unsigned long)clut_per_frame,(unsigned long)tiles_per_frame,
            (unsigned long)list_per_frame,(unsigned long)over,(unsigned long)clk));
+
+  /*
+   * The decomposition, beside the line above and never inside it: the
+   * figures of that line are what earlier measurements were written
+   * against, and a field moved or renamed there would silently rewrite
+   * them. The three parts of vdp=, the floor of the picture's work inside
+   * z80=, the instrument, the rest of the presentation, the sum of every
+   * post and what frame= has over it.
+   */
+  LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
+          ("split scan=%luus col=%luus tail=%luus markmin=%luus probe=%luus pres=%luus sum=%lu.%lums other=%lu.%lums clamp=%lu",
+           (unsigned long)scan_pf,(unsigned long)col_pf,(unsigned long)tail_pf,
+           (unsigned long)mark_pf,(unsigned long)probe_pf,(unsigned long)pres_rest_pf,
+           (unsigned long)(sum_pf / 1000UL),(unsigned long)((sum_pf / 100UL) % 10UL),
+           (unsigned long)(other_pf / 1000UL),(unsigned long)((other_pf / 100UL) % 10UL),
+           (unsigned long)main_perf_clamp));
+
+  /*
+   * The prices the line above multiplied counts by, each with the number
+   * of windows since it was last measured: a price of age zero was taken
+   * in this window, and any other age is a price carried forward because
+   * this window's probe was refused. Published so that no figure above
+   * can be read without knowing what it rests on.
+   */
+  LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
+          ("price mark=%luns/%lu scan=%luus/%lu rect=%luus/%lu pix=%luus/%lu bad=%lu",
+           MAIN_PERF_PRICE(price,MAIN_PRICE_MARK),MAIN_PERF_PRICE(price,MAIN_PRICE_SCAN),
+           MAIN_PERF_PRICE(price,MAIN_PRICE_RECT),MAIN_PERF_PRICE(price,MAIN_PRICE_PIX),
+           (unsigned long)main_perf_price_bad));
+
+  /*
+   * What those microseconds were spent on, in the unit the work is done
+   * in: per frame, over the same window. The rebuilds of the sprite table
+   * and the lines that replay a collision are counted to a tenth -- a
+   * couple of them a frame is a figure a tenth changes the meaning of --
+   * and everything else in whole units, being thousands a frame where a
+   * tenth would say nothing.
+   *
+   * ent= is the attribute entries the rebuilds walked and span= the line
+   * slots those entries filled: three stores each, and the largest thing
+   * a rebuild does. col= against colpix= splits the collision replay into
+   * the lines the rectangles settled and the lines that walked pixels --
+   * the two prices above. w=, note= and hotw= are the picture's work
+   * inside the quota: every write pays the mark, some are handed on to
+   * the note, and some of those mark a pattern. hots= is the same mark
+   * raised by the table rebuild, which is the video call and not the
+   * quota. stale= counts the writes that found the table clean and
+   * dirtied it, which is what scan= is the consequence of.
+   */
+  LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
+          ("count scan=%lu.%lu ent=%lu span=%lu col=%lu.%lu colpix=%lu.%lu w=%lu note=%lu hotw=%lu hots=%lu stale=%lu",
+           MAIN_PERF_TENTHS(cnt->scans,frames),(unsigned long)(cnt->scan_ent / frames),
+           (unsigned long)(cnt->scan_span / frames),MAIN_PERF_TENTHS(cnt->col_lines,frames),
+           MAIN_PERF_TENTHS(cnt->col_pix,frames),(unsigned long)(cnt->vram_w / frames),
+           (unsigned long)(cnt->notes / frames),(unsigned long)(cnt->hot_write / frames),
+           (unsigned long)(cnt->hot_scan / frames),(unsigned long)(cnt->spr_stale / frames)));
 
   /*
    * The translated code's own lines beside this one, at the same pace,
@@ -430,15 +793,6 @@ static uint32 main_perf_clut = 0;
 static uint32 main_perf_tiles = 0;
 static uint32 main_perf_list = 0;
 static uint32 main_perf_clk = 0;
-
-/*
- * What one reading of the clock costs, priced once at the head of the
- * loop as the mean of a few back-to-back pairs, and taken out of every
- * span: a span read between two calls into the operating system
- * otherwise carries one call's worth, tens of microseconds on this
- * console -- more than an empty line, a few percent of a rendered one.
- */
-static uint32 main_perf_clock_cost = 0;
 
 /*
  * How long the last presentation took, wall clock, from its first
@@ -727,10 +1081,36 @@ main(int    argc,
    */
   uint32 perf_emul = 0;
   uint32 perf_emul_frames = 0;
+  uint32 perf_present = 0;
   uint32 perf_z80 = 0;
   uint32 perf_z80_samples = 0;
   uint32 perf_vdp = 0;
   uint32 perf_vdp_samples = 0;
+  /*
+   * How many lines of the window were sampled at all, refused readings
+   * included: three readings of the clock each, and what they cost is a
+   * post of its own on the decomposition line.
+   */
+  uint32 perf_line_samples = 0;
+  /*
+   * What one of each priced piece of work costs, and how old each figure
+   * is. Priced once per window on the cold side of the frame; a window
+   * whose probe was refused keeps the price it knew and publishes its age
+   * rather than passing a stale figure off as a fresh one.
+   */
+  main_price_t perf_price[MAIN_PRICE_COUNT];
+  uint32 perf_price_i;
+  int32 perf_price_line;
+  uint32 perf_price_case;
+  /*
+   * The video part's counters as the previous window closed, and the
+   * window's own share of them. Running totals on that side, differences
+   * here: the two windows are not the same window, and the difference is
+   * exact across a wrap.
+   */
+  vdp_perf_t perf_cnt_prev;
+  vdp_perf_t perf_cnt_now;
+  vdp_perf_t perf_cnt;
 #endif
 #if MAIN_MEASURE
   /*
@@ -1192,6 +1572,23 @@ main(int    argc,
   LOG_INFO(LOG_CAT_PERF,("clock read cost=%luus (taken out of each line sample)",
                          (unsigned long)main_perf_clock_cost));
 
+  /*
+   * The first reading of the video part's running counters, so that the
+   * first window reports its own share and not everything since the init.
+   */
+  vdp_perf_counts(&perf_cnt_prev);
+
+  /*
+   * No price known yet, and an age that says so: the first window has
+   * taken none, and a zero price publishes a zero post -- which is the
+   * honest answer until a probe has run once.
+   */
+  for(perf_price_i = 0; perf_price_i < MAIN_PRICE_COUNT; perf_price_i++)
+    {
+      perf_price[perf_price_i].value = 0;
+      perf_price[perf_price_i].age = 0;
+    }
+
   perf_window = sys_usec();
 #endif
 
@@ -1303,11 +1700,13 @@ main(int    argc,
                * counted twice. The weighing is done after the far edge is
                * read, outside both spans.
                *
-               * Each span carries the cost of the reading that closes it,
-               * which is why the price of one reading comes off each of
-               * them: a call into the operating system is tens of
-               * microseconds here, a few percent of a rendered line and
-               * more than an empty one.
+               * The raw stretch goes into the accumulator and nothing is
+               * taken off it here. Each span carries the cost of the
+               * reading that closes it, and that cost is taken off the
+               * TOTAL when the mean is formed, once per window: taken off
+               * each sample instead, a span shorter than one reading
+               * would floor at zero every time and a small post would be
+               * published as no post at all.
                */
               line_start = sys_usec();
               residue = z80_run((int32)MAIN_TSTATES_PER_LINE - residue);
@@ -1315,11 +1714,12 @@ main(int    argc,
               vdp_line();
               line_end = sys_usec();
 
+              perf_line_samples++;
+
               perf_delta = line_mid - line_start;
               if(perf_delta < MAIN_CLK_MAX_LINE_USEC)
                 {
-                  perf_z80 += (perf_delta > main_perf_clock_cost)
-                              ? (perf_delta - main_perf_clock_cost) : 0UL;
+                  perf_z80 += perf_delta;
                   perf_z80_samples++;
                 }
               else
@@ -1328,8 +1728,7 @@ main(int    argc,
               perf_delta = line_end - line_mid;
               if(perf_delta < MAIN_CLK_MAX_LINE_USEC)
                 {
-                  perf_vdp += (perf_delta > main_perf_clock_cost)
-                              ? (perf_delta - main_perf_clock_cost) : 0UL;
+                  perf_vdp += perf_delta;
                   perf_vdp_samples++;
                 }
               else
@@ -1366,9 +1765,18 @@ main(int    argc,
        * like any impossible reading.
        */
       perf_delta = (sys_usec() - emul_start) - main_present_usec;
-      if(perf_delta < MAIN_CLK_MAX_FRAME_USEC)
+      if((perf_delta < MAIN_CLK_MAX_FRAME_USEC)
+         && (main_present_usec < MAIN_CLK_MAX_FRAME_USEC))
         {
           perf_emul += perf_delta;
+          /*
+           * The presentation of the same frame, kept beside the stretch
+           * and over the same frames: what the four spans of the
+           * presentation are held against, so that the part of it no
+           * span describes can be published instead of falling into the
+           * residual unnamed.
+           */
+          perf_present += main_present_usec;
           perf_emul_frames++;
         }
       else
@@ -1482,13 +1890,186 @@ main(int    argc,
            * it depends neither on the field rate of the host nor on any
            * supposed frame rate.
            */
+          /*
+           * The prices, taken here and nowhere else: the cold side of the
+           * frame, once per window, where the periodic line itself is
+           * written. Each is a lot run between two readings of the clock,
+           * with what the lot will touch saved before and put back after
+           * -- outside the timed interval, both of them -- and the
+           * restore says whether the lot changed anything it should not
+           * have. A price is taken only when the reading is possible, the
+           * lot is dearer than nothing, the figure is inside its bound
+           * and the lot left no trace; otherwise the price already known
+           * is kept and its age says so.
+           *
+           * Every window ages every price first, then the probes that
+           * succeed set theirs back to nothing.
+           */
+          for(perf_price_i = 0; perf_price_i < MAIN_PRICE_COUNT; perf_price_i++)
+            perf_price[perf_price_i].age++;
+
+          /*
+           * The mark of one video memory write. Two runs of the same lot
+           * over the whole video memory -- one without the mark, one with
+           * -- and the difference is the mark, the loop and the load of
+           * the byte cancelling out along with the one clock reading each
+           * span carries. The dirty marks the lot raises are put back:
+           * left standing they would cost the next presentation a sweep
+           * of every tile, and the probe would be measuring itself.
+           */
+          {
+            uint32 lot_idle;
+            uint32 lot_full;
+            uint32 lot_now;
+            int32 lot_clean;
+
+            vdp_mark_price_save();
+            lot_now = sys_usec();
+            (void)vdp_mark_price_run(0);
+            lot_idle = sys_usec() - lot_now;
+            lot_now = sys_usec();
+            (void)vdp_mark_price_run(1);
+            lot_full = sys_usec() - lot_now;
+            lot_clean = vdp_mark_price_restore();
+
+            perf_delta = MAIN_MARK_NSEC_MAX;
+            if((lot_idle < MAIN_CLK_MAX_LINE_USEC)
+               && (lot_full < MAIN_CLK_MAX_LINE_USEC)
+               && (lot_full > lot_idle))
+              perf_delta = ((lot_full - lot_idle) * 1000UL)
+                           / VDP_MARK_PRICE_LOT;
+
+            if((lot_clean != 0) && (perf_delta < MAIN_MARK_NSEC_MAX))
+              {
+                perf_price[MAIN_PRICE_MARK].value = perf_delta;
+                perf_price[MAIN_PRICE_MARK].age = 0;
+              }
+            else
+              main_perf_price_bad++;
+          }
+
+          /*
+           * One rebuild of the per-line sprite table, the whole of it,
+           * priced by running the real rebuild a few times over. What it
+           * leaves behind is the table line 0 of the next frame would
+           * have built anyway, and the two marks that say whether that
+           * rebuild is still owed are put back (vdp.h).
+           */
+          {
+            uint32 lot_now;
+            uint32 lot_usec;
+            int32 lot_clean;
+
+            vdp_scan_price_save();
+            lot_now = sys_usec();
+            vdp_scan_price_run();
+            lot_usec = sys_usec() - lot_now;
+            lot_clean = vdp_scan_price_restore();
+
+            perf_delta = MAIN_PRICE_USEC_MAX;
+            if((lot_usec < MAIN_CLK_MAX_FRAME_USEC)
+               && (lot_usec > main_perf_clock_cost))
+              perf_delta = (lot_usec - main_perf_clock_cost)
+                           / VDP_SCAN_PRICE_LOT;
+
+            if((lot_clean != 0) && (perf_delta < MAIN_PRICE_USEC_MAX))
+              {
+                perf_price[MAIN_PRICE_SCAN].value = perf_delta;
+                perf_price[MAIN_PRICE_SCAN].age = 0;
+              }
+            else
+              main_perf_price_bad++;
+          }
+
+          /*
+           * One line's collision replay, in each of its two cases. The
+           * lines are found in the table the last frame left, the first
+           * two that carry two admitted sprites; which case a line falls
+           * into is not known until it has been run, so each run sets the
+           * price of whichever case it turned out to be. A scene with one
+           * case only prices that one, and the other keeps its age --
+           * which is exactly what the age is published for.
+           */
+          perf_price_line = -1;
+          for(perf_price_i = 0; perf_price_i < 2UL; perf_price_i++)
+            {
+              uint32 lot_now;
+              uint32 lot_usec;
+              int32 lot_clean;
+
+              perf_price_line = vdp_collide_price_line(perf_price_line);
+              if(perf_price_line < 0)
+                break;
+
+              vdp_collide_price_save();
+              lot_now = sys_usec();
+              perf_price_case = vdp_collide_price_run(perf_price_line);
+              lot_usec = sys_usec() - lot_now;
+              lot_clean = vdp_collide_price_restore();
+
+              perf_delta = MAIN_PRICE_USEC_MAX;
+              if((lot_usec < MAIN_CLK_MAX_FRAME_USEC)
+                 && (lot_usec > main_perf_clock_cost))
+                perf_delta = (lot_usec - main_perf_clock_cost)
+                             / VDP_COLLIDE_PRICE_LOT;
+
+              if((lot_clean != 0) && (perf_delta < MAIN_PRICE_USEC_MAX))
+                {
+                  uint32 slot = (perf_price_case != 0UL)
+                                ? (uint32)MAIN_PRICE_PIX
+                                : (uint32)MAIN_PRICE_RECT;
+
+                  perf_price[slot].value = perf_delta;
+                  perf_price[slot].age = 0;
+                }
+              else
+                main_perf_price_bad++;
+            }
+
+          /*
+           * The video part's running counters, differenced against the
+           * reading the previous window left: the window's own share of
+           * the walks, the replays and the writes. After the probes, so
+           * that whatever they moved and put back is already back.
+           */
+          vdp_perf_counts(&perf_cnt_now);
+
+          /*
+           * Field by field, and the previous reading carried forward in
+           * the same breath: the compiler warns on an assignment of a
+           * whole structure, and a warning left standing in this file is
+           * one more line for the next reader to have to dismiss.
+           */
+          perf_cnt.vram_w = perf_cnt_now.vram_w - perf_cnt_prev.vram_w;
+          perf_cnt_prev.vram_w = perf_cnt_now.vram_w;
+          perf_cnt.notes = perf_cnt_now.notes - perf_cnt_prev.notes;
+          perf_cnt_prev.notes = perf_cnt_now.notes;
+          perf_cnt.hot_write = perf_cnt_now.hot_write - perf_cnt_prev.hot_write;
+          perf_cnt_prev.hot_write = perf_cnt_now.hot_write;
+          perf_cnt.hot_scan = perf_cnt_now.hot_scan - perf_cnt_prev.hot_scan;
+          perf_cnt_prev.hot_scan = perf_cnt_now.hot_scan;
+          perf_cnt.spr_stale = perf_cnt_now.spr_stale - perf_cnt_prev.spr_stale;
+          perf_cnt_prev.spr_stale = perf_cnt_now.spr_stale;
+          perf_cnt.scans = perf_cnt_now.scans - perf_cnt_prev.scans;
+          perf_cnt_prev.scans = perf_cnt_now.scans;
+          perf_cnt.scan_ent = perf_cnt_now.scan_ent - perf_cnt_prev.scan_ent;
+          perf_cnt_prev.scan_ent = perf_cnt_now.scan_ent;
+          perf_cnt.scan_span = perf_cnt_now.scan_span - perf_cnt_prev.scan_span;
+          perf_cnt_prev.scan_span = perf_cnt_now.scan_span;
+          perf_cnt.col_lines = perf_cnt_now.col_lines - perf_cnt_prev.col_lines;
+          perf_cnt_prev.col_lines = perf_cnt_now.col_lines;
+          perf_cnt.col_pix = perf_cnt_now.col_pix - perf_cnt_prev.col_pix;
+          perf_cnt_prev.col_pix = perf_cnt_now.col_pix;
+
           main_perf_emit(perf_now - perf_window,perf_frames,
                          perf_emul,perf_emul_frames,
                          perf_z80,perf_z80_samples,
                          perf_vdp,perf_vdp_samples,
+                         perf_line_samples,perf_present,
                          main_perf_draw,main_perf_clut,
                          main_perf_tiles,main_perf_list,
-                         perf_over,main_perf_clk);
+                         perf_over,main_perf_clk,
+                         perf_price,&perf_cnt);
 
           /*
            * The PC window, at the pace of the measurement line above and on
@@ -1551,14 +2132,27 @@ main(int    argc,
             pc_ring_n = 0;
           }
 
-          perf_window = perf_now;
+          /*
+           * The next window opens AFTER the probes and the serial writes
+           * above, not at the reading that closed the last one. Those two
+           * are the instrument's own time -- some milliseconds of lots
+           * and four blocking lines -- and they belong to no window: left
+           * inside the next one they would land in its wall time without
+           * landing in any of its posts, and the residual would carry
+           * them as though the emulation had spent them. The gap between
+           * two windows is the price of the line that separates them, and
+           * it is named here rather than measured into something else.
+           */
+          perf_window = sys_usec();
           perf_frames = 0;
           perf_emul = 0;
           perf_emul_frames = 0;
+          perf_present = 0;
           perf_z80 = 0;
           perf_z80_samples = 0;
           perf_vdp = 0;
           perf_vdp_samples = 0;
+          perf_line_samples = 0;
           main_perf_draw = 0;
           main_perf_clut = 0;
           main_perf_tiles = 0;

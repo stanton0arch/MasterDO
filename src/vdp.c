@@ -56,6 +56,15 @@ static uint32 *vdp_tc_block = NULL;
 static uint32 vdp_irq_seen = 0;
 
 /*
+ * The video memory write count as vdp_report last read it, for the same
+ * reason: that counter is a running total now -- the periodic line of
+ * the frame loop prices the mark every write pays and needs the writes
+ * of its own window, which is not this one -- so the report subtracts
+ * its previous reading instead of clearing the counter.
+ */
+static uint32 vdp_vram_w_seen = 0;
+
+/*
  * Whether the backdrop line of the current report window has been said.
  * File level for the same reason as the count above: the window is opened
  * and closed by vdp_report, and the flag has to outlive the call that
@@ -244,6 +253,19 @@ vdp_decor_watch_rebuild(void)
     sms.vdp.watch[chunk] = vdp_watch_of(chunk);
 }
 
+#if VDP_COUNTERS
+/*
+ * Which side of the frame the mark below is being raised from: zero for
+ * the write path, inside the processor's quota, and one for the rebuild
+ * of the per-line sprite table, inside the video call. The two are
+ * counted apart because they are paid apart -- one figure for both would
+ * charge the quota with work the video call did. A flag rather than an
+ * argument: the mark is raised from four places and only one of them is
+ * the rebuild, and the counting must not reach the silent build.
+ */
+static uint32 vdp_hot_source = 0;
+#endif
+
 /*
  * A pattern marked hot: watched from now to the end of the presentation,
  * whether or not the picture or the sheet shows it yet, and listed so
@@ -258,6 +280,12 @@ vdp_decor_hot(uint32 p)
       sms.vdp.hot[p] = 1;
       sms.vdp.watch[p] = 1;
       sms.vdp.hot_list[sms.vdp.hot_count++] = (uint16)p;
+#if VDP_COUNTERS
+      if(vdp_hot_source != 0UL)
+        sms.vdp.cnt_hot_scan++;
+      else
+        sms.vdp.cnt_hot_write++;
+#endif
     }
 }
 
@@ -495,6 +523,8 @@ vdp_decor_note(uint32 addr,
   uint32 word;
   uint32 p;
 
+  VDP_COUNT(decor_notes);
+
   if(sms.vdp.vcount < VDP_ACTIVE_LINES)
     vdp_journal_add(sms.vdp.vcount,addr,(uint32)sms.vdp.vram[addr],value);
 
@@ -523,6 +553,15 @@ vdp_decor_note(uint32 addr,
        * pattern byte is the odd byte of the second half of the table,
        * :448-461).
        */
+#if VDP_COUNTERS
+      /*
+       * The transition and not the write: a write that finds the table
+       * already stale costs no rebuild, and what this figure exists to
+       * explain is the rebuild count beside it.
+       */
+      if(sms.vdp.spr_dirty == 0UL)
+        sms.vdp.cnt_spr_stale++;
+#endif
       sms.vdp.spr_dirty = 1;
       if(((addr & 255UL) >= VDP_SPR_XN_OFFSET) && ((addr & 1UL) != 0UL))
         {
@@ -731,6 +770,8 @@ vdp_sprite_scan(uint32 from)
   int32 ya;
   int32 yb;
 
+  VDP_COUNT(spr_scans);
+
   reg = sms.vdp.reg;
   sat = sms.vdp.vram + sms.vdp.sat_base;
   tall = (uint32)reg[1] & 0x02UL;
@@ -762,6 +803,9 @@ vdp_sprite_scan(uint32 from)
    * table stopped naming. At line 0 no band to come drew it, and the
    * watch byte falls at once where nothing else holds it up.
    */
+#if VDP_COUNTERS
+  vdp_hot_source = 1;
+#endif
   for(i = 0; i < sms.vdp.spr_named_count; i++)
     {
       p = sms.vdp.spr_named_list[i];
@@ -771,6 +815,9 @@ vdp_sprite_scan(uint32 from)
       else
         sms.vdp.watch[p] = vdp_watch_of(p);
     }
+#if VDP_COUNTERS
+  vdp_hot_source = 0;
+#endif
   sms.vdp.spr_named_count = 0;
 
   /*
@@ -816,6 +863,26 @@ vdp_sprite_scan(uint32 from)
       yb = top + (int32)height;
       if(yb > (int32)VDP_ACTIVE_LINES)
         yb = (int32)VDP_ACTIVE_LINES;
+
+#if VDP_COUNTERS
+      /*
+       * One entry walked, and the lines it is about to be written on,
+       * added here rather than counted in the loop below: that loop runs
+       * up to sixty-four times per entry and a counter inside it would
+       * cost more than the work it counts.
+       *
+       * The span is the loop below, summed: three stores per line per
+       * entry, and the largest thing a rebuild does. The walk already
+       * stops at the terminator, so that is not where a saving is; the
+       * saving is in how OFTEN this whole span is written again, which is
+       * the rebuild count beside it (cnt_spr_scans) and the transitions
+       * that cause it (cnt_spr_stale). A frame that rebuilds the table
+       * four times writes this span four times over.
+       */
+      sms.vdp.cnt_spr_entries++;
+      if(yb > ya)
+        sms.vdp.cnt_spr_span += (uint32)(yb - ya);
+#endif
 
       for(y = (uint32)ya; (int32)y < yb; y++)
         {
@@ -961,6 +1028,13 @@ vdp_sprite_collide(uint32 y,
     }
   if(any == 0UL)
     return;
+
+  /*
+   * Past the rectangles: this line pays the pixel walk as well. The two
+   * counts together say how much of the collision replay is the cheap
+   * rectangle test and how much is the walk it guards.
+   */
+  VDP_COUNT(col_pix_lines);
 
   taken = (uint8 *)sms.vdp.spr_taken;
   clear = sms.vdp.spr_taken;
@@ -1918,7 +1992,10 @@ vdp_render_line(uint32 y)
   VDP_COUNT(line_scratch);
 
   if(n >= 2UL)
-    vdp_sprite_collide(y,n);
+    {
+      VDP_COUNT(col_lines);
+      vdp_sprite_collide(y,n);
+    }
 }
 
 int32
@@ -2225,6 +2302,15 @@ vdp_init(void)
   sms.vdp.cnt_tc_inval = 0;
   sms.vdp.cnt_line_fast = 0;
   sms.vdp.cnt_line_scratch = 0;
+  sms.vdp.cnt_spr_scans = 0;
+  sms.vdp.cnt_spr_entries = 0;
+  sms.vdp.cnt_spr_span = 0;
+  sms.vdp.cnt_col_lines = 0;
+  sms.vdp.cnt_col_pix_lines = 0;
+  sms.vdp.cnt_decor_notes = 0;
+  sms.vdp.cnt_hot_write = 0;
+  sms.vdp.cnt_hot_scan = 0;
+  sms.vdp.cnt_spr_stale = 0;
   sms.vdp.cnt_decor_tiles = 0;
   sms.vdp.cnt_list_windows = 0;
   sms.vdp.cnt_list_bands = 0;
@@ -2243,6 +2329,7 @@ vdp_init(void)
   sms.vdp.cnt_prio = 0;
   sms.vdp.cnt_cels_refused = 0;
   vdp_irq_seen = 0;
+  vdp_vram_w_seen = 0;
   vdp_backdrop_said = 0;
 #endif
 
@@ -2800,6 +2887,272 @@ vdp_line(void)
   sms.vdp.hscroll = sms.vdp.reg[8];
 }
 
+#if VDP_COUNTERS
+void
+vdp_perf_counts(vdp_perf_t *out)
+{
+  out->vram_w = sms.vdp.cnt_vram_w;
+  out->notes = sms.vdp.cnt_decor_notes;
+  out->hot_write = sms.vdp.cnt_hot_write;
+  out->hot_scan = sms.vdp.cnt_hot_scan;
+  out->spr_stale = sms.vdp.cnt_spr_stale;
+  out->scans = sms.vdp.cnt_spr_scans;
+  out->scan_ent = sms.vdp.cnt_spr_entries;
+  out->scan_span = sms.vdp.cnt_spr_span;
+  out->col_lines = sms.vdp.cnt_col_lines;
+  out->col_pix = sms.vdp.cnt_col_pix_lines;
+}
+
+/*
+ * What the probes below put back, and what they hold the lot to. A probe
+ * that changed one of these changed the emulation, and its price is
+ * thrown away rather than published: the invariant is checked at every
+ * window and not asserted once in a comment.
+ */
+static uint32 vdp_probe_notes;
+static uint32 vdp_probe_hot_write;
+static uint32 vdp_probe_hot_scan;
+static uint32 vdp_probe_stale;
+static uint32 vdp_probe_scans;
+static uint32 vdp_probe_ent;
+static uint32 vdp_probe_span;
+static uint32 vdp_probe_col_lines;
+static uint32 vdp_probe_col_pix;
+static uint32 vdp_probe_tc_hit;
+static uint32 vdp_probe_tc_miss;
+static uint32 vdp_probe_spr_col;
+static uint32 vdp_probe_dirty_flag;
+static uint32 vdp_probe_partial;
+static uint32 vdp_probe_collision;
+
+/*
+ * The counters a probe is allowed to move are put back; the ones it must
+ * not move are read here and compared after. Written as one pair of
+ * helpers so that three probes cannot drift apart on what they check.
+ */
+static void
+vdp_probe_mark(void)
+{
+  vdp_probe_notes = sms.vdp.cnt_decor_notes;
+  vdp_probe_hot_write = sms.vdp.cnt_hot_write;
+  vdp_probe_stale = sms.vdp.cnt_spr_stale;
+}
+
+static int32
+vdp_probe_clean(void)
+{
+  return ((sms.vdp.cnt_decor_notes == vdp_probe_notes)
+          && (sms.vdp.cnt_hot_write == vdp_probe_hot_write)
+          && (sms.vdp.cnt_spr_stale == vdp_probe_stale)) ? 1 : 0;
+}
+
+/*
+ * The dirty marks of the whole video memory, kept aside while the lot
+ * below raises them and put back afterwards. Both walks are outside
+ * whatever the caller times. A mark left raised would not change a
+ * pixel, but it would cost the next presentation a sweep of every tile
+ * -- the very figure the lot exists to measure would then be measuring
+ * its own probe.
+ */
+static uint32 vdp_mark_price_dirty[VDP_CHUNKS / 4UL];
+
+void
+vdp_mark_price_save(void)
+{
+  uint32 i;
+
+  for(i = 0; i < (VDP_CHUNKS / 4UL); i++)
+    vdp_mark_price_dirty[i] = sms.vdp.decor_dirty_w[i];
+  vdp_probe_mark();
+}
+
+int32
+vdp_mark_price_restore(void)
+{
+  uint32 i;
+
+  for(i = 0; i < (VDP_CHUNKS / 4UL); i++)
+    sms.vdp.decor_dirty_w[i] = vdp_mark_price_dirty[i];
+
+  /*
+   * The lot is meant to have handed nothing on to the note: every value
+   * it wrote was the value already there. A note counted here means the
+   * compare let one through, and the price then describes something other
+   * than the mark -- refused, not published.
+   */
+  return vdp_probe_clean();
+}
+
+uint32
+vdp_mark_price_run(int32 mark)
+{
+  uint32 i;
+  uint32 a;
+  uint32 v;
+  uint32 sum;
+
+  sum = 0;
+
+  /*
+   * One address per chunk, the whole video memory once: the mark reads
+   * and writes one byte of each of three arrays and its price does not
+   * depend on which byte, and this console's processor has no data cache
+   * to make one address cheaper than another.
+   *
+   * The test on the mark is outside the loop and not inside it: a branch
+   * taken VDP_MARK_PRICE_LOT times would land in the difference the two
+   * runs are subtracted to get.
+   */
+  if(mark != 0)
+    {
+      for(i = 0; i < VDP_MARK_PRICE_LOT; i++)
+        {
+          a = i << VDP_CHUNK_SHIFT;
+          v = (uint32)sms.vdp.vram[a];
+          sum += v;
+          VDP_DECOR_NOTE(a,(uint8)v);
+        }
+    }
+  else
+    {
+      for(i = 0; i < VDP_MARK_PRICE_LOT; i++)
+        {
+          a = i << VDP_CHUNK_SHIFT;
+          v = (uint32)sms.vdp.vram[a];
+          sum += v;
+        }
+    }
+
+  return sum;
+}
+
+void
+vdp_scan_price_save(void)
+{
+  vdp_probe_dirty_flag = sms.vdp.spr_dirty;
+  vdp_probe_partial = sms.vdp.spr_partial;
+  vdp_probe_scans = sms.vdp.cnt_spr_scans;
+  vdp_probe_ent = sms.vdp.cnt_spr_entries;
+  vdp_probe_span = sms.vdp.cnt_spr_span;
+  vdp_probe_hot_scan = sms.vdp.cnt_hot_scan;
+  vdp_probe_mark();
+}
+
+void
+vdp_scan_price_run(void)
+{
+  uint32 i;
+
+  /*
+   * From line 0 every time: the rebuild that line 0 of a frame makes,
+   * which is the only one whose result is the whole table. A lot of a few
+   * so that the reading stands well clear of what one reading of the
+   * clock costs.
+   */
+  for(i = 0; i < VDP_SCAN_PRICE_LOT; i++)
+    vdp_sprite_scan(0);
+}
+
+uint32
+vdp_scan_price_entries(void)
+{
+  return (sms.vdp.cnt_spr_entries - vdp_probe_ent) / VDP_SCAN_PRICE_LOT;
+}
+
+int32
+vdp_scan_price_restore(void)
+{
+  /*
+   * The two marks first: whatever rebuild was owed before the probe is
+   * owed again after it, so line 0 of the next frame does exactly what it
+   * would have done. Then the counters the probe's own rebuilds moved --
+   * the probe's work is not the emulation's work and must not show up in
+   * the figures it is measured to explain.
+   */
+  sms.vdp.spr_dirty = vdp_probe_dirty_flag;
+  sms.vdp.spr_partial = vdp_probe_partial;
+  sms.vdp.cnt_spr_scans = vdp_probe_scans;
+  sms.vdp.cnt_spr_entries = vdp_probe_ent;
+  sms.vdp.cnt_spr_span = vdp_probe_span;
+  sms.vdp.cnt_hot_scan = vdp_probe_hot_scan;
+
+  /*
+   * A rebuild writes the per-line table and the watch bytes of the
+   * patterns it names, and nothing on the write path's side. One of
+   * those moving means the rebuild reached somewhere it has no business
+   * reaching, and the price goes out with it.
+   */
+  return vdp_probe_clean();
+}
+
+int32
+vdp_collide_price_line(int32 after)
+{
+  int32 y;
+
+  for(y = after + 1; y < (int32)VDP_ACTIVE_LINES; y++)
+    {
+      if(sms.vdp.row_off[y] != 0)
+        continue;
+      if(sms.vdp.spr_n[y] >= 2U)
+        return y;
+    }
+
+  return -1;
+}
+
+void
+vdp_collide_price_save(void)
+{
+  vdp_probe_collision = sms.vdp.spr_collision;
+  vdp_probe_spr_col = sms.vdp.cnt_spr_col;
+  vdp_probe_col_lines = sms.vdp.cnt_col_lines;
+  vdp_probe_col_pix = sms.vdp.cnt_col_pix_lines;
+  vdp_probe_tc_hit = sms.vdp.cnt_tc_hit;
+  vdp_probe_tc_miss = sms.vdp.cnt_tc_miss;
+  vdp_probe_mark();
+}
+
+uint32
+vdp_collide_price_run(int32 y)
+{
+  uint32 i;
+  uint32 n;
+
+  n = sms.vdp.spr_n[y];
+
+  /*
+   * The same line replayed a lot of times over: one replay of the cheap
+   * case -- rectangles compared, none overlapping -- is a few
+   * microseconds, well under what one reading of the clock costs. Every
+   * replay starts from the same state: the taken mask is cleared at the
+   * head of the walk, and the collision flag is put back by the restore.
+   */
+  for(i = 0; i < VDP_COLLIDE_PRICE_LOT; i++)
+    vdp_sprite_collide((uint32)y,n);
+
+  /*
+   * Which of the two cases the caller just paid for: the pixel walk was
+   * reached, or the rectangles settled it. Read off the counter the walk
+   * itself raises, before the restore puts it back.
+   */
+  return (sms.vdp.cnt_col_pix_lines != vdp_probe_col_pix) ? 1UL : 0UL;
+}
+
+int32
+vdp_collide_price_restore(void)
+{
+  sms.vdp.spr_collision = vdp_probe_collision;
+  sms.vdp.cnt_spr_col = vdp_probe_spr_col;
+  sms.vdp.cnt_col_lines = vdp_probe_col_lines;
+  sms.vdp.cnt_col_pix_lines = vdp_probe_col_pix;
+  sms.vdp.cnt_tc_hit = vdp_probe_tc_hit;
+  sms.vdp.cnt_tc_miss = vdp_probe_tc_miss;
+
+  return vdp_probe_clean();
+}
+#endif /* VDP_COUNTERS */
+
 void
 vdp_report(void)
 {
@@ -2812,19 +3165,25 @@ vdp_report(void)
    */
   uint32 irq_now;
   uint32 irq;
+  uint32 vram_w_now;
+  uint32 vram_w;
 
   irq_now = sms.z80.irq_accepted;
   irq = irq_now - vdp_irq_seen;
   vdp_irq_seen = irq_now;
 
-  if((sms.vdp.cnt_reg_w != 0UL) || (sms.vdp.cnt_vram_w != 0UL) ||
+  vram_w_now = sms.vdp.cnt_vram_w;
+  vram_w = vram_w_now - vdp_vram_w_seen;
+  vdp_vram_w_seen = vram_w_now;
+
+  if((sms.vdp.cnt_reg_w != 0UL) || (vram_w != 0UL) ||
      (sms.vdp.cnt_cram_w != 0UL) || (sms.vdp.cnt_status_r != 0UL) ||
      (irq != 0UL))
     {
       LOG_HOT(LOG_CAT_VDP,LOG_LVL_DBG,
               ("reg w=%lu vram w=%lu cram w=%lu status r=%lu irq=%lu",
                (unsigned long)sms.vdp.cnt_reg_w,
-               (unsigned long)sms.vdp.cnt_vram_w,
+               (unsigned long)vram_w,
                (unsigned long)sms.vdp.cnt_cram_w,
                (unsigned long)sms.vdp.cnt_status_r,
                (unsigned long)irq));
@@ -3022,7 +3381,6 @@ vdp_report(void)
     }
 
   sms.vdp.cnt_reg_w = 0;
-  sms.vdp.cnt_vram_w = 0;
   sms.vdp.cnt_cram_w = 0;
   sms.vdp.cnt_cram_mid = 0;
   sms.vdp.cnt_clut_upd = 0;

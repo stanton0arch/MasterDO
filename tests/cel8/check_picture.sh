@@ -214,6 +214,37 @@ fi
 echo "== building the list (translated code: $Z80C) =="
 build "$S/vdp.c" "$WORK/romrun"
 
+# The silent build compiled, and compiled here because nothing else
+# compiles it. Every check in this file runs with -DSMS_TELEMETRY=1: the
+# counters, the probes that price them and the periodic line are all in.
+# What the console ships when the telemetry is switched off -- the #else
+# of every counting macro, every block the switch closes -- is then
+# compiled by no bench at all, and this project has already shipped a core
+# broken exactly that way while the bench stayed green.
+#
+# Compilation only, and only the sources this bench already links: it
+# proves the silent side still builds, not that it behaves. A step that
+# proves less than it seems to would be worse than none, so it says what
+# it proves.
+echo "== the silent build compiles =="
+mute_fail=0
+for mute in "-DSMS_TELEMETRY=0 -DLOG_LEVEL=2" "-DSMS_TELEMETRY=0 -DLOG_ENABLE=0"; do
+  for f in cart sms vdp z80 z80c; do
+    if ! $CC -O1 -std=gnu89 -w -DSMS_IRQ_TEST_SOURCE=0 \
+         -DSMS_DYNAREC_J0=0 -DSMS_DYNAREC_J1=0 -DSMS_DYNAREC_J2=0 \
+         $mute -I"$H" -I"$S" -c -o "$WORK/mute_$f.o" "$S/$f.c" \
+         2>"$WORK/mute_$f.err"; then
+      echo "FAIL: src/$f.c does not compile with $mute"
+      sed -n '1,6p' "$WORK/mute_$f.err"
+      mute_fail=1
+    fi
+  done
+done
+if [ "$mute_fail" != 0 ]; then
+  exit 1
+fi
+echo "  [OK] the core compiles with the counters off, with the log on and with it off"
+
 if [ -n "${PPM:-}" ]; then
   mkdir -p "$PPM"
 fi

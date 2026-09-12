@@ -346,6 +346,19 @@
 #define VDP_NT_CHUNKS       ((VDP_NT_TILES * 2UL) / 32UL)
 #define VDP_CHUNKS          (VDP_VRAM_SIZE / 32UL)
 
+/*
+ * The same 32 as a shift, for the paths that turn an address into its
+ * chunk. The two spellings are one fact and the check below is what keeps
+ * them one: a chunk size changed in the division above and not here would
+ * otherwise mark the wrong chunk dirty on every write, silently, and the
+ * picture would go stale in places no test looks at.
+ */
+#define VDP_CHUNK_SHIFT 5UL
+
+#if (VDP_VRAM_SIZE >> VDP_CHUNK_SHIFT) != VDP_CHUNKS
+#error "the chunk shift and the chunk count describe different chunks"
+#endif
+
 #if (VDP_PIX_WIDTH % 4UL) != 0UL
 #error "a window's source pointer is a word address: the width must be a multiple of 4"
 #endif
@@ -976,6 +989,13 @@ typedef struct
    * build counts nothing.
    */
   uint32 cnt_reg_w;
+  /*
+   * A running total, unlike the two beside it: the periodic line of the
+   * frame loop needs the writes of ITS window to price the mark every
+   * one of them pays, and its window is not this module's. The report
+   * below subtracts its own previous reading and so prints the same
+   * figure it always did.
+   */
   uint32 cnt_vram_w;
   uint32 cnt_cram_w;
   /*
@@ -1052,6 +1072,51 @@ typedef struct
    */
   uint32 cnt_line_fast;
   uint32 cnt_line_scratch;
+  /*
+   * What the sprites of a frame cost, said in counts because no clock may
+   * be read per line: the per-line table rebuilt -- how many rebuilds, how
+   * many attribute entries they walked, how many line slots those entries
+   * filled -- and the collision replayed -- how many lines called it, and
+   * how many of those got past the rectangle test to the pixel walk. The
+   * frame loop times the two together once per sampled line; these say
+   * what that time was spent on, and what finishing the table walk early
+   * would save.
+   *
+   * Running totals, and cleared by nothing but the init: the periodic
+   * line of the frame loop reads them through vdp_perf_counts and keeps
+   * its own previous reading, so that line's window (a second of wall
+   * time) and this module's report window (sixty frames) need not be the
+   * same window. The difference of two readings is exact across a wrap.
+   */
+  uint32 cnt_spr_scans;
+  uint32 cnt_spr_entries;
+  uint32 cnt_spr_span;
+  uint32 cnt_col_lines;
+  /*
+   * Of the lines that replayed a collision, the ones whose rectangles
+   * overlapped and that therefore walked pixels. LINES and not pixels:
+   * the walk stops at the first pixel taken twice, so a pixel count would
+   * say nothing about how many of them there were.
+   */
+  uint32 cnt_col_pix_lines;
+  /*
+   * The picture's own work inside the processor's quota, where it is paid
+   * and where it is charged to the processor: video memory writes handed
+   * to the note past the watch test, patterns the write path marked for
+   * the next conversion, and writes to the attribute table that found the
+   * per-line sprite table clean and made it stale -- the transition, not
+   * the writes, because it is the transition that costs a rebuild.
+   * Running totals, read the same way. The write count itself is
+   * cnt_vram_w, running for the same reason.
+   *
+   * cnt_hot_scan is the same mark raised from the table rebuild instead,
+   * which is the video call and not the quota: one figure would have
+   * mixed work paid on two sides of the frame.
+   */
+  uint32 cnt_decor_notes;
+  uint32 cnt_hot_write;
+  uint32 cnt_hot_scan;
+  uint32 cnt_spr_stale;
   /*
    * What the background picture cost over the window: tiles converted,
    * windows built, bands drawn, presentations whose distinct journal
@@ -1209,8 +1274,9 @@ typedef struct
 #define VDP_DECOR_NOTE(a,v)                                             \
   do                                                                    \
     {                                                                   \
-      VDP_DECOR_DIRTY[(a) >> 5] = 1;                                    \
-      if((sms.vdp.watch[(a) >> 5] != 0) && (sms.vdp.vram[(a)] != (v)))  \
+      VDP_DECOR_DIRTY[(a) >> VDP_CHUNK_SHIFT] = 1;                      \
+      if((sms.vdp.watch[(a) >> VDP_CHUNK_SHIFT] != 0)                   \
+         && (sms.vdp.vram[(a)] != (v)))                                 \
         vdp_decor_note((a),(v));                                        \
     }                                                                   \
   while(0)
@@ -1602,6 +1668,121 @@ uint8 vdp_io_hcounter_read(void);
  * runs at; one call per line and nothing called per pixel or per tile.
  */
 void vdp_line(void);
+
+#if VDP_COUNTERS
+/*
+ * The counts a frame's decomposition is built from, copied out as they
+ * stand. Running totals: the caller keeps its previous reading and takes
+ * the difference over its own window.
+ */
+typedef struct vdp_perf_s
+{
+  uint32 vram_w;     /* video memory writes, each paying the mark */
+  uint32 notes;      /* of those, the ones the watch test handed on */
+  uint32 hot_write;  /* patterns the write path marked */
+  uint32 hot_scan;   /* patterns the table rebuild marked */
+  uint32 spr_stale;  /* writes that found the table clean and dirtied it */
+  uint32 scans;      /* rebuilds of the per-line sprite table */
+  uint32 scan_ent;   /* attribute entries those rebuilds walked */
+  uint32 scan_span;  /* line slots those entries filled */
+  uint32 col_lines;  /* lines that replayed a collision */
+  uint32 col_pix;    /* of those, the lines that walked pixels */
+} vdp_perf_t;
+
+void vdp_perf_counts(vdp_perf_t *out);
+
+/*
+ * ---------------------------------------------------------------------------
+ * The three prices, and why a price and not a stopwatch.
+ *
+ * The work this story has to weigh is spread over thousands of small
+ * events a frame -- a mark per video memory write, an entry per sprite
+ * walked, a replay per line that carries two sprites. One clock reading
+ * costs tens of microseconds here and is wrong by whole seconds now and
+ * then: a reading around each event would cost thirty times the event and
+ * would be noise besides. A count is exact and free; what is missing is
+ * what one of them is worth, and that is measured once per window, on the
+ * cold side of the frame, over a lot big enough to read against the
+ * clock's own price.
+ *
+ * Each probe is three calls, and three because the timing belongs to the
+ * caller and must enclose the lot and nothing else: save what the lot
+ * will touch, run the lot, put it back. The restore answers whether the
+ * lot changed anything it should not have, and the caller throws the
+ * price away when it did -- an invariant a comment claims is an invariant
+ * nobody checks.
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * The mark every video memory write pays so that the picture can be
+ * brought up to date later: the dirty byte stored, the watch byte read,
+ * the old byte read and compared. Run the lot twice, once without the
+ * mark and once with, and the difference is the mark alone -- the loop,
+ * the load of the byte and the one clock reading each span carries all
+ * cancel. The value written is the byte already there, so the compare
+ * always fails: nothing is journaled, nothing is marked, nothing is made
+ * stale. The sum is returned so the lot cannot be reasoned away as dead
+ * code.
+ *
+ * It prices the CHEAP path only -- the mark of a write the watch refuses.
+ * The watched write's own path (journal, pattern marked, table made
+ * stale) is counted and not priced: pricing it would mean journaling
+ * writes that never happened, which would change the picture. What the
+ * caller publishes from this is therefore a FLOOR, and it says so in its
+ * name.
+ */
+#define VDP_MARK_PRICE_LOT VDP_CHUNKS
+
+void   vdp_mark_price_save(void);
+uint32 vdp_mark_price_run(int32 mark);
+int32  vdp_mark_price_restore(void);
+
+/*
+ * One rebuild of the per-line sprite table, the whole of it: the clearing
+ * of the lines to come, the walk of the attribute table, and the line
+ * slots every entry fills. Priced by running the real rebuild from line 0
+ * a few times over.
+ *
+ * It changes nothing, and the argument is worth writing down. The probe
+ * runs on the cold side of the frame, after the last line and before the
+ * next one: the only reader of the table between here and then is line 0
+ * of the next frame. A rebuild from line 0 rebuilds every line of the
+ * picture from the video memory and the registers as they now stand. If
+ * the table was clean and whole, that is the table it already held. If it
+ * was stale or partial, line 0 rebuilds it again anyway -- the save and
+ * restore below put those two marks back, so the rebuild that was owed is
+ * still owed. Either way no line is ever read between the two.
+ */
+#define VDP_SCAN_PRICE_LOT 4UL
+
+void   vdp_scan_price_save(void);
+void   vdp_scan_price_run(void);
+uint32 vdp_scan_price_entries(void);
+int32  vdp_scan_price_restore(void);
+
+/*
+ * One line's collision replayed: the rectangles of the admitted sprites
+ * compared, and, when two of them overlap, the pixels walked until one is
+ * taken twice. The two cases cost orders apart, so they are priced apart:
+ * the run says which case the line it was given fell into, and the caller
+ * keeps a price for each.
+ *
+ * The replay writes one flag the emulated program can read -- the
+ * collision bit -- and that flag is saved and put back. Nothing else of
+ * it outlives the call: the taken mask is scratch, cleared at every use.
+ * The rows it reads may be decoded into the row cache, which is the same
+ * work the next frame would do and is invisible to everything but the
+ * cache's own counters, saved and put back with the rest.
+ */
+#define VDP_COLLIDE_PRICE_LOT 64UL
+
+int32  vdp_collide_price_line(int32 after);
+void   vdp_collide_price_save(void);
+uint32 vdp_collide_price_run(int32 y);
+int32  vdp_collide_price_restore(void);
+
+#endif /* VDP_COUNTERS */
 
 /*
  * Emits the aggregates of the closing window and clears them: one debug
