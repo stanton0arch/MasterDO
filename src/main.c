@@ -367,6 +367,7 @@ main_perf_emit(uint32 usec,
   uint32 vdp_pf;
   uint32 scan_pf;
   uint32 col_pf;
+  uint32 col_extra;
   uint32 tail_pf;
   uint32 mark_pf;
   uint32 pres_pf;
@@ -537,8 +538,23 @@ main_perf_emit(uint32 usec,
    * frame and a half would otherwise round to one before it was priced.
    */
   scan_pf = (cnt->scans * price[MAIN_PRICE_SCAN].value) / frames;
-  col_pf = (((cnt->col_lines - cnt->col_pix) * price[MAIN_PRICE_RECT].value)
-            + (cnt->col_pix * price[MAIN_PRICE_PIX].value)) / frames;
+  /*
+   * The collision replay in two parts. Every line that paid the rectangle
+   * test (col_lines) at rect=, the price of a tested line the rectangles
+   * settled. Every pixel walk (col_pix), whether its line tested the
+   * rectangles or took the kept ones again, at what pix= adds over rect=,
+   * pix= being the price of a tested line that walked; that extra is
+   * taken as zero while pix= has not been measured or reads below rect=.
+   * A line that skipped the replay while the collision bit stood costs
+   * nothing here. What a line pays to compare its sprites with the kept
+   * rectangles, and to copy them after a test, is NOT priced: the
+   * collision post is a floor for that part. No subtraction below can
+   * wrap.
+   */
+  col_extra = (price[MAIN_PRICE_PIX].value > price[MAIN_PRICE_RECT].value)
+              ? (price[MAIN_PRICE_PIX].value - price[MAIN_PRICE_RECT].value) : 0UL;
+  col_pf = ((cnt->col_lines * price[MAIN_PRICE_RECT].value)
+            + (cnt->col_pix * col_extra)) / frames;
 
   vdp_pf = vdp10 * 100UL;
   if((scan_pf + col_pf) > vdp_pf)
@@ -695,7 +711,14 @@ main_perf_emit(uint32 usec,
    * slots those entries filled: three stores each, and the largest thing
    * a rebuild does. col= against colpix= splits the collision replay into
    * the lines the rectangles settled and the lines that walked pixels --
-   * the two prices above. w=, note= and hotw= are the picture's work
+   * the two prices above; col= counts only the lines that paid the
+   * rectangles. colreuse= is the lines that took the rectangles of the
+   * line before again, the same sprites standing, and paid the walk
+   * alone when it was owed; colskip= the lines that replayed nothing
+   * because the collision bit already stood, which no line can change
+   * before the program reads it. What the two save is read in these two
+   * counts; col= falls on its own, since those lines no longer pay the
+   * test. w=, note= and hotw= are the picture's work
    * inside the quota: every write pays the mark, some are handed on to
    * the note, and some of those mark a pattern. hots= is the same mark
    * raised by the table rebuild, which is the video call and not the
@@ -703,10 +726,11 @@ main_perf_emit(uint32 usec,
    * dirtied it, which is what scan= is the consequence of.
    */
   LOG_HOT(LOG_CAT_PERF,LOG_LVL_INFO,
-          ("count scan=%lu.%lu ent=%lu span=%lu col=%lu.%lu colpix=%lu.%lu w=%lu note=%lu hotw=%lu hots=%lu stale=%lu",
+          ("count scan=%lu.%lu ent=%lu span=%lu col=%lu.%lu colpix=%lu.%lu colreuse=%lu.%lu colskip=%lu.%lu w=%lu note=%lu hotw=%lu hots=%lu stale=%lu",
            MAIN_PERF_TENTHS(cnt->scans,frames),(unsigned long)(cnt->scan_ent / frames),
            (unsigned long)(cnt->scan_span / frames),MAIN_PERF_TENTHS(cnt->col_lines,frames),
-           MAIN_PERF_TENTHS(cnt->col_pix,frames),(unsigned long)(cnt->vram_w / frames),
+           MAIN_PERF_TENTHS(cnt->col_pix,frames),MAIN_PERF_TENTHS(cnt->col_reuse,frames),
+           MAIN_PERF_TENTHS(cnt->col_skip,frames),(unsigned long)(cnt->vram_w / frames),
            (unsigned long)(cnt->notes / frames),(unsigned long)(cnt->hot_write / frames),
            (unsigned long)(cnt->hot_scan / frames),(unsigned long)(cnt->spr_stale / frames)));
 
@@ -2060,6 +2084,10 @@ main(int    argc,
           perf_cnt_prev.col_lines = perf_cnt_now.col_lines;
           perf_cnt.col_pix = perf_cnt_now.col_pix - perf_cnt_prev.col_pix;
           perf_cnt_prev.col_pix = perf_cnt_now.col_pix;
+          perf_cnt.col_reuse = perf_cnt_now.col_reuse - perf_cnt_prev.col_reuse;
+          perf_cnt_prev.col_reuse = perf_cnt_now.col_reuse;
+          perf_cnt.col_skip = perf_cnt_now.col_skip - perf_cnt_prev.col_skip;
+          perf_cnt_prev.col_skip = perf_cnt_now.col_skip;
 
           main_perf_emit(perf_now - perf_window,perf_frames,
                          perf_emul,perf_emul_frames,

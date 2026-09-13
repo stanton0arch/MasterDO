@@ -252,9 +252,13 @@ static unsigned tile_pixel(uint32 word, int r, int c)
 }
 
 /* The writes a played picture makes, each in the quota of its line:
-   a register (reg 0 to 10), a video memory byte (reg -1) or a colour
-   byte (reg -2). Emptied by the play. */
+   a register (reg 0 to 10), a video memory byte (reg -1), a colour
+   byte (reg -2) or a read of the status port (reg -3). Emptied by the
+   play. */
 typedef struct { long line; int reg; uint32 addr, value; } play_t;
+/* A read of the status port may be scheduled as well (reg -3): what it
+   returned is kept here for the scene to hold. */
+static uint32 status_last = 0;
 static play_t sched[16];
 static int sched_n = 0;
 
@@ -280,6 +284,7 @@ static void play_writes(long y)
       if(sched[i].line != y) continue;
       if(sched[i].reg >= 0) reg_write((uint32)sched[i].reg,sched[i].value);
       else if(sched[i].reg == -1) vram_write(sched[i].addr,sched[i].value);
+      else if(sched[i].reg == -3) status_last = vdp_io_status_read();
       else cram_write(sched[i].addr,sched[i].value);
     }
 }
@@ -960,6 +965,7 @@ static const CCB *find_prio(const CCB *c, long x, long y, long w, long h)
 static void sprite_scenes(uint32 pa)
 {
   uint32 ps, pf, pe, q, i, reg1, reg7, before_ovf, before_col, before, t, word;
+  uint32 before_skip, before_lines, before_reuse;
   uint32 saved[4], saved_w[8];
   int32 bands;
   const CCB *c;
@@ -1024,6 +1030,7 @@ static void sprite_scenes(uint32 pa)
   before_ovf = sms.vdp.cnt_spr_ovf;
   before_col = sms.vdp.cnt_spr_col;
   sms.vdp.spr_overflow = 0;
+  sms.vdp.spr_collision = 0;
   bands = play_and_present();
   expect(sms.vdp.cnt_spr_ovf == before_ovf + 4 && sms.vdp.spr_overflow == 1,
          "ninth sprite: the overflow is raised on the four lines it is the ninth on");
@@ -1069,11 +1076,242 @@ static void sprite_scenes(uint32 pa)
   sat_write(1,99,50,ps);
   sat_write(2,0xD0,0,0);
   before_col = sms.vdp.cnt_spr_col;
+  before_skip = sms.vdp.cnt_col_skip;
   sms.vdp.spr_collision = 0;
   bands = play_and_present();
-  expect(sms.vdp.cnt_spr_col == before_col + 8 && sms.vdp.spr_collision == 1,
-         "two sprites on one column: the collision is raised on their eight lines");
+  expect(sms.vdp.cnt_spr_col == before_col + 1 && sms.vdp.cnt_col_skip == before_skip + 7
+         && sms.vdp.spr_collision == 1,
+         "two sprites on one column: the collision raised on their first line, the seven after it skipped");
   vdp_list_end();
+  flush();
+
+  /* The admitted sprites changing under a count that does not: entries 0
+     and 1 at columns 20 and 100 on lines 100 to 107, apart; entries 2
+     and 3 both at column 50 on lines 108 to 115. Line 108 admits two
+     sprites as line 107 did, but not the same two: the rectangles of
+     line 100 are not taken again, and the collision rises there. Lines
+     101 to 107 take them again, lines 109 to 115 skip. */
+  sat_write(0,99,20,ps);
+  sat_write(1,99,100,ps);
+  sat_write(2,107,50,ps);
+  sat_write(3,107,50,ps);
+  sat_write(4,0xD0,0,0);
+  flush();
+  before_col = sms.vdp.cnt_spr_col;
+  before_skip = sms.vdp.cnt_col_skip;
+  before_lines = sms.vdp.cnt_col_lines;
+  before_reuse = sms.vdp.cnt_col_reuse;
+  sms.vdp.spr_collision = 0;
+  bands = play_and_present();
+  expect(sms.vdp.cnt_spr_col == before_col + 1 && sms.vdp.spr_collision == 1,
+         "another pair of sprites on as many: the collision raised on line 108");
+  expect(sms.vdp.cnt_col_lines == before_lines + 2 && sms.vdp.cnt_col_reuse == before_reuse + 7
+         && sms.vdp.cnt_col_skip == before_skip + 7,
+         "another pair of sprites on as many: two lines tested, seven taken again, seven skipped");
+  vdp_list_end();
+  flush();
+  /* A third sprite arriving: entries 0 and 1 apart on lines 100 to 107,
+     entry 2 at column 20 from line 104, over entry 0. Lines 101 to 103
+     take the rectangles of line 100 again; line 104 admits three and is
+     tested, and the collision rises there. */
+  sat_write(0,99,20,ps);
+  sat_write(1,99,100,ps);
+  sat_write(2,103,20,ps);
+  sat_write(3,0xD0,0,0);
+  sat_write(4,0xD0,0,0);
+  flush();
+  before_col = sms.vdp.cnt_spr_col;
+  before_lines = sms.vdp.cnt_col_lines;
+  before_reuse = sms.vdp.cnt_col_reuse;
+  before_skip = sms.vdp.cnt_col_skip;
+  sms.vdp.spr_collision = 0;
+  bands = play_and_present();
+  expect(sms.vdp.cnt_spr_col == before_col + 1 && sms.vdp.spr_collision == 1
+         && sms.vdp.cnt_col_lines == before_lines + 2 && sms.vdp.cnt_col_reuse == before_reuse + 3
+         && sms.vdp.cnt_col_skip == before_skip + 3,
+         "a third sprite arriving on line 104: lines 101 to 103 taken again, tested on 104, the collision raised, 105 to 107 skipped");
+  vdp_list_end();
+  flush();
+
+  /* Register 0 bit 5 cleared on line 62 under two sprites at columns 0
+     and 7 on lines 60 to 67, the one at 0 opaque on its eight columns:
+     while the left column is masked its rectangle is empty and nothing
+     is shared; from line 62 the two share column 7, where both are
+     opaque. The same sprites stand on every line: only the move of the
+     register forgets the rectangles of line 60. */
+  for(i = 0; i < 32; i++)
+    vram_write(pf * 32 + i,((i & 3) == 1) ? 0xFF : 0);
+  sat_write(0,59,0,pf);
+  sat_write(1,59,7,ps);
+  sat_write(2,0xD0,0,0);
+  reg_write(0,(uint32)sms.vdp.reg[0] | 0x20UL);
+  flush();
+  before_col = sms.vdp.cnt_spr_col;
+  before_lines = sms.vdp.cnt_col_lines;
+  sms.vdp.spr_collision = 0;
+  play_at(62,0,0,(uint32)sms.vdp.reg[0] & ~0x20UL);
+  bands = play_and_present();
+  expect(sms.vdp.cnt_spr_col == before_col + 1 && sms.vdp.spr_collision == 1
+         && sms.vdp.cnt_col_lines == before_lines + 2,
+         "register 0 bit 5 cleared on line 62: the rectangles kept forgotten, the collision raised at column 7");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  reg_write(0,(uint32)sms.vdp.reg[0] & ~0x20UL);
+  flush();
+
+  /* The horizontal position of entry 1 rewritten on line 104, from 80 to
+     50, under two sprites on lines 100 to 107: the same two are admitted
+     on every line, but the write rebuilds the table, the rebuild forgets
+     the rectangles of line 100, and the two now share column 50. */
+  sat_write(0,99,50,ps);
+  sat_write(1,99,80,ps);
+  sat_write(2,0xD0,0,0);
+  flush();
+  before_col = sms.vdp.cnt_spr_col;
+  before_lines = sms.vdp.cnt_col_lines;
+  sms.vdp.spr_collision = 0;
+  play_at(104,-1,sms.vdp.sat_base + VDP_SPR_XN_OFFSET + 2,50);
+  bands = play_and_present();
+  expect(sms.vdp.cnt_spr_col == before_col + 1 && sms.vdp.spr_collision == 1
+         && sms.vdp.cnt_col_lines == before_lines + 2,
+         "x of a sprite rewritten on line 104 onto the other: the rebuild forgets the rectangles, the collision raised");
+  vdp_list_end();
+  flush();
+  /* A status read inside the picture, between two collisions: entries 0
+     and 1 on one column on lines 40 to 47, entries 2 and 3 on one column
+     on lines 100 to 107, the status read in the quota of line 60. The
+     read returns the bit raised on line 40 and lowers it; line 100 then
+     tests again and raises it anew. Seven lines skipped after each. */
+  sat_write(0,39,50,ps);
+  sat_write(1,39,50,ps);
+  sat_write(2,99,50,ps);
+  sat_write(3,99,50,ps);
+  sat_write(4,0xD0,0,0);
+  flush();
+  before_col = sms.vdp.cnt_spr_col;
+  before_skip = sms.vdp.cnt_col_skip;
+  sms.vdp.spr_collision = 0;
+  status_last = 0;
+  play_at(60,-3,0,0);
+  bands = play_and_present();
+  expect((status_last & 0x20UL) != 0UL,
+         "status read on line 60: it returns the collision raised on line 40");
+  expect(sms.vdp.cnt_spr_col == before_col + 2 && sms.vdp.cnt_col_skip == before_skip + 14
+         && sms.vdp.spr_collision == 1,
+         "status read on line 60: the collision raised again on line 100, fourteen lines skipped");
+  vdp_list_end();
+  flush();
+
+  /* The display off from line 100 to 109 over two sprites on one column
+     on lines 100 to 107: no collision replay of any kind on those lines,
+     and the bit stays down. */
+  sat_write(0,99,50,ps);
+  sat_write(1,99,50,ps);
+  sat_write(2,0xD0,0,0);
+  sat_write(3,0xD0,0,0);
+  sat_write(4,0xD0,0,0);
+  flush();
+  before_col = sms.vdp.cnt_spr_col;
+  before_skip = sms.vdp.cnt_col_skip;
+  before_lines = sms.vdp.cnt_col_lines;
+  before_reuse = sms.vdp.cnt_col_reuse;
+  sms.vdp.spr_collision = 0;
+  play_at(100,1,0,(uint32)sms.vdp.reg[1] & ~0x40UL);
+  play_at(110,1,0,(uint32)sms.vdp.reg[1] | 0x40UL);
+  bands = play_and_present();
+  expect(sms.vdp.cnt_col_lines == before_lines && sms.vdp.cnt_col_reuse == before_reuse
+         && sms.vdp.cnt_col_skip == before_skip && sms.vdp.cnt_spr_col == before_col
+         && sms.vdp.spr_collision == 0,
+         "display off over two sprites on one column: no test, no reuse, no skip, no collision");
+  vdp_list_end();
+  flush();
+
+  /* A status read inside one colliding pair: two sprites on one column
+     on lines 40 to 47, the status read in the quota of line 43. Line 40
+     is tested and raises the bit, 41 and 42 skip; the read lowers it,
+     line 43 takes the rectangles of line 40 again, walks the pixels and
+     raises it anew; 44 to 47 skip. */
+  sat_write(0,39,50,ps);
+  sat_write(1,39,50,ps);
+  sat_write(2,0xD0,0,0);
+  flush();
+  before_col = sms.vdp.cnt_spr_col;
+  before_skip = sms.vdp.cnt_col_skip;
+  before_lines = sms.vdp.cnt_col_lines;
+  before_reuse = sms.vdp.cnt_col_reuse;
+  sms.vdp.spr_collision = 0;
+  status_last = 0;
+  play_at(43,-3,0,0);
+  bands = play_and_present();
+  expect((status_last & 0x20UL) != 0UL,
+         "status read on line 43: it returns the collision raised on line 40");
+  expect(sms.vdp.cnt_spr_col == before_col + 2 && sms.vdp.cnt_col_skip == before_skip + 6
+         && sms.vdp.cnt_col_reuse == before_reuse + 1 && sms.vdp.cnt_col_lines == before_lines + 1
+         && sms.vdp.spr_collision == 1,
+         "status read on line 43: raised again on 43 from the kept rectangles, six lines skipped");
+  vdp_list_end();
+  flush();
+
+  /* Register 0 bit 3 cleared on line 62, with the left column masked:
+     two sprites at x 8 and x 15 on lines 60 to 67, shifted to 0 and 7 --
+     the first one's rectangle empty, nothing shared. Unshifted from line
+     62 they share column 15, where both are opaque. The same sprites on
+     every line: only the move of the shift forgets the rectangles. */
+  sat_write(0,59,8,pf);
+  sat_write(1,59,15,ps);
+  sat_write(2,0xD0,0,0);
+  reg_write(0,(uint32)sms.vdp.reg[0] | 0x28UL);
+  flush();
+  before_col = sms.vdp.cnt_spr_col;
+  before_lines = sms.vdp.cnt_col_lines;
+  sms.vdp.spr_collision = 0;
+  play_at(62,0,0,(uint32)sms.vdp.reg[0] & ~0x08UL);
+  bands = play_and_present();
+  expect(sms.vdp.cnt_spr_col == before_col + 1 && sms.vdp.spr_collision == 1
+         && sms.vdp.cnt_col_lines == before_lines + 2,
+         "register 0 bit 3 cleared on line 62: the rectangles kept forgotten, the collision raised at column 15");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  reg_write(0,(uint32)sms.vdp.reg[0] & ~0x28UL);
+  flush();
+
+  /* More sprites on a line than the rectangles kept were tested on, with
+     a stale entry past their count that matches: magnified sprites, 16
+     lines tall. Line 100 admits entries 0, 1, 2, apart, and is tested.
+     In line 101's quota entry 2 moves to line 108 and column 20, over
+     entry 0: the rebuild forgets the rectangles, line 101 is tested on
+     entries 0 and 1 alone, lines 102 to 107 take that again. Line 108
+     admits three again, the third entry still 2: the count differs from
+     the rectangles kept, so it is tested, and the collision rises. */
+  reg_write(1,(uint32)sms.vdp.reg[1] | 0x01UL);
+  sat_write(0,99,20,ps);
+  sat_write(1,99,100,ps);
+  sat_write(2,99,200,ps);
+  sat_write(3,0xD0,0,0);
+  flush();
+  before_col = sms.vdp.cnt_spr_col;
+  before_skip = sms.vdp.cnt_col_skip;
+  before_lines = sms.vdp.cnt_col_lines;
+  before_reuse = sms.vdp.cnt_col_reuse;
+  sms.vdp.spr_collision = 0;
+  play_at(101,-1,sms.vdp.sat_base + 2,107);
+  play_at(101,-1,sms.vdp.sat_base + VDP_SPR_XN_OFFSET + 4,20);
+  bands = play_and_present();
+  expect(sms.vdp.cnt_spr_col == before_col + 1 && sms.vdp.spr_collision == 1,
+         "a third sprite back on line 108 after a line of two: the collision raised");
+  expect(sms.vdp.cnt_col_lines == before_lines + 3 && sms.vdp.cnt_col_reuse == before_reuse + 6
+         && sms.vdp.cnt_col_skip == before_skip + 7,
+         "a third sprite back on line 108 after a line of two: three lines tested, six taken again, seven skipped");
+  vdp_list_end();
+  sms.vdp.vcount = 200;
+  reg_write(1,(uint32)sms.vdp.reg[1] & ~0x01UL);
+  sat_write(2,0xD0,0,0);
+  flush();
+
+  /* Left as the scene of two sprites on one column left it. */
+  sat_write(0,99,50,ps);
+  sat_write(1,99,50,ps);
+  sat_write(2,0xD0,0,0);
   flush();
 
   /* Magnified (register 1 bit 0), with a cut on an odd line: entries 0
@@ -1218,6 +1456,7 @@ static void sprite_scenes(uint32 pa)
   flush();
   before_ovf = sms.vdp.cnt_spr_ovf;
   before_col = sms.vdp.cnt_spr_col;
+  sms.vdp.spr_collision = 0;
   sms.vdp.vcount = 0;
   for(i = 0; i < (uint32)PIC_H; i++)
     {
@@ -1294,10 +1533,13 @@ static void sprite_scenes(uint32 pa)
   flush();
   before = sms.vdp.cnt_reg_mid;
   before_col = sms.vdp.cnt_spr_col;
+  before_skip = sms.vdp.cnt_col_skip;
+  sms.vdp.spr_collision = 0;
   play_at(100,5,0,0xFD);
   bands = play_and_present();
   expect(sms.vdp.cnt_reg_mid == before + 1,"register 5 written on line 100: counted as written mid-frame");
-  expect(sms.vdp.cnt_spr_col == before_col + 8 && (sms.vdp.spr_adm[40][0] & 3UL) == 3UL
+  expect(sms.vdp.cnt_spr_col == before_col + 1 && sms.vdp.cnt_col_skip == before_skip + 7
+         && sms.vdp.spr_collision == 1 && (sms.vdp.spr_adm[40][0] & 3UL) == 3UL
          && (sms.vdp.spr_adm[100][0] & 1UL) != 0UL && (sms.vdp.spr_adm[100][0] & 2UL) == 0UL,
          "register 5 written on line 100: the lines before it keep their collision and their admission");
   expect(bands == 2 && sms.vdp.band_line[1] == 100,"register 5 written on line 100: journaled, a band from line 100");
@@ -1355,6 +1597,7 @@ static void sprite_scenes(uint32 pa)
   sat_write(1,59,0,pf);
   sat_write(2,0xD0,0,0);
   before_col = sms.vdp.cnt_spr_col;
+  sms.vdp.spr_collision = 0;
   bands = play_and_present();
   expect(sms.vdp.cnt_spr_col == before_col,"two sprites at x 0 under the masked column: no collision");
   for(i = 0, n = 0; i < 8; i++)
@@ -1540,9 +1783,12 @@ static void sprite_scenes(uint32 pa)
       sat_write(2,0xD0,0,0);
       flush();
       before_col = sms.vdp.cnt_spr_col;
+      before_skip = sms.vdp.cnt_col_skip;
+      sms.vdp.spr_collision = 0;
       bands = play_and_present();
-      expect(sms.vdp.cnt_spr_col == before_col + 8,
-             "two tall sprites on one column, opaque on their second pattern alone: the collision on eight lines");
+      expect(sms.vdp.cnt_spr_col == before_col + 1 && sms.vdp.cnt_col_skip == before_skip + 7
+             && sms.vdp.spr_collision == 1,
+             "two tall sprites on one column, opaque on their second pattern alone: the collision raised on line 68, seven lines skipped");
       vdp_list_end();
       sms.vdp.vcount = 200;
       reg_write(1,(uint32)sms.vdp.reg[1] & ~0x02UL);
@@ -2740,6 +2986,16 @@ int main(int argc, char **argv)
      carries the per-pixel render's, which is the oracle (head of file). */
   unsigned long ovf_seen = 0, col_seen = 0, ovf_d, col_d;
   unsigned long flags_ok = 0, flags_seen = 0;
+  /* The collision is replayed only while its bit is down, so the list
+     counts the rises of the bit where the per-pixel render counted lines.
+     What relates the two on a frame: the bit as it stood when line 0 was
+     counted, and whether the program read the status while lines 0 to
+     191 were being counted -- the one thing that lowers it in between.
+     A frame with such a read (or a window of several frames) is held
+     loosely and counted apart. */
+  uint32 col_head = 0, status_head = 0;
+  int read_inside = 0, loose_window;
+  unsigned long flags_loose = 0;
   static unsigned long row_digest[PIC_H];
 
   memset(fine_frames,0,sizeof fine_frames);
@@ -2893,7 +3149,16 @@ int main(int argc, char **argv)
                      (long)residue,(unsigned long)fr,line);
               return 2;
             }
+          /* The bit and the read count as line 0 is about to be counted:
+             a read in line 0's quota is already in the bit. */
+          if(line == 0)
+            {
+              col_head = sms.vdp.spr_collision;
+              status_head = sms.vdp.cnt_status_r;
+            }
           line_step();
+          if(line == PIC_H - 1 && sms.vdp.cnt_status_r != status_head)
+            read_inside = 1;
           /* The presentation, once line 191 is counted, as src/main.c
              makes it: the list built, held and copied, on every frame,
              so that the journal and the bands are exercised as they are
@@ -2909,6 +3174,8 @@ int main(int argc, char **argv)
         continue;
 
       pictures++;
+      loose_window = (every != 1 || read_inside != 0) ? 1 : 0;
+      read_inside = 0;
       if(deg_from >= 0) degraded++;
       k = plut_identity();
       if(k < plut_ok) plut_ok = k;
@@ -2933,7 +3200,10 @@ int main(int argc, char **argv)
              A reference written here is a picture that was meant, not an
              oracle: the oracle of the bits stays the every-frame reference
              the per-pixel render wrote (head of file), and a new reference
-             is held to the list as it stood when it was written. */
+             is held to the list as it stood when it was written. Its
+             collision figure is the list's count of rises of the bit --
+             the replay stops while the bit stands -- and not the lines
+             the per-pixel render counted. */
           fprintf(ref,"flags ovf=%lu col=%lu\n",ovf_d,col_d);
         }
       else
@@ -2984,8 +3254,27 @@ int main(int argc, char **argv)
                   {
                     if(sscanf(fl,"flags ovf=%lu col=%lu",&r_ovf,&r_col) == 2)
                       {
+                        int col_held;
                         flags_seen++;
-                        if(r_ovf == ovf_d && r_col == col_d)
+                        /* Without a read inside the picture the bit rises
+                           once, on the first line the render counted, if
+                           it was down at line 0, and never if it stood.
+                           With one, it may rise again after the read:
+                           no more rises than lines (so none where the
+                           render counted none), and on a single frame
+                           that starts with the bit down and where the
+                           render counted some, at least one -- a read
+                           only ever lowers the bit. */
+                        if(loose_window == 0)
+                          col_held = (col_d == ((col_head == 0UL && r_col > 0UL) ? 1UL : 0UL));
+                        else
+                          {
+                            flags_loose++;
+                            col_held = (col_d <= r_col);
+                            if(every == 1 && col_head == 0UL && r_col > 0UL && col_d == 0UL)
+                              col_held = 0;
+                          }
+                        if(r_ovf == ovf_d && col_held)
                           flags_ok++;
                         else if(flags_seen - flags_ok <= 8)
                           fprintf(stderr,"  frame %ld flags differ: ovf %lu/%lu col %lu/%lu\n",
@@ -3054,7 +3343,7 @@ int main(int argc, char **argv)
   printf("scroll bands %lu/%lu\n",raster_ok,raster_seen);
   printf("scroll bands digest=%08lx\n",raster_fnv);
   if(!writing)
-    printf("sprite flags %lu/%lu\n",flags_ok,flags_seen);
+    printf("sprite flags %lu/%lu loose=%lu\n",flags_ok,flags_seen,flags_loose);
 
 #if LOG_ENABLE && SMS_TELEMETRY
   {

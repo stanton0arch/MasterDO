@@ -900,6 +900,14 @@ vdp_sprite_scan(uint32 from)
 
   sms.vdp.spr_dirty = 0;
   sms.vdp.spr_partial = (from != 0UL) ? 1UL : 0UL;
+
+  /*
+   * Everything a rebuild answers -- a byte of the attribute table, the
+   * size, the magnification, the pattern base, the table's place -- may
+   * have moved a position the rectangles of the collision were kept
+   * from: they are forgotten.
+   */
+  sms.vdp.col_valid = 0;
 }
 
 /*
@@ -965,41 +973,40 @@ vdp_column_fill(void)
  * recorded at vdp_list_sprites and changes nothing here: the taken
  * mask is written in table order either way). The rows are the decoded
  * row cache's, the same the picture and the sheet read.
+ *
+ * In two halves, because the first can be taken again without being
+ * paid again. The rectangles read the horizontal positions of the
+ * admitted sprites, the magnification of register 1 and the shift and
+ * masked column of register 0 -- nothing that depends on the line. The
+ * pixel walk reads the rows the line falls on, and is paid on every line
+ * that needs it.
  */
-static void
-vdp_sprite_collide(uint32 y,
-                   uint32 n)
+
+/*
+ * The rectangles: which admitted sprites of line y share a column with
+ * another one, marked in need, and whether any does.
+ */
+static uint32
+vdp_collide_rects(uint32 y,
+                  uint32 n,
+                  uint32 *need)
 {
   const uint8 *reg;
   const uint8 *sat;
-  const uint8 *row;
-  uint8 *taken;
-  uint32 *clear;
   int32 xl[VDP_SPR_MAX_ON_LINE];
   int32 xr[VDP_SPR_MAX_ON_LINE];
-  uint32 need[VDP_SPR_MAX_ON_LINE];
   uint32 r;
   uint32 s;
   uint32 i;
-  uint32 x;
   uint32 any;
-  uint32 zoom;
   uint32 width;
-  uint32 base;
-  uint32 tall;
-  uint32 p;
-  uint32 srow;
   int32 x0;
-  int32 xi;
   int32 shift;
   int32 startx;
 
   reg = sms.vdp.reg;
   sat = sms.vdp.vram + sms.vdp.sat_base;
-  zoom = (uint32)reg[1] & 0x01UL;
-  tall = (uint32)reg[1] & 0x02UL;
-  width = 8UL << zoom;
-  base = (((uint32)reg[6] & 0x04UL) != 0UL) ? 256UL : 0UL;
+  width = 8UL << ((uint32)reg[1] & 0x01UL);
   shift = (((uint32)reg[0] & 0x08UL) != 0UL) ? 8 : 0;
   startx = (((uint32)reg[0] & 0x20UL) != 0UL) ? 8 : 0;
 
@@ -1026,8 +1033,45 @@ vdp_sprite_collide(uint32 y,
             }
         }
     }
-  if(any == 0UL)
-    return;
+
+  return any;
+}
+
+/*
+ * The pixel walk of line y, on the sprites need marks.
+ */
+static void
+vdp_collide_pixels(uint32 y,
+                   uint32 n,
+                   const uint32 *need)
+{
+  const uint8 *reg;
+  const uint8 *sat;
+  const uint8 *row;
+  uint8 *taken;
+  uint32 *clear;
+  uint32 r;
+  uint32 i;
+  uint32 x;
+  uint32 zoom;
+  uint32 width;
+  uint32 base;
+  uint32 tall;
+  uint32 p;
+  uint32 srow;
+  int32 x0;
+  int32 xi;
+  int32 shift;
+  int32 startx;
+
+  reg = sms.vdp.reg;
+  sat = sms.vdp.vram + sms.vdp.sat_base;
+  zoom = (uint32)reg[1] & 0x01UL;
+  tall = (uint32)reg[1] & 0x02UL;
+  width = 8UL << zoom;
+  base = (((uint32)reg[6] & 0x04UL) != 0UL) ? 256UL : 0UL;
+  shift = (((uint32)reg[0] & 0x08UL) != 0UL) ? 8 : 0;
+  startx = (((uint32)reg[0] & 0x20UL) != 0UL) ? 8 : 0;
 
   /*
    * Past the rectangles: this line pays the pixel walk as well. The two
@@ -1072,6 +1116,23 @@ vdp_sprite_collide(uint32 y,
         }
     }
 }
+
+#if VDP_COUNTERS
+/*
+ * Both halves of one line, and nothing kept: what the price probe runs,
+ * so that the price it takes is always that of a line which paid the
+ * rectangles, never that of a line which took them again.
+ */
+static void
+vdp_sprite_collide(uint32 y,
+                   uint32 n)
+{
+  uint32 need[VDP_SPR_MAX_ON_LINE];
+
+  if(vdp_collide_rects(y,n,need) != 0UL)
+    vdp_collide_pixels(y,n,need);
+}
+#endif
 
 /*
  * The one cel factory of the list. Every block of every band -- a window
@@ -1936,13 +1997,25 @@ vdp_list_end(void)
  *      so the overflow bit falls on exactly the lines it fell on before.
  *   2. The overflow of the line, read off the table.
  *   3. The collision of the line, replayed on the admitted sprites only
- *      where two of them share a column.
+ *      where two of them share a column, and only while the bit is down;
+ *      the rectangles of the last line tested are taken again while the
+ *      same sprites stand and nothing they read has moved.
  * ---------------------------------------------------------------------------
  */
 static void
 vdp_render_line(uint32 y)
 {
   uint32 n;
+  uint32 r;
+  uint32 any;
+
+  /*
+   * A picture starts with no rectangles of the collision kept: whatever
+   * the presentation undid and replayed between the pictures is never
+   * taken on trust.
+   */
+  if(y == 0UL)
+    sms.vdp.col_valid = 0;
 
   /*
    * The per-line table owed: a table byte or a register moved since it
@@ -1991,11 +2064,54 @@ vdp_render_line(uint32 y)
     }
   VDP_COUNT(line_scratch);
 
-  if(n >= 2UL)
+  if(n < 2UL)
+    return;
+
+  /*
+   * The collision, in the least work that leaves the bit the next status
+   * read returns as it would have been. The bit falls on a status read
+   * and nowhere else (vdp_io_status_read): while it stands, no line can
+   * change what that read returns, and the line computes nothing.
+   */
+  if(sms.vdp.spr_collision != 0UL)
     {
-      VDP_COUNT(col_lines);
-      vdp_sprite_collide(y,n);
+      VDP_COUNT(col_skip);
+      return;
     }
+
+  /*
+   * The rectangles of the last line tested still hold when this line
+   * admits the same sprites in the same order and nothing they read has
+   * moved since -- every rebuild of the table and every move of register
+   * 0 bits 3 and 5 forget them, as does line 0. Then only the pixel walk,
+   * which depends on the line, is paid.
+   */
+  if((sms.vdp.col_valid != 0UL) && (sms.vdp.col_n == n))
+    {
+      for(r = 0; r < n; r++)
+        {
+          if(sms.vdp.col_idx[r] != sms.vdp.spr_idx[y][r])
+            break;
+        }
+      if(r == n)
+        {
+          VDP_COUNT(col_reuse);
+          if(sms.vdp.col_any != 0UL)
+            vdp_collide_pixels(y,n,sms.vdp.col_need);
+          return;
+        }
+    }
+
+  /* Both halves, the rectangles kept for the lines after this one. */
+  VDP_COUNT(col_lines);
+  any = vdp_collide_rects(y,n,sms.vdp.col_need);
+  for(r = 0; r < n; r++)
+    sms.vdp.col_idx[r] = sms.vdp.spr_idx[y][r];
+  sms.vdp.col_n = n;
+  sms.vdp.col_any = any;
+  sms.vdp.col_valid = 1;
+  if(any != 0UL)
+    vdp_collide_pixels(y,n,sms.vdp.col_need);
 }
 
 int32
@@ -2183,6 +2299,9 @@ vdp_init(void)
   sms.vdp.line_pending = 0;
   sms.vdp.spr_overflow = 0;
   sms.vdp.spr_collision = 0;
+  sms.vdp.col_valid = 0;
+  sms.vdp.col_n = 0;
+  sms.vdp.col_any = 0;
 
   for(i = 0; i < (int32)(VDP_PIX_WIDTH / 4UL); i++)
     sms.vdp.spr_taken[i] = 0;
@@ -2307,6 +2426,8 @@ vdp_init(void)
   sms.vdp.cnt_spr_span = 0;
   sms.vdp.cnt_col_lines = 0;
   sms.vdp.cnt_col_pix_lines = 0;
+  sms.vdp.cnt_col_reuse = 0;
+  sms.vdp.cnt_col_skip = 0;
   sms.vdp.cnt_decor_notes = 0;
   sms.vdp.cnt_hot_write = 0;
   sms.vdp.cnt_hot_scan = 0;
@@ -2663,6 +2784,13 @@ vdp_reg_write(uint32 number,
     sms.vdp.spr_dirty = 1;
   if((number == 6UL) && ((((uint32)sms.vdp.reg[6] ^ value) & 0x04UL) != 0UL))
     sms.vdp.spr_dirty = 1;
+  /*
+   * The shift and the masked column of register 0 are read by the
+   * rectangles of the collision and by no rebuild of the table: a move of
+   * either forgets the rectangles kept.
+   */
+  if((number == 0UL) && ((((uint32)sms.vdp.reg[0] ^ value) & 0x28UL) != 0UL))
+    sms.vdp.col_valid = 0;
   if((number == 5UL) && ((((uint32)sms.vdp.reg[5] ^ value) & 0x7EUL) != 0UL))
     {
       vdp_reg_apply(5UL,value);
@@ -2901,6 +3029,8 @@ vdp_perf_counts(vdp_perf_t *out)
   out->scan_span = sms.vdp.cnt_spr_span;
   out->col_lines = sms.vdp.cnt_col_lines;
   out->col_pix = sms.vdp.cnt_col_pix_lines;
+  out->col_reuse = sms.vdp.cnt_col_reuse;
+  out->col_skip = sms.vdp.cnt_col_skip;
 }
 
 /*

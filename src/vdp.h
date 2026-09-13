@@ -736,6 +736,21 @@ typedef struct
    */
   uint32 spr_taken[VDP_PIX_WIDTH / 4UL];
 
+  /*
+   * The rectangles of the collision as the last line that paid them left
+   * them: that line's admitted sprites in table order, how many, which of
+   * them share a column with another and whether any does. A line that
+   * admits the same sprites takes them again while col_valid stands;
+   * every rebuild of the per-line table (vdp_sprite_scan), every move of
+   * register 0 bits 3 and 5 (vdp_reg_write), and line 0 (vdp_render_line)
+   * bring it down.
+   */
+  uint32 col_valid;
+  uint32 col_n;
+  uint32 col_any;
+  uint32 col_need[VDP_SPR_MAX_ON_LINE];
+  uint8  col_idx[VDP_SPR_MAX_ON_LINE];
+
   /* The bit plane table, VDP_PLANES_BYTES, allocated at init. */
   uint8 *planes;
 
@@ -1032,12 +1047,14 @@ typedef struct
   uint32 height_last;
   /*
    * The sprites of the window: the largest number kept on one line, how
-   * many LINES of it overflowed and how many had a collision, and whether
-   * magnification was on for any line composed in it. Lines and not
-   * events, on purpose twice over: a scrum of sprites would otherwise publish a
-   * collision per pixel, and counting only the rise of the status bit
-   * would publish nothing at all for a program that never reads the
-   * status -- which is the program the line exists to describe.
+   * many LINES of it overflowed, how many lines raised the collision, and
+   * whether magnification was on for any line composed in it. The
+   * overflow in lines and not events: counting only the rise of its
+   * status bit would publish nothing at all for a program that never
+   * reads the status -- which is the program the line exists to describe.
+   * The collision is replayed only while its bit is down, since no line
+   * can change what the next read returns while it stands: its count is
+   * the lines that raised it, one per rise of the bit.
    */
   uint32 cnt_spr_max;
   uint32 cnt_spr_ovf;
@@ -1076,8 +1093,9 @@ typedef struct
    * What the sprites of a frame cost, said in counts because no clock may
    * be read per line: the per-line table rebuilt -- how many rebuilds, how
    * many attribute entries they walked, how many line slots those entries
-   * filled -- and the collision replayed -- how many lines called it, and
-   * how many of those got past the rectangle test to the pixel walk. The
+   * filled -- and the collision replayed -- how many lines paid its
+   * rectangle test, how many walked pixels, how many took the rectangles
+   * of the line before again and how many skipped it all. The
    * frame loop times the two together once per sampled line; these say
    * what that time was spent on, and what finishing the table walk early
    * would save.
@@ -1093,12 +1111,22 @@ typedef struct
   uint32 cnt_spr_span;
   uint32 cnt_col_lines;
   /*
-   * Of the lines that replayed a collision, the ones whose rectangles
-   * overlapped and that therefore walked pixels. LINES and not pixels:
-   * the walk stops at the first pixel taken twice, so a pixel count would
-   * say nothing about how many of them there were.
+   * Of the lines that replayed a collision, rectangles tested or taken
+   * again, the ones whose rectangles overlapped and that therefore walked
+   * pixels. LINES and not pixels: the walk stops at the first pixel taken
+   * twice, so a pixel count would say nothing about how many of them
+   * there were.
    */
   uint32 cnt_col_pix_lines;
+  /*
+   * Of the lines that carry two admitted sprites, the ones that paid no
+   * rectangle test: the lines that took the rectangles of the line before
+   * again, the same sprites standing (their walk, when owed, is counted
+   * above), and the lines that replayed nothing because the collision bit
+   * already stood.
+   */
+  uint32 cnt_col_reuse;
+  uint32 cnt_col_skip;
   /*
    * The picture's own work inside the processor's quota, where it is paid
    * and where it is charged to the processor: video memory writes handed
@@ -1685,8 +1713,10 @@ typedef struct vdp_perf_s
   uint32 scans;      /* rebuilds of the per-line sprite table */
   uint32 scan_ent;   /* attribute entries those rebuilds walked */
   uint32 scan_span;  /* line slots those entries filled */
-  uint32 col_lines;  /* lines that replayed a collision */
-  uint32 col_pix;    /* of those, the lines that walked pixels */
+  uint32 col_lines;  /* lines that paid the rectangles of a collision */
+  uint32 col_pix;    /* lines that walked pixels, tested or taken again */
+  uint32 col_reuse;  /* lines that took the rectangles of the line before */
+  uint32 col_skip;   /* lines that replayed nothing, the bit standing */
 } vdp_perf_t;
 
 void vdp_perf_counts(vdp_perf_t *out);

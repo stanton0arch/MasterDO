@@ -71,7 +71,7 @@
 #       or palette segments past their cap): counted apart, never as a
 #       defect, and bounded so that the tolerance stays honest
 #   MUTATE=1 sh tests/cel8/check_picture.sh
-#       and then breaks the list thirty-three ways, on thirty-three copies
+#       and then breaks the list forty ways, on forty copies
 #       of src/vdp.c, and demands that each copy turn the every-frame
 #       check red: a check that has not been seen to bite proves nothing
 #       (tests/celprobe/check_list.sh).
@@ -462,22 +462,39 @@ judge() {
     return 1
   fi
   echo "  [OK] the ROM's frames journaled $journal_n writes and drew $bands_n bands over $FRAMES frames"
-  # The two sprite bits the program reads, overflow and collision,
-  # raised on the same number of lines per frame as the reference says,
-  # on every frame of the every-frame reference -- which carries the
-  # per-pixel render's count, the last one ever taken from the pixels.
-  # The list computes them from a table and a replay without a pixel,
-  # and this is the only place that holds it to the pixels. Held whenever
-  # the reference carries flags lines, read off the file and not off a
-  # toggle, so a reference taken with them is never compared without.
+  # The two sprite bits the program reads, overflow and collision, on
+  # every frame of the every-frame reference -- which carries the
+  # per-pixel render's count of lines, the last one ever taken from the
+  # pixels. The list computes them from a table and a replay without a
+  # pixel, and this is the only place that holds it to the pixels. The
+  # overflow is held line for line. The collision replays nothing while
+  # its bit stands, so the list counts the rises of the bit where the
+  # render counted lines: on a frame without a status read inside the
+  # picture, one rise exactly when the bit was down at line 0 and the
+  # render saw a collision, none otherwise; on a frame with such a read
+  # (counted apart, loose=), no more rises than lines and none where the
+  # render saw none. Held whenever the reference carries flags lines,
+  # read off the file and not off a toggle, so a reference taken with
+  # them is never compared without.
   if grep -q '^flags ovf=' "$5"; then
-    if ! grep -qE '^sprite flags ([1-9][0-9]*)/\1$' "$2"; then
+    if ! grep -qE '^sprite flags ([1-9][0-9]*)/\1 loose=[0-9]+$' "$2"; then
       tables
       grep 'flags differ' "$3" || true
       echo "  [FAIL] the sprite overflow or collision bit is not raised on the frames the reference raises it"
       return 1
     fi
-    echo "  [OK] the sprite overflow and collision bits agree with the reference on every frame"
+    # The loose frames are a tolerance, and bounded like every other:
+    # at most one frame in twenty. The reference ROM reads the status
+    # inside the picture on a handful of frames; a count past the bound
+    # would mean the strict relation no longer judges the run.
+    flags_seen_n=$(sed -n 's/^sprite flags [0-9]*\/\([0-9]*\) loose=[0-9]*$/\1/p' "$2")
+    flags_loose_n=$(sed -n 's/^sprite flags [0-9]*\/[0-9]* loose=\([0-9]*\)$/\1/p' "$2")
+    flags_loose_max=$((flags_seen_n / 20))
+    if [ "$flags_loose_n" -gt "$flags_loose_max" ]; then
+      echo "  [FAIL] $flags_loose_n frames judged loosely for the collision, more than the $flags_loose_max (5% of $flags_seen_n) allowed"
+      return 1
+    fi
+    echo "  [OK] the sprite overflow and collision bits agree with the reference on every frame ($(grep '^sprite flags' "$2"), at most $flags_loose_max loose)"
   fi
 
   # The synthetic scenes: the journal, the bands, the cap, the full
@@ -621,7 +638,7 @@ mutate() {
   return 0
 }
 
-echo "== the list broken, thirty-three ways =="
+echo "== the list broken, forty ways =="
 fail=0
 # Every window one pixel to the right: the picture shifts, and screen
 # column 0 is covered by no window wherever the scroll is a multiple of
@@ -680,6 +697,35 @@ mutate bgnd_spr 's/^#define VDP_SPRITE_BGND 0UL$/#define VDP_SPRITE_BGND CCB_BGN
 # The collision never raised.
 mutate no_col '/^              sms.vdp.spr_collision = 1;$/{N;s/              sms.vdp.spr_collision = 1;\n              VDP_COUNT(spr_col);/              ;/}' \
        "the collision bit never raised" || fail=1
+# The collision replay skipped on every line, whether or not the bit
+# already stands: the bit is never raised.
+mutate skip_always '/^vdp_render_line(uint32 y)$/,/^}$/{s/^  if(sms.vdp.spr_collision != 0UL)$/  if(1)/}' \
+       "the collision replay skipped whether or not the bit stands" || fail=1
+# The skip held on a mark that stays raised for the rest of the picture
+# once the bit has been seen up, instead of on the bit itself: a status
+# read inside the picture no longer lets a later line raise it again.
+mutate skip_sticky '/^vdp_render_line(uint32 y)$/,/^}$/{s/^  uint32 any;$/  uint32 any;\n  static uint32 raised;/;s/^    sms.vdp.col_valid = 0;$/    { sms.vdp.col_valid = 0; raised = 0; }/;s/^  if(sms.vdp.spr_collision != 0UL)$/  if(sms.vdp.spr_collision != 0UL) raised = 1;\n  if(raised != 0UL)/}' \
+       "the skip held on a mark raised once per picture, blind to a status read" || fail=1
+# The rectangles of the last line tested taken again on a line that
+# admits as many sprites, whichever they are.
+mutate reuse_n 's/^          if(sms.vdp.col_idx\[r\] != sms.vdp.spr_idx\[y\]\[r\])$/          if(0)/' \
+       "the kept rectangles taken again on the count of sprites alone" || fail=1
+# A rebuild of the per-line table keeps the rectangles: a position
+# rewritten inside the picture is not seen by the collision.
+mutate reuse_stale '/^vdp_sprite_scan(uint32 from)$/,/^}$/{s/^  sms.vdp.col_valid = 0;$/  ;/}' \
+       "the kept rectangles survive a rebuild of the sprite table" || fail=1
+# A move of the shift or the masked column of register 0 keeps the
+# rectangles.
+mutate reg0 's/^  if((number == 0UL) .*0x28UL.*$/  if(0)/' \
+       "the kept rectangles survive a move of register 0 bits 3 and 5" || fail=1
+# The shift of register 0 bit 3 left out of that condition: a move of
+# the shift alone keeps the rectangles.
+mutate reg0_shift 's/^\(  if((number == 0UL) .*\)0x28UL\(.*\)$/\10x20UL\2/' \
+       "the kept rectangles survive a move of register 0 bit 3" || fail=1
+# The rectangles kept taken again whatever the count of sprites, on the
+# entries below that count alone.
+mutate reuse_count 's/^  if((sms.vdp.col_valid != 0UL) .*(sms.vdp.col_n == n))$/  if(sms.vdp.col_valid != 0UL)/' \
+       "the kept rectangles taken again without comparing the count of sprites" || fail=1
 # The backdrop column not refilled when register 7 moves.
 mutate column7 's/^          vdp_column_fill();$/          ;/' \
        "the backdrop column keeps the boot backdrop after register 7 moves" || fail=1
