@@ -1,74 +1,98 @@
-/* Host runner for the side-by-side check: the translated code held
- * against the interpreter, line for line, frame for frame.
+/* Host runner of the check of the translated code: the pictures the
+ * translated code draws held against the pictures the interpreter draws,
+ * the two machines running free.
  *
- * Boots src/cart.c, src/z80.c, src/z80c.c, src/sms.c and src/vdp.c as they
- * stand, with a generated table of translated code linked, on the ROM the
- * console runs, and plays it frame by frame the way src/main.c does --
- * 262 lines a frame, the processor's quota then the video part -- without
- * drawing anything. Three modes, on the same binary:
+ * Three modes.
  *
- *   record   translated code armed. After every line the registers are
- *            written to the trace, with the T-states the line spent, the
- *            block that started at the line's entry PC and how many blocks
- *            the line ran; after every frame, a digest of the state (see
- *            "the frame record" below) and the counters. Prints two lines
- *            at the end -- the four counters, then how many blocks of the
- *            table ran at all -- and, when a sixth argument names a file,
- *            writes the hits of every block there (one line per block:
- *            position, how often it was entered, the T-states its exits
- *            charged; after a header naming the frames and the T-states
- *            the run spent): what the translator chooses a table under a
- *            budget from. <every> does not apply.
- *   replay   the table disarmed after z80c_init: the interpreter alone,
- *            reading the trace. Every line is given as its quota exactly
- *            what the translated run spent on it, so that it stops on the
- *            same instruction boundary -- the interpreter overruns by at
- *            most one instruction, the translated code by at most one
- *            block, and with 228 - residue on both sides the two would
- *            legitimately stop at different instructions and sample the
- *            interrupt at different points. Then the registers are held
- *            against the recorded ones, and at the end of the frame the
- *            digest and the counters. Prints a line every <every> frames
- *            and on the last. The first difference is named: the frame,
- *            the line, the block that started at the line's entry PC when
- *            one does ("none" otherwise), how many blocks the line ran,
- *            and both states.
- *   replay-poke  replay, with one byte of the work RAM flipped on frame 0
- *            just before the frame's digest is taken. This is the check
- *            of the frame path itself, on its own terms: the mutations
- *            the script plays bite on the line path first, so the digest
- *            is seen to bite here, without them. Expected: a MISMATCH on
- *            frame 0, line 261, exit 1.
+ *   translated   boots src/cart.c, src/z80.c, src/z80c.c, src/sms.c and
+ *                src/vdp.c as they stand, with a generated table of
+ *                translated code linked, on the ROM named, and plays it
+ *                frame by frame the way src/main.c does -- 262 lines a
+ *                frame, a quota of 228 T-states less the residue of the
+ *                line before, then the video part, the presentation once
+ *                line 191 is counted -- without drawing anything. It
+ *                compares nothing: it refuses a table that did not pair
+ *                with the ROM, a run in which no block ran and a run in
+ *                which no chain ran a second block; it prints the counters
+ *                of the translated code; and, when a last argument names a
+ *                file, it writes the hits of every block there (one line
+ *                per block: position, how often it was entered, the
+ *                T-states its exits charged; after a header naming the
+ *                frames and the T-states the run spent) -- what the
+ *                translator chooses a table under a budget from.
  *
- * What the comparison measures is the C the tool emitted and nothing
- * else: same compiler, same core, same table linked, only the switch
- * differs. Two processes rather than two boots in one: the work RAM is
- * allocated once and never cleared (src/cart.c).
+ *   romid        boots the ROM and prints "rom_bytes=<n> rom_fnv=<8 hex>",
+ *                the two fields the picture runner writes in a take's
+ *                header: how a script checks that a take it kept is this
+ *                ROM's.
  *
- * A wrong static T-state sum shows as well: the interpreter given the
- * recorded quota then stops one instruction early or late, its residue is
- * not zero, and the spent figure of the line differs.
+ *   pictures     two takes of the picture runner (tests/cel8/romrun.c, in
+ *                write mode, one picture every frame), the translated run's
+ *                first and the interpreter's second, each a digest per row
+ *                of the palette numbers of every row of every frame, and
+ *                beside each the colours of every frame (tests/z80c/
+ *                colour_tap.c: the colour memory as each line of the
+ *                picture was counted). A translated frame MATCHES an
+ *                interpreter's frame when every row and the colours are
+ *                the same. Every frame n of the translated take must match
+ *                the interpreter's frame n, n-1 or n+1 -- tried in that
+ *                order -- and the interpreter's frames matched must never
+ *                go backwards from one translated frame to the next: the
+ *                same frame twice, or a frame skipped, is a shift; an
+ *                earlier frame than the last one matched is not. Prints one
+ *                line per frame that matches none of the allowed
+ *                neighbours:
  *
- * The state is read field by field, never as the bytes of a structure:
- * padding, and fields that exist in one configuration only, would compare
- * noise. The trace holds positions, digests, counters and registers --
- * no byte of the ROM. It weighs 10516 bytes per frame (262 line records
- * of 40 and one frame record of 36), about 31.5 megabytes at 3000 frames.
+ *                  unmatched frame <n> from=<first allowed> rows=<rows> [colours=differ]
  *
- * A core that stops -- an opcode it does not implement -- would freeze
- * identically in both runs; it is asked once per frame and a stopped
- * core is a failure, never a pass.
+ *                with the rows that differ from the frame of the same rank,
+ *                then the counts. Such a frame does not move the last
+ *                frame matched. The frames named are not a verdict: a row
+ *                digest holds palette NUMBERS, and two numbers may carry
+ *                the same colour. tests/z80c/play.sh redraws each of them
+ *                in colour on both sides and compares the screens byte for
+ *                byte, and the colours; only a frame that differs there is
+ *                a mismatch.
  *
- *   sidebyside <rom> <frames> <every> record|replay|replay-poke <trace> [counts]
+ * Why one frame of shift and no more. Without an account of time shared by
+ * the two runs, the frame interrupt may land just before or just after the
+ * end of a frame's work, on one side and not the other: the program then
+ * shows the same screen one frame earlier or later. With the translated
+ * code judged here, which still counts T-states, more than one frame would
+ * mean the program has fallen behind, which shows on the screen.
  *
- * Exit status: 0 every line and every frame the same, 1 a difference,
- * 2 the run could not prove anything (arguments, boot, overrun of the
- * quota, a stopped core, trace unreadable), 3 the table is not this
- * ROM's.
+ * What this check proves: on every frame played, the screen drawn with the
+ * translated code -- rows and colours -- is the screen the interpreter drew
+ * on that frame or on a neighbouring one, in the interpreter's order,
+ * pixel for pixel. What it does not prove:
  *
- * Stubs on the same terms as the picture check (tests/cel8/romrun.c):
- * the disc is the host file, the allocator is the host's, the log goes
- * to stderr.
+ *   - the internal memory of the program: two runs going free end a frame
+ *     on different instructions, and the interpreter against itself, one
+ *     T-state apart, already leaves different memory behind;
+ *   - the code that never runs without a pad: menus, later levels, a game
+ *     really played;
+ *   - that a translation without an account of time will draw the same
+ *     pictures. Such a translation runs the program as fast as it waits
+ *     and takes its interrupts as events: a frame the interpreter's
+ *     program did not finish in time (a lag frame) may be finished by it,
+ *     and the two may then legitimately drift apart by more than one frame.
+ *     This rule of one frame will have to be revisited then, not relaxed
+ *     in silence;
+ *   - the T-states the emitted C charges. They are no longer held exactly:
+ *     a sum off by one moves the interrupts, which may or may not move a
+ *     picture by more than a frame, and the mutations of the time alone
+ *     (tests/z80c/run_z80c.sh) are printed for information, never demanded.
+ *
+ *   sidebyside <rom> <frames> translated [counts]
+ *   sidebyside <rom> romid
+ *   sidebyside pictures <translated take> <its colours> <interpreter take> <its colours>
+ *
+ * Exit status: 0 the run went through, or every frame matched a
+ * neighbour; 1 some frame matched none (the frames are named), or the
+ * core stopped with translated code armed; 2 nothing could be proved
+ * (arguments, boot, overrun of the quota, a chain never followed, no
+ * block run, takes unreadable or not of one run, the interpreter's core
+ * stopped); 3 the table is not this ROM's.
  */
 #include "sms.h"
 #include "cart.h"
@@ -76,19 +100,16 @@
 #include "z80.h"
 #include "z80c.h"
 #include "log.h"
-#include "blockfile.h"
-#include "operror.h"
-#include "filesystem.h"
+#include "host.h"
 #include <stdio.h>
-#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* The counters this runner records exist in the telemetry build alone;
+/* The counters this runner writes exist in the telemetry build alone;
    the script pins the switches, and a build that lost one must fail here
-   rather than record zeroes. */
+   rather than write zeroes. */
 #if !LOG_ENABLE
-#error "sidebyside needs LOG_ENABLE: the port counters live under it"
+#error "sidebyside needs LOG_ENABLE: the counters of the translated code live under it"
 #endif
 #if !SMS_TELEMETRY
 #error "sidebyside needs SMS_TELEMETRY=1: z80c_counts lives under it"
@@ -96,438 +117,402 @@
 #if !Z80C_HITS
 #error "sidebyside needs Z80C_HITS=1: the hits per block live under it"
 #endif
-#if !VDP_COUNTERS
-#error "sidebyside needs the video counters (VDP_COUNTERS)"
-#endif
-/* The category names below are indexed by the log's own numbering. */
-#if LOG_CAT_COUNT != 11
-#error "the log categories changed: the names in cat_name[] must follow"
-#endif
 
 #define LINES_PER_FRAME  262
 #define TSTATES_PER_LINE 228
 
 /* The line the console presents the picture on: once line 191 has been
-   counted, src/main.c builds the list, so the decor journal is replayed
-   and emptied there and not left to fill. */
+   counted, src/main.c builds the list. */
 #define PRESENT_LINE ((int)VDP_ACTIVE_LINES - 1)
 
-/* The work RAM: the console's 8 kilobytes behind the pages from 0xC000,
-   one kilobyte each, read through the write map -- the one table that
-   points at the RAM and at nothing the processor could not write. The
-   size is the cartridge module's own (src/cart.c, CART_WORK_RAM_SIZE),
-   not published; the eight pages are pinned here, and the mirror above
-   them is the same bytes. */
-#define RAM_FIRST_PAGE (0xC000UL >> Z80_PAGE_BITS)
-#define RAM_PAGES      (8192UL / Z80_PAGE_SIZE)
+/* The rows of a picture, and their width, as the picture runner digests
+   them (tests/cel8/romrun.c, PIC_H and PIC_W). */
+#define ROWS  ((int)VDP_ACTIVE_LINES)
+#define WIDTH 256L
 
-/* The trace. A header, then per frame LINES_PER_FRAME line records and
-   one frame record, every field little-endian and at a fixed offset. */
-#define TRACE_MAGIC   "SBS2"
-#define TRACE_HDR     16
-#define LINE_REC      40
-#define LINE_REGS     32 /* the part compared by memcmp, spent included */
-#define FRAME_REC     36
-#define FRAME_CMP     28 /* the part compared: digest and six counters */
-#define NO_BLOCK      0xFFFFFFFFUL
+/* ---- pictures ---- */
 
-/* ---- the disc: one file, the ROM named on the command line ---- */
+/* The header line of a take (tests/cel8/romrun.c, ref_header_write). */
+#define TAKE_TAG "cel8-picture-reference"
 
-static const char *rom_path = NULL;
-static long rom_size = 0;
-
-/* Whether a name ends in the extension, letter case set aside. */
-static int has_ext(const char *name, const char *ext)
+typedef struct
 {
-  size_t n = strlen(name), e = strlen(ext), i;
-  if(n < e) return 0;
-  for(i = 0; i < e; i++)
-    {
-      int c = name[n - e + i], d = ext[i];
-      if(c >= 'A' && c <= 'Z') c += 'a' - 'A';
-      if(c != d) return 0;
-    }
-  return 1;
-}
+  long frames;
+  unsigned long rom_bytes;
+  unsigned long rom_fnv;
+  char taken[64];
+  unsigned long *rows;    /* frames * ROWS digests */
+  unsigned long *colours; /* frames digests */
+  long stopped;           /* the frame the core was seen stopped on, or -1 */
+} take_t;
 
-Err OpenBlockFile(char *name, BlockFilePtr bf)
+/* A take read whole: its header held -- one picture every frame, as many
+   pictures as frames, rows of the picture's height and width -- then
+   every frame in order, each followed by its line of sprite flags, which
+   is skipped. */
+static int take_read(const char *path, take_t *t)
 {
   FILE *f;
-  (void)bf;
-  /* The boot tries the SMS name, then the GG name (src/cart.c): the one
-     found is the one whose extension is the file's on disc, so that a
-     Game Gear image boots with the Game Gear profile and nothing else. */
-  if(!(has_ext(name,".sms") && has_ext(rom_path,".sms")) &&
-     !(has_ext(name,".gg") && has_ext(rom_path,".gg")))
-    return MAKEFERR(ER_SEVERE,ER_C_NSTND,ER_Fs_NoFile);
-  f = fopen(rom_path,"rb");
+  char line[512];
+  char tag[64];
+  long every, width, lines, fr, got;
+  unsigned long pictures;
+  int y, c;
+
+  f = fopen(path,"r");
   if(f == NULL)
-    return MAKEFERR(ER_SEVERE,ER_C_NSTND,ER_Fs_NoFile);
-  fseek(f,0,SEEK_END);
-  rom_size = ftell(f);
+    {
+      printf("FAIL: cannot open the take %s\n",path);
+      return -1;
+    }
+  if(fgets(line,sizeof line,f) == NULL ||
+     sscanf(line,"%63s frames=%ld every=%ld width=%ld lines=%ld pictures=%lu "
+            "rom_bytes=%lu rom_fnv=%lx taken=%63s",
+            tag,&t->frames,&every,&width,&lines,&pictures,
+            &t->rom_bytes,&t->rom_fnv,t->taken) != 9 ||
+     strcmp(tag,TAKE_TAG) != 0)
+    {
+      printf("FAIL: %s is not a take of the picture runner\n",path);
+      fclose(f);
+      return -1;
+    }
+  if(every != 1L || width != WIDTH || lines != (long)ROWS || t->frames <= 0L ||
+     pictures != (unsigned long)t->frames)
+    {
+      printf("FAIL: %s is not one picture of %ldx%d every frame "
+             "(frames=%ld every=%ld width=%ld lines=%ld pictures=%lu)\n",
+             path,WIDTH,ROWS,t->frames,every,width,lines,pictures);
+      fclose(f);
+      return -1;
+    }
+  t->rows = (unsigned long *)malloc((size_t)t->frames * ROWS * sizeof(unsigned long));
+  if(t->rows == NULL)
+    {
+      printf("FAIL: no memory for the take %s\n",path);
+      fclose(f);
+      return -1;
+    }
+  for(fr = 0; fr < t->frames; fr++)
+    {
+      if(fscanf(f," frame=%ld",&got) != 1 || got != fr)
+        {
+          printf("FAIL: %s does not hold frame %ld where it should\n",path,fr);
+          fclose(f);
+          return -1;
+        }
+      for(y = 0; y < ROWS; y++)
+        if(fscanf(f," %lx",&t->rows[fr * ROWS + y]) != 1)
+          {
+            printf("FAIL: %s ends inside frame %ld\n",path,fr);
+            fclose(f);
+            return -1;
+          }
+      /* The rest of the digest line, then the flags line. */
+      while((c = fgetc(f)) != EOF && c != '\n')
+        ;
+      if(fgets(line,sizeof line,f) == NULL || strncmp(line,"flags ",6) != 0)
+        {
+          printf("FAIL: %s has no flags line after frame %ld\n",path,fr);
+          fclose(f);
+          return -1;
+        }
+    }
+  if(fscanf(f," frame=%ld",&got) == 1)
+    {
+      printf("FAIL: %s holds more frames than its header says\n",path);
+      fclose(f);
+      return -1;
+    }
   fclose(f);
   return 0;
 }
-void CloseBlockFile(BlockFilePtr bf) { (void)bf; }
-int32 GetBlockFileSize(BlockFilePtr bf) { (void)bf; return (int32)rom_size; }
-void *LoadFileHere(const char *fname, int32 *pfsize, void *buffer, int32 bufsize)
+
+/* The colours of a take: one record per frame in order, the frames of
+   the take and no fewer; a "stopped" line among them, or right after
+   the last, is noted. Records past the frames (the runner's synthetic
+   scenes) are not read. */
+static int colours_read(const char *path, take_t *t)
 {
-  FILE *f = fopen(rom_path,"rb");
-  size_t n;
-  (void)fname;
-  if(f == NULL) { *pfsize = -1; return NULL; }
-  n = fread(buffer,1,(size_t)bufsize,f);
-  fclose(f);
-  *pfsize = (int32)n;
-  return buffer;
-}
+  FILE *f;
+  char line[128];
+  long fr = 0, got;
+  unsigned long h;
 
-/* ---- the console ---- */
-
-void *sys_alloc(const char *name, int32 size, uint32 memtype)
-{
-  void *p = malloc((size_t)size);
-  (void)name; (void)memtype;
-  if(p != NULL) memset(p,0,(size_t)size);
-  return p;
-}
-void sys_mem_report(void) {}
-void sys_mem_seal(void) {}
-int32 sys_width(void) { return 320; }
-int32 sys_height(void) { return 240; }
-Item sys_bitmap(void) { return 0; }
-
-/* ---- the log: boot in full, then warnings and errors only ---- */
-
-static const char *cat_name[] =
-  {"BOOT","SYS","CART","BUS","Z80","VDP","PSG","PAD","SAVE","PERF","GG"};
-static const char *lvl_name[] = {"ERR","WARN","INFO","DBG","TRACE"};
-static int booted = 0;
-static int muted = 0;
-
-void log_begin(int32 cat, int32 lvl)
-{
-  muted = (booted && lvl > LOG_LVL_WARN);
-  if(muted) return;
-  fprintf(stderr,"[%s][%s] ",cat_name[cat],lvl_name[lvl]);
-}
-void log_printf(const char *fmt, ...)
-{
-  va_list a;
-  if(muted) return;
-  va_start(a,fmt);
-  vfprintf(stderr,fmt,a);
-  va_end(a);
-  fputc('\n',stderr);
-}
-void log_bind_screen(Item b, Item s) { (void)b; (void)s; }
-void log_set_frame(const uint32 *f) { (void)f; }
-void log_fatal(int32 cat, int32 code, const char *l1, const char *l2)
-{
-  fprintf(stderr,"FATAL cat=%ld code=%ld: %s / %s\n",(long)cat,(long)code,l1,l2);
-  exit(2);
-}
-
-/* ---- FNV-1a, 32 bits, continued over several runs of bytes ---- */
-
-static unsigned long fnv_begin(void)
-{
-  return 2166136261UL;
-}
-
-static unsigned long fnv_add(unsigned long h, const unsigned char *p,
-                             unsigned long n)
-{
-  unsigned long i;
-  for(i = 0; i < n; i++)
+  t->colours = (unsigned long *)malloc((size_t)t->frames * sizeof(unsigned long));
+  if(t->colours == NULL)
     {
-      h ^= (unsigned long)p[i];
-      h *= 16777619UL;
-      h &= 0xFFFFFFFFUL;
+      printf("FAIL: no memory for the colours %s\n",path);
+      return -1;
     }
-  return h;
+  f = fopen(path,"r");
+  if(f == NULL)
+    {
+      printf("FAIL: cannot open the colours %s\n",path);
+      return -1;
+    }
+  while(fgets(line,sizeof line,f) != NULL)
+    {
+      if(sscanf(line,"stopped %ld",&got) == 1)
+        {
+          if(t->stopped < 0 && got < t->frames)
+            t->stopped = got;
+          continue;
+        }
+      if(fr == t->frames)
+        break;
+      if(sscanf(line,"%ld %lx",&got,&h) != 2 || got != fr)
+        {
+          printf("FAIL: %s does not hold the colours of frame %ld where it should\n",path,fr);
+          fclose(f);
+          return -1;
+        }
+      t->colours[fr++] = h;
+    }
+  fclose(f);
+  if(fr != t->frames)
+    {
+      printf("FAIL: %s holds the colours of %ld frames, not %ld\n",path,fr,t->frames);
+      return -1;
+    }
+  return 0;
 }
 
-/* A word folded in as four bytes, low first, whatever the host's order. */
-static unsigned long fnv_add_u32(unsigned long h, unsigned long v)
+/* Whether frame a of one take matches frame b of the other: every row and
+   the colours. */
+static int same_frame(const take_t *t, long a, const take_t *i, long b)
 {
-  unsigned char b[4];
-  b[0] = (unsigned char)(v & 0xFFUL);
-  b[1] = (unsigned char)((v >> 8) & 0xFFUL);
-  b[2] = (unsigned char)((v >> 16) & 0xFFUL);
-  b[3] = (unsigned char)((v >> 24) & 0xFFUL);
-  return fnv_add(h,b,4);
+  return t->colours[a] == i->colours[b] &&
+         memcmp(t->rows + a * ROWS,i->rows + b * ROWS,
+                (size_t)ROWS * sizeof(unsigned long)) == 0;
 }
 
-/* ---- little-endian fields of the trace ---- */
-
-static void put16(unsigned char *p, unsigned long v)
+/* The rows of frame fr that differ between the two takes, as ranges, the
+   first few only. */
+static void print_rows(const take_t *t, const take_t *i, long fr)
 {
-  p[0] = (unsigned char)(v & 0xFFUL);
-  p[1] = (unsigned char)((v >> 8) & 0xFFUL);
+  int y = 0, first = 1, ranges = 0;
+
+  while(y < ROWS)
+    {
+      int a;
+
+      if(t->rows[fr * ROWS + y] == i->rows[fr * ROWS + y])
+        {
+          y++;
+          continue;
+        }
+      a = y;
+      while(y < ROWS && t->rows[fr * ROWS + y] != i->rows[fr * ROWS + y])
+        y++;
+      if(ranges == 6)
+        {
+          printf(",...");
+          return;
+        }
+      if(y - 1 == a)
+        printf("%s%d",first ? "" : ",",a);
+      else
+        printf("%s%d-%d",first ? "" : ",",a,y - 1);
+      first = 0;
+      ranges++;
+    }
+  if(first)
+    printf("none");
 }
-static void put32(unsigned char *p, unsigned long v)
+
+static int pictures(const char *tpath, const char *tcol,
+                    const char *ipath, const char *icol)
 {
-  put16(p,v);
-  put16(p + 2,v >> 16);
-}
-static unsigned long get16(const unsigned char *p)
-{
-  return (unsigned long)p[0] | ((unsigned long)p[1] << 8);
-}
-static unsigned long get32(const unsigned char *p)
-{
-  return get16(p) | (get16(p + 2) << 16);
-}
+  take_t t, i;
+  long fr, last = 0;
+  unsigned long same = 0, shifted = 0, unmatched = 0;
+  int rc = 0;
 
-/* ---- the line record ----
- *
- *   0..7   a f b c d e h l
- *   8..15  the alternate set, same order
- *   16..19 ixh ixl iyh iyl
- *   20..21 sp        22..23 pc        24 i   25 r
- *   26     iff1 | iff2 << 1 | im << 2 | halted << 4 | ei_delay << 5
- *   27     zero
- *   28..29 spent: the T-states the line consumed, quota plus residue
- *   30..31 zero
- *   32..33 pc at the entry of the line
- *   34..35 blocks the line ran (z80c_counts before and after)
- *   36..39 position of the block starting at the entry pc, NO_BLOCK when
- *          none starts there
- *
- * The first 32 bytes are what the replay compares; the last 8 name the
- * place and are read back, never recomputed, in replay. */
+  memset(&t,0,sizeof t);
+  memset(&i,0,sizeof i);
+  t.stopped = -1;
+  i.stopped = -1;
+  if(take_read(tpath,&t) != 0 || colours_read(tcol,&t) != 0 ||
+     take_read(ipath,&i) != 0 || colours_read(icol,&i) != 0)
+    {
+      rc = 2;
+      goto done;
+    }
+  /* The translated take first, the interpreter's second: the picture
+     scripts name them so, and two takes swapped would judge nothing. */
+  if(strcmp(t.taken,"translated") != 0 || strcmp(i.taken,"interpreter") != 0)
+    {
+      printf("FAIL: %s must be taken=translated and %s taken=interpreter "
+             "(they are %s and %s)\n",tpath,ipath,t.taken,i.taken);
+      rc = 2;
+      goto done;
+    }
+  if(t.frames != i.frames || t.rom_bytes != i.rom_bytes || t.rom_fnv != i.rom_fnv)
+    {
+      printf("FAIL: the two takes are not of one rom and one length "
+             "(%ld frames of %lu/%08lx, %ld frames of %lu/%08lx)\n",
+             t.frames,t.rom_bytes,t.rom_fnv,i.frames,i.rom_bytes,i.rom_fnv);
+      rc = 2;
+      goto done;
+    }
+  /* A stopped interpreter is no reference: nothing is proved, and the
+     translation is never blamed for it. A stopped core with translated
+     code armed, against an interpreter that went to its end, is. */
+  if(i.stopped >= 0)
+    {
+      printf("FAIL: the interpreter's core stopped at frame %ld: nothing to hold the pictures to\n",
+             i.stopped);
+      rc = 2;
+      goto done;
+    }
+  if(t.stopped >= 0)
+    {
+      printf("z80c: MISMATCH frame %ld: the core stopped with translated code armed\n",
+             t.stopped);
+      rc = 1;
+      goto done;
+    }
 
-static void regs_take(unsigned char *r, long spent)
-{
-  const z80_t *z = &sms.z80;
+  for(fr = 0; fr < t.frames; fr++)
+    {
+      /* The interpreter's frames allowed: n, n-1, n+1 in that order, none
+         before the last one matched. The last one matched is at most n,
+         so n is always allowed. */
+      if(same_frame(&t,fr,&i,fr))
+        {
+          same++;
+          last = fr;
+        }
+      else if(fr > 0 && fr - 1 >= last && same_frame(&t,fr,&i,fr - 1))
+        {
+          shifted++;
+          last = fr - 1;
+        }
+      else if(fr + 1 < i.frames && same_frame(&t,fr,&i,fr + 1))
+        {
+          shifted++;
+          last = fr + 1;
+        }
+      else
+        {
+          unmatched++;
+          printf("unmatched frame %ld from=%ld rows=",fr,last);
+          print_rows(&t,&i,fr);
+          if(t.colours[fr] != i.colours[fr])
+            printf(" colours=differ");
+          printf("\n");
+          rc = 1;
+        }
+    }
+  printf("z80c: pictures frames=%ld same=%lu shifted=%lu unmatched=%lu\n",
+         t.frames,same,shifted,unmatched);
 
-  memset(r,0,LINE_REGS);
-  r[0] = z->main.a; r[1] = z->main.f;
-  r[2] = z->main.b; r[3] = z->main.c;
-  r[4] = z->main.d; r[5] = z->main.e;
-  r[6] = z->main.h; r[7] = z->main.l;
-  r[8] = z->alt.a;  r[9] = z->alt.f;
-  r[10] = z->alt.b; r[11] = z->alt.c;
-  r[12] = z->alt.d; r[13] = z->alt.e;
-  r[14] = z->alt.h; r[15] = z->alt.l;
-  r[16] = z->ixh; r[17] = z->ixl; r[18] = z->iyh; r[19] = z->iyl;
-  put16(r + 20,(unsigned long)z->sp);
-  put16(r + 22,(unsigned long)z->pc);
-  r[24] = z->i;
-  r[25] = z->r;
-  r[26] = (unsigned char)((z->iff1 & 1U) | ((z->iff2 & 1U) << 1) |
-                          ((z->im & 3U) << 2) | ((z->halted & 1U) << 4) |
-                          ((z->ei_delay & 1U) << 5));
-  put16(r + 28,(unsigned long)spent);
-}
-
-/* The state as one line of text, from a record. */
-static void regs_format(char *out, size_t cap, const unsigned char *r)
-{
-  snprintf(out,cap,
-           "af=%02x%02x bc=%02x%02x de=%02x%02x hl=%02x%02x "
-           "af'=%02x%02x bc'=%02x%02x de'=%02x%02x hl'=%02x%02x "
-           "ix=%02x%02x iy=%02x%02x sp=%04lx pc=%04lx i=%02x r=%02x "
-           "iff=%u%u im=%u halt=%u ei=%u t=%lu",
-           r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7],
-           r[8],r[9],r[10],r[11],r[12],r[13],r[14],r[15],
-           r[16],r[17],r[18],r[19],get16(r + 20),get16(r + 22),r[24],r[25],
-           (unsigned)(r[26] & 1U),(unsigned)((r[26] >> 1) & 1U),
-           (unsigned)((r[26] >> 2) & 3U),(unsigned)((r[26] >> 4) & 1U),
-           (unsigned)((r[26] >> 5) & 1U),get16(r + 28));
-}
-
-/* ---- the frame record ----
- *
- *   0..3   digest of the state at the end of the frame (below)
- *   4..7   unrouted port reads       8..11  unrouted port writes
- *   12..15 video register writes     16..19 video memory writes
- *   20..23 colour memory writes      24..27 status port reads
- *   28..31 blocks executed           32..35 hand-backs to the interpreter
- *
- * The first 28 bytes are what the replay compares. The last two fields
- * are the translated run's figures, carried for the report: the replay
- * runs none. Every counter is a running total since reset -- nothing in
- * this loop calls the periodic reports that clear them.
- *
- * The digest covers what the program can read back or what decides what
- * it reads next: the work RAM, the video memory, the colour memory, the
- * sixteen registers, the two scroll latches, the address, the code, the
- * control word and its latch, the read buffer, the line count and the
- * line counter, the two interrupt requests, the two sprite bits of the
- * status port (a program branches on them), the four mapper registers,
- * the memory control register, and the cartridge RAM. Left out on
- * purpose: everything the render keeps for itself -- the decor journal,
- * the cel lists and their arena, the sheets, the tile cache, the PLUT
- * and the CLUT -- which the processor never reads and which the
- * presentation rebuilds from the memory digested above; and the
- * telemetry fields of the processor (irq_accepted), which exist in one
- * configuration only. */
-
-static unsigned long state_digest(void)
-{
-  unsigned long h = fnv_begin();
-  unsigned long i;
-
-  for(i = 0; i < RAM_PAGES; i++)
-    h = fnv_add(h,z80_wmap[RAM_FIRST_PAGE + i],Z80_PAGE_SIZE);
-  h = fnv_add(h,sms.vdp.vram,VDP_VRAM_SIZE);
-  h = fnv_add(h,sms.vdp.cram,VDP_CRAM_SIZE);
-  h = fnv_add(h,sms.vdp.reg,VDP_REG_COUNT);
-  h = fnv_add_u32(h,(unsigned long)sms.vdp.vscroll);
-  h = fnv_add_u32(h,(unsigned long)sms.vdp.hscroll);
-  h = fnv_add_u32(h,(unsigned long)sms.vdp.addr);
-  h = fnv_add_u32(h,(unsigned long)sms.vdp.code);
-  h = fnv_add_u32(h,(unsigned long)sms.vdp.ctrl_word);
-  h = fnv_add_u32(h,(unsigned long)sms.vdp.latch);
-  h = fnv_add_u32(h,(unsigned long)sms.vdp.read_buf);
-  h = fnv_add_u32(h,(unsigned long)sms.vdp.vcount);
-  h = fnv_add_u32(h,(unsigned long)sms.vdp.line_ctr);
-  h = fnv_add_u32(h,(unsigned long)sms.vdp.frame_pending);
-  h = fnv_add_u32(h,(unsigned long)sms.vdp.line_pending);
-  h = fnv_add_u32(h,(unsigned long)sms.vdp.spr_overflow);
-  h = fnv_add_u32(h,(unsigned long)sms.vdp.spr_collision);
-  h = fnv_add_u32(h,(unsigned long)sms.cart.mapper_fffc);
-  h = fnv_add_u32(h,(unsigned long)sms.cart.mapper_fffd);
-  h = fnv_add_u32(h,(unsigned long)sms.cart.mapper_fffe);
-  h = fnv_add_u32(h,(unsigned long)sms.cart.mapper_ffff);
-  h = fnv_add_u32(h,(unsigned long)sms.cart.memctl);
-  /* The cartridge RAM exists in the Sega build alone; a build without
-     it digests nothing here, on both sides alike. */
-  if(sms.cart.cart_ram != NULL)
-    h = fnv_add(h,sms.cart.cart_ram,CART_RAM_SIZE);
-  return h;
+done:
+  free(t.rows);
+  free(t.colours);
+  free(i.rows);
+  free(i.colours);
+  return rc;
 }
 
-static void frame_take(unsigned char *f)
+/* ---- the translated run ---- */
+
+/* The end of a translated run: the counters, how many blocks ran, the
+   chains, and the hits per block when a file is named. */
+static int report_translated(long frames, unsigned long spent_total,
+                             const char *counts_path)
 {
   uint32 z80c_exec, z80c_fallback, z80c_insns, z80c_ram;
+  unsigned long i, hit = 0;
+  uint32 chains;
 
   z80c_counts(&z80c_exec,&z80c_fallback,&z80c_insns,&z80c_ram);
-  put32(f,state_digest());
-  put32(f + 4,(unsigned long)sms.cart.io_unrouted_reads);
-  put32(f + 8,(unsigned long)sms.cart.io_unrouted_writes);
-  put32(f + 12,(unsigned long)sms.vdp.cnt_reg_w);
-  put32(f + 16,(unsigned long)sms.vdp.cnt_vram_w);
-  put32(f + 20,(unsigned long)sms.vdp.cnt_cram_w);
-  put32(f + 24,(unsigned long)sms.vdp.cnt_status_r);
-  put32(f + 28,(unsigned long)z80c_exec);
-  put32(f + 32,(unsigned long)z80c_fallback);
-}
-
-/* The digest, then the counters in the record's order: port reads and
-   writes, register, video memory and colour writes, status reads. */
-static void frame_format(char *out, size_t cap, const unsigned char *f)
-{
-  snprintf(out,cap,"digest=%08lx io=%lu/%lu vdp=%lu/%lu/%lu/%lu",
-           get32(f),get32(f + 4),get32(f + 8),
-           get32(f + 12),get32(f + 16),get32(f + 20),get32(f + 24));
-}
-
-/* The block's position for a table entry: the lookup answers the entry,
-   and the position is what names it. */
-static unsigned long block_pos(const z80c_entry_t *e)
-{
-  if(e == NULL) return NO_BLOCK;
-  return (unsigned long)e->pos;
-}
-
-static void block_name(char *out, size_t cap, unsigned long pos)
-{
-  if(pos == NO_BLOCK)
-    snprintf(out,cap,"none");
-  else
-    snprintf(out,cap,"%06lx",pos);
-}
-
-/* The presentation as the console makes it once line 191 is counted:
-   the journal undone, every band replayed -- the last one puts the video
-   memory back in its final state -- and the journal emptied. Without it
-   the journal fills and the picture is degraded; the processor sees no
-   difference, but the console never runs that way. */
-static void present(void)
-{
-  int32 bands, k;
-  bands = vdp_list_begin();
-  for(k = 0; k < bands; k++) vdp_list_band(k);
-  vdp_list_end();
-}
-
-/* A positive count from the command line, the whole word or nothing. */
-static long count_arg(const char *s)
-{
-  char *end;
-  long v;
-  if(*s == '\0') return -1;
-  v = strtol(s,&end,10);
-  if(*end != '\0' || v <= 0) return -1;
-  return v;
-}
-
-int main(int argc, char **argv)
-{
-  long frames, every, fr;
-  int line;
-  int recording, poke = 0;
-  FILE *tr;
-  unsigned char hdr[TRACE_HDR];
-  unsigned char rec[LINE_REC], got[LINE_REC];
-  unsigned char frec[FRAME_REC], fgot[FRAME_REC];
-  unsigned long rom_fnv;
-  int32 residue = 0;
-  long total_exec = 0;
-  unsigned long spent_total = 0;
-  const char *counts_path = NULL;
-  char a[256], b[256], name[16];
-
-  if(argc != 6 && argc != 7)
+  printf("z80c: translated %lu frames exec=%lu fallback=%lu insns=%lu ram_exec=%lu\n",
+         (unsigned long)frames,(unsigned long)z80c_exec,
+         (unsigned long)z80c_fallback,(unsigned long)z80c_insns,
+         (unsigned long)z80c_ram);
+  /* A translated run in which no block ran is the interpreter judged
+     against itself. */
+  if(z80c_exec == 0UL)
     {
-      fprintf(stderr,"usage: sidebyside <rom> <frames> <every> "
-              "record|replay|replay-poke <trace> [counts]\n"
-              "  every: the frames between two progress lines of a replay\n"
-              "  counts: where a record writes the hits per block\n");
+      printf("FAIL: no translated block ran\n");
       return 2;
     }
-  if(argc == 7)
-    counts_path = argv[6];
-  rom_path = argv[1];
-  frames = count_arg(argv[2]);
-  every = count_arg(argv[3]);
-  if(frames < 0 || every < 0)
+  for(i = 0; i < z80c_block_count; i++)
+    if(z80c_hits[i] != 0UL)
+      hit++;
+  printf("z80c: hits %lu/%lu blocks ran\n",hit,(unsigned long)z80c_block_count);
+  /*
+   * The chain seen to be followed. A block hands the core the entry of
+   * its successor so that the next one runs with no lookup; when that
+   * hand-off is lost -- a successor rendered as 0, an epoch that never
+   * matches, a chain that returns after its first block -- the pictures
+   * do not change: the core's loop finds every block again through
+   * z80c_find. Only the time changes, and the time is what this path
+   * exists for. So a run in which no chain ever ran a second block is
+   * refused, the way a run in which no block ran at all is refused.
+   */
+  chains = z80c_chains();
+  printf("z80c: chains %lu entered, %lu blocks, %lu.%02lu blocks a chain\n",
+         (unsigned long)chains,(unsigned long)z80c_exec,
+         chains != 0UL ? (unsigned long)(z80c_exec / chains) : 0UL,
+         chains != 0UL
+           ? (unsigned long)(((z80c_exec % chains) * 100UL) / chains)
+           : 0UL);
+  if(z80c_exec <= chains)
     {
-      fprintf(stderr,"frames and every must be positive integers\n");
+      printf("FAIL: no chain ran a second block (%lu blocks for %lu chains):"
+             " the successors are not being followed\n",
+             (unsigned long)z80c_exec,(unsigned long)chains);
       return 2;
     }
-  if(strcmp(argv[4],"record") == 0)
-    recording = 1;
-  else if(strcmp(argv[4],"replay") == 0)
-    recording = 0;
-  else if(strcmp(argv[4],"replay-poke") == 0)
+  if(counts_path != NULL)
     {
-      recording = 0;
-      poke = 1;
-    }
-  else
-    {
-      fprintf(stderr,"mode must be record, replay or replay-poke, not %s\n",
-              argv[4]);
-      return 2;
-    }
+      FILE *cf = fopen(counts_path,"w");
 
+      if(cf == NULL)
+        {
+          fprintf(stderr,"cannot write the counts %s\n",counts_path);
+          return 2;
+        }
+      fprintf(cf,"z80c-counts frames=%lu tstates=%lu\n",(unsigned long)frames,spent_total);
+      for(i = 0; i < z80c_block_count; i++)
+        fprintf(cf,"%06lx %lu %lu\n",(unsigned long)z80c_table[i].pos,
+                (unsigned long)z80c_hits[i],(unsigned long)z80c_tstates[i]);
+      if(fclose(cf) != 0)
+        {
+          fprintf(stderr,"cannot finish the counts %s\n",counts_path);
+          return 2;
+        }
+    }
+  return 0;
+}
+
+/* The machine booted as src/main.c boots it, the table paired; the digest
+   of the ROM as the picture runner computes it (romrun.c, digest over
+   sms.cart.rom). */
+static int boot(const char *rom, unsigned long *rom_fnv)
+{
+  host_rom_path = rom;
   z80_init();
   if(cart_init() < 0) return 2;
   if(cart_boot() < 0) return 2;
   if(vdp_init() < 0) return 2;
   z80_reset();
-  /* The table paired as src/main.c pairs it; the replay then takes the
-     switch down, and the core never looks for a block again (src/z80.c
-     reads it at the head of every turn). Same binary, same table linked,
-     the interpreter alone. */
   z80c_init();
-  booted = 1;
+  host_booted = 1;
+  *rom_fnv = host_fnv_add(host_fnv_begin(),sms.cart.rom,(unsigned long)sms.cart.size);
+  return 0;
+}
 
-  rom_fnv = fnv_add(fnv_begin(),sms.cart.rom,(unsigned long)sms.cart.size);
+static int run(const char *rom, long frames, const char *counts_path)
+{
+  int line;
+  long fr;
+  unsigned long rom_fnv, spent_total = 0;
+  int32 residue = 0;
+
+  if(boot(rom,&rom_fnv) != 0) return 2;
   /* The console pairs the table by size alone; this runner has the digest
      in hand and refuses a table written from another image of the same
      size, rather than judging two programs that never were one. */
@@ -537,86 +522,23 @@ int main(int argc, char **argv)
              (unsigned long)z80c_rom_fnv,rom_fnv);
       return 3;
     }
-  if(!recording)
-    z80c_armed = 0;
-
-  if(recording)
+  if(!z80c_armed)
     {
-      tr = fopen(argv[5],"wb");
-      if(tr == NULL)
-        {
-          fprintf(stderr,"cannot write the trace %s\n",argv[5]);
-          return 2;
-        }
-      memcpy(hdr,TRACE_MAGIC,4);
-      put32(hdr + 4,(unsigned long)frames);
-      put32(hdr + 8,(unsigned long)sms.cart.size);
-      put32(hdr + 12,rom_fnv);
-      fwrite(hdr,1,TRACE_HDR,tr);
-    }
-  else
-    {
-      tr = fopen(argv[5],"rb");
-      if(tr == NULL)
-        {
-          fprintf(stderr,"cannot open the trace %s\n",argv[5]);
-          return 2;
-        }
-      if(fread(hdr,1,TRACE_HDR,tr) != TRACE_HDR ||
-         memcmp(hdr,TRACE_MAGIC,4) != 0)
-        {
-          printf("FAIL: %s is not a trace of this runner\n",argv[5]);
-          return 2;
-        }
-      if(get32(hdr + 4) != (unsigned long)frames ||
-         get32(hdr + 8) != (unsigned long)sms.cart.size ||
-         get32(hdr + 12) != rom_fnv)
-        {
-          printf("FAIL: the trace is of %lu frames of rom %lu/%08lx, "
-                 "not %lu of %lu/%08lx\n",
-                 get32(hdr + 4),get32(hdr + 8),get32(hdr + 12),
-                 (unsigned long)frames,(unsigned long)sms.cart.size,rom_fnv);
-          return 2;
-        }
+      printf("FAIL: no translated block ran: the table did not pair with the rom\n");
+      return 2;
     }
 
   for(fr = 0; fr < frames; fr++)
     {
       for(line = 0; line < LINES_PER_FRAME; line++)
         {
-          int32 quota;
-          uint32 exec0, exec1, fb, ins, ram;
-          unsigned long pc_entry = (unsigned long)sms.z80.pc;
-
-          if(recording)
-            {
-              quota = (int32)TSTATES_PER_LINE - residue;
-              z80c_counts(&exec0,&fb,&ins,&ram);
-              put16(rec + 32,pc_entry);
-              put32(rec + 36,block_pos(z80c_find((uint16)pc_entry)));
-            }
-          else
-            {
-              if(fread(rec,1,LINE_REC,tr) != LINE_REC)
-                {
-                  printf("FAIL: the trace ends at frame %lu line %d\n",
-                         (unsigned long)fr,line);
-                  return 2;
-                }
-              /* The quota is what the translated run spent on this line:
-                 the interpreter stops on the same instruction boundary,
-                 or its residue says the static sum was wrong. */
-              quota = (int32)get16(rec + 28);
-              exec0 = 0;
-            }
+          int32 quota = (int32)TSTATES_PER_LINE - residue;
 
           residue = z80_run(quota);
           /* The overrun z80_run hands back is bounded by the contract in
-             z80.h: below one instruction with the interpreter alone, and
-             below one block with translated code armed -- a block spends
-             at most Z80C_BLOCK_TSTATES_MAX, started with at least one
-             T-state left. Held on every line, since the quota arithmetic
-             of the scanline loop rests on it. */
+             z80.h: below one block with translated code armed. Held on
+             every line, since the quota arithmetic of the loop rests on
+             it. */
           if(residue >= (int32)Z80C_BLOCK_TSTATES_MAX)
             {
               printf("FAIL: z80_run overran the quota by %ld T-states "
@@ -624,155 +546,57 @@ int main(int argc, char **argv)
                      (long)residue,(unsigned long)fr,line);
               return 2;
             }
-
-          if(recording)
-            {
-              regs_take(rec,(long)quota + (long)residue);
-              spent_total += (unsigned long)((long)quota + (long)residue);
-              z80c_counts(&exec1,&fb,&ins,&ram);
-              put16(rec + 34,(unsigned long)(exec1 - exec0));
-              fwrite(rec,1,LINE_REC,tr);
-            }
-          else
-            {
-              regs_take(got,(long)quota + (long)residue);
-              if(memcmp(got,rec,LINE_REGS) != 0)
-                {
-                  regs_format(a,sizeof a,got);
-                  regs_format(b,sizeof b,rec);
-                  block_name(name,sizeof name,get32(rec + 36));
-                  printf("z80c: MISMATCH frame %lu line %d block %s blocks=%lu "
-                         ": %s / %s\n",
-                         (unsigned long)fr,line,name,get16(rec + 34),a,b);
-                  return 1;
-                }
-            }
+          spent_total += (unsigned long)((long)quota + (long)residue);
 
           vdp_line();
-          if(line == PRESENT_LINE) present();
+          if(line == PRESENT_LINE) host_present();
         }
 
-      /* A stopped core spends every quota without moving: both runs
-         would agree on a dead machine. */
+      /* A stopped core spends every quota without moving, and its picture
+         stands still: never a pass. This run does not know whether the
+         interpreter stops on the same ROM, so a stop here says nothing
+         about the translation yet: it is refused as proving nothing. The
+         picture takes say which side stopped (tests/z80c/colour_tap.c),
+         and only a stop with translated code armed against an interpreter
+         that went to its end is a mismatch (the pictures mode). */
       if(z80_is_stopped())
         {
-          printf("FAIL: the core stopped at frame %lu\n",(unsigned long)fr);
+          printf("FAIL: the core stopped at frame %lu with translated code armed\n",
+                 (unsigned long)fr);
           return 2;
-        }
-
-      if(recording)
-        {
-          frame_take(frec);
-          fwrite(frec,1,FRAME_REC,tr);
-        }
-      else
-        {
-          if(fread(frec,1,FRAME_REC,tr) != FRAME_REC)
-            {
-              printf("FAIL: the trace ends at frame %lu\n",(unsigned long)fr);
-              return 2;
-            }
-          /* The self-check of the frame path: one byte of the work RAM
-             flipped before the digest is taken, once. */
-          if(poke && fr == 0)
-            z80_wmap[RAM_FIRST_PAGE][0] ^= 1U;
-          frame_take(fgot);
-          if(memcmp(fgot,frec,FRAME_CMP) != 0)
-            {
-              frame_format(a,sizeof a,fgot);
-              frame_format(b,sizeof b,frec);
-              block_name(name,sizeof name,get32(rec + 36));
-              printf("z80c: MISMATCH frame %lu line %d block %s blocks=%lu "
-                     ": %s / %s\n",
-                     (unsigned long)fr,LINES_PER_FRAME - 1,name,
-                     get16(rec + 34),a,b);
-              return 1;
-            }
-          total_exec = (long)get32(frec + 28);
-          if((fr % every) == 0 || fr == frames - 1)
-            printf("z80c: frame %lu OK digest=%08lx exec=%lu fallback=%lu\n",
-                   (unsigned long)fr,get32(frec),get32(frec + 28),
-                   get32(frec + 32));
         }
     }
 
-  if(recording)
+  return report_translated(frames,spent_total,counts_path);
+}
+
+int main(int argc, char **argv)
+{
+  long frames;
+  unsigned long rom_fnv;
+
+  if(argc == 6 && strcmp(argv[1],"pictures") == 0)
+    return pictures(argv[2],argv[3],argv[4],argv[5]);
+  if(argc == 3 && strcmp(argv[2],"romid") == 0)
     {
-      uint32 z80c_exec, z80c_fallback, z80c_insns, z80c_ram;
-      unsigned long i, hit = 0;
-
-      if(fclose(tr) != 0)
-        {
-          fprintf(stderr,"cannot finish the trace %s\n",argv[5]);
-          return 2;
-        }
-      z80c_counts(&z80c_exec,&z80c_fallback,&z80c_insns,&z80c_ram);
-      printf("z80c: recorded %lu frames exec=%lu fallback=%lu insns=%lu ram_exec=%lu\n",
-             (unsigned long)frames,(unsigned long)z80c_exec,
-             (unsigned long)z80c_fallback,(unsigned long)z80c_insns,
-             (unsigned long)z80c_ram);
-      /* The hits per block: how many of the table ran at all, and the
-         file the translator chooses from. */
-      for(i = 0; i < z80c_block_count; i++)
-        if(z80c_hits[i] != 0UL)
-          hit++;
-      printf("z80c: hits %lu/%lu blocks ran\n",hit,(unsigned long)z80c_block_count);
-      /*
-       * The chain seen to be followed. A block hands the core the entry
-       * of its successor so that the next one runs with no lookup; when
-       * that hand-off is lost -- a successor rendered as 0, an epoch
-       * that never matches, a chain that returns after its first block
-       * -- nothing else here changes: the core's loop finds every block
-       * again through z80c_find and the two runs still agree, because
-       * the interpreter is right either way. Only the time changes, and
-       * the time is what this path exists for. So a run in which no
-       * chain ever ran a second block is refused, the way a run in which
-       * no block ran at all is refused: it proves the translation, not
-       * the chain.
-       */
-      if(z80c_block_count != 0UL)
-        {
-          uint32 chains = z80c_chains();
-
-          printf("z80c: chains %lu entered, %lu blocks, %lu.%02lu blocks a chain\n",
-                 (unsigned long)chains,(unsigned long)z80c_exec,
-                 chains != 0UL ? (unsigned long)(z80c_exec / chains) : 0UL,
-                 chains != 0UL
-                   ? (unsigned long)(((z80c_exec % chains) * 100UL) / chains)
-                   : 0UL);
-          if(z80c_exec <= chains)
-            {
-              printf("FAIL: no chain ran a second block (%lu blocks for %lu chains):"
-                     " the successors are not being followed\n",
-                     (unsigned long)z80c_exec,(unsigned long)chains);
-              return 2;
-            }
-        }
-      if(counts_path != NULL)
-        {
-          FILE *cf = fopen(counts_path,"w");
-
-          if(cf == NULL)
-            {
-              fprintf(stderr,"cannot write the counts %s\n",counts_path);
-              return 2;
-            }
-          fprintf(cf,"z80c-counts frames=%lu tstates=%lu\n",(unsigned long)frames,spent_total);
-          for(i = 0; i < z80c_block_count; i++)
-            fprintf(cf,"%06lx %lu %lu\n",(unsigned long)z80c_table[i].pos,
-                    (unsigned long)z80c_hits[i],(unsigned long)z80c_tstates[i]);
-          if(fclose(cf) != 0)
-            {
-              fprintf(stderr,"cannot finish the counts %s\n",counts_path);
-              return 2;
-            }
-        }
+      if(boot(argv[1],&rom_fnv) != 0) return 2;
+      printf("rom_bytes=%lu rom_fnv=%08lx\n",(unsigned long)sms.cart.size,rom_fnv);
       return 0;
     }
-
-  fclose(tr);
-  printf("z80c: PASS %lu/%lu frames%s\n",(unsigned long)frames,
-         (unsigned long)frames,
-         total_exec == 0 ? " (no translated block ran)" : "");
-  return 0;
+  if((argc != 4 && argc != 5) || strcmp(argv[3],"translated") != 0)
+    {
+      fprintf(stderr,"usage: sidebyside <rom> <frames> translated [counts]\n"
+              "       sidebyside <rom> romid\n"
+              "       sidebyside pictures <translated take> <its colours> "
+              "<interpreter take> <its colours>\n"
+              "  counts: where the run writes the hits per block\n");
+      return 2;
+    }
+  frames = host_count_arg(argv[2]);
+  if(frames < 0)
+    {
+      fprintf(stderr,"frames must be a positive integer\n");
+      return 2;
+    }
+  return run(argv[1],frames,argc == 5 ? argv[4] : NULL);
 }

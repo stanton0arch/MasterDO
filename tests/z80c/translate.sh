@@ -5,19 +5,22 @@
 #
 # Builds the translator (tests/z80c/translate.c) on the host compiler and
 # runs it on the image given, translating everything it reaches; links
-# that whole table with the core into the side-by-side runner and plays
-# the ROM twice -- translated code armed, then the interpreter alone on
-# the same per-line quotas -- which must agree on every line and every
-# frame, and which counts how often every block ran; runs the translator
-# again with those counts and the budget, so that the blocks that ran the
-# most T-states are kept while the bytes they cover fit; proves that
-# chosen table the same way; compiles it on the host compiler with the
-# same strictness the console chain applies, so that a file the console
-# would refuse is refused here first; and only then writes src/rom_code.c
-# -- a generated file the repository ignores. A red proof writes nothing:
-# whatever src/rom_code.c held stays as it was.
+# that whole table with the core and judges it by its pictures -- the ROM
+# run free twice, translated code armed then the interpreter alone, every
+# frame of the first held to the frame of the same rank of the second or
+# to the one before or after it, a frame that is none of them redrawn in
+# colour on both sides and compared byte for byte (tests/z80c/play.sh,
+# tests/z80c/sidebyside.c) -- while a free translated run counts how often
+# every block ran; runs the translator again with those counts and the
+# budget, so that the blocks that ran the most T-states are kept while the
+# bytes they cover fit; judges that chosen table the same way; compiles it
+# on the host compiler with the same strictness the console chain applies,
+# so that a file the console would refuse is refused here first; and only
+# then writes src/rom_code.c -- a generated file the repository ignores.
+# A red judgement writes nothing: whatever src/rom_code.c held stays as
+# it was.
 #
-# Prints the translator's reports, the runner's lines for both proofs
+# Prints the translator's reports, the runners' lines for both judgements
 # and, after them, the size of the host object's code as the estimate of
 # what the chosen blocks will weigh in the boot binary.
 #
@@ -32,7 +35,17 @@
 #                                     table may cover; the default below
 #                                     is what keeps the boot binary under
 #                                     its ceiling on the reference ROM
-#   FRAMES=<n> EVERY=<n>              the proof's length and its pace
+#   FRAMES=<n>                        the judgement's length
+#   Z80C_PICREF=<file>                where the interpreter's picture of
+#                                     the ROM is taken, or read when the
+#                                     file exists (tests/z80c/run_z80c.sh
+#                                     keeps it for its mutations); by
+#                                     default a file of the work directory
+#   Z80C_REDRAW_MAX=<n>               frames of the same screen under other
+#                                     palette numbers allowed per judgement
+#   Z80C_KEEP=<dir>                   where the two screens of a mismatch
+#                                     are copied; by default nothing of a
+#                                     run is kept
 #
 set -e
 
@@ -42,6 +55,8 @@ case "${1:-}" in
   *)  ROM="$PWD/$1";;
 esac
 case "${OUT:-}" in ''|/*) ;; *) OUT="$PWD/$OUT";; esac
+case "${Z80C_PICREF:-}" in ''|/*) ;; *) Z80C_PICREF="$PWD/$Z80C_PICREF";; esac
+case "${Z80C_KEEP:-}" in ''|/*) ;; *) Z80C_KEEP="$PWD/$Z80C_KEEP";; esac
 
 cd "$(dirname "$0")/../.."
 
@@ -51,9 +66,13 @@ S=src
 H=tests/cel8/3do
 B=tests/z80c
 FRAMES=${FRAMES:-3000}
-EVERY=${EVERY:-300}
 case "$FRAMES" in ''|*[!0-9]*|0) echo "FRAMES must be a positive integer, not '$FRAMES'"; exit 2;; esac
-case "$EVERY"  in ''|*[!0-9]*|0) echo "EVERY must be a positive integer, not '$EVERY'"; exit 2;; esac
+# A frame is redrawn by a run with one picture every 100000 frames
+# (tests/z80c/play.sh): a longer run would take a second picture inside it.
+if [ "$FRAMES" -gt 100000 ]; then
+  echo "FRAMES must be at most 100000, not $FRAMES"
+  exit 2
+fi
 
 # The budget, in bytes of Z80 code the chosen blocks may cover. The
 # default comes from the measure taken on the reference ROM with the
@@ -106,43 +125,41 @@ $CC -O1 -std=gnu89 -Wall -Wextra -DBLOCK_TSTATES="${CAP}UL" -DBLOCK_TSTATES_MAX=
 echo "== translating everything =="
 "$WORK/translate" "$ROM" "$WORK/full.c"
 
-echo "== building the runner =="
-z80c_runner "$WORK/sidebyside.o"
-z80c_build "$WORK/full.c" "$WORK/full" "$WORK/sidebyside.o"
+echo "== building the runners =="
+z80c_runner "$WORK/obj"
+z80c_build "$WORK/full.c" "$WORK/full" "$WORK/obj"
 
-echo "== the whole table: translated code armed, then the interpreter on its quotas =="
+# The picture the interpreter draws of every frame: what both tables are
+# held to, row for row.
+PICREF=${Z80C_PICREF:-$WORK/picture.fnv}
+echo "== the interpreter's picture of every frame =="
+if ! z80c_reference "$WORK/obj" "$ROM" "$PICREF"; then
+  echo "FAIL: nothing to hold the pictures to (nothing written)"
+  exit 1
+fi
+
+echo "== the whole table: run free, its pictures held to the interpreter's =="
 mkdir -p "$WORK/full.d"
-if ! z80c_play "$WORK/full" "$ROM" "$WORK/full.d" replay "$WORK/counts"; then
-  echo "FAIL: the whole table does not agree with the interpreter (nothing written)"
+if ! z80c_play "$WORK/full" "$ROM" "$WORK/full.d" "$PICREF" "$WORK/obj" "$WORK/counts"; then
+  echo "FAIL: the whole table does not draw the interpreter's pictures (nothing written)"
   exit 1
 fi
-echo "z80c: whole table proved translated=${t_rec}s interp=${t_rep}s"
-rm -f "$WORK/full.d/trace.bin"
-# A proof in which no block ran proves nothing (tests/z80c/run_z80c.sh).
-if ! grep -q '^z80c: recorded [0-9]* frames exec=[1-9]' "$WORK/full.d/record.out"; then
-  echo "FAIL: no translated block ran, the interpreter was judged against itself (nothing written)"
-  exit 1
-fi
+echo "z80c: whole table proved translated=${t_tr}s picture=${t_pic}s redraw=${t_redraw}s"
 
-# The table chosen under the budget, from the counts, and proved on its
+# The table chosen under the budget, from the counts, and judged on its
 # own: what it leaves out is interpreted, and a successor that pointed at
 # a block left out is null.
 echo "== choosing under Z80C_BUDGET=$Z80C_BUDGET bytes =="
 "$WORK/translate" "$ROM" "$WORK/rom_code.c" --counts "$WORK/counts" --budget "$Z80C_BUDGET"
-z80c_build "$WORK/rom_code.c" "$WORK/chosen" "$WORK/sidebyside.o"
+z80c_build "$WORK/rom_code.c" "$WORK/chosen" "$WORK/obj"
 
-echo "== the chosen table: translated code armed, then the interpreter on its quotas =="
+echo "== the chosen table: run free, its pictures held to the interpreter's =="
 mkdir -p "$WORK/chosen.d"
-if ! z80c_play "$WORK/chosen" "$ROM" "$WORK/chosen.d" replay; then
-  echo "FAIL: the chosen table does not agree with the interpreter (nothing written)"
+if ! z80c_play "$WORK/chosen" "$ROM" "$WORK/chosen.d" "$PICREF" "$WORK/obj"; then
+  echo "FAIL: the chosen table does not draw the interpreter's pictures (nothing written)"
   exit 1
 fi
-echo "z80c: chosen table proved translated=${t_rec}s interp=${t_rep}s"
-rm -f "$WORK/chosen.d/trace.bin"
-if ! grep -q '^z80c: recorded [0-9]* frames exec=[1-9]' "$WORK/chosen.d/record.out"; then
-  echo "FAIL: no block of the chosen table ran (nothing written)"
-  exit 1
-fi
+echo "z80c: chosen table proved translated=${t_tr}s picture=${t_pic}s redraw=${t_redraw}s"
 
 # The file compiled as the console chain will compile it: strict C89,
 # optimised so that the code size read off it is an estimate and not a
