@@ -49,6 +49,31 @@ uint8 *z80_wmap[Z80_PAGE_COUNT];
 static int32 z80_stopped = 0;
 
 /*
+ * The state of a line run by events (z80_run_events, z80.h), all three
+ * written by that entry around its call of z80_run and read inside it:
+ *
+ *   z80_events      raised for the length of the call: the loop looks for
+ *                   translated code and for waits, a halt ends the line
+ *                   instead of spending the quota, and LD A,R reads the
+ *                   byte below. Down, z80_run is the interpreter on its
+ *                   quota, as it always was, and pays one load and one
+ *                   branch per instruction for this test.
+ *   z80_events_ran  raised once the line has run anything: arriving on a
+ *                   wait ends the line only after that, so that a line
+ *                   that starts on a wait runs the loop once and the
+ *                   program sees what the line before changed.
+ *   z80_events_r    the refresh register of the line: its low seven bits
+ *                   step by one per line, bit 7 is kept, and LD R,A
+ *                   writes it whole. The counter the interpreter ticks per
+ *                   opcode means nothing on this path -- translated code
+ *                   ticks nothing -- so both sides read this byte and
+ *                   read the same value.
+ */
+static uint8 z80_events     = 0;
+static uint8 z80_events_ran = 0;
+static uint8 z80_events_r   = 0;
+
+/*
  * ---------------------------------------------------------------------------
  * Reset values, and where each of them comes from -- because they do not all
  * come from the same kind of place.
@@ -459,6 +484,12 @@ z80_reset(void)
    */
   Z80_TSTATES = 0;
   z80_stopped = 0;
+
+  /* No line is being run by events, and the register of the line starts
+     where the refresh register does. */
+  z80_events     = 0;
+  z80_events_ran = 0;
+  z80_events_r   = 0;
 
 #if LOG_ENABLE && SMS_TELEMETRY
   sms.z80.irq_accepted = 0;
@@ -986,8 +1017,13 @@ z80_run(int32 quota)
    */
   if(Z80_HALTED)
     {
-      while(Z80_TSTATES > 0)
-        Z80_SPEND(4);
+      /*
+       * On a line run by events a halt is a wait: nothing runs, and the
+       * line ends at once. The huge quota of that entry is never spent.
+       */
+      if(!z80_events)
+        while(Z80_TSTATES > 0)
+          Z80_SPEND(4);
 
       Z80_RESIDENT_FLUSH();
       return -Z80_TSTATES;
@@ -1028,26 +1064,59 @@ z80_run(int32 quota)
        * whose page is not the image (z80c.h): that is what the
        * translated share of the run is computed from.
        */
-      if(z80c_armed)
+      if(z80_events)
         {
+#if Z80C_BENCH
+          /*
+           * The guard of the host runners (z80c.h): a line past the
+           * ceiling of instructions never waits. The address is named and
+           * the line ends; the runner refuses the program.
+           */
+          if(Z80C_LINE_OVER())
+            {
+              z80c_no_wait    = 1;
+              z80c_no_wait_pc = (uint32)Z80_PC;
+              Z80_RESIDENT_FLUSH();
+              return 0;
+            }
+#endif
           if(z80c_miss_pc != (uint32)Z80_PC)
             {
               const z80c_entry_t *z80c_block = z80c_find(Z80_PC);
 
               if(z80c_block != NULL)
                 {
-                  Z80_RESIDENT_FLUSH();
-                  z80c_run(z80c_block);
-                  Z80_PC      = Z80_PC_STATE;
-                  Z80_R       = Z80_R_STATE;
-                  Z80_A       = Z80_A_STATE;
-                  Z80_F       = Z80_F_STATE;
-                  Z80_TSTATES = Z80_TSTATES_STATE;
-                  continue;
+                  /*
+                   * Arrived where the program waits: the line ends here,
+                   * PC on the wait, and the next line -- its interrupt
+                   * taken first -- runs the loop again. Not on the first
+                   * turn of a line, which has to run the loop once.
+                   */
+                  if(z80c_block->wait != 0UL && z80_events_ran)
+                    {
+                      Z80_RESIDENT_FLUSH();
+                      return 0;
+                    }
+                  z80_events_ran = 1;
+#if Z80C_BENCH
+                  if(!z80c_no_exec)
+#endif
+                    {
+                      Z80_RESIDENT_FLUSH();
+                      z80c_run(z80c_block);
+                      Z80_PC      = Z80_PC_STATE;
+                      Z80_R       = Z80_R_STATE;
+                      Z80_A       = Z80_A_STATE;
+                      Z80_F       = Z80_F_STATE;
+                      Z80_TSTATES = Z80_TSTATES_STATE;
+                      continue;
+                    }
                 }
-              z80c_miss_pc = (uint32)Z80_PC;
+              else
+                z80c_miss_pc = (uint32)Z80_PC;
             }
 
+          z80_events_ran = 1;
           Z80C_INTERPRETED(Z80_PC);
         }
 
@@ -1262,8 +1331,10 @@ z80_run(int32 quota)
                      ("halt with interrupts disabled at pc=0x%04lx, only an nmi can end it",
                       Z80_OP_ADDR));
 
-          while(Z80_TSTATES > 0)
-            Z80_SPEND(4);
+          /* On a line run by events the halt is a wait: the line ends. */
+          if(!z80_events)
+            while(Z80_TSTATES > 0)
+              Z80_SPEND(4);
 
           /*
            * Exit boundary: locals -> structure, the rule of every return
@@ -1585,6 +1656,8 @@ z80_run(int32 quota)
                 Z80_SPEND(9);
                 Z80_R_STATE = Z80_A;
                 Z80_R = Z80_A;
+                /* On a line run by events, the register of the line. */
+                z80_events_r = Z80_A;
                 break;
 
               /*
@@ -1600,8 +1673,14 @@ z80_run(int32 quota)
                 {
                   uint8 edval;
 
-                  edval = (uint8)(((uint32)Z80_R_STATE & 0x80U) |
-                                  (Z80_R & 0x7FU));
+                  /* On a line run by events, the register of the line
+                     (z80_run_events): the count of opcodes read is not
+                     kept there, translated code ticks nothing. */
+                  if(z80_events)
+                    edval = z80_events_r;
+                  else
+                    edval = (uint8)(((uint32)Z80_R_STATE & 0x80U) |
+                                    (Z80_R & 0x7FU));
                   Z80_A = edval;
                   Z80_LD_A_IR_FLAGS(edval);
                 }
@@ -2311,6 +2390,59 @@ z80_run(int32 quota)
 #define Z80_F       Z80_F_STATE
 #define Z80_TICK_R()                                            \
   (Z80_R = (uint8)((Z80_R & 0x80U) | ((Z80_R + 1U) & 0x7FU)))
+
+/*
+ * Header: z80.h, where the line by events is written out. What is done
+ * here, around one call of z80_run:
+ *
+ *   the register of the line steps its low seven bits, bit 7 kept, so
+ *   that LD A,R -- the only reader of it -- sees the same byte whether
+ *   the code around it ran translated or interpreted;
+ *
+ *   the three flags go up, the count of instructions of the line is
+ *   marked on the PC, and z80_run is entered with the largest quota the
+ *   counter holds: the acceptance at its head is the one z80_run always
+ *   makes, and its loop, seeing z80_events, ends the line on a wait
+ *   instead of on the quota;
+ *
+ *   on return the refresh register of the structure is set to the
+ *   register of the line, so that what the structure holds is what the
+ *   program can read -- the counter the interpreter ticked meanwhile
+ *   meant nothing, the translated blocks having ticked nothing -- and
+ *   the flags go down, leaving z80_run the interpreter on its quota for
+ *   whoever calls it next.
+ *
+ * The quota is the largest positive value the counter holds: the
+ * interpreter spends at most 23 T-states a turn, so the counter cannot
+ * wrap below zero by more than that. A line that never waits ends on
+ * the console once that quota is spent -- minutes -- if the interpreter
+ * runs it, and never if translated blocks with rendered successors run
+ * it, since they spend nothing; the guard of the host runners ends it
+ * long before and the program is refused on the PC (z80c.h).
+ *
+ * A stopped core runs nothing: the structure is left as it stands, the
+ * register of the line included, as z80_run leaves it.
+ */
+void
+z80_run_events(void)
+{
+  if(z80_stopped)
+    return;
+
+  z80_events_r   = (uint8)((z80_events_r & 0x80U) |
+                           ((z80_events_r + 1U) & 0x7FU));
+  z80_events     = 1;
+  z80_events_ran = 0;
+#if Z80C_BENCH
+  Z80C_LINE_BEGIN();
+#endif
+
+  (void)z80_run((int32)0x7FFFFFFFL);
+
+  Z80_R      = z80_events_r;
+  z80_events = 0;
+}
+
 int32
 z80_step(void)
 {

@@ -7,12 +7,24 @@ uint8  z80c_armed     = 0;
 uint32 z80c_map_epoch = 0;
 uint32 z80c_miss_pc   = Z80C_NO_PC;
 
+#if Z80C_BENCH
+uint8  z80c_no_exec    = 0;
+uint8  z80c_no_wait    = 0;
+uint32 z80c_no_wait_pc = 0;
+uint32 z80c_line_mark  = 0;
+uint32 z80c_ram_pc     = Z80C_NO_PC;
+uint32 z80c_last_pos   = 0;
+uint8 *z80c_seen       = NULL;
+uint32 z80c_ring[Z80C_RING];
+uint32 z80c_ring_n     = 0;
+#endif
+
 #if LOG_ENABLE && SMS_TELEMETRY
 /*
  * The four running totals since reset, and what each of them was when the
  * periodic line last said it. Blocks run and instructions run translated
  * are stepped here and in the generated code; the two interpreter-side
- * counts are stepped by the core's loop (z80.h, Z80C_INTERPRETED). Kept
+ * counts are stepped by the core's loop (z80c.h, Z80C_INTERPRETED). Kept
  * only with the lines they feed (log.h).
  */
 static uint32 z80c_exec_total     = 0;
@@ -35,6 +47,15 @@ z80c_init(void)
   z80c_armed     = 0;
   z80c_map_epoch = 0;
   z80c_miss_pc   = Z80C_NO_PC;
+
+#if Z80C_BENCH
+  z80c_no_wait    = 0;
+  z80c_no_wait_pc = 0;
+  z80c_line_mark  = 0;
+  z80c_ram_pc     = Z80C_NO_PC;
+  z80c_last_pos   = 0;
+  z80c_ring_n     = 0;
+#endif
 
 #if LOG_ENABLE && SMS_TELEMETRY
   z80c_exec_total     = 0;
@@ -129,12 +150,18 @@ z80c_run(const z80c_entry_t *e)
 
   for(;;)
     {
-      const z80c_entry_t *next = e->fn();
+      const z80c_entry_t *next;
+
+      Z80C_BLOCK_SEEN(e->pos);
+      next = e->fn();
 
       Z80C_COUNT(z80c_exec_total);
 
-      if(sms.z80.tstates <= 0)
+#if Z80C_BENCH
+      /* The guard, on the PC: the core's loop names the address. */
+      if(Z80C_LINE_OVER())
         return;
+#endif
 
       /*
        * The successor the block rendered is trusted while the mapper has
@@ -155,6 +182,14 @@ z80c_run(const z80c_entry_t *e)
             }
         }
 
+      /*
+       * A wait is never entered from a chain: the program has arrived
+       * where it waits, and the core's loop, which finds the same entry
+       * at PC, ends the line there.
+       */
+      if(next->wait != 0UL)
+        return;
+
       e = next;
     }
 }
@@ -169,36 +204,55 @@ z80c_run(const z80c_entry_t *e)
 #define Z80C_TSTATES_A_FRAME 59736UL
 
 void
-z80c_report(uint32 z80_tenths_ms)
+z80c_report(uint32 z80_tenths_ms, uint32 frames)
 {
 #if LOG_ENABLE && SMS_TELEMETRY
   uint32 exec     = z80c_exec_total - z80c_exec_said;
   uint32 insns    = z80c_insns_total - z80c_insns_said;
   uint32 fallback = z80c_fallback_total - z80c_fallback_said;
   uint32 ram      = z80c_ram_total - z80c_ram_said;
-  uint32 cyc10    = (z80_tenths_ms * Z80C_CYCLES_PER_MS) / Z80C_TSTATES_A_FRAME;
   uint32 pct      = 0;
-
-  if(insns + fallback != 0UL)
-    pct = (uint32)(((unsigned long)insns * 100UL) / (insns + fallback));
-
-  /*
-   * The share and the ratio, whether or not a table is armed: with the
-   * interpreter alone the ratio is the interpreter's and the share is
-   * nought, which is what a reader of the two builds compares.
-   */
-  LOG_HOT(LOG_CAT_Z80,LOG_LVL_INFO,
-          ("z80c cyc/tstate=%lu.%lu translated=%lu%%",
-           (unsigned long)(cyc10 / 10UL),(unsigned long)(cyc10 % 10UL),
-           (unsigned long)pct));
+  uint32 per_frame;
+  uint32 cyc10;
 
   z80c_exec_said     = z80c_exec_total;
   z80c_insns_said    = z80c_insns_total;
   z80c_fallback_said = z80c_fallback_total;
   z80c_ram_said      = z80c_ram_total;
 
+  /*
+   * With the interpreter alone the program is still paced by T-states, and
+   * the ratio a reader holds against earlier runs is the cycles a T-state
+   * cost.
+   */
   if(!z80c_armed)
-    return;
+    {
+      cyc10 = (z80_tenths_ms * Z80C_CYCLES_PER_MS) / Z80C_TSTATES_A_FRAME;
+      LOG_HOT(LOG_CAT_Z80,LOG_LVL_INFO,
+              ("z80c cyc/tstate=%lu.%lu translated=0%%",
+               (unsigned long)(cyc10 / 10UL),(unsigned long)(cyc10 % 10UL)));
+      return;
+    }
+
+  /*
+   * With a table armed there is no T-state left to divide by: the work of
+   * a frame is the instructions it ran, translated and interpreted, and
+   * the share is divided by those. The tenths of a millisecond times the
+   * cycles of a millisecond are tenths of a cycle -- a frame of a hundred
+   * milliseconds is 12.5 million, well inside 32 bits -- and divided by
+   * the instructions of a frame, tenths of a cycle per instruction.
+   */
+  if(insns + fallback != 0UL)
+    pct = (uint32)(((unsigned long)insns * 100UL) / (insns + fallback));
+  per_frame = (frames != 0UL) ? (insns + fallback) / frames : 0UL;
+  cyc10 = (per_frame != 0UL)
+            ? (z80_tenths_ms * Z80C_CYCLES_PER_MS) / per_frame
+            : 0UL;
+  LOG_HOT(LOG_CAT_Z80,LOG_LVL_INFO,
+          ("z80c insns/frame=%lu cyc/insn=%lu.%lu translated=%lu%%",
+           (unsigned long)per_frame,
+           (unsigned long)(cyc10 / 10UL),(unsigned long)(cyc10 % 10UL),
+           (unsigned long)pct));
 
   LOG_HOT(LOG_CAT_Z80,LOG_LVL_DBG,
           ("exec=%lu insns=%lu fallback=%lu ram_exec=%lu",
@@ -206,6 +260,7 @@ z80c_report(uint32 z80_tenths_ms)
            (unsigned long)fallback,(unsigned long)ram));
 #else
   (void)z80_tenths_ms;
+  (void)frames;
 #endif
 }
 

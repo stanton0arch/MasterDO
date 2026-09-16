@@ -2,14 +2,14 @@
  * translate: reads a cartridge image on the PC and writes the C of its
  * code, for the core to run in place of interpreting it.
  *
- *   translate <rom> <out.c> [--counts <file> --budget <bytes>]
+ *   translate <rom> <out.c> [--seeds <file>] [--counts <file> --budget <bytes>]
  *
- * What it knows: the Z80 instruction set -- the length, the price, the
- * registers read and written and the semantics of every instruction of
- * the four families, unprefixed, CB, ED, DD/FD and their double prefix --
- * the shape of a cartridge image and the Sega mapper's slots. What it
- * does not know: any title, any per-game figure. Every image is treated
- * alike.
+ * What it knows: the Z80 instruction set -- the length, the registers
+ * read and written and the semantics of every instruction of the four
+ * families, unprefixed, CB, ED, DD/FD and their double prefix -- the
+ * shape of a cartridge image and the Sega mapper's slots. What it does
+ * not know: any title, any per-game figure, and any price in T-states.
+ * Every image is treated alike.
  *
  * The output (src/rom_code.c) holds one function per block, a table from
  * the block's position in the cartridge to the function, the size and the
@@ -28,9 +28,26 @@
  * the way z80_run retargets its five hot names (src/z80.c); a block
  * declares the ones it touches, loads at its entry those it reads before
  * writing them, stores at each of its exits those it has written by then,
- * and nothing else. PC, R and the T-state counter stay on the structure.
- * The compiler keeps the accounts: a register used and not declared does
- * not compile, one declared and not used is a warning the build refuses.
+ * and nothing else. PC stays on the structure. The compiler keeps the
+ * accounts: a register used and not declared does not compile, one
+ * declared and not used is a warning the build refuses.
+ *
+ * NO ACCOUNT OF TIME. A block spends no T-state, ticks no refresh
+ * register and is cut by no quota: it runs its instructions and hands
+ * back its successor, and what paces the program is WAITING
+ * (src/z80c.h). The tool marks, in the table, the blocks that start a
+ * wait: a short loop -- at most WAIT_INSNS instructions, closed by a
+ * branch back to its first -- that reads a fixed byte of the work RAM
+ * (an absolute address at or above 0xC000, or a byte through a pair the
+ * loop does not write), the status port or the line counter of the
+ * video part, and writes nothing to memory nor to a port. Arriving on
+ * such a block ends the line of the picture. A delay loop that reads
+ * nothing (djnz to itself, a pair counted down) is not a wait and runs
+ * through in one line; a halt is a wait the interpreter answers, and
+ * needs no mark. The reads of the emitted C are written Z80C_RD8 and
+ * Z80C_RD16 (src/z80c.h), so that the text of the generated file names
+ * nothing of the interpreter's clock nor of its refresh register:
+ * `grep -E 'Z80_SPEND|Z80_R|TSTATES' src/rom_code.c` finds nothing.
  *
  * A block returns its successor. When the tool knows where a block
  * leaves PC -- the linear continuation, a relative or absolute jump, a
@@ -69,37 +86,52 @@
  * address are another bank's. Emission then writes one block per start:
  * the instructions in order until the next start, an unconditional
  * transfer, a repeated block instruction, an instruction left to the
- * interpreter (the block leaves PC on it), the T-state cap, or the bank's
- * edge. A block cut by the cap makes its continuation a start; the walk
- * is repeated until no start is added.
+ * interpreter (the block leaves PC on it), the instruction table's size
+ * (MAX_INSNS), or the bank's edge. A block cut at the table's size makes
+ * its continuation a start; the walk is repeated until no start is added.
  *
- * What is left to the interpreter, and nothing else: HALT, which consumes
- * the quota without reading anything; IM n, run once at boot; LD A,R and
- * LD R,A, which read and write the refresh register the interpreter's
- * flush alone composes; and every byte the interpreter itself refuses
- * (the defaults of its ED and DD/FD dispatches). Code in work RAM is
- * interpreted by construction: it has no position.
+ * What is left to the interpreter, and nothing else: HALT, which ends
+ * the line; IM n, run once at boot; LD A,R and LD R,A, which read and
+ * write the refresh register the core holds; and every byte the
+ * interpreter itself refuses (the defaults of its ED and DD/FD
+ * dispatches).
  *
- * The cap. A block closes as soon as the sum of the DEAREST price of its
- * instructions -- the taken branch, the repeating iteration -- reaches
- * BLOCK_TSTATES, and never takes an instruction that would carry that sum
- * past BLOCK_TSTATES_MAX: the core's overrun bound (src/z80.h) rests on
- * a block never spending more than the second figure.
+ * A jump or a call into the work RAM (an address at or above 0xC000)
+ * met by the walk is counted and the first is named in the report: such
+ * a target is code without a position, which no block can hold. The
+ * walk over-approximates -- it follows both arms of every conditional
+ * and the code no run without a pad reaches -- so the tool does not
+ * refuse on it; the runners refuse the program that EXECUTES code from
+ * RAM, and the one that never waits, when they see it run
+ * (tests/z80c/sidebyside.c).
  *
- * With a file of counts -- the hits and the T-states per block a
+ * SEEDS. The walk reads no table: a program that dispatches through one
+ * (a restart followed by an index, a jump through a pair) hides its
+ * code from it, and what is hidden is interpreted and never marked as a
+ * wait. So a run of the translated table on the PC records every
+ * position the interpreter ran an instruction from, and a file of them
+ * (--seeds, written by tests/z80c/sidebyside.c) adds those positions to
+ * the starts before the walk. The same file may name a WAIT the shape
+ * above does not see ("wait <pos>"): the head of the cycle a run was
+ * found turning in without the line ending -- a loop that waits through
+ * a call it dispatches -- and the block there is marked as a wait. The
+ * scripts run the table and translate again until no run adds a
+ * position (tests/z80c/translate.sh).
+ *
+ * With a file of counts -- the hits and the instructions per block a
  * recorded run of the side-by-side check wrote (tests/z80c/sidebyside.c)
- * -- and a budget in bytes of Z80 code, the table is chosen: blocks
- * never run are left out, the others are taken by the T-states they
- * charged, dearest first, while the bytes they cover fit the budget. Blocks left out are interpreted,
- * and the successors that pointed at them are null.
+ * -- and a budget in bytes of Z80 code, the table is chosen: the blocks
+ * that start a wait are always in, blocks never run are left out, the
+ * others are taken by the instructions they ran, most first, while the
+ * bytes they cover fit the budget. Blocks left out are interpreted, and
+ * the successors that pointed at them are null.
  *
- * Lengths and costs are those of the core's own dispatch (src/z80.c, the
- * switch of z80_run and the three prefixed ones), which is the reference
- * the emitted code must agree with. The one trap is written there at
- * length: an index prefix in front of an instruction it has nothing to
+ * Lengths are those of the core's own dispatch (src/z80.c, the switch of
+ * z80_run and the three prefixed ones), which is the reference the
+ * emitted code must agree with. The one trap is written there at length:
+ * an index prefix in front of an instruction it has nothing to
  * substitute in consumes no displacement, so the instruction is two
- * bytes and not three (z80.c, Z80_DDFD_INERT); its price is the prefix's
- * four plus the instruction's own, and the refresh counter ticks twice.
+ * bytes and not three (z80.c, Z80_DDFD_INERT).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -112,25 +144,25 @@
 #define ROM_MIN      32768UL
 #define BANK_SIZE    16384UL
 
-/* The two figures of the cap: src/z80c.h, Z80C_BLOCK_TSTATES and
-   Z80C_BLOCK_TSTATES_MAX, which translate.sh reads off the header and
-   passes here, so that the two cannot drift apart. The figures below are
-   the fallback for a bare build of the tool. */
-#ifndef BLOCK_TSTATES
-#define BLOCK_TSTATES 64UL
-#endif
-#ifndef BLOCK_TSTATES_MAX
-#define BLOCK_TSTATES_MAX 80UL
-#endif
-
 /* The edge of the fixed first kilobyte of bank 0, in slot 0: a walk or a
    block that starts below it stops there (src/cart.c, cart_mapper_project:
    page 0 of the address space is never repointed, pages 1 to 15 are). */
 #define SLOT0_FIXED 1024UL
 
-/* The most instructions a block can hold: every instruction costs at
-   least four and the cap is BLOCK_TSTATES_MAX. */
-#define MAX_INSNS 32
+/* The most instructions a block holds: a block that reaches this many is
+   cut there and its continuation is a start. A size, never a time: it
+   bounds the function the compiler is handed, nothing else. */
+#define MAX_INSNS 256
+
+/* The most instructions a wait loop holds, its closing branch included:
+   the short loops a program spins in while it waits are two to six
+   instructions long (tests/z80c/probe_code.c counts them so). */
+#define WAIT_INSNS 6
+
+/* The address space the work RAM occupies: a target there is code the
+   tool cannot translate and refuses. */
+#define RAM_BASE 0xC000UL
+
 
 static unsigned char rom[ROM_CAPACITY];
 static unsigned long rom_size;
@@ -146,6 +178,7 @@ static unsigned long bank_mask;
 #define M_BLOCK 4U
 #define M_COVER 8U
 #define M_ANY   16U
+#define M_WAIT  32U /* a wait the seeds name: forced on the block there */
 static unsigned char mark[ROM_CAPACITY];
 
 /* The starts still to walk. A position enters once. */
@@ -161,8 +194,11 @@ static unsigned long n_reached;
 static unsigned long n_blocks;
 static unsigned long n_emitted;
 static unsigned long n_code_bytes;
-static unsigned long n_end_next, n_end_jump, n_end_fallback, n_end_cap, n_end_bank, n_end_repeat;
+static unsigned long n_end_next, n_end_jump, n_end_fallback, n_end_cut, n_end_bank, n_end_repeat;
 static unsigned long n_fb_halt, n_fb_im, n_fb_ld_a_r, n_fb_ld_r_a, n_fb_refused;
+static unsigned long n_waits;
+static unsigned long n_ram_targets, ram_target_addr, ram_target_from;
+static unsigned long n_seeds;
 
 /* ---- the registers ---------------------------------------------------- */
 
@@ -396,8 +432,22 @@ static void add_start(unsigned long pos)
   starts_added = 1;
 }
 
-static void add_target(unsigned long addr, unsigned long bank)
+/* A target of a jump or a call walked at position from: a start in the
+   cartridge, or, in the work RAM, code without a position -- counted,
+   the first one kept for the report, and walked no further. */
+static void add_target(unsigned long addr, unsigned long bank, unsigned long from)
 {
+  addr &= 0xFFFFUL;
+  if(addr >= RAM_BASE)
+    {
+      if(n_ram_targets == 0UL)
+        {
+          ram_target_addr = addr;
+          ram_target_from = from;
+        }
+      n_ram_targets++;
+      return;
+    }
   add_start(pos_of(addr,bank));
 }
 
@@ -561,25 +611,25 @@ static void discover(unsigned long start)
       switch(op)
         {
         case 0x18: /* jr */
-          add_target(addr_of(pos) + 2UL + (unsigned long)disp8(p[1]),bank);
+          add_target(addr_of(pos) + 2UL + (unsigned long)disp8(p[1]),bank,pos);
           return;
         case 0x10: case 0x20: case 0x28: case 0x30: case 0x38: /* djnz, jr cc */
-          add_target(addr_of(pos) + 2UL + (unsigned long)disp8(p[1]),bank);
+          add_target(addr_of(pos) + 2UL + (unsigned long)disp8(p[1]),bank,pos);
           break;
         case 0xC3: /* jp nn */
-          add_target(imm16(p + 1),bank);
+          add_target(imm16(p + 1),bank,pos);
           return;
         case 0xC2: case 0xCA: case 0xD2: case 0xDA:
         case 0xE2: case 0xEA: case 0xF2: case 0xFA: /* jp cc,nn */
-          add_target(imm16(p + 1),bank);
+          add_target(imm16(p + 1),bank,pos);
           break;
         case 0xCD: /* call nn: the callee, and the return */
-          add_target(imm16(p + 1),bank);
+          add_target(imm16(p + 1),bank,pos);
           add_start(pos + 3UL);
           return;
         case 0xC4: case 0xCC: case 0xD4: case 0xDC:
         case 0xE4: case 0xEC: case 0xF4: case 0xFC: /* call cc,nn */
-          add_target(imm16(p + 1),bank);
+          add_target(imm16(p + 1),bank,pos);
           break;
         case 0xC7: case 0xCF: case 0xD7: case 0xDF:
         case 0xE7: case 0xEF: case 0xF7: case 0xFF: /* rst */
@@ -621,9 +671,6 @@ enum kind
 typedef struct
 {
   int len;
-  unsigned long cost;     /* the price of the case, the untaken one for a branch */
-  unsigned long extra;    /* the surcharge of the taken branch or the repeat */
-  unsigned long rticks;   /* opcode reads: what the refresh counter gains */
   unsigned rd, wr;        /* the registers read and written */
   enum kind kind;
   enum fb_reason fb;
@@ -635,6 +682,14 @@ typedef struct
   int target_rel;         /* the target is relative to the entry address */
   unsigned long target_pos;
   unsigned long target_addr;
+  /* What a wait is made of (classify): whether the instruction reads a
+     fixed byte -- an absolute address in the work RAM, the status port
+     or the line counter -- or a byte through a pair, named by wait_pair,
+     which the loop must then not write; and whether it writes memory or
+     a port. */
+  int wait_read;
+  unsigned wait_pair;
+  int writes;
 } insn_t;
 
 static void set_text(insn_t *in, const char *s)
@@ -694,11 +749,9 @@ static void decode_cb(insn_t *in, unsigned cbop, const char *ixpair, unsigned ix
     {
       /* z80.c, the CB case: the operand read by the low field, the
          operation applied (z80_ops.h, Z80_CB_APPLY), the result stored
-         back by the same field. Register forms cost 8, the byte HL points
-         at 12 to test a bit and 15 to change one (z80.c, z80_cycles_cb). */
+         back by the same field. */
       if(r != 6U)
         {
-          in->cost = 8UL;
           if(fam == 0x00U)
             {
               snprintf(buf,sizeof buf,
@@ -728,27 +781,24 @@ static void decode_cb(insn_t *in, unsigned cbop, const char *ixpair, unsigned ix
         {
           if(fam == 0x00U)
             {
-              in->cost = 15UL;
               snprintf(buf,sizeof buf,
-                       "  { uint16 cbaddr = Z80_HL; uint8 cbval = Z80_RD8(cbaddr), cbres; Z80_CB_%s(cbval,cbres); Z80_WR8(cbaddr,cbres); } /* %s (hl) */",
+                       "  { uint16 cbaddr = Z80_HL; uint8 cbval = Z80C_RD8(cbaddr), cbres; Z80_CB_%s(cbval,cbres); Z80_WR8(cbaddr,cbres); } /* %s (hl) */",
                        cb_rot[op],cb_rotname[op]);
               in->rd = R_HL | cb_rot_rd[op];
               in->wr = R_F;
             }
           else if(fam == 0x40U)
             {
-              in->cost = 12UL;
               snprintf(buf,sizeof buf,
-                       "  { uint16 cbaddr = Z80_HL; uint8 cbval = Z80_RD8(cbaddr); Z80_CB_BIT(cbval,0x%02XU,(uint8)(cbaddr >> 8)); } /* bit %u,(hl) */",
+                       "  { uint16 cbaddr = Z80_HL; uint8 cbval = Z80C_RD8(cbaddr); Z80_CB_BIT(cbval,0x%02XU,(uint8)(cbaddr >> 8)); } /* bit %u,(hl) */",
                        mask,op);
               in->rd = R_HL | R_F;
               in->wr = R_F;
             }
           else
             {
-              in->cost = 15UL;
               snprintf(buf,sizeof buf,
-                       "  { uint16 cbaddr = Z80_HL; uint8 cbval = Z80_RD8(cbaddr), cbres; Z80_CB_%s(cbval,cbres,0x%02XU); Z80_WR8(cbaddr,cbres); } /* %s %u,(hl) */",
+                       "  { uint16 cbaddr = Z80_HL; uint8 cbval = Z80C_RD8(cbaddr), cbres; Z80_CB_%s(cbval,cbres,0x%02XU); Z80_WR8(cbaddr,cbres); } /* %s %u,(hl) */",
                        (fam == 0x80U) ? "RES" : "SET",mask,
                        (fam == 0x80U) ? "res" : "set",op);
               in->rd = R_HL;
@@ -762,14 +812,12 @@ static void decode_cb(insn_t *in, unsigned cbop, const char *ixpair, unsigned ix
   /* z80.c, the double prefix: the displaced byte is the operand, the
      result goes to the register the low field names or to the byte
      itself, and a bit test takes its two undocumented flags off the high
-     byte of the address. 23 T-states with a result, 20 without
-     (Z80_DDFD_CB_RMW_CYCLES, Z80_DDFD_CB_BIT_CYCLES). */
+     byte of the address. */
   ixaddr_text(ax,sizeof ax,ixpair,d);
   if(fam == 0x40U)
     {
-      in->cost = 20UL;
       snprintf(buf,sizeof buf,
-               "  { %s; uint8 cbval = Z80_RD8(ixaddr); Z80_CB_BIT(cbval,0x%02XU,(uint8)(ixaddr >> 8)); } /* bit %u,(%s+d) */",
+               "  { %s; uint8 cbval = Z80C_RD8(ixaddr); Z80_CB_BIT(cbval,0x%02XU,(uint8)(ixaddr >> 8)); } /* bit %u,(%s+d) */",
                ax,mask,op,(ixbits == R_IX) ? "ix" : "iy");
       in->rd = ixbits | R_F;
       in->wr = R_F;
@@ -778,7 +826,6 @@ static void decode_cb(insn_t *in, unsigned cbop, const char *ixpair, unsigned ix
     {
       char store[64];
 
-      in->cost = 23UL;
       if(r == 6U)
         {
           snprintf(store,sizeof store,"Z80_WR8(ixaddr,cbres)");
@@ -792,7 +839,7 @@ static void decode_cb(insn_t *in, unsigned cbop, const char *ixpair, unsigned ix
       if(fam == 0x00U)
         {
           snprintf(buf,sizeof buf,
-                   "  { %s; uint8 cbval = Z80_RD8(ixaddr), cbres; Z80_CB_%s(cbval,cbres); %s; } /* %s (%s+d)%s%s */",
+                   "  { %s; uint8 cbval = Z80C_RD8(ixaddr), cbres; Z80_CB_%s(cbval,cbres); %s; } /* %s (%s+d)%s%s */",
                    ax,cb_rot[op],store,cb_rotname[op],(ixbits == R_IX) ? "ix" : "iy",
                    (r == 6U) ? "" : ",",(r == 6U) ? "" : r8name[r]);
           in->rd = ixbits | cb_rot_rd[op];
@@ -801,7 +848,7 @@ static void decode_cb(insn_t *in, unsigned cbop, const char *ixpair, unsigned ix
       else
         {
           snprintf(buf,sizeof buf,
-                   "  { %s; uint8 cbval = Z80_RD8(ixaddr), cbres; Z80_CB_%s(cbval,cbres,0x%02XU); %s; } /* %s %u,(%s+d)%s%s */",
+                   "  { %s; uint8 cbval = Z80C_RD8(ixaddr), cbres; Z80_CB_%s(cbval,cbres,0x%02XU); %s; } /* %s %u,(%s+d)%s%s */",
                    ax,(fam == 0x80U) ? "RES" : "SET",mask,store,
                    (fam == 0x80U) ? "res" : "set",op,(ixbits == R_IX) ? "ix" : "iy",
                    (r == 6U) ? "" : ",",(r == 6U) ? "" : r8name[r]);
@@ -824,7 +871,6 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
   if((sub & 0xC7U) == 0x40U)
     {
       /* z80.c, ED 0x40..0x78: Z80_OP_IN_C, Z80_OP_IN_C_DROP. */
-      in->cost = 12UL;
       if(r == 6U)
         {
           set_text(in,"  Z80_OP_IN_C_DROP(); /* in (c) */");
@@ -843,7 +889,6 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
   if((sub & 0xC7U) == 0x41U)
     {
       /* z80.c, ED 0x41..0x79: Z80_OP_OUT_C. */
-      in->cost = 12UL;
       if(r == 6U)
         {
           set_text(in,"  Z80_OP_OUT_C(0); /* out (c),0 */");
@@ -860,7 +905,6 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
   if((sub & 0xC7U) == 0x42U)
     {
       /* z80.c, ED 0x4A/0x42 and the three others: Z80_OP_ADC_HL, Z80_OP_SBC_HL. */
-      in->cost = 15UL;
       snprintf(buf,sizeof buf,"  Z80_OP_%s_HL(%s); /* %s hl,%s */",
                (sub & 8U) ? "ADC" : "SBC",rp[q],(sub & 8U) ? "adc" : "sbc",rpname[q]);
       set_text(in,buf);
@@ -874,13 +918,12 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
          the pair, or the pair set from Z80_RD16; SP in plain. */
       unsigned long nn = imm16(p + 2);
 
-      in->cost = 20UL;
       if(sub & 8U)
         {
           if(q == 3U)
-            snprintf(buf,sizeof buf,"  Z80_SP = Z80_RD16(0x%04lXU); /* ld sp,(nn) */",nn);
+            snprintf(buf,sizeof buf,"  Z80_SP = Z80C_RD16(0x%04lXU); /* ld sp,(nn) */",nn);
           else
-            snprintf(buf,sizeof buf,"  Z80_SET_%s(Z80_RD16(0x%04lXU)); /* ld %s,(nn) */",
+            snprintf(buf,sizeof buf,"  Z80_SET_%s(Z80C_RD16(0x%04lXU)); /* ld %s,(nn) */",
                      rp[q] + 4,nn,rpname[q]);
           in->wr = rpbit[q];
         }
@@ -895,7 +938,6 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
   if((sub & 0xC7U) == 0x44U)
     {
       /* z80.c, ED 0x44 and its seven mirrors: Z80_OP_NEG. */
-      in->cost = 8UL;
       set_text(in,"  Z80_OP_NEG(); /* neg */");
       in->rd = R_A;
       in->wr = R_A | R_F;
@@ -904,7 +946,6 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
   if((sub & 0xC7U) == 0x45U)
     {
       /* z80.c, ED 0x45 and its mirrors: Z80_OP_RETN; 0x4D: Z80_OP_RETI. */
-      in->cost = 14UL;
       set_text(in,(sub == 0x4DU) ? "  Z80_OP_RETI(); /* reti */" : "  Z80_OP_RETN(); /* retn */");
       in->rd = R_SP;
       in->wr = R_SP;
@@ -915,24 +956,20 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
   switch(sub)
     {
     case 0x47: /* z80.c, ED 0x47: Z80_I = Z80_A */
-      in->cost = 9UL;
       set_text(in,"  Z80_I = Z80_A; /* ld i,a */");
       in->rd = R_A;
       return;
     case 0x57: /* z80.c, ED 0x57: Z80_OP_LD_A_I */
-      in->cost = 9UL;
       set_text(in,"  Z80_OP_LD_A_I(); /* ld a,i */");
       in->rd = R_F;
       in->wr = R_A | R_F;
       return;
     case 0x67: /* z80.c, ED 0x67: Z80_OP_RRD */
-      in->cost = 18UL;
       set_text(in,"  Z80_OP_RRD(); /* rrd */");
       in->rd = R_HL | R_A | R_F;
       in->wr = R_A | R_F;
       return;
     case 0x6F: /* z80.c, ED 0x6F: Z80_OP_RLD */
-      in->cost = 18UL;
       set_text(in,"  Z80_OP_RLD(); /* rld */");
       in->rd = R_HL | R_A | R_F;
       in->wr = R_A | R_F;
@@ -944,13 +981,11 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
        when it goes on, so PC is set past the instruction first and the
        block closes: the next block is found by the core. */
     case 0xA0: case 0xA8: case 0xB0: case 0xB8:
-      in->cost = 16UL;
       in->rd = R_A | R_F | R_BC | R_DE | R_HL;
       in->wr = R_F | R_BC | R_DE | R_HL;
       if(sub & 0x10U)
         {
           in->kind = K_REPEAT;
-          in->extra = 5UL;
           in->uses_pc0 = 1;
           snprintf(buf,sizeof buf,
                    "  Z80_PC = (uint16)(z80_pc0 + 0x%04lXU); Z80_OP_%s(); /* %s: PC past it first, the macro backs PC up when it repeats */",
@@ -961,13 +996,11 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
       set_text(in,buf);
       return;
     case 0xA1: case 0xA9: case 0xB1: case 0xB9:
-      in->cost = 16UL;
       in->rd = R_A | R_F | R_BC | R_HL;
       in->wr = R_F | R_BC | R_HL;
       if(sub & 0x10U)
         {
           in->kind = K_REPEAT;
-          in->extra = 5UL;
           in->uses_pc0 = 1;
           snprintf(buf,sizeof buf,
                    "  Z80_PC = (uint16)(z80_pc0 + 0x%04lXU); Z80_OP_%s(); /* %s: PC past it first, the macro backs PC up when it repeats */",
@@ -979,7 +1012,6 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
       return;
     case 0xA2: case 0xAA: case 0xB2: case 0xBA:
     case 0xA3: case 0xAB: case 0xB3: case 0xBB:
-      in->cost = 16UL;
       in->rd = R_F | R_BC | R_HL;
       in->wr = R_F | R_B | R_HL;
       {
@@ -991,7 +1023,6 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
         if(sub & 0x10U)
           {
             in->kind = K_REPEAT;
-            in->extra = 5UL;
             in->uses_pc0 = 1;
             snprintf(buf,sizeof buf,
                      "  Z80_PC = (uint16)(z80_pc0 + 0x%04lXU); Z80_OP_%s(); /* PC past it first, the macro backs PC up when it repeats */",
@@ -1039,13 +1070,11 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
 
   if(ddfd_inert(sub))
     {
-      /* z80.c, the inert path: the prefix charged four and left alone,
-         the byte behind it executed on the next turn as the unprefixed
-         load it is, ticking the refresh counter a second time. */
+      /* z80.c, the inert path: the prefix left alone, the byte behind it
+         executed on the next turn as the unprefixed load it is. */
       unsigned d = (sub >> 3) & 7U;
       unsigned s = sub & 7U;
 
-      in->cost = 4UL + 4UL;
       if(d == s)
         snprintf(buf,sizeof buf,"  /* %s prefix with nothing to substitute, then ld %s,%s -- no operation */",pn,r8name[d],r8name[s]);
       else
@@ -1065,7 +1094,6 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
       {
         unsigned q = (sub >> 4) & 3U;
 
-        in->cost = 15UL;
         snprintf(buf,sizeof buf,"  Z80_OP_ADD16(%s,%s,%s); /* add %s,%s */",
                  hi,lo,(q == 2U) ? pair : rp[q],pn,(q == 2U) ? pn : rpname[q]);
         in->rd = bits | R_F | ((q == 2U) ? 0U : rpbit[q]);
@@ -1074,25 +1102,21 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
       set_text(in,buf);
       return;
     case 0x21: /* z80.c, DD 0x21: the low half fetched, then the high */
-      in->cost = 14UL;
       snprintf(buf,sizeof buf,"  %s = 0x%02XU; %s = 0x%02XU; /* ld %s,nn */",lo,(unsigned)p[2],hi,(unsigned)p[3],pn);
       set_text(in,buf);
       in->wr = bits;
       return;
     case 0x22: /* z80.c, DD 0x22: Z80_WR16 of the pair */
-      in->cost = 20UL;
       snprintf(buf,sizeof buf,"  Z80_WR16(0x%04lXU,%s); /* ld (nn),%s */",imm16(p + 2),pair,pn);
       set_text(in,buf);
       in->rd = bits;
       return;
     case 0x2A: /* z80.c, DD 0x2A: the word read, the halves set */
-      in->cost = 20UL;
-      snprintf(buf,sizeof buf,"  Z80_SET_%s(Z80_RD16(0x%04lXU)); /* ld %s,(nn) */",pair + 4,imm16(p + 2),pn);
+      snprintf(buf,sizeof buf,"  Z80_SET_%s(Z80C_RD16(0x%04lXU)); /* ld %s,(nn) */",pair + 4,imm16(p + 2),pn);
       set_text(in,buf);
       in->wr = bits;
       return;
     case 0x23: case 0x2B: /* z80.c, DD 0x23/0x2B: Z80_OP_INC_PAIR, Z80_OP_DEC_PAIR */
-      in->cost = 10UL;
       snprintf(buf,sizeof buf,"  Z80_OP_%s_PAIR(%s,%s); /* %s %s */",
                (sub == 0x23U) ? "INC" : "DEC",hi,lo,(sub == 0x23U) ? "inc" : "dec",pn);
       set_text(in,buf);
@@ -1100,14 +1124,12 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
       in->wr = bits;
       return;
     case 0x26: case 0x2E: /* z80.c, DD 0x26/0x2E: a half fetched */
-      in->cost = 11UL;
       snprintf(buf,sizeof buf,"  %s = 0x%02XU; /* ld %s%c,n */",(sub == 0x26U) ? hi : lo,(unsigned)p[2],pn,(sub == 0x26U) ? 'h' : 'l');
       set_text(in,buf);
       in->wr = (sub == 0x26U) ? bhi : blo;
       return;
     case 0x24: case 0x2C: case 0x25: case 0x2D:
       /* z80.c, DD 0x24..0x2D: Z80_OP_INC_R, Z80_OP_DEC_R on a half */
-      in->cost = 8UL;
       snprintf(buf,sizeof buf,"  Z80_OP_%s_R(%s); /* %s %s%c */",
                (sub & 1U) ? "DEC" : "INC",(sub & 8U) ? lo : hi,
                (sub & 1U) ? "dec" : "inc",pn,(sub & 8U) ? 'l' : 'h');
@@ -1117,7 +1139,6 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
       return;
     case 0x34: case 0x35:
       /* z80.c, DD 0x34/0x35: Z80_FETCH_IXY_ADDR then Z80_OP_INC_MEM_AT / DEC */
-      in->cost = 23UL;
       ixaddr_text(ax,sizeof ax,pair,disp8(p[2]));
       snprintf(buf,sizeof buf,"  { %s; Z80_OP_%s_MEM_AT(ixaddr); } /* %s (%s+d) */",
                ax,(sub == 0x34U) ? "INC" : "DEC",(sub == 0x34U) ? "inc" : "dec",pn);
@@ -1126,42 +1147,36 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
       in->wr = R_F;
       return;
     case 0x36: /* z80.c, DD 0x36: the address, then the immediate, then Z80_WR8 */
-      in->cost = 19UL;
       ixaddr_text(ax,sizeof ax,pair,disp8(p[2]));
       snprintf(buf,sizeof buf,"  { %s; Z80_WR8(ixaddr,0x%02XU); } /* ld (%s+d),n */",ax,(unsigned)p[3],pn);
       set_text(in,buf);
       in->rd = bits;
       return;
     case 0xE1: /* z80.c, DD 0xE1: Z80_OP_POP on the halves */
-      in->cost = 14UL;
       snprintf(buf,sizeof buf,"  Z80_OP_POP(%s,%s); /* pop %s */",hi,lo,pn);
       set_text(in,buf);
       in->rd = R_SP;
       in->wr = R_SP | bits;
       return;
     case 0xE3: /* z80.c, DD 0xE3: Z80_OP_EX_SP_PAIR on the halves */
-      in->cost = 23UL;
       snprintf(buf,sizeof buf,"  Z80_OP_EX_SP_PAIR(%s,%s); /* ex (sp),%s */",hi,lo,pn);
       set_text(in,buf);
       in->rd = R_SP | bits;
       in->wr = bits;
       return;
     case 0xE5: /* z80.c, DD 0xE5: Z80_OP_PUSH of the pair */
-      in->cost = 15UL;
       snprintf(buf,sizeof buf,"  Z80_OP_PUSH(%s); /* push %s */",pair,pn);
       set_text(in,buf);
       in->rd = R_SP | bits;
       in->wr = R_SP;
       return;
     case 0xE9: /* z80.c, DD 0xE9: Z80_PC = pair */
-      in->cost = 8UL;
       snprintf(buf,sizeof buf,"  Z80_PC = %s; /* jp (%s) */",pair,pn);
       set_text(in,buf);
       in->rd = bits;
       in->kind = K_JUMP_LOST;
       return;
     case 0xF9: /* z80.c, DD 0xF9: Z80_SP = pair */
-      in->cost = 10UL;
       snprintf(buf,sizeof buf,"  Z80_SP = %s; /* ld sp,%s */",pair,pn);
       set_text(in,buf);
       in->rd = bits;
@@ -1181,9 +1196,8 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
 
       if(s == 6U)
         {
-          in->cost = 19UL;
           ixaddr_text(ax,sizeof ax,pair,disp8(p[2]));
-          snprintf(buf,sizeof buf,"  { %s; %s = Z80_RD8(ixaddr); } /* ld %s,(%s+d) */",ax,r8[d],r8name[d],pn);
+          snprintf(buf,sizeof buf,"  { %s; %s = Z80C_RD8(ixaddr); } /* ld %s,(%s+d) */",ax,r8[d],r8name[d],pn);
           set_text(in,buf);
           in->rd = bits;
           in->wr = r8bit[d];
@@ -1191,7 +1205,6 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
         }
       if(d == 6U)
         {
-          in->cost = 19UL;
           ixaddr_text(ax,sizeof ax,pair,disp8(p[2]));
           snprintf(buf,sizeof buf,"  { %s; Z80_WR8(ixaddr,%s); } /* ld (%s+d),%s */",ax,r8[s],pn,r8name[s]);
           set_text(in,buf);
@@ -1204,7 +1217,6 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
         unsigned db = (d == 4U) ? bhi : (d == 5U) ? blo : r8bit[d];
         unsigned sb = (s == 4U) ? bhi : (s == 5U) ? blo : r8bit[s];
 
-        in->cost = 8UL;
         if(d == s)
           snprintf(buf,sizeof buf,"  /* ld %s%c,%s%c -- no operation */",pn,(d == 4U) ? 'h' : 'l',pn,(d == 4U) ? 'h' : 'l');
         else
@@ -1228,15 +1240,13 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
 
       if(s == 6U)
         {
-          in->cost = 19UL;
           ixaddr_text(ax,sizeof ax,pair,disp8(p[2]));
-          snprintf(opnd,sizeof opnd,alu_fmt[a],"Z80_RD8(ixaddr)");
+          snprintf(opnd,sizeof opnd,alu_fmt[a],"Z80C_RD8(ixaddr)");
           snprintf(buf,sizeof buf,"  { %s; %s; } /* %s (%s+d) */",ax,opnd,alu_name[a],pn);
           in->rd = bits | alu_rd[a];
         }
       else
         {
-          in->cost = 8UL;
           snprintf(opnd,sizeof opnd,alu_fmt[a],(s == 4U) ? hi : lo);
           snprintf(buf,sizeof buf,"  %s; /* %s %s%c */",opnd,alu_name[a],pn,(s == 4U) ? 'h' : 'l');
           in->rd = ((s == 4U) ? bhi : blo) | alu_rd[a];
@@ -1250,17 +1260,27 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
   in->fb = FB_REFUSED;
 }
 
+static void decode_form(const unsigned char *p, unsigned long start, unsigned long off,
+                        unsigned long avail, insn_t *in);
+static void classify(insn_t *in);
+
 /* Decodes the instruction at p, at offset off in the block that starts
-   at start, with avail bytes readable. */
+   at start, with avail bytes readable, and classifies it. */
 static void decode(const unsigned char *p, unsigned long start, unsigned long off,
                    unsigned long avail, insn_t *in)
+{
+  decode_form(p,start,off,avail,in);
+  classify(in);
+}
+
+static void decode_form(const unsigned char *p, unsigned long start, unsigned long off,
+                        unsigned long avail, insn_t *in)
 {
   unsigned op = p[0];
   char buf[512];
 
   memset(in,0,sizeof *in);
   in->len = insn_len(p,avail);
-  in->rticks = 1UL;
   in->kind = K_PLAIN;
 
   in->fb = fallback_reason(p,avail);
@@ -1272,19 +1292,16 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
 
   if(op == 0xCBU)
     {
-      in->rticks = 2UL;
       decode_cb(in,p[1],NULL,0U,0L);
       return;
     }
   if(op == 0xEDU)
     {
-      in->rticks = 2UL;
       decode_ed(in,p,start,off);
       return;
     }
   if(op == 0xDDU || op == 0xFDU)
     {
-      in->rticks = 2UL;
       decode_ddfd(in,p,start,off);
       return;
     }
@@ -1298,20 +1315,17 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
 
       if(d == 6U)
         {
-          in->cost = 7UL;
           snprintf(buf,sizeof buf,"  Z80_WR8(Z80_HL,%s); /* ld (hl),%s */",r8[s],r8name[s]);
           in->rd = R_HL | r8bit[s];
         }
       else if(s == 6U)
         {
-          in->cost = 7UL;
-          snprintf(buf,sizeof buf,"  %s = Z80_RD8(Z80_HL); /* ld %s,(hl) */",r8[d],r8name[d]);
+          snprintf(buf,sizeof buf,"  %s = Z80C_RD8(Z80_HL); /* ld %s,(hl) */",r8[d],r8name[d]);
           in->rd = R_HL;
           in->wr = r8bit[d];
         }
       else
         {
-          in->cost = 4UL;
           if(d == s)
             snprintf(buf,sizeof buf,"  /* ld %s,%s -- no operation */",r8name[d],r8name[s]);
           else
@@ -1335,13 +1349,11 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
 
       if(s == 6U)
         {
-          in->cost = 7UL;
-          snprintf(opnd,sizeof opnd,alu_fmt[a],"Z80_RD8(Z80_HL)");
+          snprintf(opnd,sizeof opnd,alu_fmt[a],"Z80C_RD8(Z80_HL)");
           in->rd = R_HL | alu_rd[a];
         }
       else
         {
-          in->cost = 4UL;
           snprintf(opnd,sizeof opnd,alu_fmt[a],r8[s]);
           in->rd = r8bit[s] | alu_rd[a];
         }
@@ -1358,7 +1370,6 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
       char imm[16];
       char opnd[64];
 
-      in->cost = 7UL;
       snprintf(imm,sizeof imm,"0x%02XU",(unsigned)p[1]);
       snprintf(opnd,sizeof opnd,alu_fmt[a],imm);
       snprintf(buf,sizeof buf,"  %s; /* %s n */",opnd,alu_name[a]);
@@ -1375,13 +1386,11 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
 
       if(d == 6U)
         {
-          in->cost = 10UL;
           snprintf(buf,sizeof buf,"  Z80_WR8(Z80_HL,0x%02XU); /* ld (hl),n */",(unsigned)p[1]);
           in->rd = R_HL;
         }
       else
         {
-          in->cost = 7UL;
           snprintf(buf,sizeof buf,"  %s = 0x%02XU; /* ld %s,n */",r8[d],(unsigned)p[1],r8name[d]);
           in->wr = r8bit[d];
         }
@@ -1396,14 +1405,12 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
 
       if(d == 6U)
         {
-          in->cost = 11UL;
           snprintf(buf,sizeof buf,"  Z80_OP_%s_MEM(); /* %s (hl) */",(op & 1U) ? "DEC" : "INC",(op & 1U) ? "dec" : "inc");
           in->rd = R_HL | R_F;
           in->wr = R_F;
         }
       else
         {
-          in->cost = 4UL;
           snprintf(buf,sizeof buf,"  Z80_OP_%s_R(%s); /* %s %s */",(op & 1U) ? "DEC" : "INC",r8[d],(op & 1U) ? "dec" : "inc",r8name[d]);
           in->rd = r8bit[d] | R_F;
           in->wr = r8bit[d] | R_F;
@@ -1417,7 +1424,6 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
     {
       unsigned q = (op >> 4) & 3U;
 
-      in->cost = 10UL;
       if(q == 3U)
         snprintf(buf,sizeof buf,"  Z80_SP = 0x%04lXU; /* ld sp,nn */",imm16(p + 1));
       else
@@ -1430,7 +1436,6 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
     {
       unsigned q = (op >> 4) & 3U;
 
-      in->cost = 6UL;
       if(q == 3U)
         snprintf(buf,sizeof buf,"  Z80_SP = (uint16)(Z80_SP %c 1); /* %s sp */",(op & 8U) ? '-' : '+',(op & 8U) ? "dec" : "inc");
       else
@@ -1444,7 +1449,6 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
     {
       unsigned q = (op >> 4) & 3U;
 
-      in->cost = 11UL;
       snprintf(buf,sizeof buf,"  Z80_OP_ADD_HL(%s); /* add hl,%s */",rp[q],rpname[q]);
       in->rd = R_HL | R_F | rpbit[q];
       in->wr = R_HL | R_F;
@@ -1454,13 +1458,11 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
 
   /* The conditional forms (z80.c, the conditional branches: Z80_OP_JR_CC,
      Z80_OP_JP_CC, Z80_OP_CALL_CC, Z80_OP_RET_CC), each as a test and a
-     taken exit charging its surcharge; the untaken path falls through. */
+     taken exit; the untaken path falls through. */
   if((op & 0xE7U) == 0x20U)
     {
       unsigned c = (op >> 3) & 3U;
 
-      in->cost = 7UL;
-      in->extra = 5UL;
       in->kind = K_COND;
       in->rd = R_F;
       set_text(in,"");
@@ -1474,7 +1476,6 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
     {
       unsigned c = (op >> 3) & 7U;
 
-      in->cost = 10UL;
       in->kind = K_COND;
       in->rd = R_F;
       set_text(in,"");
@@ -1487,8 +1488,6 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
     {
       unsigned c = (op >> 3) & 7U;
 
-      in->cost = 10UL;
-      in->extra = 7UL;
       in->kind = K_COND;
       in->rd = R_F | R_SP;
       in->wr = R_SP;
@@ -1505,8 +1504,6 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
     {
       unsigned c = (op >> 3) & 7U;
 
-      in->cost = 5UL;
-      in->extra = 6UL;
       in->kind = K_COND;
       in->rd = R_F | R_SP;
       in->wr = R_SP;
@@ -1519,7 +1516,6 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
     {
       /* z80.c, cases 0xC7..0xFF: Z80_OP_RST, the return address being the
          byte after the opcode, folded from the entry address. */
-      in->cost = 11UL;
       in->kind = K_JUMP;
       in->rd = R_SP;
       in->wr = R_SP;
@@ -1535,7 +1531,6 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
       /* z80.c, cases 0xC1..0xF1: Z80_OP_POP into the halves, AF last. */
       unsigned q = (op >> 4) & 3U;
 
-      in->cost = 10UL;
       if(q == 3U)
         {
           set_text(in,"  Z80_OP_POP(Z80_A,Z80_F); /* pop af */");
@@ -1555,7 +1550,6 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
       /* z80.c, cases 0xC5..0xF5: Z80_OP_PUSH of the pair, AF last. */
       unsigned q = (op >> 4) & 3U;
 
-      in->cost = 11UL;
       if(q == 3U)
         {
           set_text(in,"  Z80_OP_PUSH(Z80_AF); /* push af */");
@@ -1574,55 +1568,46 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
   switch(op)
     {
     case 0x00: /* z80.c, case 0x00 */
-      in->cost = 4UL;
       set_text(in,"  /* nop */");
       return;
     case 0x02: case 0x12: /* z80.c, cases 0x02/0x12: Z80_WR8 through the pair */
-      in->cost = 7UL;
       snprintf(buf,sizeof buf,"  Z80_WR8(%s,Z80_A); /* ld (%s),a */",rp[op >> 4],rpname[op >> 4]);
       set_text(in,buf);
       in->rd = rpbit[op >> 4] | R_A;
       return;
     case 0x0A: case 0x1A: /* z80.c, cases 0x0A/0x1A: Z80_RD8 through the pair */
-      in->cost = 7UL;
-      snprintf(buf,sizeof buf,"  Z80_A = Z80_RD8(%s); /* ld a,(%s) */",rp[op >> 4],rpname[op >> 4]);
+      snprintf(buf,sizeof buf,"  Z80_A = Z80C_RD8(%s); /* ld a,(%s) */",rp[op >> 4],rpname[op >> 4]);
       set_text(in,buf);
       in->rd = rpbit[op >> 4];
       in->wr = R_A;
       return;
     case 0x22: /* z80.c, case 0x22: Z80_WR16 of HL at nn */
-      in->cost = 16UL;
       snprintf(buf,sizeof buf,"  Z80_WR16(0x%04lXU,Z80_HL); /* ld (nn),hl */",imm16(p + 1));
       set_text(in,buf);
       in->rd = R_HL;
       return;
     case 0x2A: /* z80.c, case 0x2A: HL set from Z80_RD16 at nn */
-      in->cost = 16UL;
-      snprintf(buf,sizeof buf,"  Z80_SET_HL(Z80_RD16(0x%04lXU)); /* ld hl,(nn) */",imm16(p + 1));
+      snprintf(buf,sizeof buf,"  Z80_SET_HL(Z80C_RD16(0x%04lXU)); /* ld hl,(nn) */",imm16(p + 1));
       set_text(in,buf);
       in->wr = R_HL;
       return;
     case 0x32: /* z80.c, case 0x32: Z80_WR8 of A at nn */
-      in->cost = 13UL;
       snprintf(buf,sizeof buf,"  Z80_WR8(0x%04lXU,Z80_A); /* ld (nn),a */",imm16(p + 1));
       set_text(in,buf);
       in->rd = R_A;
       return;
     case 0x3A: /* z80.c, case 0x3A: A from Z80_RD8 at nn */
-      in->cost = 13UL;
-      snprintf(buf,sizeof buf,"  Z80_A = Z80_RD8(0x%04lXU); /* ld a,(nn) */",imm16(p + 1));
+      snprintf(buf,sizeof buf,"  Z80_A = Z80C_RD8(0x%04lXU); /* ld a,(nn) */",imm16(p + 1));
       set_text(in,buf);
       in->wr = R_A;
       return;
     case 0xF9: /* z80.c, case 0xF9 */
-      in->cost = 6UL;
       set_text(in,"  Z80_SP = Z80_HL; /* ld sp,hl */");
       in->rd = R_HL;
       in->wr = R_SP;
       return;
     case 0x07: case 0x0F: case 0x17: case 0x1F:
       /* z80.c, cases 0x07..0x1F: Z80_OP_RLCA, RRCA, RLA, RRA */
-      in->cost = 4UL;
       {
         static const char *rot[4] = { "RLCA", "RRCA", "RLA", "RRA" };
 
@@ -1633,32 +1618,26 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
       in->wr = R_A | R_F;
       return;
     case 0x27: /* z80.c, case 0x27: Z80_OP_DAA */
-      in->cost = 4UL;
       set_text(in,"  Z80_OP_DAA();");
       in->rd = R_A | R_F;
       in->wr = R_A | R_F;
       return;
     case 0x2F: /* z80.c, case 0x2F: Z80_OP_CPL */
-      in->cost = 4UL;
       set_text(in,"  Z80_OP_CPL();");
       in->rd = R_A | R_F;
       in->wr = R_A | R_F;
       return;
     case 0x37: /* z80.c, case 0x37: Z80_OP_SCF */
-      in->cost = 4UL;
       set_text(in,"  Z80_OP_SCF();");
       in->rd = R_A | R_F;
       in->wr = R_F;
       return;
     case 0x3F: /* z80.c, case 0x3F: Z80_OP_CCF */
-      in->cost = 4UL;
       set_text(in,"  Z80_OP_CCF();");
       in->rd = R_A | R_F;
       in->wr = R_F;
       return;
     case 0x10: /* z80.c, case 0x10: Z80_OP_DJNZ, the counter stepped then tested */
-      in->cost = 8UL;
-      in->extra = 5UL;
       in->kind = K_COND;
       in->rd = R_B;
       in->wr = R_B;
@@ -1669,34 +1648,29 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
                in->target_addr,disp8(p[1]));
       return;
     case 0x18: /* z80.c, case 0x18: Z80_OP_JR, the target folded */
-      in->cost = 12UL;
       in->kind = K_JUMP;
       set_rel_target(in,start,off,disp8(p[1]));
       snprintf(buf,sizeof buf,"  Z80_PC = (uint16)(z80_pc0 + 0x%04lXU); /* jr %ld */",in->target_addr,disp8(p[1]));
       set_text(in,buf);
       return;
     case 0xC3: /* z80.c, case 0xC3: Z80_OP_JP, the target folded */
-      in->cost = 10UL;
       in->kind = K_JUMP;
       set_abs_target(in,start,imm16(p + 1));
       snprintf(buf,sizeof buf,"  Z80_PC = 0x%04lXU; /* jp nn */",in->target_addr);
       set_text(in,buf);
       return;
     case 0xE9: /* z80.c, case 0xE9 */
-      in->cost = 4UL;
       in->kind = K_JUMP_LOST;
       set_text(in,"  Z80_PC = Z80_HL; /* jp (hl) */");
       in->rd = R_HL;
       return;
     case 0xC9: /* z80.c, case 0xC9: Z80_OP_RET */
-      in->cost = 10UL;
       in->kind = K_JUMP_LOST;
       set_text(in,"  Z80_OP_RET(); /* ret */");
       in->rd = R_SP;
       in->wr = R_SP;
       return;
     case 0xCD: /* z80.c, case 0xCD: Z80_OP_CALL, the return address folded */
-      in->cost = 17UL;
       in->kind = K_JUMP;
       in->rd = R_SP;
       in->wr = R_SP;
@@ -1707,47 +1681,39 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
       set_text(in,buf);
       return;
     case 0x08: /* z80.c, case 0x08: Z80_OP_EX_AF */
-      in->cost = 4UL;
       set_text(in,"  Z80_OP_EX_AF();");
       in->rd = R_A | R_F;
       in->wr = R_A | R_F;
       return;
     case 0xD9: /* z80.c, case 0xD9: Z80_OP_EXX */
-      in->cost = 4UL;
       set_text(in,"  Z80_OP_EXX();");
       in->rd = R_BC | R_DE | R_HL;
       in->wr = R_BC | R_DE | R_HL;
       return;
     case 0xE3: /* z80.c, case 0xE3: Z80_OP_EX_SP_HL */
-      in->cost = 19UL;
       set_text(in,"  Z80_OP_EX_SP_HL();");
       in->rd = R_SP | R_HL;
       in->wr = R_HL;
       return;
     case 0xEB: /* z80.c, case 0xEB: Z80_OP_EX_DE_HL */
-      in->cost = 4UL;
       set_text(in,"  Z80_OP_EX_DE_HL();");
       in->rd = R_DE | R_HL;
       in->wr = R_DE | R_HL;
       return;
     case 0xD3: /* z80.c, case 0xD3: z80_io_write of A at the port */
-      in->cost = 11UL;
       snprintf(buf,sizeof buf,"  z80_io_write(0x%02XU,Z80_A); /* out (n),a */",(unsigned)p[1]);
       set_text(in,buf);
       in->rd = R_A;
       return;
     case 0xDB: /* z80.c, case 0xDB: A from z80_io_read of the port */
-      in->cost = 11UL;
       snprintf(buf,sizeof buf,"  Z80_A = z80_io_read(0x%02XU); /* in a,(n) */",(unsigned)p[1]);
       set_text(in,buf);
       in->wr = R_A;
       return;
     case 0xF3: /* z80.c, case 0xF3: Z80_OP_DI */
-      in->cost = 4UL;
       set_text(in,"  Z80_OP_DI();");
       return;
     case 0xFB: /* z80.c, case 0xFB: Z80_OP_EI */
-      in->cost = 4UL;
       set_text(in,"  Z80_OP_EI();");
       return;
     default:
@@ -1760,10 +1726,97 @@ static void decode(const unsigned char *p, unsigned long start, unsigned long of
   exit(2);
 }
 
+/* Whether the port an IN A,(n) reads is one a program waits on: the V
+   counter (the even ports of the second quarter) or the status of the
+   video part (the odd ports of the third), as src/cart.h decodes them.
+   The data port, read in the same quarter, moves the address of the
+   video part and is no wait. */
+static int wait_port(unsigned port)
+{
+  unsigned quarter = (port >> 6) & 3U;
+
+  if(quarter == 1U)
+    return (port & 1U) == 0U;
+  if(quarter == 2U)
+    return (port & 1U) != 0U;
+  return 0;
+}
+
+/* What the emitted text of a decoded instruction tells of a wait, read
+   off the forms this file writes: the reads (Z80C_RD8, Z80C_RD16, and
+   z80_io_read of an immediate port; a read through cbaddr is a read
+   through HL, the bit test on (hl)) and the writes (Z80_WR8, Z80_WR16,
+   the push, the exchange with the stack, the read-modify-write forms,
+   the block moves and the port writes). The forms are this file's own,
+   so a new form that reads or writes is added here as it is added
+   above. A K_COND instruction's taken exit is part of it: a jr cc or jp
+   cc back to the start closes the loop, and a call cc taken LEAVES the
+   loop -- its push is on the taken exit, which is the way out, not a
+   write of the loop -- so a conditional call inside a wait loop is
+   judged by its untaken arm, and the loop is a wait if the rest is. */
+static void classify(insn_t *in)
+{
+  static const char *const write_forms[] =
+  {
+    "Z80_WR8(", "Z80_WR16(", "Z80_OP_PUSH(", "Z80_OP_EX_SP", "_MEM_AT(",
+    "_MEM(", "Z80_OP_LDI", "Z80_OP_LDD", "Z80_OP_INI", "Z80_OP_IND",
+    "Z80_OP_RRD", "Z80_OP_RLD", "z80_io_write(", "Z80_OP_OUT", NULL
+  };
+  const char *texts[2];
+  const char *const *w;
+  int t;
+
+  in->wait_read = 0;
+  in->wait_pair = 0U;
+  in->writes = 0;
+  if(in->kind == K_FALLBACK)
+    return;
+  texts[0] = in->text;
+  texts[1] = in->taken;
+  for(t = 0; t < 2; t++)
+    {
+      const char *x = texts[t];
+      const char *r;
+
+      /* The taken exit of a conditional call leaves the loop: what it
+         pushes is not written inside it. */
+      if(t == 1 && in->kind == K_COND && strstr(x,"Z80_OP_CALL") != NULL)
+        ;
+      else
+        for(w = write_forms; *w != NULL; w++)
+          if(strstr(x,*w) != NULL)
+            in->writes = 1;
+
+      r = strstr(x,"Z80C_RD8(");
+      if(r == NULL)
+        r = strstr(x,"Z80C_RD16(");
+      if(r != NULL)
+        {
+          r = strchr(r,'(') + 1;
+          if(strncmp(r,"0x",2) == 0)
+            {
+              if(strtoul(r,NULL,16) >= RAM_BASE)
+                in->wait_read = 1;
+            }
+          else if(strncmp(r,"Z80_HL",6) == 0 || strncmp(r,"cbaddr",6) == 0)
+            in->wait_pair = R_HL;
+          else if(strncmp(r,"Z80_BC",6) == 0)
+            in->wait_pair = R_BC;
+          else if(strncmp(r,"Z80_DE",6) == 0)
+            in->wait_pair = R_DE;
+          else if(strncmp(r,"ixaddr",6) == 0)
+            in->wait_pair = (strstr(x,"(uint32)Z80_IX") != NULL) ? R_IX : R_IY;
+        }
+      r = strstr(x,"z80_io_read(0x");
+      if(r != NULL && wait_port((unsigned)strtoul(r + 12,NULL,16)))
+        in->wait_read = 1;
+    }
+}
+
 /* ---- blocks ---------------------------------------------------------- */
 
 /* Why a block closed. */
-enum end_kind { END_NEXT, END_JUMP, END_FALLBACK, END_CAP, END_BANK, END_REPEAT };
+enum end_kind { END_NEXT, END_JUMP, END_FALLBACK, END_CUT, END_BANK, END_REPEAT };
 
 typedef struct
 {
@@ -1772,14 +1825,56 @@ typedef struct
   int n;
   insn_t ins[MAX_INSNS];
   enum end_kind kind;
-  unsigned long sum;      /* the base price of the whole block */
-  unsigned long summax;   /* the dearest price of the whole block */
   unsigned loaded;        /* registers read before being written */
   unsigned written;       /* registers written anywhere in the block */
+  int wait;               /* the block starts a loop the program waits in */
 } block_t;
 
-/* Scans the block that starts at a position: the instructions it holds
-   and why it closes. Adds the starts a cap or a fallback creates. */
+/* Whether the block starts a wait: among its first WAIT_INSNS
+   instructions, a branch back to the block's own start closes a loop
+   that reads a fixed byte -- an absolute one, or one through a pair no
+   instruction of the loop writes -- and writes nothing to memory nor to
+   a port. The loop is the instructions from the start to that branch,
+   the branch included; an unconditional transfer elsewhere, a lost
+   target or a repeat met first means no loop closes on the start. */
+static int wait_of(const block_t *b)
+{
+  int i, j;
+  int n = (b->n < WAIT_INSNS) ? b->n : WAIT_INSNS;
+  unsigned written = 0;
+
+  for(i = 0; i < n; i++)
+    {
+      const insn_t *in = &b->ins[i];
+      int closes = (in->kind == K_COND || in->kind == K_JUMP) &&
+                   in->target_known && in->target_pos == b->start;
+
+      written |= in->wr;
+      if(closes)
+        {
+          for(j = 0; j <= i; j++)
+            if(b->ins[j].writes)
+              return 0;
+          for(j = 0; j <= i; j++)
+            {
+              const insn_t *r = &b->ins[j];
+
+              if(r->wait_read)
+                return 1;
+              if(r->wait_pair != 0U && (r->wait_pair & written) == 0U)
+                return 1;
+            }
+          return 0;
+        }
+      if(in->kind == K_JUMP || in->kind == K_JUMP_LOST || in->kind == K_REPEAT)
+        return 0;
+    }
+  return 0;
+}
+
+/* Scans the block that starts at a position: the instructions it holds,
+   why it closes and whether it starts a wait. Adds the starts a cut or a
+   fallback creates. */
 static void scan_block(unsigned long start, block_t *b)
 {
   unsigned long bank = start / BANK_SIZE;
@@ -1791,10 +1886,9 @@ static void scan_block(unsigned long start, block_t *b)
 
   b->start = start;
   b->n = 0;
-  b->sum = 0;
-  b->summax = 0;
   b->loaded = 0;
   b->written = 0;
+  b->wait = 0;
   b->kind = END_BANK;
 
   for(;;)
@@ -1819,10 +1913,13 @@ static void scan_block(unsigned long start, block_t *b)
           break;
         }
 
+      /* The instruction table is full: the block is cut here, and the
+         instruction it could not take starts the next one. */
       if(b->n >= MAX_INSNS)
         {
-          fprintf(stderr,"translate: a block outgrew its instruction table\n");
-          exit(2);
+          b->kind = END_CUT;
+          add_start(pos);
+          break;
         }
       in = &b->ins[b->n];
       decode(rom + pos,start,pos - start,end - pos,in);
@@ -1834,18 +1931,7 @@ static void scan_block(unsigned long start, block_t *b)
           break;
         }
 
-      /* The cap, on the dearest price: an instruction that would carry
-         the sum past the ceiling is left to the next block. */
-      if(b->summax + in->cost + in->extra > BLOCK_TSTATES_MAX)
-        {
-          b->kind = END_CAP;
-          add_start(pos);
-          break;
-        }
-
       b->n++;
-      b->sum += in->cost;
-      b->summax += in->cost + in->extra;
       b->loaded |= in->rd & ~b->written;
       b->written |= in->wr;
       pos += (unsigned long)len;
@@ -1860,16 +1946,15 @@ static void scan_block(unsigned long start, block_t *b)
           b->kind = END_REPEAT;
           break;
         }
-      if(b->summax >= BLOCK_TSTATES)
-        {
-          b->kind = END_CAP;
-          if(pos < end)
-            add_start(pos);
-          break;
-        }
     }
 
   b->end = pos;
+  b->wait = (b->n > 0) && (wait_of(b) || (mark[start] & M_WAIT) != 0U);
+  /* A wait the seeds name on a block of no instruction -- the position
+     holds something the interpreter keeps -- carries no flag: the line
+     there ends only if the interpreter's own wait ends it. */
+  if(b->n == 0 && (mark[start] & M_WAIT) != 0U)
+    fprintf(stderr,"translate: wait at %06lx is a fallback, not marked\n",start);
 }
 
 /* The blocks of the table being written, in position order, and the
@@ -1878,9 +1963,9 @@ typedef struct
 {
   unsigned long pos;
   unsigned long bytes;    /* the bytes it covers */
-  unsigned long sum;      /* its base price */
   unsigned long hits;     /* from the counts file, when there is one */
-  unsigned long weight;   /* the T-states it charged over the recorded run */
+  unsigned long weight;   /* the instructions it ran over the recorded run */
+  int wait;               /* it starts a wait: always in the table */
   int selected;
   long index;             /* its index in the written table, when selected */
 } blockinfo_t;
@@ -1909,9 +1994,29 @@ static long table_index(unsigned long pos)
   return -1L;
 }
 
+/* Whether the block at a position starts a wait, as the block list
+   holds it. */
+static int blocks_wait_at(unsigned long pos)
+{
+  unsigned long lo = 0, hi = nblocks;
+
+  while(lo < hi)
+    {
+      unsigned long mid = lo + ((hi - lo) >> 1);
+
+      if(blocks[mid].pos < pos)
+        lo = mid + 1;
+      else
+        hi = mid;
+    }
+  return (lo < nblocks && blocks[lo].pos == pos) ? blocks[lo].wait : 0;
+}
+
 /* One block's C, accumulated before its head is written: whether the
-   entry address is used decides whether the local is declared at all. */
-static char body[32768];
+   entry address is used decides whether the local is declared at all.
+   Sized for MAX_INSNS instructions of the longest form, each with an
+   exit of its own. */
+static char body[MAX_INSNS * 1024];
 static size_t body_n;
 static int uses_pc0;
 
@@ -1982,32 +2087,21 @@ static void emit_stores(unsigned written, const char *indent)
       }
 }
 
-/* The tail of an exit: the refresh counter ticked once per opcode read,
-   the T-states spent, the instructions counted. */
-static void emit_tail(long k, unsigned long rticks, unsigned long spend, unsigned long extra,
-                      int insns, const char *indent)
+/* The tail of an exit: the instructions run to it, counted for the
+   telemetry and for the block's own count (src/z80c.h). */
+static void emit_tail(long k, int insns, const char *indent)
 {
   char line[192];
 
-  snprintf(line,sizeof line,"%sZ80_R = (uint8)((Z80_R & 0x80U) | ((Z80_R + %luU) & 0x7FU));\n",indent,rticks);
-  emit(line);
-  /* The surcharge of a taken branch stays a separate term, so that it
-     reads as the case's literal plus the operation's surcharge. */
-  if(extra != 0UL)
-    snprintf(line,sizeof line,"%sZ80_SPEND(%lu + %lu);\n",indent,spend,extra);
-  else
-    snprintf(line,sizeof line,"%sZ80_SPEND(%lu);\n",indent,spend);
-  emit(line);
   snprintf(line,sizeof line,"%sZ80C_INSNS(%d);\n",indent,insns);
   emit(line);
-  snprintf(line,sizeof line,"%sZ80C_SPENT(%ld,%lu);\n",indent,k,spend + extra);
+  snprintf(line,sizeof line,"%sZ80C_RAN(%ld,%d);\n",indent,k,insns);
   emit(line);
 }
 
 /* Writes the block at index k of the table. */
 static void emit_block(FILE *out, const block_t *b, long k)
 {
-  unsigned long sum = 0, rticks = 0;
   unsigned written = 0;
   int i;
   char line[1024];
@@ -2031,8 +2125,6 @@ static void emit_block(FILE *out, const block_t *b, long k)
           emit(in->text);
           emit("\n");
         }
-      sum += in->cost;
-      rticks += in->rticks;
       written |= in->wr;
 
       if(in->kind == K_COND)
@@ -2041,7 +2133,7 @@ static void emit_block(FILE *out, const block_t *b, long k)
           snprintf(line,sizeof line,"  if(%s)\n    {\n      %s\n",in->cond,in->taken);
           emit(line);
           emit_stores(written,"      ");
-          emit_tail(k,rticks,sum,in->extra,i + 1,"      ");
+          emit_tail(k,i + 1,"      ");
           snprintf(line,sizeof line,"      return %s;\n    }\n",succ);
           emit(line);
         }
@@ -2055,17 +2147,17 @@ static void emit_block(FILE *out, const block_t *b, long k)
                (b->end - b->start) & 0xFFFFUL,
                (b->kind == END_NEXT) ? "next block" :
                (b->kind == END_FALLBACK) ? "fallback: interpreted from here" :
-               (b->kind == END_CAP) ? "cap" : "bank edge");
+               (b->kind == END_CUT) ? "cut" : "bank edge");
       emit(line);
       uses_pc0 = 1;
     }
   emit_stores(written,"  ");
-  emit_tail(k,rticks,sum,0UL,b->n,"  ");
+  emit_tail(k,b->n,"  ");
 
   switch(b->kind)
     {
     case END_NEXT:
-    case END_CAP:
+    case END_CUT:
       {
         long kn = table_index(b->end);
 
@@ -2115,11 +2207,11 @@ static void emit_block(FILE *out, const block_t *b, long k)
 /* ---- the counts and the choice --------------------------------------- */
 
 static unsigned long counts_frames;
-static unsigned long counts_tstates;
+static unsigned long counts_insns;
 
 /* Reads the counts a recorded run wrote: a header line, then one line
-   per block -- its position, how often it was entered, the T-states its
-   exits charged. Positions with no block are ignored; a malformed file
+   per block -- its position, how often it was entered, the instructions
+   its exits ran. Positions with no block are ignored; a malformed file
    is refused. */
 static void read_counts(const char *path)
 {
@@ -2132,17 +2224,17 @@ static void read_counts(const char *path)
       exit(2);
     }
   if(fgets(line,sizeof line,f) == NULL ||
-     sscanf(line,"z80c-counts frames=%lu tstates=%lu",&counts_frames,&counts_tstates) != 2)
+     sscanf(line,"z80c-counts frames=%lu insns=%lu",&counts_frames,&counts_insns) != 2)
     {
       fprintf(stderr,"translate: %s is not a counts file\n",path);
       exit(2);
     }
   while(fgets(line,sizeof line,f) != NULL)
     {
-      unsigned long pos, hits, tstates;
+      unsigned long pos, hits, ran;
       unsigned long lo = 0, hi = nblocks;
 
-      if(sscanf(line,"%lx %lu %lu",&pos,&hits,&tstates) != 3)
+      if(sscanf(line,"%lx %lu %lu",&pos,&hits,&ran) != 3)
         {
           fprintf(stderr,"translate: bad line in %s: %s",path,line);
           exit(2);
@@ -2159,8 +2251,52 @@ static void read_counts(const char *path)
       if(lo < nblocks && blocks[lo].pos == pos)
         {
           blocks[lo].hits = hits;
-          blocks[lo].weight = tstates;
+          blocks[lo].weight = ran;
         }
+    }
+  fclose(f);
+}
+
+/* Reads the seeds a run wrote (tests/z80c/sidebyside.c): a header naming
+   the ROM, which must be this one, then one position per line, each
+   made a start. A malformed file, or another ROM's, is refused. */
+static void read_seeds(const char *path, unsigned long fnv)
+{
+  FILE *f = fopen(path,"r");
+  char line[128];
+  unsigned long bytes, seeds_fnv;
+
+  if(f == NULL)
+    {
+      fprintf(stderr,"translate: cannot open the seeds %s\n",path);
+      exit(2);
+    }
+  if(fgets(line,sizeof line,f) == NULL ||
+     sscanf(line,"z80c-seeds rom_bytes=%lu rom_fnv=%lx",&bytes,&seeds_fnv) != 2)
+    {
+      fprintf(stderr,"translate: %s is not a seeds file\n",path);
+      exit(2);
+    }
+  if(bytes != rom_size || seeds_fnv != fnv)
+    {
+      fprintf(stderr,"translate: the seeds %s are of another rom (%lu/%08lx, this one is %lu/%08lx)\n",
+              path,bytes,seeds_fnv,rom_size,fnv);
+      exit(2);
+    }
+  while(fgets(line,sizeof line,f) != NULL)
+    {
+      unsigned long pos;
+      int wait = (strncmp(line,"wait ",5) == 0);
+
+      if(sscanf(wait ? line + 5 : line,"%lx",&pos) != 1 || pos >= rom_size)
+        {
+          fprintf(stderr,"translate: bad line in %s: %s",path,line);
+          exit(2);
+        }
+      add_start(pos);
+      if(wait)
+        mark[pos] |= M_WAIT;
+      n_seeds++;
     }
   fclose(f);
 }
@@ -2199,6 +2335,7 @@ int main(int argc, char **argv)
   unsigned long pos;
   unsigned long pct10;
   const char *counts_path = NULL;
+  const char *seeds_path = NULL;
   unsigned long budget = 0;
   int have_budget = 0;
   int i;
@@ -2208,13 +2345,15 @@ int main(int argc, char **argv)
 
   if(argc < 3)
     {
-      fprintf(stderr,"usage: translate <rom> <out.c> [--counts <file> --budget <bytes>]\n");
+      fprintf(stderr,"usage: translate <rom> <out.c> [--seeds <file>] [--counts <file> --budget <bytes>]\n");
       return 2;
     }
   for(i = 3; i < argc; i++)
     {
       if(strcmp(argv[i],"--counts") == 0 && i + 1 < argc)
         counts_path = argv[++i];
+      else if(strcmp(argv[i],"--seeds") == 0 && i + 1 < argc)
+        seeds_path = argv[++i];
       else if(strcmp(argv[i],"--budget") == 0 && i + 1 < argc)
         {
           budget = strtoul(argv[++i],NULL,10);
@@ -2276,12 +2415,14 @@ int main(int argc, char **argv)
       return 2;
     }
 
-  /* Discovery from the three vectors, then the blocks scanned until no
-     scan adds a start: a cap or a fallback met while scanning opens a
-     start that an earlier block may have walked over. */
+  /* Discovery from the three vectors and the seeds, then the blocks
+     scanned until no scan adds a start: a cut or a fallback met while
+     scanning opens a start that an earlier block may have walked over. */
   add_start(0x0000UL);
   add_start(0x0038UL);
   add_start(0x0066UL);
+  if(seeds_path != NULL)
+    read_seeds(seeds_path,fnv);
   do
     {
       starts_added = 0;
@@ -2318,13 +2459,15 @@ int main(int argc, char **argv)
         scan_block(pos,blk);
         blocks[nblocks].pos = pos;
         blocks[nblocks].bytes = blk->end - pos;
-        blocks[nblocks].sum = blk->sum;
+        blocks[nblocks].wait = blk->wait;
         blocks[nblocks].selected = 1;
         nblocks++;
       }
 
-  /* The choice under the budget: blocks never run are out, the others
-     are taken by the T-states they ran while the bytes fit. */
+  /* The choice under the budget: the blocks that start a wait are in
+     first, whatever they ran -- a wait left out of the table is a line
+     that never ends -- then blocks never run are out, and the others are
+     taken by the instructions they ran while the bytes fit. */
   if(counts_path != NULL)
     {
       blockinfo_t *order;
@@ -2342,13 +2485,24 @@ int main(int argc, char **argv)
           blocks[j].selected = 0;
           all_weight += blocks[j].weight;
           order[j] = blocks[j];
+          if(blocks[j].wait)
+            {
+              blocks[j].selected = 1;
+              sel_bytes += blocks[j].bytes;
+              sel_weight += blocks[j].weight;
+            }
         }
+      /* The waits alone may cover more than the budget: they are in all
+         the same, said so, and nothing else is taken. */
+      if(sel_bytes > budget)
+        fprintf(stderr,"translate: the waits alone cover %lu bytes, over the budget of %lu\n",
+                sel_bytes,budget);
       qsort(order,nblocks,sizeof *order,by_weight);
       for(j = 0; j < nblocks; j++)
         {
           unsigned long lo = 0, hi = nblocks;
 
-          if(order[j].hits == 0UL)
+          if(order[j].wait || order[j].hits == 0UL)
             continue;
           if(sel_bytes + order[j].bytes > budget)
             continue;
@@ -2406,20 +2560,22 @@ int main(int argc, char **argv)
           " * Translated cartridge code, written by tests/z80c/translate.c.\n"
           " * Generated: not tracked, not edited by hand. One function per\n"
           " * block, then the table from positions in the cartridge to the\n"
-          " * functions; src/z80c.h says how the core runs them.\n"
+          " * functions, each entry saying whether the block starts a wait;\n"
+          " * src/z80c.h says how the core runs them, and that no block keeps\n"
+          " * an account of time.\n"
           " *\n"
           " * The thirteen register names of z80_ops.h are retargeted below\n"
           " * onto locals of the block, the way z80.c retargets its five hot\n"
           " * names inside z80_run: a block declares the ones it touches,\n"
           " * loads at its entry those it reads first, stores at each exit\n"
-          " * those it has written. PC, R and the counter stay on the\n"
-          " * structure.\n"
+          " * those it has written. PC stays on the structure.\n"
           " */\n"
-          "#include \"z80c.h\"\n"
-          "#include \"z80_ops.h\"\n\n");
+          "#define Z80C_BLOCK_FILE 1\n"
+          "#include \"z80_ops.h\"\n"
+          "#include \"z80c.h\"\n\n");
   for(i = 0; i < R_COUNT; i++)
     fprintf(out,"#undef %s\n#define %s %s\n",reg_macro[i],reg_macro[i],reg_local[i]);
-  fprintf(out,"\n#if Z80C_HITS\nuint32 z80c_hits[%lu];\nuint32 z80c_tstates[%lu];\n#endif\n\n",
+  fprintf(out,"\n#if Z80C_HITS\nuint32 z80c_hits[%lu];\nuint32 z80c_ran[%lu];\n#endif\n\n",
           (n_blocks == 0UL) ? 1UL : n_blocks,(n_blocks == 0UL) ? 1UL : n_blocks);
 
   /* Emission in position order, which is the table's order. */
@@ -2433,6 +2589,8 @@ int main(int argc, char **argv)
         emit_block(out,blk,k);
 
         n_emitted += (unsigned long)blk->n;
+        if(blk->wait)
+          n_waits++;
         for(i2 = pos; i2 < blk->end; i2++)
           if(!(mark[i2] & M_COVER))
             {
@@ -2444,7 +2602,7 @@ int main(int argc, char **argv)
           case END_NEXT:     n_end_next++;     break;
           case END_JUMP:     n_end_jump++;     break;
           case END_FALLBACK: n_end_fallback++; break;
-          case END_CAP:      n_end_cap++;      break;
+          case END_CUT:      n_end_cut++;      break;
           case END_BANK:     n_end_bank++;     break;
           case END_REPEAT:   n_end_repeat++;   break;
           }
@@ -2456,13 +2614,18 @@ int main(int argc, char **argv)
   fprintf(out,"const uint32 z80c_block_count = %luUL;\n\n",n_blocks);
 
   if(n_blocks == 0UL)
-    fprintf(out,"const z80c_entry_t z80c_table[1] = { { 0UL, 0 } };\n");
+    fprintf(out,"const z80c_entry_t z80c_table[1] = { { 0UL, 0, 0UL } };\n");
   else
     {
       fprintf(out,"const z80c_entry_t z80c_table[%lu] =\n{\n",n_blocks);
       for(pos = 0; pos < rom_size; pos++)
         if(mark[pos] & M_BLOCK)
-          fprintf(out,"  { 0x%06lXUL, b_%06lx },\n",pos,pos);
+          {
+            long k = table_index(pos);
+
+            fprintf(out,"  { 0x%06lXUL, b_%06lx, %luUL },\n",pos,pos,
+                    (unsigned long)((k >= 0L && blocks_wait_at(pos)) ? 1UL : 0UL));
+          }
       fprintf(out,"};\n");
     }
 
@@ -2477,22 +2640,25 @@ int main(int argc, char **argv)
          "emitted=%lu fallback_ends=%lu\n",
          rom_size,fnv,n_blocks,n_insns,n_code_bytes,pct10 / 10UL,pct10 % 10UL,
          n_emitted,n_end_fallback);
-  printf("z80c: fallback ops: halt=%lu im=%lu ld_a_r=%lu ld_r_a=%lu refused=%lu\n",
-         n_fb_halt,n_fb_im,n_fb_ld_a_r,n_fb_ld_r_a,n_fb_refused);
+  printf("z80c: fallback ops: halt=%lu im=%lu ld_a_r=%lu ld_r_a=%lu refused=%lu waits=%lu seeds=%lu\n",
+         n_fb_halt,n_fb_im,n_fb_ld_a_r,n_fb_ld_r_a,n_fb_refused,n_waits,n_seeds);
+  if(n_ram_targets != 0UL)
+    printf("z80c: ram targets=%lu walked, first %04lX reached from %06lx: code without a position, not translated\n",
+           n_ram_targets,ram_target_addr,ram_target_from);
   if(counts_path != NULL)
     {
-      unsigned long run = counts_tstates;
+      unsigned long run = counts_insns;
       unsigned long p10 = (run != 0UL) ? (unsigned long)(((double)sel_weight * 1000.0) / (double)run) : 0UL;
       unsigned long a10 = (run != 0UL) ? (unsigned long)(((double)all_weight * 1000.0) / (double)run) : 0UL;
 
-      printf("z80c: selected blocks=%lu/%lu bytes=%lu tstates=%lu.%lu%% of the recorded run "
+      printf("z80c: selected blocks=%lu/%lu bytes=%lu insns=%lu.%lu%% of the recorded run "
              "(every block: %lu.%lu%%, %lu frames)\n",
              n_blocks,n_all,sel_bytes,p10 / 10UL,p10 % 10UL,a10 / 10UL,a10 % 10UL,counts_frames);
     }
   fprintf(stderr,
           "z80c: starts=%lu reached=%lu ends: next=%lu jump=%lu fallback=%lu "
-          "cap=%lu bank=%lu repeat=%lu\n",
-          n_starts,n_reached,n_end_next,n_end_jump,n_end_fallback,n_end_cap,
+          "cut=%lu bank=%lu repeat=%lu\n",
+          n_starts,n_reached,n_end_next,n_end_jump,n_end_fallback,n_end_cut,
           n_end_bank,n_end_repeat);
   free(blocks);
   free(blk);

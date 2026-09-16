@@ -3043,6 +3043,17 @@ int main(int argc, char **argv)
   /* The translated code, paired as src/main.c pairs it: the empty table
      by default, a generated one when the script links it (Z80C=). */
   z80c_init();
+#if Z80C_BENCH
+  /* The reference of the translated code (tests/z80c/play.sh): with
+     Z80C_NO_EXEC=1 the table still says where the program waits and the
+     lines still end there, but the interpreter runs every instruction. */
+  {
+    const char *no_exec = getenv("Z80C_NO_EXEC");
+
+    z80c_no_exec = (no_exec != NULL && strcmp(no_exec,"1") == 0) ? 1 : 0;
+    printf("z80c blocks executed=%s\n",z80c_no_exec ? "no" : "yes");
+  }
+#endif
   /* The lookup held on the table just paired, at reset, when slots 0 and
      1 show banks 0 and 1 (src/cart.c): every block below position 0x8000
      is found by its own address, and a page that is not the image never
@@ -3135,19 +3146,58 @@ int main(int argc, char **argv)
 
       for(line = 0; line < LINES_PER_FRAME; line++)
         {
-          residue = z80_run(TSTATES_PER_LINE - residue);
-          /* The overrun z80_run hands back is bounded by the contract in
-             z80.h: below one instruction with the interpreter alone, and
-             below one block with translated code armed -- a block spends
-             at most Z80C_BLOCK_TSTATES - 1 + 17 (a call), started with at
-             least one T-state left. Held on every line, since the quota
-             arithmetic of the scanline loop rests on it. */
-          if(residue > (int32)(Z80C_BLOCK_TSTATES + 15))
+          /* The line as src/main.c runs it: by events once a table of
+             translated code is armed, on a quota of T-states otherwise. */
+          if(z80c_armed)
             {
-              printf("FAIL: z80_run overran the quota by %ld T-states "
-                     "(frame %lu line %d)\n",
-                     (long)residue,(unsigned long)fr,line);
-              return 2;
+              z80_run_events();
+#if Z80C_BENCH
+              /* The two refusals of the host runners (src/z80c.h): code
+                 executed from a page that is not the image, and a line
+                 that never waited. The program is refused, never
+                 passed. */
+              if(z80c_ram_pc != Z80C_NO_PC)
+                {
+                  printf("z80c: REFUSED ram code at %04lX reached from %06lx frame %ld\n",
+                         (unsigned long)z80c_ram_pc,(unsigned long)z80c_last_pos,fr);
+                  if(writing) { fclose(ref); remove(tmp); }
+                  return 4;
+                }
+              if(z80c_no_wait)
+                {
+                  /* Named by its position in the image, as
+                     tests/z80c/sidebyside.c names it, so that the two
+                     runners say the same thing under the same label;
+                     an address whose page is not the image is named as
+                     such. */
+                  long z80c_off = (long)(z80_rmap[(uint16)z80c_no_wait_pc >> Z80_PAGE_BITS]
+                                         - sms.cart.rom);
+
+                  if(z80c_off >= 0L && (unsigned long)z80c_off < (unsigned long)sms.cart.size)
+                    printf("z80c: REFUSED no wait at %06lx frame %ld\n",
+                           (unsigned long)z80c_off + (unsigned long)(z80c_no_wait_pc & Z80_PAGE_MASK),fr);
+                  else
+                    printf("z80c: REFUSED no wait at ram %04lx frame %ld\n",
+                           (unsigned long)z80c_no_wait_pc,fr);
+                  if(writing) { fclose(ref); remove(tmp); }
+                  return 4;
+                }
+#endif
+            }
+          else
+            {
+              residue = z80_run(TSTATES_PER_LINE - residue);
+              /* The overrun z80_run hands back is bounded by the contract
+                 in z80.h: below one instruction, the dearest costing 23.
+                 Held on every line, since the quota arithmetic of the
+                 scanline loop rests on it. */
+              if(residue > 22)
+                {
+                  printf("FAIL: z80_run overran the quota by %ld T-states "
+                         "(frame %lu line %d)\n",
+                         (long)residue,(unsigned long)fr,line);
+                  return 2;
+                }
             }
           /* The bit and the read count as line 0 is about to be counted:
              a read in line 0's quota is already in the bit. */

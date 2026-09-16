@@ -1,36 +1,56 @@
 #!/bin/sh
 #
-# The translated code held against the interpreter by its pictures, on
-# the PC: every ROM of takeme/roms/ translated into a work directory and
-# judged by the translator's own two judgements (tests/z80c/translate.sh)
-# -- the whole table, then the table chosen under the budget -- each of
-# them the ROM run free twice, translated code armed then the interpreter
-# alone, and every frame of the first held to the frame of the same rank
-# of the second, or to the one before or after it; a frame that is none of
-# the three by its palette numbers is redrawn in colour on both sides and
-# the two screens compared byte for byte (tests/z80c/play.sh,
-# tests/z80c/sidebyside.c). The same screen is counted apart, colour_only;
-# another screen names the frame and its rows. Per ROM, two verdict lines,
-# or a FAIL and nothing written.
+# The translated code held against the interpreter led by the same
+# clock, on the PC: every ROM of takeme/roms/ translated into a work
+# directory and judged by the translator's own two judgements
+# (tests/z80c/translate.sh) -- the whole table, then the table chosen
+# under the budget -- each of them the ROM played twice by the picture
+# runner with that table linked, the blocks executed then not executed,
+# and every frame of the first held to the frame of the same rank of the
+# second: rows, colours line by line and the memory the program keeps,
+# no shift, no tolerance (tests/z80c/play.sh, tests/z80c/sidebyside.c).
+# Beside the verdict, for information, how the pictures stand against
+# the classic interpreter. Per ROM, two verdict lines, or a FAIL and
+# nothing written, or a REFUSED: a program that never waits, or one
+# that executes code from RAM, which no table can hold. A refusal is
+# counted and named, never failed on and never passed: the summary says
+# how many ROMs were refused, and the human reads which.
 #
-# What this does not prove, and sidebyside.c says why: the internal
-# memory of the program, the code that never runs without a pad, and that
-# a translation without an account of time will draw the same pictures.
+# What this does not prove, and sidebyside.c says why: that the program
+# behaves as the console did (the clock by events is not the part's),
+# that the waits marked are the program's, and the code that never runs
+# without a pad.
 #
 # A green run in which no translated block ran is not green: the runners
 # refuse it before comparing anything -- the interpreter judged against
 # itself proves nothing.
 #
 # The repository carries no ROM, but it does carry one cartridge it
-# writes itself (tests/z80c/rom_bank.c): a handful of instructions that
-# move the very window they run in, which is the one case a real ROM
-# never produces and the only thing the epoch of the mapper guards
-# against, its result shown as the backdrop. That image is generated into
-# the work directory and judged first, on every checkout, so the target is
-# never green on nothing. Without a real ROM beside it the script says so
-# unmistakably and judges the written cartridge alone. With several ROMs
-# every one is translated into its own directory and judged; the exit
-# status is 1 if any fails.
+# writes itself (tests/z80c/rom_bank.c), generated into the work
+# directory and judged first, on every checkout, so the target is never
+# green on nothing. It is the one program whose every wait and write is
+# known, and it is held to more than a real ROM is:
+#
+#   - it moves the very window it runs in, mid-chain, which no real ROM
+#     does and which only the epoch of the mapper guards against;
+#   - it never halts: it waits by a loop on a byte of RAM, which the core
+#     must end the line on -- a refusal ("no wait") is a FAILURE on this
+#     image, never a refusal counted;
+#   - its frames must also match the classic interpreter's frame for
+#     frame (the line "classic same=FRAMES shifted=0 differ=0", demanded
+#     twice, once per judgement): every write it makes to the video part
+#     falls inside the vertical blank under either clock, so the two
+#     clocks draw the same frames unless a wait is marked where the
+#     program does not wait -- it carries a fill loop of 128 turns that
+#     reads a fixed byte of RAM and writes memory, and marked as a wait
+#     that loop would push the write of the backdrop into the picture;
+#   - it keeps a byte at $C000 the picture never reads back, which the
+#     mutation "memory" below moves: only the memory held beside the
+#     picture can tell.
+#
+# Without a real ROM beside it the script says so unmistakably and judges
+# the written cartridge alone. With several ROMs every one is translated
+# into its own directory and judged; the exit status is 1 if any fails.
 #
 # Nothing derived from a ROM lands in the tree: the C the translator
 # writes goes to the work directory, never to src/rom_code.c, and the
@@ -43,24 +63,27 @@
 #   ROMS=some/dir sh tests/z80c/run_z80c.sh the ROMs of another directory
 #   Z80C_KEEP=some/dir sh tests/z80c/run_z80c.sh
 #                                           the screens of a mismatch kept
-#   Z80C_REDRAW_MAX=<n> sh tests/z80c/run_z80c.sh
-#                                           frames of the same screen under
-#                                           other palette numbers allowed
-#                                           per judgement (64)
 #   MUTATE=1 sh tests/z80c/run_z80c.sh      after the green: the chosen
 #                                           table's C broken four ways a
 #                                           wrong translation would be,
-#                                           one visible byte of the video
-#                                           memory flipped, and every
-#                                           emitted write to the colour
-#                                           memory altered, each demanded
-#                                           red on at least one ROM; the
-#                                           C broken two ways that
-#                                           change the time alone, each
-#                                           verdict printed as it is; and,
-#                                           on the written cartridge, the
-#                                           epoch of the mapper taken out
-#                                           of the core and demanded red
+#                                           its waits marked two wrong
+#                                           ways (one block in two a
+#                                           wait, no block a wait), one visible
+#                                           byte of the video memory
+#                                           flipped, and every emitted
+#                                           write to the colour memory
+#                                           altered, each demanded red or
+#                                           refused on at least one ROM;
+#                                           and, on the written cartridge,
+#                                           the epoch of the mapper taken
+#                                           out of the core, the write of
+#                                           its byte at $C000 moved to
+#                                           $C003, and its waits marked
+#                                           the same two wrong ways, each
+#                                           demanded red or refused.
+#                                           Every broken copy is held to
+#                                           the reference of the intact
+#                                           table.
 #
 set -e
 
@@ -88,7 +111,7 @@ CC=${CC:-gcc}
 S=src
 H=tests/cel8/3do
 B=tests/z80c
-export FRAMES CC Z80C_KEEP Z80C_REDRAW_MAX
+export FRAMES CC Z80C_KEEP
 
 # The ROMs, .sms and .gg, whatever their names: none means nothing to
 # compare, and that is said rather than counted as a pass.
@@ -124,9 +147,10 @@ $CC -O1 -std=c89 -Wall -Wextra -Werror -o "$WORK/rom_bank" "$B/rom_bank.c"
 "$WORK/rom_bank" "$FIXTURE"
 set -- "$FIXTURE" "$@"
 
-# One broken copy played through the whole judgement. Prints nothing;
-# leaves the status in mrc (0 green, 1 red, 2 or 3 nothing proved, 8 does
-# not compile, 9 the pattern matches nothing) and the lines in
+# One broken copy played through the whole judgement, against the
+# reference of the intact chosen table. Prints nothing; leaves the status
+# in mrc (0 green, 1 red, 2 or 3 nothing proved, 4 refused, 8 does not
+# compile, 9 the pattern matches nothing) and the lines in
 # <dir>/<name>/verdict. A pattern that no longer matches is refused rather
 # than played intact; a copy that does not compile is reported, not died
 # on.
@@ -158,15 +182,15 @@ broken() {
     return 0
   fi
   set +e
-  z80c_play "$6/$1/bin" "$5" "$6/$1" "$6/picture.fnv" "$WORK/obj" >"$6/$1/verdict" 2>&1
+  z80c_play "$6/$1/bin" "$5" "$6/$1" "$6/events.fnv" "$6/picture.fnv" "$WORK/obj" >"$6/$1/verdict" 2>&1
   mrc=$?
   set -e
   return 0
 }
 
-# The first line that says why a judgement went red.
+# The first line that says why a judgement went red, or was refused.
 red_line() {
-  grep -m1 'MISMATCH' "$1" || grep -m1 '^FAIL' "$1" || true
+  grep -m1 'MISMATCH' "$1" || grep -m1 '^z80c: REFUSED' "$1" || grep -m1 '^FAIL' "$1" || true
 }
 
 # A mutation of a core file lays its code on one line of that file: an
@@ -183,12 +207,13 @@ one_site() {
   return 0
 }
 
-# The semantic mutations seen red, by name, over every ROM: each must be
-# in this list at the end, or the check has not been seen to bite on it.
+# The mutations seen red or refused, by name, over every ROM: each must
+# be in this list at the end, or the check has not been seen to bite on
+# it.
 RED_SEEN=" "
 PLAYED=" "
 
-# A mutation of the semantics, on one ROM: red is what it is for; green on
+# A mutation, on one ROM: red, or refused, is what it is for; green on
 # this ROM is printed and counted against the ROMs still to come; a copy
 # that does not compile or that proves nothing is a failure of THIS
 # script; a pattern with no form to break in this ROM's table is said.
@@ -207,12 +232,15 @@ mutate() {
        return 1;;
   esac
   case "$mrc" in
-    0|1) PLAYED="$PLAYED$m_name ";;
+    0|1|4) PLAYED="$PLAYED$m_name ";;
   esac
   case "$mrc" in
-    0) echo "  [INFO] mutation $m_name ($m_why) stays green on this rom: $(grep -m1 'pictures PASS' "$m_dir/$m_name/verdict")"
+    0) echo "  [INFO] mutation $m_name ($m_why) stays green on this rom: $(grep -m1 'events PASS' "$m_dir/$m_name/verdict")"
        return 0;;
     1) echo "  [OK] mutation $m_name turns the check red: $(red_line "$m_dir/$m_name/verdict")"
+       RED_SEEN="$RED_SEEN$m_name "
+       return 0;;
+    4) echo "  [OK] mutation $m_name gets the program refused: $(red_line "$m_dir/$m_name/verdict")"
        RED_SEEN="$RED_SEEN$m_name "
        return 0;;
     *) echo "  [FAIL] mutation $m_name ($m_why) proved nothing (status $mrc)"
@@ -221,32 +249,12 @@ mutate() {
   esac
 }
 
-# A mutation of the time alone: played, and its verdict printed as it
-# is. Once the account of time is gone, nothing the program shows depends
-# on it; while it stands, a shift of the interrupts may or may not move a
-# picture by more than a frame.
-#
-#   timing <name> <sed> <why> <rom_code.c> <rom> <dir>
-timing() {
-  broken "$1" "$2" "$4" "$4" "$5" "$6"
-  case "$mrc" in
-    9) echo "  [FAIL] timing mutation $1 changed nothing, its pattern no longer matches"
-       return 1;;
-    8) echo "  [FAIL] timing mutation $1 ($3) does not compile"
-       cat "$6/$1/build.log"
-       return 1;;
-    0) echo "  [INFO] timing mutation $1: green ($3): $(grep -m1 'pictures PASS' "$6/$1/verdict")";;
-    1) echo "  [INFO] timing mutation $1: red ($3): $(red_line "$6/$1/verdict")";;
-    *) echo "  [INFO] timing mutation $1: proved nothing ($3, status $mrc): $(red_line "$6/$1/verdict")";;
-  esac
-  return 0
-}
-
 if [ "${MUTATE:-0}" = 1 ]; then
   z80c_runner "$WORK/obj"
 fi
 
 fail=0
+refused=0
 for rom in "$@"; do
   [ -f "$rom" ] || continue
   # rom.sms and rom.gg each get their own directory and their own name.
@@ -259,15 +267,37 @@ for rom in "$@"; do
   # src/rom_code.c stays whatever the tree holds. The interpreter's
   # picture is kept there for the mutations.
   set +e
-  OUT="$dir/rom_code.c" Z80C_PICREF="$dir/picture.fnv" sh "$B/translate.sh" "$rom" >"$dir/translate.out" 2>&1
+  OUT="$dir/rom_code.c" Z80C_PICREF="$dir/picture.fnv" Z80C_EVREF="$dir/events.fnv" sh "$B/translate.sh" "$rom" >"$dir/translate.out" 2>&1
   trc=$?
   set -e
   cat "$dir/translate.out"
   echo "  ($(( $(date +%s) - start )) s)"
+  if [ "$trc" -eq 4 ] && grep -q '^z80c: REFUSED ' "$dir/translate.out"; then
+    if [ "$rom" = "$FIXTURE" ]; then
+      # The written cartridge waits by a loop the core must honour: a
+      # refusal of it is the core's failure, not the program's.
+      echo "FAIL: $name: the written cartridge was refused: $(grep -m1 '^z80c: REFUSED ' "$dir/translate.out")"
+      fail=1
+      continue
+    fi
+    echo "z80c: $name REFUSED: $(grep -m1 '^z80c: REFUSED ' "$dir/translate.out")"
+    refused=$(( refused + 1 ))
+    continue
+  fi
   if [ "$trc" -ne 0 ] \
-     || [ "$(grep -c "^z80c: pictures PASS $FRAMES/$FRAMES same=[0-9]* shifted=[0-9]* colour_only=[0-9]*\$" "$dir/translate.out")" -ne 2 ] \
+     || [ "$(grep -c "^z80c: events PASS $FRAMES/$FRAMES memory=same insns/frame=[0-9]*\$" "$dir/translate.out")" -ne 2 ] \
      || ! grep -q "^written: " "$dir/translate.out"; then
-    echo "FAIL: $name: the two judgements did not both pass on the pictures, or nothing was written"
+    echo "FAIL: $name: the two judgements did not both pass, or nothing was written"
+    fail=1
+    continue
+  fi
+  # The written cartridge alone: the classic interpreter, which shares
+  # nothing with the clock by events, must draw the very same frames,
+  # frame for frame, under both judgements. On a real ROM the two clocks
+  # legitimately drift apart and the line is information.
+  if [ "$rom" = "$FIXTURE" ] \
+     && [ "$(grep -c "^z80c: classic same=$FRAMES shifted=0 differ=0\$" "$dir/translate.out")" -ne 2 ]; then
+    echo "FAIL: $name: the written cartridge does not draw the classic interpreter's frames frame for frame ($(grep -m1 '^z80c: classic ' "$dir/translate.out" || echo 'no classic line')): a wait is marked where the program does not wait, or one is missed"
     fail=1
     continue
   fi
@@ -283,10 +313,24 @@ for rom in "$@"; do
     # Without it the chain trusts the successor a block rendered while
     # the bank behind that address was being turned: the block of the
     # bank that has just left runs in place of the one now there, and the
-    # backdrop turns white.
+    # backdrop shows the inverted pattern.
     mutate epoch 's/^\( *\)z80c_map_epoch++;$/\1;/' \
          "the mapper no longer steps the epoch" "$S/cart.c" \
          "$dir/rom_code.c" "$rom" "$dir" core || fail=1
+    echo "== $name: the write of the byte at \$C000 moved to \$C003 =="
+    # The picture never reads that byte back: the frames stand, and only
+    # the memory held beside them at the end of every frame can tell.
+    mutate memory 's/Z80_WR8(0xC000U,Z80_A)/Z80_WR8(0xC003U,Z80_A)/' \
+         "the byte at \$C000 written at \$C003" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
+    echo "== $name: the written cartridge's waits marked two wrong ways =="
+    # The same two breakings of the waits as on a real ROM (below): with
+    # no block a wait the loop at wait never ends its line and the
+    # program is refused; with one block in two a wait the fill is one,
+    # and every turn of it ends a line.
+    mutate nowait 's/, 1UL },$/, 0UL },/' \
+         "no block marked as a wait" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
+    mutate wait 's/^\(  { 0x[0-9A-F]*[02468ACE]UL, b_[0-9a-f]*\), 0UL },$/\1, 1UL },/' \
+         "one block in two marked as a wait" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
     continue
   fi
 
@@ -334,24 +378,31 @@ for rom in "$@"; do
   else
     fail=1
   fi
-  echo "== $name: the chosen table's C broken, two ways that change the time alone =="
-  # Every exit of every block charges one T-state too few.
-  timing spend 's/^\(  *Z80_SPEND(\)\([0-9]*\)\();\)$/\1\2 - 1\3/' \
-         "every block one T-state cheaper" "$dir/rom_code.c" "$rom" "$dir" || fail=1
-  # Every taken branch forgets its surcharge.
-  timing cc 's/^\(      Z80_SPEND([0-9]*\) + [0-9]*);$/\1);/' \
-         "the surcharge of every taken branch dropped" "$dir/rom_code.c" "$rom" "$dir" || fail=1
+  echo "== $name: the chosen table's waits marked two wrong ways =="
+  # No block a wait: the program spins in its loop and the line never
+  # ends -- the guard refuses it. A table whose waits are all halts has
+  # no mark to take out and says so.
+  mutate nowait 's/, 1UL },$/, 0UL },/' \
+         "no block marked as a wait" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
+  # One block in two a wait (the ones whose position is even): a line
+  # ends where the program does not wait, it falls behind its clock, and
+  # the frames no longer match the reference taken with the intact
+  # table's waits. Not every block: a table of nothing but waits never
+  # chains two blocks, and the free run refuses it before anything is
+  # judged.
+  mutate wait 's/^\(  { 0x[0-9A-F]*[02468ACE]UL, b_[0-9a-f]*\), 0UL },$/\1, 1UL },/' \
+         "one block in two marked as a wait" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
 done
 
-# The semantic mutations, over every ROM played: each seen red at least
-# once, or the check has not been seen to bite on it. Without a real ROM,
-# only the epoch was played.
+# The mutations, over every ROM played: each seen red or refused at
+# least once, or the check has not been seen to bite on it. Without a
+# real ROM, only the four of the written cartridge were played.
 if [ "${MUTATE:-0}" = 1 ]; then
   echo "== the mutations over every rom =="
   if [ "$found" -eq 1 ]; then
-    wanted="epoch cp jr load succ vram colour"
+    wanted="epoch memory cp jr load succ vram colour wait nowait"
   else
-    wanted="epoch"
+    wanted="epoch memory wait nowait"
   fi
   for m in $wanted; do
     case "$RED_SEEN" in
@@ -365,5 +416,5 @@ if [ "${MUTATE:-0}" = 1 ]; then
   done
 fi
 
-echo "failed=$fail"
+echo "failed=$fail refused=$refused"
 exit $fail

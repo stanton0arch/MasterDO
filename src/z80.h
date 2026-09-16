@@ -325,20 +325,17 @@ void z80_reset(void);
  * the quota it hands over next. The value is never negative, and never above
  * one less than the dearest thing the core runs whole: a quota has to have
  * at least one T-state left in it for that thing to have been started at
- * all. For the interpreter alone that thing is an instruction, and the
- * bound rose as prefixes were opened -- 18 while only the unprefixed set
- * existed, whose dearest instruction costs 19; then 20, a repeated block
- * transfer at 21 being the dearest of the two sets; 22 once an index prefix
- * could reach a read-modify-write costing 23. With translated code armed
- * (z80c.h) the thing run whole is a BLOCK, and the tool that writes the
- * blocks closes each one on the sum of the DEAREST price of its
- * instructions -- the taken branch, the repeating iteration -- as soon as
- * that sum reaches 64, and never takes an instruction that would carry it
- * past 80: a block spends at most 80 T-states whatever exit it takes, and
- * the bound is then 79, well inside a scanline of 228. A block is never
- * cut in half either, and the sampling below sees a boundary between two
- * blocks exactly as it sees one between two instructions. The empty
- * table leaves the interpreter's bound in force.
+ * all. That thing is an instruction, and the bound rose as prefixes were
+ * opened -- 18 while only the unprefixed set existed, whose dearest
+ * instruction costs 19; then 20, a repeated block transfer at 21 being the
+ * dearest of the two sets; 22 once an index prefix could reach a
+ * read-modify-write costing 23.
+ *
+ * Called directly, with z80_events down, it is the interpreter alone: no
+ * translated code runs, which keeps no T-state to spend a quota with.
+ * With a table armed (z80c.h) the frame loop calls z80_run_events below
+ * instead, which enters this function with z80_events raised: its loop
+ * then runs the translated blocks too, and ends the line on a wait.
  *
  * Returns 0 once the core has stopped, and stops for good the first time it
  * meets an opcode it cannot execute: an incomplete instruction set is the
@@ -356,6 +353,36 @@ void z80_reset(void);
  * back, so the caller's loop keeps sampling at every boundary.
  */
 int32 z80_run(int32 quota);
+
+/*
+ * Runs one line of the picture BY EVENTS, the entry of a frame loop whose
+ * table of translated code is armed (z80c.h). There is no quota: the
+ * interrupt lines are sampled and an interrupt accepted at the head, as
+ * z80_run does, then the program runs -- blocks of translated code, and
+ * the instructions no block covers, interpreted -- until it WAITS: it
+ * arrives on the start of a block the tool marked as a wait, having run
+ * something first in this line, or it halts, or a halt is already in
+ * force. The line then ends with PC on the wait, the video part counts
+ * the line, and what it raised is accepted at the head of the next call.
+ *
+ * Nothing is counted in T-states on this path, and the refresh register
+ * is not the count of opcodes read: its low seven bits step by one at the
+ * head of every line, bit 7 is kept, LD R,A writes it whole and LD A,R
+ * reads it. The interpreter still spends its prices on the counter while
+ * it runs here, and they are thrown away.
+ *
+ * A program that never waits never ends its line, and on the console
+ * nothing guards against it: a line the interpreter runs ends once the
+ * largest quota a counter holds is spent, minutes of Z80 time; a line
+ * that runs entirely in translated blocks whose successors are rendered
+ * never ends at all, the blocks spending nothing. On the PC the guard of
+ * z80c.h ends it after a ceiling of instructions and names the address,
+ * and the runner refuses the program: that is why such a program is
+ * refused there before the console sees it, and why the code that only a
+ * pad reaches is not proved. A stopped core runs nothing, as with
+ * z80_run: the call returns with the structure untouched.
+ */
+void z80_run_events(void);
 
 /*
  * The two ends of the input and output space, one byte each way: the

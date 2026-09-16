@@ -736,11 +736,13 @@ main_perf_emit(uint32 usec,
 
   /*
    * The translated code's own lines beside this one, at the same pace,
-   * out of the processor share just published: the ARM cycles a T-state
-   * cost, the part of the instructions that ran translated, and, while
-   * a table is armed, its four counters over the window.
+   * out of the processor share just published and the frames of the
+   * window: with the interpreter alone the ARM cycles a T-state cost;
+   * with a table armed the instructions a frame ran, the cycles an
+   * instruction cost, the part that ran translated and its four counters
+   * over the window.
    */
-  z80c_report(z8010);
+  z80c_report(z8010,frames);
 }
 
 #endif /* MAIN_MEASURE */
@@ -1733,7 +1735,10 @@ main(int    argc,
                * published as no post at all.
                */
               line_start = sys_usec();
-              residue = z80_run((int32)MAIN_TSTATES_PER_LINE - residue);
+              if(z80c_armed)
+                z80_run_events();
+              else
+                residue = z80_run((int32)MAIN_TSTATES_PER_LINE - residue);
               line_mid = sys_usec();
               vdp_line();
               line_end = sys_usec();
@@ -1760,11 +1765,17 @@ main(int    argc,
             }
           else
             {
-              residue = z80_run((int32)MAIN_TSTATES_PER_LINE - residue);
+              if(z80c_armed)
+                z80_run_events();
+              else
+                residue = z80_run((int32)MAIN_TSTATES_PER_LINE - residue);
               vdp_line();
             }
 #else
-          residue = z80_run((int32)MAIN_TSTATES_PER_LINE - residue);
+          if(z80c_armed)
+            z80_run_events();
+          else
+            residue = z80_run((int32)MAIN_TSTATES_PER_LINE - residue);
           vdp_line();
 #endif
 
