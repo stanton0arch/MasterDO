@@ -97,6 +97,20 @@
  * copy, and an absorbed ROM write has nowhere to be carried at all. The
  * table walk stays in force inside z80_run too, cost assumed, and z80.c
  * says so in place.
+ *
+ * ONE EXCEPTION, AND IT IS NOT A SECOND WRITE PATH: the direct forms
+ * further down (Z80_RAM_RD8 and its three kin, Z80_STK_PUSH and its
+ * kin) store into the work RAM without the table. They are written for
+ * the translated code alone, and that code's tool emits one only where
+ * it PROVED, on the PC and at conversion, that the address is the work
+ * RAM's and, for a write, below the mapper's registers ($FFFC-$FFFF,
+ * cart.h): a byte that lands there through the direct form is a byte
+ * the table would have put in the very same cell, and one the trigger
+ * would have let through. A write the tool could not prove, and every
+ * write to a register, keeps Z80_WR8 and its trigger. So the trigger
+ * still has one home, and every write that can turn a bank still
+ * reaches it; what the direct forms remove is the two table loads on
+ * the writes that never could.
  * ---------------------------------------------------------------------------
  */
 #define Z80_RD8(addr)                                       \
@@ -161,6 +175,14 @@
  * sixteen bit fields of data that genuinely is contiguous in host memory --
  * ROM images, colour entries, structures read out of a file. The page tables
  * are the one place where contiguity is not a given.
+ *
+ * The direct forms below DISCHARGE THE THREE REASONS BY PROOF, and use
+ * read16_le / write16_le on the work RAM for that: their tool emits a
+ * direct word only when both bytes are proved to lie in the work RAM,
+ * below $FFFF (no wrap), on the same side of the mirror's seam
+ * $DFFF/$E000 (one page of the RAM, contiguous in host memory), and,
+ * for a write, below the mapper's registers (no trigger to fire, once
+ * or twice). What is not proved keeps the two byte forms here.
  * ---------------------------------------------------------------------------
  */
 #define Z80_RD16(addr)                                              \
@@ -177,6 +199,46 @@
       Z80_WR8((uint16)(z80_wr16_addr + 1),z80_wr16_val >> 8);       \
     }                                                               \
   while(0)
+
+/*
+ * ---------------------------------------------------------------------------
+ * The direct path: the work RAM without the tables.
+ *
+ * The twins of the four forms above for the translated code (z80c.h),
+ * which is the only code to expand them, and only where its tool proved
+ * the address (tests/z80c/translate.c). Same semantics to the byte: the
+ * byte lands in the cell the table entry would have pointed at, since
+ * every high entry points into the work RAM at the offset the mask
+ * gives (cart.c, cart_bus_install: entry n of the top sixteen is the
+ * RAM at (n & 7) * page). What changes is the two loads: the table's
+ * address and its entry are gone, ram is a register the block received,
+ * and the access is one load or one store. No trigger: a proved write
+ * is below the registers by construction, and the words above say why
+ * that is not a second write path.
+ *
+ * The RAM base is an argument, not a global read here: cart_work_ram is
+ * a pointer, and loading it at every access would cost the literal, the
+ * pointer and the byte -- the three loads of the table again.
+ *
+ * Evaluate their arguments more than once, like Z80_RD8: plain base,
+ * plain address, plain value.
+ * ---------------------------------------------------------------------------
+ */
+#define Z80_RAM_RD8(ram, addr)                                      \
+  ((ram)[(uint16)(addr) & CART_WORK_RAM_MASK])
+
+#define Z80_RAM_WR8(ram, addr, value)                               \
+  do                                                                \
+    {                                                               \
+      (ram)[(uint16)(addr) & CART_WORK_RAM_MASK] = (uint8)(value);  \
+    }                                                               \
+  while(0)
+
+#define Z80_RAM_RD16(ram, addr)                                     \
+  read16_le((ram) + ((uint16)(addr) & CART_WORK_RAM_MASK))
+
+#define Z80_RAM_WR16(ram, addr, value)                              \
+  write16_le((ram) + ((uint16)(addr) & CART_WORK_RAM_MASK),(value))
 
 /*
  * ---------------------------------------------------------------------------
@@ -966,6 +1028,39 @@
   while(0)
 
 /*
+ * The twins of the two on the work RAM, for the translated code alone
+ * (z80c.h), emitted only once its tool proved that nothing in the
+ * program writes SP otherwise than LD SP,nn into the work RAM: the
+ * stack then leaves the RAM only by running out of it, which the host
+ * runners refuse (z80c.h, the stack check) and the console does not
+ * guard. Same order, same bytes, the pointer moved the same way; the
+ * two bytes masked one by one, never a word, since SP is known only at
+ * run time and the stack may sit on the mirror's seam or at the top of
+ * the space -- the two reasons Z80_WR16 gives, still standing here.
+ */
+#define Z80_STK_PUSH(ram, value)                                        \
+  do                                                                    \
+    {                                                                   \
+      uint16 z80_pv = (uint16)(value);                                  \
+                                                                        \
+      Z80_SP = (uint16)(Z80_SP - 1);                                    \
+      (ram)[Z80_SP & CART_WORK_RAM_MASK] = (uint8)(z80_pv >> 8);        \
+      Z80_SP = (uint16)(Z80_SP - 1);                                    \
+      (ram)[Z80_SP & CART_WORK_RAM_MASK] = (uint8)(z80_pv & 0xFFU);     \
+    }                                                                   \
+  while(0)
+
+#define Z80_STK_POP(ram, hi, lo)                        \
+  do                                                    \
+    {                                                   \
+      (lo) = (ram)[Z80_SP & CART_WORK_RAM_MASK];        \
+      Z80_SP = (uint16)(Z80_SP + 1);                    \
+      (hi) = (ram)[Z80_SP & CART_WORK_RAM_MASK];        \
+      Z80_SP = (uint16)(Z80_SP + 1);                    \
+    }                                                   \
+  while(0)
+
+/*
  * ---------------------------------------------------------------------------
  * The four exchanges.
  * Semantics: TotalSMS/src/core/sms_z80.c:1075-1110.
@@ -1029,6 +1124,22 @@
   while(0)
 
 #define Z80_OP_EX_SP_HL() Z80_OP_EX_SP_PAIR(Z80_H,Z80_L)
+
+/* The twin on the work RAM (Z80_STK_PUSH says when): the word read
+   low byte first, then written low byte first, each byte masked on its
+   own, the pointer left alone. */
+#define Z80_STK_EXSP(ram, hi, lo)                                       \
+  do                                                                    \
+    {                                                                   \
+      uint8 z80_sl = (ram)[Z80_SP & CART_WORK_RAM_MASK];                \
+      uint8 z80_sh = (ram)[(uint16)(Z80_SP + 1) & CART_WORK_RAM_MASK];  \
+                                                                        \
+      (ram)[Z80_SP & CART_WORK_RAM_MASK] = (lo);                        \
+      (ram)[(uint16)(Z80_SP + 1) & CART_WORK_RAM_MASK] = (hi);          \
+      (hi) = z80_sh;                                                    \
+      (lo) = z80_sl;                                                    \
+    }                                                                   \
+  while(0)
 
 /*
  * ---------------------------------------------------------------------------
@@ -1151,6 +1262,19 @@
           Z80_OP_RET();                                 \
           Z80_SPEND(6);                                 \
         }                                               \
+    }                                                   \
+  while(0)
+
+/* The twin of the return on the work RAM (Z80_STK_PUSH says when); the
+   conditional form is the translated code's own test around it. */
+#define Z80_STK_RET(ram)                                \
+  do                                                    \
+    {                                                   \
+      uint8 z80_rl;                                     \
+      uint8 z80_rh;                                     \
+                                                        \
+      Z80_STK_POP(ram,z80_rh,z80_rl);                   \
+      Z80_PC = Z80_PAIR(z80_rh,z80_rl);                 \
     }                                                   \
   while(0)
 
@@ -1776,6 +1900,17 @@
   while(0)
 
 #define Z80_OP_RETI() Z80_OP_RET()
+
+/* The twins on the work RAM (Z80_STK_PUSH says when). */
+#define Z80_STK_RETN(ram)                               \
+  do                                                    \
+    {                                                   \
+      Z80_STK_RET(ram);                                 \
+      Z80_IFF1 = Z80_IFF2;                              \
+    }                                                   \
+  while(0)
+
+#define Z80_STK_RETI(ram) Z80_STK_RET(ram)
 
 /*
  * ---------------------------------------------------------------------------

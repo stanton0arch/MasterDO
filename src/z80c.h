@@ -47,15 +47,40 @@
  * wait the tool missed there is a line that never ends, on the console.
  *
  * The block's contract. It is entered with the structure sms.z80 exact --
- * the core has flushed its resident window (z80.c) -- and PC on its first
- * byte. It loads the registers it reads into locals, executes its
- * instructions through the very macros of z80_ops.h the interpreter uses
- * -- the register names retargeted onto those locals for the length of the
- * generated file, the way z80_run retargets its five hot names -- stores
- * the registers it wrote, and leaves PC on the next instruction to run. It
- * ends on a transfer, on the instruction before one it does not translate,
- * on the edge of its bank, or in front of the start of another block; a
- * conditional branch may end it with two exits.
+ * the core has flushed its resident window (z80.c) -- PC on its first
+ * byte, and THE BASE OF THE WORK RAM as its one argument. It loads the
+ * registers it reads into locals, executes its instructions through the
+ * very macros of z80_ops.h the interpreter uses -- the register names
+ * retargeted onto those locals for the length of the generated file,
+ * the way z80_run retargets its five hot names -- stores the registers
+ * it wrote, and leaves PC on the next instruction to run. It ends on a
+ * transfer, on the instruction before one it does not translate, on the
+ * edge of its bank, in front of the start of another block, or after a
+ * write proved to land on the mapper's registers; a conditional branch
+ * may end it with two exits.
+ *
+ * THE DIRECT PATH. Every access of the interpreter goes through the page
+ * tables: the table, its entry, the byte. The tables exist for the
+ * mapper to move banks; the work RAM never moves, and its base is a
+ * pointer the cartridge module publishes (cart.h, cart_work_ram). So
+ * the tool proves, at conversion, which accesses land in the work RAM
+ * -- an absolute address, a pair whose value it knows at that point of
+ * the block, the stack when nothing writes SP but LD SP,nn into the
+ * RAM -- and emits those through the direct forms of z80_ops.h
+ * (Z80_RAM_RD8 and kin, Z80_STK_PUSH and kin, aliased below), which
+ * index the base the block received: one load or one store, the
+ * address masked to the 8k. What is not proved keeps the full path.
+ * z80c_run loads the base once per chain and hands it to every block;
+ * a block that uses no direct form still takes it. A write proved to
+ * land on $FFFC-$FFFF keeps Z80_WR8 -- the store through the table and
+ * the mapper trigger -- and CLOSES ITS BLOCK, whose entry says so
+ * (Z80C_FLAG_BANKEND): the bytes after it may be another bank's, and
+ * z80c_run, seeing the epoch move, asks the tables again. On the PC a
+ * block that sees the epoch move without that flag, AND WHOSE OWN BYTES
+ * MOVED with it, is refused -- the one way there is a write through a
+ * pointer the tool could not prove, turning the block's own window --
+ * and so is a direct stack access outside $C000-$FFFB; the console
+ * runs what the PC accepted, and tests nothing per access.
  *
  * WHAT A BLOCK RETURNS IS ITS SUCCESSOR: the table entry of the block
  * that starts where it left PC, when the tool knew it at emission -- the
@@ -89,18 +114,23 @@
  */
 
 /*
- * A block: a function that takes nothing, works on the structure, and
- * returns the table entry of its successor, or null. The entry type and
- * the function type name each other, hence the forward declaration.
+ * A block: a function that takes the base of the work RAM, works on the
+ * structure, and returns the table entry of its successor, or null. The
+ * entry type and the function type name each other, hence the forward
+ * declaration. The third word of an entry holds the block's flags: the
+ * wait (bit 0), and the close on a mapper write (bit 1).
  */
 typedef struct z80c_entry z80c_entry_t;
-typedef const z80c_entry_t *(*z80c_fn)(void);
+typedef const z80c_entry_t *(*z80c_fn)(uint8 *ram);
+
+#define Z80C_FLAG_WAIT    1UL /* the block starts a loop the program waits in */
+#define Z80C_FLAG_BANKEND 2UL /* the block closes on a write to the mapper's registers */
 
 struct z80c_entry
 {
   uint32  pos;  /* position of the block's first byte in the cartridge */
   z80c_fn fn;
-  uint32  wait; /* 1 when the block starts a loop the program waits in */
+  uint32  wait; /* the flags above */
 };
 
 /*
@@ -160,11 +190,20 @@ extern uint32 z80c_miss_pc;
 #if Z80C_HITS
 extern uint32 z80c_hits[];
 extern uint32 z80c_ran[];
-#define Z80C_HIT(k)    (z80c_hits[(k)]++)
-#define Z80C_RAN(k, n) (z80c_ran[(k)] += (uint32)(n))
+/* The bytes the blocks moved by each memory path, direct and through
+   the tables: each exit adds the counts of the instructions it ran,
+   which the tool knows at emission. Printed by the runners as direct=
+   and full=. */
+extern uint32 z80c_direct_total;
+extern uint32 z80c_full_total;
+#define Z80C_HIT(k)       (z80c_hits[(k)]++)
+#define Z80C_RAN(k, n)    (z80c_ran[(k)] += (uint32)(n))
+#define Z80C_ACCESS(d, f) ((void)(z80c_direct_total += (uint32)(d), \
+                                  z80c_full_total += (uint32)(f)))
 #else
-#define Z80C_HIT(k)    ((void)0)
-#define Z80C_RAN(k, n) ((void)0)
+#define Z80C_HIT(k)       ((void)0)
+#define Z80C_RAN(k, n)    ((void)0)
+#define Z80C_ACCESS(d, f) ((void)0)
 #endif
 
 /*
@@ -248,6 +287,35 @@ uint32 z80c_chains(void);
  *                  tool did not see -- a loop that waits through a call
  *                  it dispatches, which no shape names (sidebyside.c).
  *
+ *   z80c_bank_pos  the position of a block that returned with the
+ *                  mapper's epoch moved while its entry does not carry
+ *                  Z80C_FLAG_BANKEND and the address it was entered at
+ *                  no longer holds its position, or Z80C_NO_PC: a bank
+ *                  turned under a block the tool did not close for it
+ *                  -- a write through a pointer it could not prove --
+ *                  and the instructions after the write ran on the
+ *                  bytes of the bank that left. The runner refuses the
+ *                  program ("bank switch inside block"). A write that
+ *                  turns another window moves nothing under the block
+ *                  and is not refused.
+ *
+ *   z80c_word_addr the address of a direct word access whose two bytes
+ *                  would straddle the end of the 8k, or Z80C_NO_PC: a
+ *                  word the tool proved wrongly (the seam of the
+ *                  mirror, the top of the space), which the host would
+ *                  read past the buffer. The runner refuses the program
+ *                  ("direct word off the ram"), naming the block.
+ *
+ *   z80c_stack_sp  the stack pointer of a direct stack access whose two
+ *                  bytes are not both in $C000-$FFFB, or Z80C_NO_PC: the
+ *                  stack the tool proved has run out of the work RAM,
+ *                  or onto the mapper's registers. The runner refuses
+ *                  the program ("stack outside ram"), naming the block
+ *                  (z80c_last_pos). The direct forms mask the address,
+ *                  so the access itself landed in the 8k and harmed
+ *                  nothing of the host; on the console there is no
+ *                  check, and only a program the PC accepted runs.
+ *
  * All of them lean on the counters above, hence the telemetry.
  */
 #if Z80C_BENCH
@@ -262,6 +330,26 @@ extern uint32 z80c_line_mark;
 extern uint32 z80c_ram_pc;
 extern uint32 z80c_last_pos;
 extern uint8 *z80c_seen;
+extern uint32 z80c_bank_pos;
+extern uint32 z80c_stack_sp;
+extern uint32 z80c_word_addr;
+/* The direct word check, on the PC alone: a word the tool proved is
+   two bytes of one page of the work RAM, so its address masked is
+   never the last byte of the 8k -- a word there would read past the
+   buffer on the host. The first offender is kept, with its address;
+   the tool, not the program, is what it accuses. */
+#define Z80C_WORD_CHECK(addr)                                           \
+  ((void)((((uint16)(addr) & CART_WORK_RAM_MASK) == CART_WORK_RAM_MASK && \
+           z80c_word_addr == Z80C_NO_PC)                                \
+          ? (z80c_word_addr = (uint32)(uint16)(addr)) : 0UL))
+/* The stack check, on the PC alone: lo is the lower of the two bytes a
+   direct stack access touches (SP - 2 for a push, SP otherwise); both
+   must be in $C000-$FFFB, so lo in $C000-$FFFA. The first offender is
+   kept, with its SP. */
+#define Z80C_STK_CHECK(lo)                                              \
+  ((void)(((uint16)((uint16)(lo) - 0xC000U) > 0x3FFAU &&                \
+           z80c_stack_sp == Z80C_NO_PC)                                 \
+          ? (z80c_stack_sp = (uint32)Z80_SP) : 0UL))
 #define Z80C_RING 1024UL
 extern uint32 z80c_ring[Z80C_RING];
 extern uint32 z80c_ring_n;
@@ -310,6 +398,8 @@ extern uint32 z80c_ring_n;
 #define Z80C_RAM_SEEN(pc)    ((void)0)
 #define Z80C_CART_SEEN(pos)  ((void)0)
 #define Z80C_BLOCK_SEEN(pos) ((void)0)
+#define Z80C_STK_CHECK(lo)   ((void)0)
+#define Z80C_WORD_CHECK(addr) ((void)0)
 #endif
 
 /*
@@ -373,7 +463,15 @@ void z80c_report(uint32 z80_tenths_ms, uint32 frames);
  *                the generated file names nothing of the interpreter's
  *                clock nor of its refresh register -- which a reader
  *                checks with one search -- while expanding to the very
- *                reads the interpreter makes.
+ *                reads the interpreter makes;
+ *
+ *   the direct   the forms on the work RAM, under names of this module
+ *   path         too, bound to the base every block receives as `ram`:
+ *                the four accesses at a proved address -- the two words
+ *                running the word check of the host runners first --
+ *                and the stack's five, each running their stack check
+ *                first; the console compiles both checks away. `grep -c 'Z80C_RAM_\|Z80C_STK_' src/rom_code.c`
+ *                counts the instructions the tool proved.
  * ---------------------------------------------------------------------------
  */
 #ifdef Z80C_BLOCK_FILE
@@ -384,6 +482,52 @@ void z80c_report(uint32 z80_tenths_ms, uint32 frames);
 #define Z80_SPEND(n) ((void)0)
 #define Z80C_RD8(addr)  Z80_RD8(addr)
 #define Z80C_RD16(addr) Z80_RD16(addr)
+#define Z80C_RAM_RD8(addr)         Z80_RAM_RD8(ram,addr)
+#define Z80C_RAM_RD16(addr)        (Z80C_WORD_CHECK(addr), Z80_RAM_RD16(ram,addr))
+#define Z80C_RAM_WR8(addr, value)  Z80_RAM_WR8(ram,addr,value)
+#define Z80C_RAM_WR16(addr, value)                      \
+  do                                                    \
+    {                                                   \
+      Z80C_WORD_CHECK(addr);                            \
+      Z80_RAM_WR16(ram,addr,value);                     \
+    }                                                   \
+  while(0)
+#define Z80C_STK_PUSH(value)                            \
+  do                                                    \
+    {                                                   \
+      Z80C_STK_CHECK((uint16)(Z80_SP - 2));             \
+      Z80_STK_PUSH(ram,value);                          \
+    }                                                   \
+  while(0)
+#define Z80C_STK_POP(hi, lo)                            \
+  do                                                    \
+    {                                                   \
+      Z80C_STK_CHECK(Z80_SP);                           \
+      Z80_STK_POP(ram,hi,lo);                           \
+    }                                                   \
+  while(0)
+#define Z80C_STK_RET()                                  \
+  do                                                    \
+    {                                                   \
+      Z80C_STK_CHECK(Z80_SP);                           \
+      Z80_STK_RET(ram);                                 \
+    }                                                   \
+  while(0)
+#define Z80C_STK_RETN()                                 \
+  do                                                    \
+    {                                                   \
+      Z80C_STK_CHECK(Z80_SP);                           \
+      Z80_STK_RETN(ram);                                \
+    }                                                   \
+  while(0)
+#define Z80C_STK_RETI() Z80C_STK_RET()
+#define Z80C_STK_EXSP(hi, lo)                           \
+  do                                                    \
+    {                                                   \
+      Z80C_STK_CHECK(Z80_SP);                           \
+      Z80_STK_EXSP(ram,hi,lo);                          \
+    }                                                   \
+  while(0)
 #endif
 
 #endif /* SMS3DO_Z80C_H */

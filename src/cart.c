@@ -758,9 +758,10 @@ cart_load(const char *name)
  * cart_work_ram is the console's 8k, allocated once at the first install
  * and kept across any later one: a second cartridge gets the same RAM, the
  * way the console's own chips survive a cartridge swap. Taken through
- * sys_alloc before the seal, so it stands in the boot footprint.
+ * sys_alloc before the seal, so it stands in the boot footprint. Its
+ * size is cart.h's, beside the pointer this module publishes and the
+ * mask the translated code indexes it with.
  */
-#define CART_WORK_RAM_SIZE 8192UL
 
 /* Pages per 16k slot, wired ROM pages (three slots), RAM pages above. */
 #define CART_BUS_SLOT_PAGES (CART_BANK_SIZE / Z80_PAGE_SIZE)
@@ -772,7 +773,7 @@ cart_load(const char *name)
 
 static const uint8 cart_bus_fixed[Z80_PAGE_SIZE];
 static uint8       cart_bus_scrap[Z80_PAGE_SIZE];
-static uint8      *cart_work_ram = NULL;
+uint8             *cart_work_ram = NULL;
 
 /* First page of each slot, and of the work RAM above them. */
 #define CART_BUS_SLOT0_PAGE 0UL

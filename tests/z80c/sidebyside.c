@@ -51,12 +51,22 @@
  *                a program waiting for the line to end: nothing else a
  *                frame holds runs that long.
  *
- *                Two refusals, exit status 4, the program's and not the
- *                translation's: a line that never waits (the guard), and
- *                an instruction executed from a page that is not the
+ *                Five refusals, exit status 4, the program's and not the
+ *                translation's: a line that never waits (the guard); an
+ *                instruction executed from a page that is not the
  *                image -- code in RAM, which no table can hold -- named
  *                with the position of the last cartridge code run before
- *                it.
+ *                it; a bank turned under a block the translator did
+ *                not close for it, its own bytes moved -- a mapper
+ *                write through a pointer it could not prove (src/z80c.h,
+ *                z80c_bank_pos); and a
+ *                direct stack access outside $C000-$FFFB -- the stack
+ *                the translator proved has run out of the work RAM
+ *                (z80c_stack_sp); and a fifth that accuses the
+ *                translator, a direct word whose second byte is past
+ *                the 8k (z80c_word_addr). It also prints the bytes the blocks
+ *                moved by each memory path (direct= through the work
+ *                RAM's base, full= through the page tables).
  *
  *   romid        boots the ROM and prints "rom_bytes=<n> rom_fnv=<8 hex>",
  *                the two fields the picture runner writes in a take's
@@ -598,6 +608,10 @@ static int report_translated(long frames, const char *counts_path)
          (unsigned long)z80c_fallback,(unsigned long)z80c_insns,
          (unsigned long)z80c_ram);
   printf("z80c: insns/frame=%lu\n",all / (unsigned long)frames);
+  /* The bytes the blocks moved by each memory path: the work RAM
+     indexed directly, and the page tables (src/z80c.h). */
+  printf("z80c: direct=%lu full=%lu\n",
+         (unsigned long)z80c_direct_total,(unsigned long)z80c_full_total);
   /* A translated run in which no block ran is the interpreter judged
      against itself. */
   if(z80c_exec == 0UL)
@@ -792,6 +806,35 @@ static int run(const char *rom, long frames, const char *counts_path,
       for(line = 0; line < LINES_PER_FRAME; line++)
         {
           z80_run_events();
+          /* The two refusals of the direct path (src/z80c.h): a bank
+             turned inside a block not closed for it, and the proved
+             stack out of the work RAM. */
+          if(z80c_bank_pos != Z80C_NO_PC)
+            {
+              printf("z80c: REFUSED bank switch inside block at %06lx frame %ld\n",
+                     (unsigned long)z80c_bank_pos,fr);
+              printf("z80c: the mapper was written through a pointer the translator could not prove, and the block went on with its own bytes turned\n");
+              if(seeds_path != NULL) (void)write_seeds(seeds_path,rom_fnv,-1L);
+              return 4;
+            }
+          if(z80c_stack_sp != Z80C_NO_PC)
+            {
+              printf("z80c: REFUSED stack outside ram at %06lx frame %ld\n",
+                     (unsigned long)z80c_last_pos,fr);
+              printf("z80c: a direct stack access at sp=%04lx touched a byte outside C000-FFFB\n",
+                     (unsigned long)z80c_stack_sp);
+              if(seeds_path != NULL) (void)write_seeds(seeds_path,rom_fnv,-1L);
+              return 4;
+            }
+          if(z80c_word_addr != Z80C_NO_PC)
+            {
+              printf("z80c: REFUSED direct word off the ram at %06lx frame %ld\n",
+                     (unsigned long)z80c_last_pos,fr);
+              printf("z80c: the translator proved a word at %04lx whose second byte is past the 8k: its proof is wrong\n",
+                     (unsigned long)z80c_word_addr);
+              if(seeds_path != NULL) (void)write_seeds(seeds_path,rom_fnv,-1L);
+              return 4;
+            }
           /* The two refusals of the program, said with the position and
              the frame; the seeds are written first, so that the next
              walk reaches what this run reached. */

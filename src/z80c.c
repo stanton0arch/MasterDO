@@ -1,5 +1,6 @@
 #include "z80c.h"
 #include "sms.h"
+#include "cart.h"
 #include "z80.h"
 #include "log.h"
 
@@ -17,6 +18,14 @@ uint32 z80c_last_pos   = 0;
 uint8 *z80c_seen       = NULL;
 uint32 z80c_ring[Z80C_RING];
 uint32 z80c_ring_n     = 0;
+uint32 z80c_bank_pos   = Z80C_NO_PC;
+uint32 z80c_stack_sp   = Z80C_NO_PC;
+uint32 z80c_word_addr  = Z80C_NO_PC;
+#endif
+
+#if Z80C_HITS
+uint32 z80c_direct_total = 0;
+uint32 z80c_full_total   = 0;
 #endif
 
 #if LOG_ENABLE && SMS_TELEMETRY
@@ -55,6 +64,13 @@ z80c_init(void)
   z80c_ram_pc     = Z80C_NO_PC;
   z80c_last_pos   = 0;
   z80c_ring_n     = 0;
+  z80c_bank_pos   = Z80C_NO_PC;
+  z80c_stack_sp   = Z80C_NO_PC;
+  z80c_word_addr  = Z80C_NO_PC;
+#endif
+#if Z80C_HITS
+  z80c_direct_total = 0;
+  z80c_full_total   = 0;
 #endif
 
 #if LOG_ENABLE && SMS_TELEMETRY
@@ -100,28 +116,35 @@ z80c_init(void)
   z80c_armed = 1;
 }
 
+/*
+ * The position in the image behind an address, through the live tables,
+ * or none. The page decides: an entry that points into the image is a
+ * position, anything else -- the work RAM and its mirrors, the cartridge
+ * RAM, the two fixed pages -- is not. The difference is taken as a
+ * signed offset and bounded by the loaded size, so that a page below the
+ * buffer or beyond the image answers the same "none".
+ */
+static int
+z80c_position(uint16 pc, uint32 *pos)
+{
+  const uint8 *page = z80_rmap[pc >> Z80_PAGE_BITS];
+  long off = (long)(page - sms.cart.rom);
+
+  if(off < 0L || (uint32)off >= sms.cart.size)
+    return 0;
+  *pos = (uint32)off + (uint32)(pc & Z80_PAGE_MASK);
+  return 1;
+}
+
 const z80c_entry_t *
 z80c_find(uint16 pc)
 {
-  const uint8 *page = z80_rmap[pc >> Z80_PAGE_BITS];
-  const uint8 *rom  = sms.cart.rom;
-  long   off;
   uint32 pos;
   uint32 lo;
   uint32 hi;
 
-  /*
-   * The page decides: an entry that points into the image is a position,
-   * anything else -- the work RAM and its mirrors, the cartridge RAM, the
-   * two fixed pages -- is interpreted. The difference is taken as a
-   * signed offset and bounded by the loaded size, so that a page below
-   * the buffer or beyond the image answers the same "none".
-   */
-  off = (long)(page - rom);
-  if(off < 0L || (uint32)off >= sms.cart.size)
+  if(!z80c_position(pc,&pos))
     return NULL;
-
-  pos = (uint32)off + (uint32)(pc & Z80_PAGE_MASK);
 
   lo = 0;
   hi = z80c_block_count;
@@ -145,6 +168,15 @@ void
 z80c_run(const z80c_entry_t *e)
 {
   uint32 epoch = z80c_map_epoch;
+  /*
+   * The base of the work RAM, loaded once for the chain and handed to
+   * every block: the accesses the tool proved index it directly
+   * (z80c.h, the direct path). A pointer read here, never in a block.
+   */
+  uint8 *ram = cart_work_ram;
+#if Z80C_BENCH
+  uint16 entry_pc;
+#endif
 
   Z80C_COUNT(z80c_chains_total);
 
@@ -153,11 +185,36 @@ z80c_run(const z80c_entry_t *e)
       const z80c_entry_t *next;
 
       Z80C_BLOCK_SEEN(e->pos);
-      next = e->fn();
+#if Z80C_BENCH
+      entry_pc = sms.z80.pc;
+#endif
+      next = e->fn(ram);
 
       Z80C_COUNT(z80c_exec_total);
 
 #if Z80C_BENCH
+      /*
+       * The mapper moved while this block ran, the block was not closed
+       * for it, and THE BLOCK'S OWN BYTES MOVED: the address it was
+       * entered at no longer holds its position in the image, so the
+       * instructions after the write ran on the bytes of the bank that
+       * left. The runner refuses the program; the block is named. A
+       * write that turns another window -- a program in the fixed
+       * kilobyte setting the mapper's registers one by one through a
+       * pointer -- moves nothing under the block and is let through:
+       * the chain asks the live tables next, as after any move.
+       */
+      if(z80c_map_epoch != epoch && (e->wait & Z80C_FLAG_BANKEND) == 0UL &&
+         z80c_bank_pos == Z80C_NO_PC)
+        {
+          uint32 pos;
+
+          if(!z80c_position(entry_pc,&pos) || pos != e->pos)
+            {
+              z80c_bank_pos = e->pos;
+              return;
+            }
+        }
       /* The guard, on the PC: the core's loop names the address. */
       if(Z80C_LINE_OVER())
         return;
@@ -169,7 +226,11 @@ z80c_run(const z80c_entry_t *e)
        * window, the epoch tests the pages behind it. Otherwise -- a
        * null, or a moved page -- the live tables say what starts at PC,
        * and a miss ends the chain with the address left for the core's
-       * loop, which does not search it a second time.
+       * loop, which does not search it a second time. A block closed on
+       * a mapper write renders its linear successor like any other: the
+       * epoch drops it when the write turned a bank, and keeps it when
+       * the write changed nothing, the bytes being then the ones
+       * translated.
        */
       if(next == NULL || z80c_map_epoch != epoch)
         {
@@ -187,7 +248,7 @@ z80c_run(const z80c_entry_t *e)
        * where it waits, and the core's loop, which finds the same entry
        * at PC, ends the line there.
        */
-      if(next->wait != 0UL)
+      if((next->wait & Z80C_FLAG_WAIT) != 0UL)
         return;
 
       e = next;

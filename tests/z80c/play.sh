@@ -85,17 +85,46 @@ z80c_runner() {
 # fourth argument names a file that takes the place of the core file of
 # the same name, and of that one only: it is how a check breaks the core
 # itself rather than the emitted C, and a name that matches none of them
-# is refused rather than compiled as if it had been used.
+# is refused rather than compiled as if it had been used. A fourth
+# argument that names z80_ops.h -- the one header a check may break,
+# since the runners' own objects, built once above, do not read it --
+# has no object to swap: the core's files are COPIED BESIDE IT and
+# compiled from there, and so is the table read with that directory
+# first. Copied, not pointed at by -I: for #include "z80_ops.h" the
+# compiler looks in the including file's own directory before any -I,
+# so a core file compiled from src/ would read src/z80_ops.h intact
+# whatever the include path says. The core is thus compiled again, with
+# the broken header, into the binary's own objects; a check that breaks
+# an interpreter macro in it sees the interpreter's frames change.
 #
 #   z80c_build <rom_code.c> <binary> <objects dir> [core file]
 z80c_build() {
   z80c_objs=
   z80c_swapped=0
+  z80c_inc=
+  z80c_src=$S
+  case "${4:-}" in
+    *.h)
+      if [ "$(basename "$4")" != "z80_ops.h" ]; then
+        echo "z80c_build: $4 takes the place of no core header the runners leave alone (z80_ops.h only)"
+        return 2
+      fi
+      z80c_inc="-I$(dirname "$4")"
+      z80c_src=$(dirname "$4")
+      for z80c_f in $Z80C_CORE; do
+        cp "$S/$z80c_f.c" "$z80c_src/$z80c_f.c" || return 2
+      done
+      z80c_swapped=1
+      ;;
+  esac
   for z80c_f in $Z80C_CORE; do
     if [ -n "${4:-}" ] && [ "$(basename "$4")" = "$z80c_f.c" ]; then
       $CC -O1 -std=gnu89 -w $Z80C_PINS -I"$H" -I"$S" -c -o "$2.$z80c_f.o" "$4" || return 2
       z80c_objs="$z80c_objs $2.$z80c_f.o"
       z80c_swapped=1
+    elif [ -n "$z80c_inc" ]; then
+      $CC -O1 -std=gnu89 -w $Z80C_PINS $z80c_inc -I"$H" -I"$S" -c -o "$2.$z80c_f.o" "$z80c_src/$z80c_f.c" || return 2
+      z80c_objs="$z80c_objs $2.$z80c_f.o"
     else
       z80c_objs="$z80c_objs $3/$z80c_f.o"
     fi
@@ -104,7 +133,7 @@ z80c_build() {
     echo "z80c_build: $4 takes the place of no core file"
     return 2
   fi
-  $CC -O1 -std=gnu89 -w $Z80C_PINS -I"$H" -I"$S" -c -o "$2.table.o" "$1" || return 2
+  $CC -O1 -std=gnu89 -w $Z80C_PINS $z80c_inc -I"$H" -I"$S" -c -o "$2.table.o" "$1" || return 2
   $CC -o "$2" "$3/sidebyside.o" "$3/host.o" $z80c_objs "$2.table.o" || return 2
   $CC -o "$2.picture" "$3/romrun.o" "$3/colour_tap.o" $z80c_objs "$2.table.o" $Z80C_TAP || return 2
 }

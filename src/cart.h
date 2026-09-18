@@ -219,6 +219,22 @@ typedef struct
 #endif
 
 /*
+ * The work RAM: the console's 8k, allocated once by cart_bus_install
+ * and never moved, seen at $C000-$DFFF and again at $E000-$FFFF through
+ * the sixteen high entries of the page tables, each pointing into it.
+ * Published as a pointer, READ BY ONE MODULE AND WRITTEN BY THIS ONE:
+ * the translated code (z80c.h) takes it once per chain of blocks and
+ * indexes it directly for the accesses its tool proved to land there,
+ * masked to the 8k -- the mirror comes out of the mask -- in place of
+ * the two table loads. Nothing else reads it: every other access goes
+ * through the tables, which stay the mapper's to move. Null until the
+ * first install; the translated code never runs before it.
+ */
+#define CART_WORK_RAM_SIZE 8192UL
+#define CART_WORK_RAM_MASK ((uint16)(CART_WORK_RAM_SIZE - 1UL))
+extern uint8 *cart_work_ram;
+
+/*
  * What cart_identify learns about a file without reading its bytes.
  */
 typedef struct

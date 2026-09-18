@@ -3152,6 +3152,29 @@ int main(int argc, char **argv)
             {
               z80_run_events();
 #if Z80C_BENCH
+              /* The two refusals of the direct path (src/z80c.h), said
+                 as tests/z80c/sidebyside.c says them. */
+              if(z80c_bank_pos != Z80C_NO_PC)
+                {
+                  printf("z80c: REFUSED bank switch inside block at %06lx frame %ld\n",
+                         (unsigned long)z80c_bank_pos,fr);
+                  if(writing) { fclose(ref); remove(tmp); }
+                  return 4;
+                }
+              if(z80c_stack_sp != Z80C_NO_PC)
+                {
+                  printf("z80c: REFUSED stack outside ram at %06lx frame %ld\n",
+                         (unsigned long)z80c_last_pos,fr);
+                  if(writing) { fclose(ref); remove(tmp); }
+                  return 4;
+                }
+              if(z80c_word_addr != Z80C_NO_PC)
+                {
+                  printf("z80c: REFUSED direct word off the ram at %06lx frame %ld\n",
+                         (unsigned long)z80c_last_pos,fr);
+                  if(writing) { fclose(ref); remove(tmp); }
+                  return 4;
+                }
               /* The two refusals of the host runners (src/z80c.h): code
                  executed from a page that is not the image, and a line
                  that never waited. The program is refused, never
@@ -3406,6 +3429,11 @@ int main(int argc, char **argv)
     z80c_counts(&z80c_exec,&z80c_fallback,&z80c_insns,&z80c_ram);
     printf("z80c exec=%lu fallback=%lu\n",
            (unsigned long)z80c_exec,(unsigned long)z80c_fallback);
+#if Z80C_HITS
+    /* The bytes the blocks moved by each memory path (src/z80c.h). */
+    printf("z80c direct=%lu full=%lu\n",
+           (unsigned long)z80c_direct_total,(unsigned long)z80c_full_total);
+#endif
   }
 #endif
   if(writing)

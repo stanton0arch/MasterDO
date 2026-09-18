@@ -46,7 +46,23 @@
 #     that loop would push the write of the backdrop into the picture;
 #   - it keeps a byte at $C000 the picture never reads back, which the
 #     mutation "memory" below moves: only the memory held beside the
-#     picture can tell.
+#     picture can tell;
+#   - it walks the direct path to the work RAM on every family the
+#     translator proves (the stack, an absolute read of the ROM, a pair
+#     the tool knows, the seam of the mirror, the write to the mapper
+#     that closes its block), so that the mutations "direct", "stack"
+#     and "bankend" below have a form to break without a real ROM.
+#
+# Two VARIANTS of it are each held to one refusal of the runners, and to
+# nothing else; they are judged after the cartridge and played under no
+# mutation. bankswitch_indirect.sms writes the mapper through a pointer
+# loaded in another block, which the translator cannot prove: the block
+# goes on after the write on the bytes of the bank that left, and the
+# runners must refuse it ("bank switch inside block").
+# bankswitch_underflow.sms sets its stack at $C001, in the work RAM, so
+# that the stack is proved and its first push lands under the RAM: the
+# runners must refuse it ("stack outside ram"), the check the console
+# does not make.
 #
 # Without a real ROM beside it the script says so unmistakably and judges
 # the written cartridge alone. With several ROMs every one is translated
@@ -76,11 +92,25 @@
 #                                           refused on at least one ROM;
 #                                           and, on the written cartridge,
 #                                           the epoch of the mapper taken
-#                                           out of the core, the write of
+#                                           out of the core, the
+#                                           core's push swapped in its
+#                                           header, the write of
 #                                           its byte at $C000 moved to
 #                                           $C003, and its waits marked
 #                                           the same two wrong ways, each
-#                                           demanded red or refused.
+#                                           demanded red or refused; and,
+#                                           on the cartridge and the ROMs
+#                                           alike, the direct path broken
+#                                           three ways: every absolute
+#                                           read of the ROM turned into
+#                                           the RAM form, the two bytes
+#                                           of the direct pop swapped in
+#                                           the core's header, and the
+#                                           flag of the blocks closed on
+#                                           a mapper write cleared --
+#                                           the written cartridge carries
+#                                           all three forms, a real ROM
+#                                           may carry none.
 #                                           Every broken copy is held to
 #                                           the reference of the intact
 #                                           table.
@@ -143,9 +173,60 @@ trap 'rm -rf "$WORK"' EXIT
 # directory and judged before the real ROMs. It is built with the
 # strictness of the tools, not of the console: it never leaves the PC.
 FIXTURE=$WORK/bankswitch.sms
+INDIRECT=$WORK/bankswitch_indirect.sms
+UNDERFLOW=$WORK/bankswitch_underflow.sms
 $CC -O1 -std=c89 -Wall -Wextra -Werror -o "$WORK/rom_bank" "$B/rom_bank.c"
 "$WORK/rom_bank" "$FIXTURE"
-set -- "$FIXTURE" "$@"
+"$WORK/rom_bank" "$INDIRECT" indirect
+"$WORK/rom_bank" "$UNDERFLOW" underflow
+set -- "$FIXTURE" "$INDIRECT" "$UNDERFLOW" "$@"
+
+# The written cartridge's direct path, held to figures: the translator's
+# report of what it proved on the seeded table -- the whole one and the
+# chosen one, which are the same twelve blocks -- and, in the C it
+# wrote, at least one of every form the image was written to exercise,
+# direct and full alike. A proof gone silent draws the very same frames
+# (the full path and the direct one agree to the byte), so only the
+# figures can tell; the runner's own count of bytes moved directly must
+# be above zero on both judgements. Counter and floor, the way a speed
+# bench is held.
+FIXTURE_DIRECT='z80c: direct rd=18/22 wr=30/37 stack=proven rom_fixed=0'
+z80c_fixture_floors() {
+  ff_rc=0
+  if [ "$(grep -c "^$FIXTURE_DIRECT\$" "$1/translate.out")" -lt 2 ]; then
+    echo "FAIL: the written cartridge's proof does not report '$FIXTURE_DIRECT' on both seeded tables: $(grep '^z80c: direct rd=' "$1/translate.out" | tr '\n' ' ')"
+    ff_rc=1
+  fi
+  if [ "$(grep -c '^z80c: direct=[1-9][0-9]* full=[1-9][0-9]*$' "$1/translate.out")" -ne 2 ]; then
+    echo "FAIL: the written cartridge's runs do not both count bytes on the direct path and the full one: $(grep '^z80c: direct=' "$1/translate.out" | tr '\n' ' ')"
+    ff_rc=1
+  fi
+  for ff_form in \
+    'Z80C_RAM_RD8(0x' 'Z80C_RAM_WR8(0x' 'Z80C_RAM_WR8(Z80_HL,Z80_D)' 'Z80C_RAM_WR8(ixaddr,' \
+    'Z80C_RAM_RD16(0x' 'Z80C_RAM_WR16(0x' \
+    'Z80C_STK_PUSH(' 'Z80C_STK_POP(' 'Z80C_STK_EXSP(' 'Z80C_STK_RET()' 'Z80C_STK_RETI()' \
+    'Z80_WR8(Z80_HL,Z80_D)' 'Z80_WR8(0xFFFFU,Z80_A)' 'Z80C_RD16(0xDFFFU)' 'Z80C_RD8(0x8'; do
+    if ! grep -qF "$ff_form" "$1/rom_code.c"; then
+      echo "FAIL: the written cartridge's C carries no '$ff_form'"
+      ff_rc=1
+    fi
+  done
+  return $ff_rc
+}
+
+# A variant held to one refusal: the translator's status is 4 and its
+# output carries the line; anything else -- a pass, another refusal, a
+# failure -- is the core's failure.
+#
+#   expected_refusal <name> <status> <output> <refusal line prefix> <why>
+expected_refusal() {
+  if [ "$2" -eq 4 ] && grep -q "^z80c: REFUSED $4 at " "$3"; then
+    echo "z80c: $1 refused as expected: $(grep -m1 '^z80c: REFUSED ' "$3")"
+    return 0
+  fi
+  echo "FAIL: $1: $5 was not refused as expected (status $2: $(grep -m1 '^z80c: REFUSED \|^FAIL' "$3" || echo 'no refusal'))"
+  return 1
+}
 
 # One broken copy played through the whole judgement, against the
 # reference of the intact chosen table. Prints nothing; leaves the status
@@ -249,6 +330,49 @@ mutate() {
   esac
 }
 
+# The three breakings of the direct path, played on the written
+# cartridge and on every ROM alike, each demanded red or refused:
+#
+#   direct   every absolute read of the ROM (the reads the tool did NOT
+#            prove, since the proved ones already carry the RAM form)
+#            turned into the RAM form: the byte comes out of the work
+#            RAM at the masked offset instead of the image;
+#   stack    the two bytes of the direct pop swapped, in the core's
+#            header: a value popped comes back with its halves crossed,
+#            and so does every return address -- proved in the core,
+#            not in the emitted C, since the emitted C only names the
+#            form;
+#   bankend  the flag of every block closed on a mapper write cleared:
+#            the core sees the epoch move under a block not marked for
+#            it and refuses the program.
+#
+#   z80c_direct_mutations <dir> <rom>
+#
+# The last two break a form the table may not carry -- a program whose
+# stack is not proved names no Z80C_STK_ form, one that never writes the
+# mapper at a proved address closes no block -- and the sed of "stack"
+# always changes the header it edits: the form is looked for in the
+# table first, and a table without it is said not played, the way
+# "broken" says it of a pattern that matches nothing.
+z80c_direct_mutations() {
+  z80c_dm_rc=0
+  mutate direct 's/Z80C_RD8(0x\([0-9A-F]*\)U)/Z80C_RAM_RD8(0x\1U)/' \
+         "every absolute read of the rom taken from the ram" "$1/rom_code.c" "$1/rom_code.c" "$2" "$1" || z80c_dm_rc=1
+  if grep -q 'Z80C_STK_' "$1/rom_code.c"; then
+    mutate stack 's/(lo) = (ram)\[Z80_SP/(XX) = (ram)[Z80_SP/; s/(hi) = (ram)\[Z80_SP/(lo) = (ram)[Z80_SP/; s/(XX) = (ram)\[Z80_SP/(hi) = (ram)[Z80_SP/' \
+           "the two bytes of the direct pop swapped" "$S/z80_ops.h" "$1/rom_code.c" "$2" "$1" core || z80c_dm_rc=1
+  else
+    echo "  [INFO] mutation stack (the two bytes of the direct pop swapped) has no form to break here: not played"
+  fi
+  if grep -q ', [23]UL },$' "$1/rom_code.c"; then
+    mutate bankend 's/, 2UL },$/, 0UL },/; s/, 3UL },$/, 1UL },/' \
+           "the flag of the blocks closed on a mapper write cleared" "$1/rom_code.c" "$1/rom_code.c" "$2" "$1" || z80c_dm_rc=1
+  else
+    echo "  [INFO] mutation bankend (the flag of the blocks closed on a mapper write cleared) has no form to break here: not played"
+  fi
+  return $z80c_dm_rc
+}
+
 if [ "${MUTATE:-0}" = 1 ]; then
   z80c_runner "$WORK/obj"
 fi
@@ -272,6 +396,19 @@ for rom in "$@"; do
   set -e
   cat "$dir/translate.out"
   echo "  ($(( $(date +%s) - start )) s)"
+  # The two variants of the written cartridge, each held to its one
+  # refusal: the bank turned inside a block the translator did not
+  # close, and the proved stack pushed under the work RAM.
+  if [ "$rom" = "$INDIRECT" ]; then
+    expected_refusal "$name" "$trc" "$dir/translate.out" "bank switch inside block" \
+      "the mapper written through a pointer" || fail=1
+    continue
+  fi
+  if [ "$rom" = "$UNDERFLOW" ]; then
+    expected_refusal "$name" "$trc" "$dir/translate.out" "stack outside ram" \
+      "the stack set at \$C001 and pushed" || fail=1
+    continue
+  fi
   if [ "$trc" -eq 4 ] && grep -q '^z80c: REFUSED ' "$dir/translate.out"; then
     if [ "$rom" = "$FIXTURE" ]; then
       # The written cartridge waits by a loop the core must honour: a
@@ -301,6 +438,10 @@ for rom in "$@"; do
     fail=1
     continue
   fi
+  if [ "$rom" = "$FIXTURE" ] && ! z80c_fixture_floors "$dir"; then
+    fail=1
+    continue
+  fi
 
   [ "${MUTATE:-0}" = 1 ] || continue
 
@@ -317,20 +458,35 @@ for rom in "$@"; do
     mutate epoch 's/^\( *\)z80c_map_epoch++;$/\1;/' \
          "the mapper no longer steps the epoch" "$S/cart.c" \
          "$dir/rom_code.c" "$rom" "$dir" core || fail=1
+    echo "== $name: the core's push swapped in its header =="
+    # The one breaking of the core's HEADER: the core's own PUSH -- the
+    # one the frame interrupt uses to stack the return address, every
+    # push of the image itself being translated and direct -- stores
+    # its two bytes crossed, and the handler's direct RETI returns to a
+    # crossed address. Red here proves that a header handed to
+    # z80c_build reaches the core's files, not only the table
+    # (tests/z80c/play.sh says how).
+    mutate corepush 's/Z80_WR8(Z80_SP,(uint8)(z80_pv >> 8));/Z80_WR8(Z80_SP,(uint8)(z80_pv XX 8));/; s/Z80_WR8(Z80_SP,(uint8)(z80_pv \& 0xFFU));/Z80_WR8(Z80_SP,(uint8)(z80_pv >> 8));/; s/Z80_WR8(Z80_SP,(uint8)(z80_pv XX 8));/Z80_WR8(Z80_SP,(uint8)(z80_pv \& 0xFFU));/' \
+         "the core's push swapped in its header" "$S/z80_ops.h" \
+         "$dir/rom_code.c" "$rom" "$dir" core || fail=1
     echo "== $name: the write of the byte at \$C000 moved to \$C003 =="
     # The picture never reads that byte back: the frames stand, and only
     # the memory held beside them at the end of every frame can tell.
-    mutate memory 's/Z80_WR8(0xC000U,Z80_A)/Z80_WR8(0xC003U,Z80_A)/' \
+    mutate memory 's/Z80C_RAM_WR8(0xC000U,Z80_A)/Z80C_RAM_WR8(0xC003U,Z80_A)/' \
          "the byte at \$C000 written at \$C003" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
     echo "== $name: the written cartridge's waits marked two wrong ways =="
     # The same two breakings of the waits as on a real ROM (below): with
     # no block a wait the loop at wait never ends its line and the
     # program is refused; with one block in two a wait the fill is one,
-    # and every turn of it ends a line.
-    mutate nowait 's/, 1UL },$/, 0UL },/' \
+    # and every turn of it ends a line. The flags share one word (bit 0
+    # the wait, bit 1 the close on a mapper write), so each breaking
+    # touches bit 0 of both values.
+    mutate nowait 's/, 1UL },$/, 0UL },/; s/, 3UL },$/, 2UL },/' \
          "no block marked as a wait" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
-    mutate wait 's/^\(  { 0x[0-9A-F]*[02468ACE]UL, b_[0-9a-f]*\), 0UL },$/\1, 1UL },/' \
+    mutate wait 's/^\(  { 0x[0-9A-F]*[02468ACE]UL, b_[0-9a-f]*\), 0UL },$/\1, 1UL },/; s/^\(  { 0x[0-9A-F]*[02468ACE]UL, b_[0-9a-f]*\), 2UL },$/\1, 3UL },/' \
          "one block in two marked as a wait" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
+    echo "== $name: the direct path broken three ways =="
+    z80c_direct_mutations "$dir" "$rom" || fail=1
     continue
   fi
 
@@ -382,16 +538,18 @@ for rom in "$@"; do
   # No block a wait: the program spins in its loop and the line never
   # ends -- the guard refuses it. A table whose waits are all halts has
   # no mark to take out and says so.
-  mutate nowait 's/, 1UL },$/, 0UL },/' \
+  mutate nowait 's/, 1UL },$/, 0UL },/; s/, 3UL },$/, 2UL },/' \
          "no block marked as a wait" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
   # One block in two a wait (the ones whose position is even): a line
   # ends where the program does not wait, it falls behind its clock, and
   # the frames no longer match the reference taken with the intact
   # table's waits. Not every block: a table of nothing but waits never
   # chains two blocks, and the free run refuses it before anything is
-  # judged.
-  mutate wait 's/^\(  { 0x[0-9A-F]*[02468ACE]UL, b_[0-9a-f]*\), 0UL },$/\1, 1UL },/' \
+  # judged. Bit 1 of the flags, the close on a mapper write, is kept.
+  mutate wait 's/^\(  { 0x[0-9A-F]*[02468ACE]UL, b_[0-9a-f]*\), 0UL },$/\1, 1UL },/; s/^\(  { 0x[0-9A-F]*[02468ACE]UL, b_[0-9a-f]*\), 2UL },$/\1, 3UL },/' \
          "one block in two marked as a wait" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
+  echo "== $name: the direct path broken three ways =="
+  z80c_direct_mutations "$dir" "$rom" || fail=1
 done
 
 # The mutations, over every ROM played: each seen red or refused at
@@ -400,9 +558,9 @@ done
 if [ "${MUTATE:-0}" = 1 ]; then
   echo "== the mutations over every rom =="
   if [ "$found" -eq 1 ]; then
-    wanted="epoch memory cp jr load succ vram colour wait nowait"
+    wanted="epoch corepush memory cp jr load succ vram colour wait nowait direct stack bankend"
   else
-    wanted="epoch memory wait nowait"
+    wanted="epoch corepush memory wait nowait direct stack bankend"
   fi
   for m in $wanted; do
     case "$RED_SEEN" in

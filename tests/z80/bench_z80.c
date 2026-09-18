@@ -16,8 +16,8 @@
  *   - it is built with the mapper the shipped binary is built with, so the
  *     write macro it exercises is the one every emulated write of the game
  *     goes through -- see THE WRITE PATH below;
- *   - the ten link-time stubs answer with neutral values and imitate neither
- *     the video part nor the cartridge.
+ *   - the eleven link-time stubs answer with neutral values and imitate
+ *     neither the video part nor the cartridge.
  *
  * ---------------------------------------------------------------------------
  * THREE THINGS IT WATCHES, AND THEY ARE NOT THE SAME KIND OF THING
@@ -217,6 +217,12 @@ memory_install(void)
 /* ------------------------------------------------------------------ */
 
 void cart_io_memctl_write(uint8 value) { (void)value; }
+
+/* The base of the work RAM the cartridge module publishes (cart.h): the
+   translated code's module takes it once per chain of blocks. The empty
+   table never arms, so no chain runs here and the pointer is read by
+   nothing; null, like a bus never installed. */
+uint8 *cart_work_ram = NULL;
 
 void  vdp_io_ctrl_write(uint8 value)   { (void)value; }
 uint8 vdp_io_data_read(void)           { return 0; }

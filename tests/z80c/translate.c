@@ -105,6 +105,54 @@
  * RAM, and the one that never waits, when they see it run
  * (tests/z80c/sidebyside.c).
  *
+ * THE DIRECT PATH. Every read and write the interpreter makes goes
+ * through the page tables (src/z80_ops.h): the table's address, its
+ * entry, then the byte -- three loads where one would do. The tables
+ * exist so that the mapper can move banks; the work RAM never moves. So
+ * the tool PROVES, here, that an access lands in the work RAM, and
+ * emits it without the tables: the block receives the RAM's base as its
+ * argument, and the access is one load or one store into it, the
+ * address masked to the 8k (the mirror at 0xE000 comes out of the
+ * mask). Three families are proved:
+ *
+ *   the absolute address (nn) at or above 0xC000;
+ *
+ *   a pair or an index whose value the tool knows at that point of the
+ *   block -- set by LD rr,nn, moved by INC rr and DEC rr, a half set
+ *   by LD r,n, and lost on anything else that writes it; a block is
+ *   entered from anywhere, so nothing is known at its head;
+ *
+ *   the stack, when every instruction the walk reached writes SP only
+ *   by LD SP,nn with nn between 0xC000 and 0xFFFC: the stack then
+ *   leaves the work RAM only by running out of it, which the runners
+ *   refuse on the PC (src/z80c.h, the stack check); one LD SP,HL or
+ *   INC SP anywhere sends the stack back to the full path, and the
+ *   report says which and where.
+ *
+ * What is not proved keeps the full path. A write proved to land on
+ * 0xFFFC-0xFFFF -- the mapper's registers -- keeps the full path, which
+ * carries the mapper trigger, and CLOSES THE BLOCK: the instructions
+ * after it may belong to the bank that has just left, and the core
+ * asks the tables again (src/z80c.c, the epoch). The entry of such a
+ * block carries a second flag, and a block that sees the mapper move
+ * its own bytes without carrying it is refused on the PC -- the case
+ * left is a write through a pointer the tool could not prove, turning
+ * the block's own window, and it is named; a pointer write that turns
+ * another window, the way a program sets the registers one by one
+ * from the fixed kilobyte, is let through. A word
+ * is direct only when both its bytes are proved, on the same side of
+ * the mirror's seam (0xDFFF/0xE000) and below the top of the address
+ * space; the stack, whose pointer is known only at run time, reads and
+ * writes its two bytes masked one by one. An absolute read of the
+ * fixed first kilobyte of the image is counted and not made direct:
+ * the image is a pointer too, and the direct form would load as much
+ * as the tables. The report says how much was proved:
+ *
+ *   z80c: direct rd=<proved>/<all> wr=<proved>/<all> stack=proven|full (<form> at <pos>) rom_fixed=<n>
+ *
+ * in instructions of the written table; `grep -c 'Z80C_RAM_\|Z80C_STK_'
+ * src/rom_code.c` counts the same instructions.
+ *
  * SEEDS. The walk reads no table: a program that dispatches through one
  * (a restart followed by an index, a jump through a pair) hides its
  * code from it, and what is hidden is interpreted and never marked as a
@@ -163,6 +211,20 @@
    tool cannot translate and refuses. */
 #define RAM_BASE 0xC000UL
 
+/* The mapper's registers, at the top of the work RAM's address space
+   (src/cart.h): a write proved to land there keeps the full path, which
+   carries the mapper trigger, and closes the block. */
+#define MAPPER_FIRST_REG 0xFFFCUL
+
+/* The first byte of the mirror: a word whose two bytes stand on either
+   side of it is two pages of the tables, never one direct read. */
+#define MIRROR_BASE 0xE000UL
+
+/* Where the stack may point when it is proved: LD SP,nn with nn in this
+   range, and nothing else writing SP. */
+#define STACK_LOW  0xC000UL
+#define STACK_HIGH 0xFFFCUL
+
 
 static unsigned char rom[ROM_CAPACITY];
 static unsigned long rom_size;
@@ -194,11 +256,21 @@ static unsigned long n_reached;
 static unsigned long n_blocks;
 static unsigned long n_emitted;
 static unsigned long n_code_bytes;
-static unsigned long n_end_next, n_end_jump, n_end_fallback, n_end_cut, n_end_bank, n_end_repeat;
+static unsigned long n_end_next, n_end_jump, n_end_fallback, n_end_cut, n_end_bank, n_end_repeat, n_end_bankend;
 static unsigned long n_fb_halt, n_fb_im, n_fb_ld_a_r, n_fb_ld_r_a, n_fb_refused;
 static unsigned long n_waits;
 static unsigned long n_ram_targets, ram_target_addr, ram_target_from;
 static unsigned long n_seeds;
+
+/* The direct path: the instructions of the written table that read
+   memory and that write it, and among each how many were proved; the
+   absolute reads of the fixed kilobyte, counted only; and the stack --
+   proved until the walk meets an instruction that writes SP otherwise
+   than LD SP,nn into the work RAM, named with its position. */
+static unsigned long n_rd_all, n_rd_direct, n_wr_all, n_wr_direct, n_rom_fixed;
+static int stack_proven = 1;
+static unsigned long stack_full_pos;
+static char stack_full_form[24];
 
 /* ---- the registers ---------------------------------------------------- */
 
@@ -571,6 +643,57 @@ static int ed_return(unsigned sub)
   return (sub & 0xC7U) == 0x45U;
 }
 
+/* The stack's proof, held over every instruction the walk reaches: SP
+   written by LD SP,nn into the work RAM keeps it; any other write of SP
+   -- LD SP,HL, LD SP,IX, INC SP, DEC SP, LD SP,(nn), or an LD SP,nn
+   outside the RAM -- loses it, and the first such instruction is kept
+   for the report. */
+static void stack_seen(const unsigned char *p, unsigned long pos, unsigned long avail)
+{
+  const char *form = NULL;
+  unsigned op = p[0];
+
+  if(op == 0x31U)
+    {
+      /* An operand cut by the edge of the bank is an operand unknown:
+         the proof falls, it does not stand by default. */
+      if(avail < 3UL)
+        form = "ld sp,nn (cut)";
+      else
+        {
+          unsigned long nn = imm16(p + 1);
+
+          if(nn < STACK_LOW || nn > STACK_HIGH)
+            form = "ld sp,nn";
+        }
+    }
+  else if(op == 0xF9U)
+    form = "ld sp,hl";
+  else if(op == 0x33U)
+    form = "inc sp";
+  else if(op == 0x3BU)
+    form = "dec sp";
+  else if(op == 0xEDU && avail >= 2UL && p[1] == 0x7BU)
+    form = "ld sp,(nn)";
+  else if((op == 0xDDU || op == 0xFDU) && avail >= 2UL && p[1] == 0xF9U)
+    form = (op == 0xDDU) ? "ld sp,ix" : "ld sp,iy";
+  else if((op == 0xDDU || op == 0xFDU) && avail >= 2UL &&
+          (p[1] == 0x31U || p[1] == 0x33U || p[1] == 0x3BU ||
+           (p[1] == 0xEDU && avail >= 3UL && p[2] == 0x7BU)))
+    /* A stray prefix in front of a write of SP: the interpreter runs
+       the instruction under it all the same, and the tool does not
+       translate it. */
+    form = "prefixed sp write";
+
+  if(form != NULL && stack_proven)
+    {
+      stack_proven = 0;
+      stack_full_pos = pos;
+      strncpy(stack_full_form,form,sizeof stack_full_form - 1);
+      stack_full_form[sizeof stack_full_form - 1] = '\0';
+    }
+}
+
 /* Walks the reachable code from one start to the first unconditional
    transfer, the edge of the bank, or an instruction already walked. */
 static void discover(unsigned long start)
@@ -592,6 +715,9 @@ static void discover(unsigned long start)
       if(mark[pos] & M_INSN)
         return;
       len = insn_len(p,end - pos);
+      /* Seen by the stack's proof before the cut is tested: an
+         instruction cut by the edge still runs in the interpreter. */
+      stack_seen(p,pos,end - pos);
       if(pos + (unsigned long)len > end)
         return;
 
@@ -690,12 +816,352 @@ typedef struct
   int wait_read;
   unsigned wait_pair;
   int writes;
+  /* The direct path: whether the instruction reads memory (1) or
+     writes it (2, an exchange with the stack included); whether the
+     form emitted is the direct one; whether it is an absolute read of
+     the fixed kilobyte; whether it is a proved write to the mapper's
+     registers, after which the block closes; and the bytes each path
+     moves, in the text and in the taken exit. */
+  int mem;
+  int direct;
+  int rom_fixed;
+  int bankend;
+  int acc_direct, acc_full;
+  int taken_direct, taken_full;
 } insn_t;
 
 static void set_text(insn_t *in, const char *s)
 {
   strncpy(in->text,s,sizeof in->text - 1);
   in->text[sizeof in->text - 1] = '\0';
+}
+
+/* ---- the proof of the work RAM --------------------------------------- */
+
+/* What the tool knows of the registers at one point of a block: the
+   value of each half when it is known. Indexed like the register bits;
+   only the ten halves of the five pairs are ever known. */
+typedef struct
+{
+  int known[R_COUNT];
+  unsigned value[R_COUNT];
+} regs_t;
+
+/* The state the instruction being decoded is emitted under: set by
+   decode, read by the forms below. Nothing is known at a block's head. */
+static const regs_t *proof;
+
+static void regs_reset(regs_t *r)
+{
+  memset(r,0,sizeof *r);
+}
+
+/* The value of a pair, when both halves are known. The bits name the
+   halves (R_H | R_L, R_IXH | R_IXL...). */
+static int regs_pair(const regs_t *r, unsigned bits, unsigned long *value)
+{
+  unsigned i, hi = 0U, lo = 0U;
+  int n = 0;
+
+  for(i = 0; i < R_COUNT; i++)
+    if(bits & (1U << i))
+      {
+        if(!r->known[i])
+          return 0;
+        if(n == 0)
+          hi = r->value[i];
+        else
+          lo = r->value[i];
+        n++;
+      }
+  if(n != 2)
+    return 0;
+  *value = ((unsigned long)hi << 8) | (unsigned long)lo;
+  return 1;
+}
+
+static void regs_set_half(regs_t *r, unsigned bit, unsigned v)
+{
+  unsigned i;
+
+  for(i = 0; i < R_COUNT; i++)
+    if(bit == (1U << i))
+      {
+        r->known[i] = 1;
+        r->value[i] = v & 0xFFU;
+      }
+}
+
+static void regs_set_pair(regs_t *r, unsigned bits, unsigned long v)
+{
+  unsigned i;
+  int n = 0;
+
+  for(i = 0; i < R_COUNT; i++)
+    if(bits & (1U << i))
+      {
+        r->known[i] = 1;
+        r->value[i] = (n == 0) ? (unsigned)((v >> 8) & 0xFFUL) : (unsigned)(v & 0xFFUL);
+        n++;
+      }
+}
+
+/* What is known after the instruction at p, decoded as in: every
+   register it writes is lost, then the three forms that set a value
+   -- LD rr,nn, LD r,n on a half, INC rr and DEC rr on a pair whose
+   value was known -- put one back. SP is never held here: the stack is
+   proved over the whole program. */
+static void regs_after(regs_t *r, const insn_t *in, const unsigned char *p)
+{
+  unsigned op = p[0];
+  unsigned i;
+
+  for(i = 0; i < R_COUNT; i++)
+    if(in->wr & (1U << i))
+      r->known[i] = 0;
+  if(in->kind == K_FALLBACK)
+    return;
+
+  if(op == 0xDDU || op == 0xFDU)
+    {
+      unsigned bits = (op == 0xDDU) ? R_IX : R_IY;
+      unsigned bhi  = (op == 0xDDU) ? R_IXH : R_IYH;
+      unsigned blo  = (op == 0xDDU) ? R_IXL : R_IYL;
+
+      switch(p[1])
+        {
+        case 0x21: regs_set_pair(r,bits,imm16(p + 2)); break;
+        case 0x26: regs_set_half(r,bhi,p[2]); break;
+        case 0x2E: regs_set_half(r,blo,p[2]); break;
+        case 0x23: case 0x2B:
+          /* The halves were lost above; the pair is known again only
+             when it was known before, which the caller's copy says. */
+          break;
+        default: break;
+        }
+      return;
+    }
+  if(op == 0xCBU || op == 0xEDU)
+    return;
+
+  if((op & 0xCFU) == 0x01U && ((op >> 4) & 3U) != 3U)
+    {
+      regs_set_pair(r,rpbit[(op >> 4) & 3U],imm16(p + 1));
+      return;
+    }
+  if((op & 0xC7U) == 0x06U && ((op >> 3) & 7U) != 6U)
+    regs_set_half(r,r8bit[(op >> 3) & 7U],p[1]);
+}
+
+/* The pair moved by INC rr or DEC rr, plain or indexed, when its value
+   was known before: known after, one further. Applied by the caller
+   on the state before the instruction, since regs_after has lost it. */
+static void regs_step(regs_t *r, const regs_t *before, const unsigned char *p)
+{
+  unsigned op = p[0];
+  unsigned bits;
+  int dec;
+  unsigned long v;
+
+  if(op == 0xDDU || op == 0xFDU)
+    {
+      if(p[1] != 0x23U && p[1] != 0x2BU)
+        return;
+      bits = (op == 0xDDU) ? R_IX : R_IY;
+      dec = (p[1] == 0x2BU);
+    }
+  else if((op & 0xC7U) == 0x03U && ((op >> 4) & 3U) != 3U)
+    {
+      bits = rpbit[(op >> 4) & 3U];
+      dec = (op & 8U) != 0U;
+    }
+  else
+    return;
+  if(!regs_pair(before,bits,&v))
+    return;
+  v = (dec ? (v - 1UL) : (v + 1UL)) & 0xFFFFUL;
+  regs_set_pair(r,bits,v);
+}
+
+/* Whether an address is the work RAM's, and whether a byte written
+   there is one of the mapper's registers. */
+static int in_ram(unsigned long addr)
+{
+  return (addr & 0xFFFFUL) >= RAM_BASE;
+}
+
+static int in_mapper(unsigned long addr)
+{
+  return (addr & 0xFFFFUL) >= MAPPER_FIRST_REG;
+}
+
+/* The two bytes of a word at addr: both in the work RAM, on the same
+   side of the mirror's seam, below the top of the address space. */
+static int word_in_ram(unsigned long addr)
+{
+  addr &= 0xFFFFUL;
+  if(addr + 1UL > 0xFFFFUL)
+    return 0;
+  if(!in_ram(addr))
+    return 0;
+  return (addr < MIRROR_BASE) == (addr + 1UL < MIRROR_BASE);
+}
+
+/* The forms of one access at a known address, and the counts that go
+   with them. An eight bit read is direct in the work RAM; a write is
+   direct below the mapper's registers, and on them it keeps the full
+   path and ends the block. A word is direct when both its bytes are.
+   The absolute read of the fixed kilobyte is counted. */
+static const char *form_rd8(insn_t *in, unsigned long addr, int absolute)
+{
+  in->mem = 1;
+  if(absolute && (addr & 0xFFFFUL) < SLOT0_FIXED)
+    in->rom_fixed = 1;
+  if(in_ram(addr))
+    {
+      in->direct = 1;
+      in->acc_direct += 1;
+      return "Z80C_RAM_RD8";
+    }
+  in->acc_full += 1;
+  return "Z80C_RD8";
+}
+
+static const char *form_wr8(insn_t *in, unsigned long addr)
+{
+  in->mem = 2;
+  if(in_ram(addr) && !in_mapper(addr))
+    {
+      in->direct = 1;
+      in->acc_direct += 1;
+      return "Z80C_RAM_WR8";
+    }
+  if(in_mapper(addr))
+    in->bankend = 1;
+  in->acc_full += 1;
+  return "Z80_WR8";
+}
+
+static const char *form_rd16(insn_t *in, unsigned long addr)
+{
+  in->mem = 1;
+  if(word_in_ram(addr))
+    {
+      in->direct = 1;
+      in->acc_direct += 2;
+      return "Z80C_RAM_RD16";
+    }
+  in->acc_full += 2;
+  return "Z80C_RD16";
+}
+
+static const char *form_wr16(insn_t *in, unsigned long addr)
+{
+  in->mem = 2;
+  if(word_in_ram(addr) && !in_mapper(addr + 1UL))
+    {
+      in->direct = 1;
+      in->acc_direct += 2;
+      return "Z80C_RAM_WR16";
+    }
+  /* A word at 0xFFFF puts its second byte at 0x0000, absorbed; its
+     first is a register all the same. */
+  if(in_mapper(addr) || in_mapper(addr + 1UL))
+    in->bankend = 1;
+  in->acc_full += 2;
+  return "Z80_WR16";
+}
+
+/* The same forms for an access through a pair, or a displaced index:
+   known, the address decides as above; unknown, the full path. */
+static const char *pair_rd8(insn_t *in, unsigned bits, long d)
+{
+  unsigned long v;
+
+  if(proof != NULL && regs_pair(proof,bits,&v))
+    return form_rd8(in,(unsigned long)((long)v + d) & 0xFFFFUL,0);
+  in->mem = 1;
+  in->acc_full += 1;
+  return "Z80C_RD8";
+}
+
+static const char *pair_wr8(insn_t *in, unsigned bits, long d)
+{
+  unsigned long v;
+
+  if(proof != NULL && regs_pair(proof,bits,&v))
+    return form_wr8(in,(unsigned long)((long)v + d) & 0xFFFFUL);
+  in->mem = 2;
+  in->acc_full += 1;
+  return "Z80_WR8";
+}
+
+/* The stack's forms: the direct ones when the stack is proved, the
+   interpreter's otherwise. The bytes moved: two for a push, a pop, a
+   call, a return, a restart; four for the exchange. */
+static const char *stk_form(insn_t *in, const char *direct, const char *full,
+                            int mem, int bytes, int taken)
+{
+  in->mem = mem;
+  if(stack_proven)
+    {
+      in->direct = 1;
+      if(taken) in->taken_direct += bytes; else in->acc_direct += bytes;
+      return direct;
+    }
+  if(taken) in->taken_full += bytes; else in->acc_full += bytes;
+  return full;
+}
+
+#define STK_PUSH(in, taken) stk_form((in),"Z80C_STK_PUSH","Z80_OP_PUSH",2,2,(taken))
+#define STK_POP(in)         stk_form((in),"Z80C_STK_POP","Z80_OP_POP",1,2,0)
+#define STK_RET(in, taken)  stk_form((in),"Z80C_STK_RET","Z80_OP_RET",1,2,(taken))
+#define STK_RETN(in)        stk_form((in),"Z80C_STK_RETN","Z80_OP_RETN",1,2,0)
+#define STK_RETI(in)        stk_form((in),"Z80C_STK_RETI","Z80_OP_RETI",1,2,0)
+#define STK_EXSP(in)        stk_form((in),"Z80C_STK_EXSP","Z80_OP_EX_SP_PAIR",2,4,0)
+
+/* A read-modify-write through a pair or a displaced index (the CB
+   forms on (hl) and (ix+d)): direct when the byte is known to be in
+   the work RAM below the mapper's registers, the full path for both
+   accesses otherwise -- on a register, the write closes the block. */
+static void pair_rmw(insn_t *in, unsigned bits, long d, const char **rd, const char **wr)
+{
+  unsigned long v;
+
+  in->mem = 2;
+  if(proof != NULL && regs_pair(proof,bits,&v))
+    {
+      unsigned long addr = (unsigned long)((long)v + d) & 0xFFFFUL;
+
+      if(in_ram(addr) && !in_mapper(addr))
+        {
+          in->direct = 1;
+          in->acc_direct += 2;
+          *rd = "Z80C_RAM_RD8";
+          *wr = "Z80C_RAM_WR8";
+          return;
+        }
+      if(in_mapper(addr))
+        in->bankend = 1;
+    }
+  in->acc_full += 2;
+  *rd = "Z80C_RD8";
+  *wr = "Z80_WR8";
+}
+
+/* A read-modify-write the interpreter's macro makes on its own (INC
+   (HL), RRD, the block moves): the full path, counted -- and, when the
+   pair it writes through is known to point at a register of the
+   mapper, the block closes on it like on any proved mapper write. */
+static void full_rmw(insn_t *in, unsigned bits, long d, int bytes)
+{
+  unsigned long v;
+
+  in->mem = 2;
+  in->acc_full += bytes;
+  if(proof != NULL && regs_pair(proof,bits,&v) &&
+     in_mapper((unsigned long)((long)v + d) & 0xFFFFUL))
+    in->bankend = 1;
 }
 
 /* The address the byte the index pair points at, displaced, as the
@@ -779,27 +1245,32 @@ static void decode_cb(insn_t *in, unsigned cbop, const char *ixpair, unsigned ix
         }
       else
         {
+          const char *rdf, *wrf;
+
           if(fam == 0x00U)
             {
+              pair_rmw(in,R_HL,0L,&rdf,&wrf);
               snprintf(buf,sizeof buf,
-                       "  { uint16 cbaddr = Z80_HL; uint8 cbval = Z80C_RD8(cbaddr), cbres; Z80_CB_%s(cbval,cbres); Z80_WR8(cbaddr,cbres); } /* %s (hl) */",
-                       cb_rot[op],cb_rotname[op]);
+                       "  { uint16 cbaddr = Z80_HL; uint8 cbval = %s(cbaddr), cbres; Z80_CB_%s(cbval,cbres); %s(cbaddr,cbres); } /* %s (hl) */",
+                       rdf,cb_rot[op],wrf,cb_rotname[op]);
               in->rd = R_HL | cb_rot_rd[op];
               in->wr = R_F;
             }
           else if(fam == 0x40U)
             {
+              rdf = pair_rd8(in,R_HL,0L);
               snprintf(buf,sizeof buf,
-                       "  { uint16 cbaddr = Z80_HL; uint8 cbval = Z80C_RD8(cbaddr); Z80_CB_BIT(cbval,0x%02XU,(uint8)(cbaddr >> 8)); } /* bit %u,(hl) */",
-                       mask,op);
+                       "  { uint16 cbaddr = Z80_HL; uint8 cbval = %s(cbaddr); Z80_CB_BIT(cbval,0x%02XU,(uint8)(cbaddr >> 8)); } /* bit %u,(hl) */",
+                       rdf,mask,op);
               in->rd = R_HL | R_F;
               in->wr = R_F;
             }
           else
             {
+              pair_rmw(in,R_HL,0L,&rdf,&wrf);
               snprintf(buf,sizeof buf,
-                       "  { uint16 cbaddr = Z80_HL; uint8 cbval = Z80C_RD8(cbaddr), cbres; Z80_CB_%s(cbval,cbres,0x%02XU); Z80_WR8(cbaddr,cbres); } /* %s %u,(hl) */",
-                       (fam == 0x80U) ? "RES" : "SET",mask,
+                       "  { uint16 cbaddr = Z80_HL; uint8 cbval = %s(cbaddr), cbres; Z80_CB_%s(cbval,cbres,0x%02XU); %s(cbaddr,cbres); } /* %s %u,(hl) */",
+                       rdf,(fam == 0x80U) ? "RES" : "SET",mask,wrf,
                        (fam == 0x80U) ? "res" : "set",op);
               in->rd = R_HL;
               in->wr = 0U;
@@ -816,31 +1287,38 @@ static void decode_cb(insn_t *in, unsigned cbop, const char *ixpair, unsigned ix
   ixaddr_text(ax,sizeof ax,ixpair,d);
   if(fam == 0x40U)
     {
+      const char *rdf = pair_rd8(in,ixbits,d);
+
       snprintf(buf,sizeof buf,
-               "  { %s; uint8 cbval = Z80C_RD8(ixaddr); Z80_CB_BIT(cbval,0x%02XU,(uint8)(ixaddr >> 8)); } /* bit %u,(%s+d) */",
-               ax,mask,op,(ixbits == R_IX) ? "ix" : "iy");
+               "  { %s; uint8 cbval = %s(ixaddr); Z80_CB_BIT(cbval,0x%02XU,(uint8)(ixaddr >> 8)); } /* bit %u,(%s+d) */",
+               ax,rdf,mask,op,(ixbits == R_IX) ? "ix" : "iy");
       in->rd = ixbits | R_F;
       in->wr = R_F;
     }
   else
     {
       char store[64];
+      const char *rdf, *wrf;
 
+      /* The result goes back to the byte, a read-modify-write, or to a
+         register, a read alone. */
       if(r == 6U)
         {
-          snprintf(store,sizeof store,"Z80_WR8(ixaddr,cbres)");
+          pair_rmw(in,ixbits,d,&rdf,&wrf);
+          snprintf(store,sizeof store,"%s(ixaddr,cbres)",wrf);
           in->wr = 0U;
         }
       else
         {
+          rdf = pair_rd8(in,ixbits,d);
           snprintf(store,sizeof store,"%s = cbres",r8[r]);
           in->wr = r8bit[r];
         }
       if(fam == 0x00U)
         {
           snprintf(buf,sizeof buf,
-                   "  { %s; uint8 cbval = Z80C_RD8(ixaddr), cbres; Z80_CB_%s(cbval,cbres); %s; } /* %s (%s+d)%s%s */",
-                   ax,cb_rot[op],store,cb_rotname[op],(ixbits == R_IX) ? "ix" : "iy",
+                   "  { %s; uint8 cbval = %s(ixaddr), cbres; Z80_CB_%s(cbval,cbres); %s; } /* %s (%s+d)%s%s */",
+                   ax,rdf,cb_rot[op],store,cb_rotname[op],(ixbits == R_IX) ? "ix" : "iy",
                    (r == 6U) ? "" : ",",(r == 6U) ? "" : r8name[r]);
           in->rd = ixbits | cb_rot_rd[op];
           in->wr |= R_F;
@@ -848,8 +1326,8 @@ static void decode_cb(insn_t *in, unsigned cbop, const char *ixpair, unsigned ix
       else
         {
           snprintf(buf,sizeof buf,
-                   "  { %s; uint8 cbval = Z80C_RD8(ixaddr), cbres; Z80_CB_%s(cbval,cbres,0x%02XU); %s; } /* %s %u,(%s+d)%s%s */",
-                   ax,(fam == 0x80U) ? "RES" : "SET",mask,store,
+                   "  { %s; uint8 cbval = %s(ixaddr), cbres; Z80_CB_%s(cbval,cbres,0x%02XU); %s; } /* %s %u,(%s+d)%s%s */",
+                   ax,rdf,(fam == 0x80U) ? "RES" : "SET",mask,store,
                    (fam == 0x80U) ? "res" : "set",op,(ixbits == R_IX) ? "ix" : "iy",
                    (r == 6U) ? "" : ",",(r == 6U) ? "" : r8name[r]);
           in->rd = ixbits;
@@ -920,16 +1398,18 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
 
       if(sub & 8U)
         {
+          const char *rdf = form_rd16(in,nn);
+
           if(q == 3U)
-            snprintf(buf,sizeof buf,"  Z80_SP = Z80C_RD16(0x%04lXU); /* ld sp,(nn) */",nn);
+            snprintf(buf,sizeof buf,"  Z80_SP = %s(0x%04lXU); /* ld sp,(nn) */",rdf,nn);
           else
-            snprintf(buf,sizeof buf,"  Z80_SET_%s(Z80C_RD16(0x%04lXU)); /* ld %s,(nn) */",
-                     rp[q] + 4,nn,rpname[q]);
+            snprintf(buf,sizeof buf,"  Z80_SET_%s(%s(0x%04lXU)); /* ld %s,(nn) */",
+                     rp[q] + 4,rdf,nn,rpname[q]);
           in->wr = rpbit[q];
         }
       else
         {
-          snprintf(buf,sizeof buf,"  Z80_WR16(0x%04lXU,%s); /* ld (nn),%s */",nn,rp[q],rpname[q]);
+          snprintf(buf,sizeof buf,"  %s(0x%04lXU,%s); /* ld (nn),%s */",form_wr16(in,nn),nn,rp[q],rpname[q]);
           in->rd = rpbit[q];
         }
       set_text(in,buf);
@@ -945,8 +1425,13 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
     }
   if((sub & 0xC7U) == 0x45U)
     {
-      /* z80.c, ED 0x45 and its mirrors: Z80_OP_RETN; 0x4D: Z80_OP_RETI. */
-      set_text(in,(sub == 0x4DU) ? "  Z80_OP_RETI(); /* reti */" : "  Z80_OP_RETN(); /* retn */");
+      /* z80.c, ED 0x45 and its mirrors: Z80_OP_RETN; 0x4D: Z80_OP_RETI;
+         the stack's direct forms when the stack is proved. */
+      if(sub == 0x4DU)
+        snprintf(buf,sizeof buf,"  %s(); /* reti */",STK_RETI(in));
+      else
+        snprintf(buf,sizeof buf,"  %s(); /* retn */",STK_RETN(in));
+      set_text(in,buf);
       in->rd = R_SP;
       in->wr = R_SP;
       in->kind = K_JUMP_LOST;
@@ -968,11 +1453,13 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
       set_text(in,"  Z80_OP_RRD(); /* rrd */");
       in->rd = R_HL | R_A | R_F;
       in->wr = R_A | R_F;
+      full_rmw(in,R_HL,0L,2);
       return;
     case 0x6F: /* z80.c, ED 0x6F: Z80_OP_RLD */
       set_text(in,"  Z80_OP_RLD(); /* rld */");
       in->rd = R_HL | R_A | R_F;
       in->wr = R_A | R_F;
+      full_rmw(in,R_HL,0L,2);
       return;
 
     /* z80.c, ED 0xA0..0xBB: the eight block instructions and their
@@ -983,6 +1470,7 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
     case 0xA0: case 0xA8: case 0xB0: case 0xB8:
       in->rd = R_A | R_F | R_BC | R_DE | R_HL;
       in->wr = R_F | R_BC | R_DE | R_HL;
+      full_rmw(in,R_DE,0L,2);
       if(sub & 0x10U)
         {
           in->kind = K_REPEAT;
@@ -998,6 +1486,8 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
     case 0xA1: case 0xA9: case 0xB1: case 0xB9:
       in->rd = R_A | R_F | R_BC | R_HL;
       in->wr = R_F | R_BC | R_HL;
+      in->mem = 1;
+      in->acc_full += 1;
       if(sub & 0x10U)
         {
           in->kind = K_REPEAT;
@@ -1014,6 +1504,14 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
     case 0xA3: case 0xAB: case 0xB3: case 0xBB:
       in->rd = R_F | R_BC | R_HL;
       in->wr = R_F | R_B | R_HL;
+      /* The port moves write the byte (IN) or read it (OUT). */
+      if(sub & 1U)
+        {
+          in->mem = 1;
+          in->acc_full += 1;
+        }
+      else
+        full_rmw(in,R_HL,0L,1);
       {
         const char *name = (sub & 1U) ? ((sub & 8U) ? "OUTD" : "OUTI")
                                       : ((sub & 8U) ? "IND" : "INI");
@@ -1107,12 +1605,12 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
       in->wr = bits;
       return;
     case 0x22: /* z80.c, DD 0x22: Z80_WR16 of the pair */
-      snprintf(buf,sizeof buf,"  Z80_WR16(0x%04lXU,%s); /* ld (nn),%s */",imm16(p + 2),pair,pn);
+      snprintf(buf,sizeof buf,"  %s(0x%04lXU,%s); /* ld (nn),%s */",form_wr16(in,imm16(p + 2)),imm16(p + 2),pair,pn);
       set_text(in,buf);
       in->rd = bits;
       return;
     case 0x2A: /* z80.c, DD 0x2A: the word read, the halves set */
-      snprintf(buf,sizeof buf,"  Z80_SET_%s(Z80C_RD16(0x%04lXU)); /* ld %s,(nn) */",pair + 4,imm16(p + 2),pn);
+      snprintf(buf,sizeof buf,"  Z80_SET_%s(%s(0x%04lXU)); /* ld %s,(nn) */",pair + 4,form_rd16(in,imm16(p + 2)),imm16(p + 2),pn);
       set_text(in,buf);
       in->wr = bits;
       return;
@@ -1145,27 +1643,28 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
       set_text(in,buf);
       in->rd = bits | R_F;
       in->wr = R_F;
+      full_rmw(in,bits,disp8(p[2]),2);
       return;
     case 0x36: /* z80.c, DD 0x36: the address, then the immediate, then Z80_WR8 */
       ixaddr_text(ax,sizeof ax,pair,disp8(p[2]));
-      snprintf(buf,sizeof buf,"  { %s; Z80_WR8(ixaddr,0x%02XU); } /* ld (%s+d),n */",ax,(unsigned)p[3],pn);
+      snprintf(buf,sizeof buf,"  { %s; %s(ixaddr,0x%02XU); } /* ld (%s+d),n */",ax,pair_wr8(in,bits,disp8(p[2])),(unsigned)p[3],pn);
       set_text(in,buf);
       in->rd = bits;
       return;
     case 0xE1: /* z80.c, DD 0xE1: Z80_OP_POP on the halves */
-      snprintf(buf,sizeof buf,"  Z80_OP_POP(%s,%s); /* pop %s */",hi,lo,pn);
+      snprintf(buf,sizeof buf,"  %s(%s,%s); /* pop %s */",STK_POP(in),hi,lo,pn);
       set_text(in,buf);
       in->rd = R_SP;
       in->wr = R_SP | bits;
       return;
     case 0xE3: /* z80.c, DD 0xE3: Z80_OP_EX_SP_PAIR on the halves */
-      snprintf(buf,sizeof buf,"  Z80_OP_EX_SP_PAIR(%s,%s); /* ex (sp),%s */",hi,lo,pn);
+      snprintf(buf,sizeof buf,"  %s(%s,%s); /* ex (sp),%s */",STK_EXSP(in),hi,lo,pn);
       set_text(in,buf);
       in->rd = R_SP | bits;
       in->wr = bits;
       return;
     case 0xE5: /* z80.c, DD 0xE5: Z80_OP_PUSH of the pair */
-      snprintf(buf,sizeof buf,"  Z80_OP_PUSH(%s); /* push %s */",pair,pn);
+      snprintf(buf,sizeof buf,"  %s(%s); /* push %s */",STK_PUSH(in,0),pair,pn);
       set_text(in,buf);
       in->rd = R_SP | bits;
       in->wr = R_SP;
@@ -1197,7 +1696,7 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
       if(s == 6U)
         {
           ixaddr_text(ax,sizeof ax,pair,disp8(p[2]));
-          snprintf(buf,sizeof buf,"  { %s; %s = Z80C_RD8(ixaddr); } /* ld %s,(%s+d) */",ax,r8[d],r8name[d],pn);
+          snprintf(buf,sizeof buf,"  { %s; %s = %s(ixaddr); } /* ld %s,(%s+d) */",ax,r8[d],pair_rd8(in,bits,disp8(p[2])),r8name[d],pn);
           set_text(in,buf);
           in->rd = bits;
           in->wr = r8bit[d];
@@ -1206,7 +1705,7 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
       if(d == 6U)
         {
           ixaddr_text(ax,sizeof ax,pair,disp8(p[2]));
-          snprintf(buf,sizeof buf,"  { %s; Z80_WR8(ixaddr,%s); } /* ld (%s+d),%s */",ax,r8[s],pn,r8name[s]);
+          snprintf(buf,sizeof buf,"  { %s; %s(ixaddr,%s); } /* ld (%s+d),%s */",ax,pair_wr8(in,bits,disp8(p[2])),r8[s],pn,r8name[s]);
           set_text(in,buf);
           in->rd = bits | r8bit[s];
           return;
@@ -1240,8 +1739,11 @@ static void decode_ddfd(insn_t *in, const unsigned char *p, unsigned long start,
 
       if(s == 6U)
         {
+          char rdx[32];
+
           ixaddr_text(ax,sizeof ax,pair,disp8(p[2]));
-          snprintf(opnd,sizeof opnd,alu_fmt[a],"Z80C_RD8(ixaddr)");
+          snprintf(rdx,sizeof rdx,"%s(ixaddr)",pair_rd8(in,bits,disp8(p[2])));
+          snprintf(opnd,sizeof opnd,alu_fmt[a],rdx);
           snprintf(buf,sizeof buf,"  { %s; %s; } /* %s (%s+d) */",ax,opnd,alu_name[a],pn);
           in->rd = bits | alu_rd[a];
         }
@@ -1265,11 +1767,14 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
 static void classify(insn_t *in);
 
 /* Decodes the instruction at p, at offset off in the block that starts
-   at start, with avail bytes readable, and classifies it. */
+   at start, with avail bytes readable, under what is known of the
+   registers there (regs, or NULL for nothing), and classifies it. */
 static void decode(const unsigned char *p, unsigned long start, unsigned long off,
-                   unsigned long avail, insn_t *in)
+                   unsigned long avail, const regs_t *regs, insn_t *in)
 {
+  proof = regs;
   decode_form(p,start,off,avail,in);
+  proof = NULL;
   classify(in);
 }
 
@@ -1315,12 +1820,12 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
 
       if(d == 6U)
         {
-          snprintf(buf,sizeof buf,"  Z80_WR8(Z80_HL,%s); /* ld (hl),%s */",r8[s],r8name[s]);
+          snprintf(buf,sizeof buf,"  %s(Z80_HL,%s); /* ld (hl),%s */",pair_wr8(in,R_HL,0L),r8[s],r8name[s]);
           in->rd = R_HL | r8bit[s];
         }
       else if(s == 6U)
         {
-          snprintf(buf,sizeof buf,"  %s = Z80C_RD8(Z80_HL); /* ld %s,(hl) */",r8[d],r8name[d]);
+          snprintf(buf,sizeof buf,"  %s = %s(Z80_HL); /* ld %s,(hl) */",r8[d],pair_rd8(in,R_HL,0L),r8name[d]);
           in->rd = R_HL;
           in->wr = r8bit[d];
         }
@@ -1349,7 +1854,10 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
 
       if(s == 6U)
         {
-          snprintf(opnd,sizeof opnd,alu_fmt[a],"Z80C_RD8(Z80_HL)");
+          char rdx[32];
+
+          snprintf(rdx,sizeof rdx,"%s(Z80_HL)",pair_rd8(in,R_HL,0L));
+          snprintf(opnd,sizeof opnd,alu_fmt[a],rdx);
           in->rd = R_HL | alu_rd[a];
         }
       else
@@ -1386,7 +1894,7 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
 
       if(d == 6U)
         {
-          snprintf(buf,sizeof buf,"  Z80_WR8(Z80_HL,0x%02XU); /* ld (hl),n */",(unsigned)p[1]);
+          snprintf(buf,sizeof buf,"  %s(Z80_HL,0x%02XU); /* ld (hl),n */",pair_wr8(in,R_HL,0L),(unsigned)p[1]);
           in->rd = R_HL;
         }
       else
@@ -1408,6 +1916,7 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
           snprintf(buf,sizeof buf,"  Z80_OP_%s_MEM(); /* %s (hl) */",(op & 1U) ? "DEC" : "INC",(op & 1U) ? "dec" : "inc");
           in->rd = R_HL | R_F;
           in->wr = R_F;
+          full_rmw(in,R_HL,0L,2);
         }
       else
         {
@@ -1496,8 +2005,8 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
       snprintf(in->cond,sizeof in->cond,"%s",cc[c]);
       set_abs_target(in,start,imm16(p + 1));
       snprintf(in->taken,sizeof in->taken,
-               "Z80_OP_PUSH((uint16)(z80_pc0 + 0x%04lXU)); Z80_PC = 0x%04lXU; /* call %s,nn */",
-               (off + 3UL) & 0xFFFFUL,in->target_addr,ccname[c]);
+               "%s((uint16)(z80_pc0 + 0x%04lXU)); Z80_PC = 0x%04lXU; /* call %s,nn */",
+               STK_PUSH(in,1),(off + 3UL) & 0xFFFFUL,in->target_addr,ccname[c]);
       return;
     }
   if((op & 0xC7U) == 0xC0U)
@@ -1509,7 +2018,7 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
       in->wr = R_SP;
       set_text(in,"");
       snprintf(in->cond,sizeof in->cond,"%s",cc[c]);
-      snprintf(in->taken,sizeof in->taken,"Z80_OP_RET(); /* ret %s */",ccname[c]);
+      snprintf(in->taken,sizeof in->taken,"%s(); /* ret %s */",STK_RET(in,1),ccname[c]);
       return;
     }
   if((op & 0xC7U) == 0xC7U)
@@ -1521,8 +2030,8 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
       in->wr = R_SP;
       in->uses_pc0 = 1;
       set_abs_target(in,start,(unsigned long)(op & 0x38U));
-      snprintf(buf,sizeof buf,"  Z80_OP_PUSH((uint16)(z80_pc0 + 0x%04lXU)); Z80_PC = 0x%04lXU; /* rst */",
-               (off + 1UL) & 0xFFFFUL,in->target_addr);
+      snprintf(buf,sizeof buf,"  %s((uint16)(z80_pc0 + 0x%04lXU)); Z80_PC = 0x%04lXU; /* rst */",
+               STK_PUSH(in,0),(off + 1UL) & 0xFFFFUL,in->target_addr);
       set_text(in,buf);
       return;
     }
@@ -1533,12 +2042,13 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
 
       if(q == 3U)
         {
-          set_text(in,"  Z80_OP_POP(Z80_A,Z80_F); /* pop af */");
+          snprintf(buf,sizeof buf,"  %s(Z80_A,Z80_F); /* pop af */",STK_POP(in));
+          set_text(in,buf);
           in->wr = R_A | R_F | R_SP;
         }
       else
         {
-          snprintf(buf,sizeof buf,"  Z80_OP_POP(%s,%s); /* pop %s */",r8[q * 2U],r8[q * 2U + 1U],rpname[q]);
+          snprintf(buf,sizeof buf,"  %s(%s,%s); /* pop %s */",STK_POP(in),r8[q * 2U],r8[q * 2U + 1U],rpname[q]);
           set_text(in,buf);
           in->wr = rpbit[q] | R_SP;
         }
@@ -1552,12 +2062,13 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
 
       if(q == 3U)
         {
-          set_text(in,"  Z80_OP_PUSH(Z80_AF); /* push af */");
+          snprintf(buf,sizeof buf,"  %s(Z80_AF); /* push af */",STK_PUSH(in,0));
+          set_text(in,buf);
           in->rd = R_A | R_F | R_SP;
         }
       else
         {
-          snprintf(buf,sizeof buf,"  Z80_OP_PUSH(%s); /* push %s */",rp[q],rpname[q]);
+          snprintf(buf,sizeof buf,"  %s(%s); /* push %s */",STK_PUSH(in,0),rp[q],rpname[q]);
           set_text(in,buf);
           in->rd = rpbit[q] | R_SP;
         }
@@ -1571,33 +2082,33 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
       set_text(in,"  /* nop */");
       return;
     case 0x02: case 0x12: /* z80.c, cases 0x02/0x12: Z80_WR8 through the pair */
-      snprintf(buf,sizeof buf,"  Z80_WR8(%s,Z80_A); /* ld (%s),a */",rp[op >> 4],rpname[op >> 4]);
+      snprintf(buf,sizeof buf,"  %s(%s,Z80_A); /* ld (%s),a */",pair_wr8(in,rpbit[op >> 4],0L),rp[op >> 4],rpname[op >> 4]);
       set_text(in,buf);
       in->rd = rpbit[op >> 4] | R_A;
       return;
     case 0x0A: case 0x1A: /* z80.c, cases 0x0A/0x1A: Z80_RD8 through the pair */
-      snprintf(buf,sizeof buf,"  Z80_A = Z80C_RD8(%s); /* ld a,(%s) */",rp[op >> 4],rpname[op >> 4]);
+      snprintf(buf,sizeof buf,"  Z80_A = %s(%s); /* ld a,(%s) */",pair_rd8(in,rpbit[op >> 4],0L),rp[op >> 4],rpname[op >> 4]);
       set_text(in,buf);
       in->rd = rpbit[op >> 4];
       in->wr = R_A;
       return;
     case 0x22: /* z80.c, case 0x22: Z80_WR16 of HL at nn */
-      snprintf(buf,sizeof buf,"  Z80_WR16(0x%04lXU,Z80_HL); /* ld (nn),hl */",imm16(p + 1));
+      snprintf(buf,sizeof buf,"  %s(0x%04lXU,Z80_HL); /* ld (nn),hl */",form_wr16(in,imm16(p + 1)),imm16(p + 1));
       set_text(in,buf);
       in->rd = R_HL;
       return;
     case 0x2A: /* z80.c, case 0x2A: HL set from Z80_RD16 at nn */
-      snprintf(buf,sizeof buf,"  Z80_SET_HL(Z80C_RD16(0x%04lXU)); /* ld hl,(nn) */",imm16(p + 1));
+      snprintf(buf,sizeof buf,"  Z80_SET_HL(%s(0x%04lXU)); /* ld hl,(nn) */",form_rd16(in,imm16(p + 1)),imm16(p + 1));
       set_text(in,buf);
       in->wr = R_HL;
       return;
     case 0x32: /* z80.c, case 0x32: Z80_WR8 of A at nn */
-      snprintf(buf,sizeof buf,"  Z80_WR8(0x%04lXU,Z80_A); /* ld (nn),a */",imm16(p + 1));
+      snprintf(buf,sizeof buf,"  %s(0x%04lXU,Z80_A); /* ld (nn),a */",form_wr8(in,imm16(p + 1)),imm16(p + 1));
       set_text(in,buf);
       in->rd = R_A;
       return;
     case 0x3A: /* z80.c, case 0x3A: A from Z80_RD8 at nn */
-      snprintf(buf,sizeof buf,"  Z80_A = Z80C_RD8(0x%04lXU); /* ld a,(nn) */",imm16(p + 1));
+      snprintf(buf,sizeof buf,"  Z80_A = %s(0x%04lXU); /* ld a,(nn) */",form_rd8(in,imm16(p + 1),1),imm16(p + 1));
       set_text(in,buf);
       in->wr = R_A;
       return;
@@ -1666,7 +2177,8 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
       return;
     case 0xC9: /* z80.c, case 0xC9: Z80_OP_RET */
       in->kind = K_JUMP_LOST;
-      set_text(in,"  Z80_OP_RET(); /* ret */");
+      snprintf(buf,sizeof buf,"  %s(); /* ret */",STK_RET(in,0));
+      set_text(in,buf);
       in->rd = R_SP;
       in->wr = R_SP;
       return;
@@ -1676,8 +2188,8 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
       in->wr = R_SP;
       in->uses_pc0 = 1;
       set_abs_target(in,start,imm16(p + 1));
-      snprintf(buf,sizeof buf,"  Z80_OP_PUSH((uint16)(z80_pc0 + 0x%04lXU)); Z80_PC = 0x%04lXU; /* call nn */",
-               (off + 3UL) & 0xFFFFUL,in->target_addr);
+      snprintf(buf,sizeof buf,"  %s((uint16)(z80_pc0 + 0x%04lXU)); Z80_PC = 0x%04lXU; /* call nn */",
+               STK_PUSH(in,0),(off + 3UL) & 0xFFFFUL,in->target_addr);
       set_text(in,buf);
       return;
     case 0x08: /* z80.c, case 0x08: Z80_OP_EX_AF */
@@ -1690,8 +2202,9 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
       in->rd = R_BC | R_DE | R_HL;
       in->wr = R_BC | R_DE | R_HL;
       return;
-    case 0xE3: /* z80.c, case 0xE3: Z80_OP_EX_SP_HL */
-      set_text(in,"  Z80_OP_EX_SP_HL();");
+    case 0xE3: /* z80.c, case 0xE3: Z80_OP_EX_SP_HL, the pair form of it */
+      snprintf(buf,sizeof buf,"  %s(Z80_H,Z80_L); /* ex (sp),hl */",STK_EXSP(in));
+      set_text(in,buf);
       in->rd = R_SP | R_HL;
       in->wr = R_HL;
       return;
@@ -1760,7 +2273,15 @@ static void classify(insn_t *in)
   {
     "Z80_WR8(", "Z80_WR16(", "Z80_OP_PUSH(", "Z80_OP_EX_SP", "_MEM_AT(",
     "_MEM(", "Z80_OP_LDI", "Z80_OP_LDD", "Z80_OP_INI", "Z80_OP_IND",
-    "Z80_OP_RRD", "Z80_OP_RLD", "z80_io_write(", "Z80_OP_OUT", NULL
+    "Z80_OP_RRD", "Z80_OP_RLD", "z80_io_write(", "Z80_OP_OUT",
+    "Z80C_RAM_WR8(", "Z80C_RAM_WR16(", "Z80C_STK_PUSH(", "Z80C_STK_EXSP",
+    NULL
+  };
+  /* The reads, the full path's and the direct path's alike: the form
+     says nothing of the wait, the address does. */
+  static const char *const read_forms[] =
+  {
+    "Z80C_RD8(", "Z80C_RD16(", "Z80C_RAM_RD8(", "Z80C_RAM_RD16(", NULL
   };
   const char *texts[2];
   const char *const *w;
@@ -1787,9 +2308,9 @@ static void classify(insn_t *in)
           if(strstr(x,*w) != NULL)
             in->writes = 1;
 
-      r = strstr(x,"Z80C_RD8(");
-      if(r == NULL)
-        r = strstr(x,"Z80C_RD16(");
+      r = NULL;
+      for(w = read_forms; *w != NULL && r == NULL; w++)
+        r = strstr(x,*w);
       if(r != NULL)
         {
           r = strchr(r,'(') + 1;
@@ -1815,8 +2336,10 @@ static void classify(insn_t *in)
 
 /* ---- blocks ---------------------------------------------------------- */
 
-/* Why a block closed. */
-enum end_kind { END_NEXT, END_JUMP, END_FALLBACK, END_CUT, END_BANK, END_REPEAT };
+/* Why a block closed: END_BANKEND after a write proved to land on the
+   mapper's registers, the bank behind the next instruction being
+   possibly gone. */
+enum end_kind { END_NEXT, END_JUMP, END_FALLBACK, END_CUT, END_BANK, END_REPEAT, END_BANKEND };
 
 typedef struct
 {
@@ -1829,6 +2352,10 @@ typedef struct
   unsigned written;       /* registers written anywhere in the block */
   int wait;               /* the block starts a loop the program waits in */
 } block_t;
+
+/* The two flags of a table entry (src/z80c.h). */
+#define FLAG_WAIT    1UL
+#define FLAG_BANKEND 2UL
 
 /* Whether the block starts a wait: among its first WAIT_INSNS
    instructions, a branch back to the block's own start closes a loop
@@ -1880,6 +2407,7 @@ static void scan_block(unsigned long start, block_t *b)
   unsigned long bank = start / BANK_SIZE;
   unsigned long end  = (bank + 1UL) * BANK_SIZE;
   unsigned long pos  = start;
+  regs_t regs, before;
 
   if(start < SLOT0_FIXED)
     end = SLOT0_FIXED;
@@ -1890,6 +2418,9 @@ static void scan_block(unsigned long start, block_t *b)
   b->written = 0;
   b->wait = 0;
   b->kind = END_BANK;
+  /* Nothing is known of the registers at a block's head: a block is
+     entered from anywhere. */
+  regs_reset(&regs);
 
   for(;;)
     {
@@ -1922,7 +2453,7 @@ static void scan_block(unsigned long start, block_t *b)
           break;
         }
       in = &b->ins[b->n];
-      decode(rom + pos,start,pos - start,end - pos,in);
+      decode(rom + pos,start,pos - start,end - pos,&regs,in);
 
       if(in->kind == K_FALLBACK)
         {
@@ -1934,6 +2465,11 @@ static void scan_block(unsigned long start, block_t *b)
       b->n++;
       b->loaded |= in->rd & ~b->written;
       b->written |= in->wr;
+      /* What the instruction leaves known: the registers it writes are
+         lost, then the forms that set a value put one back. */
+      before = regs;
+      regs_after(&regs,in,rom + pos);
+      regs_step(&regs,&before,rom + pos);
       pos += (unsigned long)len;
 
       if(in->kind == K_JUMP || in->kind == K_JUMP_LOST)
@@ -1944,6 +2480,24 @@ static void scan_block(unsigned long start, block_t *b)
       if(in->kind == K_REPEAT)
         {
           b->kind = END_REPEAT;
+          break;
+        }
+      /* A write proved to land on the mapper's registers: the bank
+         behind the next instruction may be gone, the block closes and
+         the core asks the tables again (src/z80c.c). The next
+         instruction is a start of its own. */
+      if(in->bankend)
+        {
+          /* On the last byte of the bank the edge closes the block as
+             it would anyway: no start queued in the next bank, no
+             linear successor rendered into it. */
+          if(pos < end)
+            {
+              b->kind = END_BANKEND;
+              add_start(pos);
+            }
+          else
+            b->kind = END_BANK;
           break;
         }
     }
@@ -1966,6 +2520,7 @@ typedef struct
   unsigned long hits;     /* from the counts file, when there is one */
   unsigned long weight;   /* the instructions it ran over the recorded run */
   int wait;               /* it starts a wait: always in the table */
+  int bankend;            /* it closes on a write to the mapper's registers */
   int selected;
   long index;             /* its index in the written table, when selected */
 } blockinfo_t;
@@ -1994,9 +2549,9 @@ static long table_index(unsigned long pos)
   return -1L;
 }
 
-/* Whether the block at a position starts a wait, as the block list
-   holds it. */
-static int blocks_wait_at(unsigned long pos)
+/* The flags of the block at a position, as the block list holds them:
+   whether it starts a wait, whether it closes on a mapper write. */
+static unsigned long blocks_flags_at(unsigned long pos)
 {
   unsigned long lo = 0, hi = nblocks;
 
@@ -2009,7 +2564,9 @@ static int blocks_wait_at(unsigned long pos)
       else
         hi = mid;
     }
-  return (lo < nblocks && blocks[lo].pos == pos) ? blocks[lo].wait : 0;
+  if(lo < nblocks && blocks[lo].pos == pos)
+    return (blocks[lo].wait ? FLAG_WAIT : 0UL) | (blocks[lo].bankend ? FLAG_BANKEND : 0UL);
+  return 0UL;
 }
 
 /* One block's C, accumulated before its head is written: whether the
@@ -2063,7 +2620,20 @@ static void succ_expr(char *buf, size_t cap, unsigned long start, const insn_t *
       return;
     }
   if(in->target_rel)
-    snprintf(buf,cap,"&z80c_table[%ld]",k);
+    {
+      /* A relative target under the first kilobyte of its bank, from a
+         bank that is not bank 0: in window 0 the mapper keeps bank 0's
+         kilobyte in place there, so the bytes at the address are not
+         the ones translated; rendered only while the block runs in
+         another window. */
+      if(start / BANK_SIZE != 0UL && (in->target_pos % BANK_SIZE) < SLOT0_FIXED)
+        {
+          snprintf(buf,cap,"(((z80_pc0 & 0xC000U) != 0U) ? &z80c_table[%ld] : 0)",k);
+          uses_pc0 = 1;
+        }
+      else
+        snprintf(buf,cap,"&z80c_table[%ld]",k);
+    }
   else
     {
       snprintf(buf,cap,"((((z80_pc0 ^ 0x%04lXU) & 0xC000U) == 0U) ? &z80c_table[%ld] : 0)",
@@ -2088,14 +2658,17 @@ static void emit_stores(unsigned written, const char *indent)
 }
 
 /* The tail of an exit: the instructions run to it, counted for the
-   telemetry and for the block's own count (src/z80c.h). */
-static void emit_tail(long k, int insns, const char *indent)
+   telemetry and for the block's own count, and the bytes each memory
+   path moved, counted by the host runner (src/z80c.h). */
+static void emit_tail(long k, int insns, int direct, int full, const char *indent)
 {
   char line[192];
 
   snprintf(line,sizeof line,"%sZ80C_INSNS(%d);\n",indent,insns);
   emit(line);
   snprintf(line,sizeof line,"%sZ80C_RAN(%ld,%d);\n",indent,k,insns);
+  emit(line);
+  snprintf(line,sizeof line,"%sZ80C_ACCESS(%d,%d);\n",indent,direct,full);
   emit(line);
 }
 
@@ -2104,6 +2677,7 @@ static void emit_block(FILE *out, const block_t *b, long k)
 {
   unsigned written = 0;
   int i;
+  int direct = 0, full = 0;
   char line[1024];
   char succ[128];
   const insn_t *last = (b->n > 0) ? &b->ins[b->n - 1] : NULL;
@@ -2126,6 +2700,8 @@ static void emit_block(FILE *out, const block_t *b, long k)
           emit("\n");
         }
       written |= in->wr;
+      direct += in->acc_direct;
+      full += in->acc_full;
 
       if(in->kind == K_COND)
         {
@@ -2133,7 +2709,7 @@ static void emit_block(FILE *out, const block_t *b, long k)
           snprintf(line,sizeof line,"  if(%s)\n    {\n      %s\n",in->cond,in->taken);
           emit(line);
           emit_stores(written,"      ");
-          emit_tail(k,i + 1,"      ");
+          emit_tail(k,i + 1,direct + in->taken_direct,full + in->taken_full,"      ");
           snprintf(line,sizeof line,"      return %s;\n    }\n",succ);
           emit(line);
         }
@@ -2147,17 +2723,24 @@ static void emit_block(FILE *out, const block_t *b, long k)
                (b->end - b->start) & 0xFFFFUL,
                (b->kind == END_NEXT) ? "next block" :
                (b->kind == END_FALLBACK) ? "fallback: interpreted from here" :
-               (b->kind == END_CUT) ? "cut" : "bank edge");
+               (b->kind == END_CUT) ? "cut" :
+               (b->kind == END_BANKEND) ? "mapper written: the bank behind the next byte may have turned" :
+               "bank edge");
       emit(line);
       uses_pc0 = 1;
     }
   emit_stores(written,"  ");
-  emit_tail(k,b->n,"  ");
+  emit_tail(k,b->n,direct,full,"  ");
 
+  /* The successor after a mapper write is the linear one, as after any
+     other instruction: the core drops it when the epoch has moved, and
+     keeps it when the write turned nothing (the same bank written
+     again), in which case the bytes are the ones translated. */
   switch(b->kind)
     {
     case END_NEXT:
     case END_CUT:
+    case END_BANKEND:
       {
         long kn = table_index(b->end);
 
@@ -2178,10 +2761,11 @@ static void emit_block(FILE *out, const block_t *b, long k)
   snprintf(line,sizeof line,"  return %s;\n",succ);
   emit(line);
 
-  /* The head, now that it is known what the body names: the entry
-     address, and the locals -- loaded where read first, bare where
-     written first. */
-  fprintf(out,"static const z80c_entry_t *\nb_%06lx(void)\n{\n",b->start);
+  /* The head, now that it is known what the body names: the base of
+     the work RAM, which the direct forms index and every block takes;
+     the entry address; and the locals -- loaded where read first, bare
+     where written first. */
+  fprintf(out,"static const z80c_entry_t *\nb_%06lx(uint8 *ram)\n{\n",b->start);
   if(uses_pc0)
     fprintf(out,"  uint16 z80_pc0 = Z80_PC;\n");
   {
@@ -2199,7 +2783,7 @@ static void emit_block(FILE *out, const block_t *b, long k)
           fprintf(out,"  %s %s;\n",(bit == R_SP) ? "uint16" : "uint8",reg_local[i2]);
       }
   }
-  fprintf(out,"\n");
+  fprintf(out,"\n  (void)ram;\n");
   fwrite(body,1,body_n,out);
   fprintf(out,"}\n\n");
 }
@@ -2460,6 +3044,7 @@ int main(int argc, char **argv)
         blocks[nblocks].pos = pos;
         blocks[nblocks].bytes = blk->end - pos;
         blocks[nblocks].wait = blk->wait;
+        blocks[nblocks].bankend = (blk->kind == END_BANKEND);
         blocks[nblocks].selected = 1;
         nblocks++;
       }
@@ -2560,9 +3145,12 @@ int main(int argc, char **argv)
           " * Translated cartridge code, written by tests/z80c/translate.c.\n"
           " * Generated: not tracked, not edited by hand. One function per\n"
           " * block, then the table from positions in the cartridge to the\n"
-          " * functions, each entry saying whether the block starts a wait;\n"
-          " * src/z80c.h says how the core runs them, and that no block keeps\n"
-          " * an account of time.\n"
+          " * functions, each entry carrying the block's flags (a wait, a\n"
+          " * close on a mapper write); src/z80c.h says how the core runs\n"
+          " * them, and that no block keeps an account of time. Every block\n"
+          " * takes the base of the work RAM: the accesses the tool proved\n"
+          " * to land there index it directly, the others go through the\n"
+          " * page tables.\n"
           " *\n"
           " * The thirteen register names of z80_ops.h are retargeted below\n"
           " * onto locals of the block, the way z80.c retargets its five hot\n"
@@ -2591,6 +3179,25 @@ int main(int argc, char **argv)
         n_emitted += (unsigned long)blk->n;
         if(blk->wait)
           n_waits++;
+        /* The direct path, over the instructions written: how many
+           read memory, how many write it, and how many of each were
+           proved; the absolute reads of the fixed kilobyte. */
+        for(i2 = 0; i2 < (unsigned long)blk->n; i2++)
+          {
+            const insn_t *in = &blk->ins[i2];
+
+            if(in->mem == 1)
+              {
+                n_rd_all++;
+                n_rd_direct += (in->direct != 0);
+              }
+            else if(in->mem == 2)
+              {
+                n_wr_all++;
+                n_wr_direct += (in->direct != 0);
+              }
+            n_rom_fixed += (in->rom_fixed != 0);
+          }
         for(i2 = pos; i2 < blk->end; i2++)
           if(!(mark[i2] & M_COVER))
             {
@@ -2605,6 +3212,7 @@ int main(int argc, char **argv)
           case END_CUT:      n_end_cut++;      break;
           case END_BANK:     n_end_bank++;     break;
           case END_REPEAT:   n_end_repeat++;   break;
+          case END_BANKEND:  n_end_bankend++;  break;
           }
       }
 
@@ -2624,7 +3232,7 @@ int main(int argc, char **argv)
             long k = table_index(pos);
 
             fprintf(out,"  { 0x%06lXUL, b_%06lx, %luUL },\n",pos,pos,
-                    (unsigned long)((k >= 0L && blocks_wait_at(pos)) ? 1UL : 0UL));
+                    (k >= 0L) ? blocks_flags_at(pos) : 0UL);
           }
       fprintf(out,"};\n");
     }
@@ -2645,6 +3253,15 @@ int main(int argc, char **argv)
   if(n_ram_targets != 0UL)
     printf("z80c: ram targets=%lu walked, first %04lX reached from %06lx: code without a position, not translated\n",
            n_ram_targets,ram_target_addr,ram_target_from);
+  /* The direct path: instructions of the written table, proved over
+     all; the stack, proved or not, and where it was lost; the reads of
+     the fixed kilobyte, counted only. */
+  if(stack_proven)
+    printf("z80c: direct rd=%lu/%lu wr=%lu/%lu stack=proven rom_fixed=%lu\n",
+           n_rd_direct,n_rd_all,n_wr_direct,n_wr_all,n_rom_fixed);
+  else
+    printf("z80c: direct rd=%lu/%lu wr=%lu/%lu stack=full (%s at %06lx) rom_fixed=%lu\n",
+           n_rd_direct,n_rd_all,n_wr_direct,n_wr_all,stack_full_form,stack_full_pos,n_rom_fixed);
   if(counts_path != NULL)
     {
       unsigned long run = counts_insns;
@@ -2657,9 +3274,9 @@ int main(int argc, char **argv)
     }
   fprintf(stderr,
           "z80c: starts=%lu reached=%lu ends: next=%lu jump=%lu fallback=%lu "
-          "cut=%lu bank=%lu repeat=%lu\n",
+          "cut=%lu bank=%lu repeat=%lu bankend=%lu\n",
           n_starts,n_reached,n_end_next,n_end_jump,n_end_fallback,n_end_cut,
-          n_end_bank,n_end_repeat);
+          n_end_bank,n_end_repeat,n_end_bankend);
   free(blocks);
   free(blk);
   return 0;
