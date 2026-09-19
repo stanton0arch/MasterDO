@@ -3086,11 +3086,10 @@ int main(int argc, char **argv)
   booted = 1;
 
   rom_fnv = digest(sms.cart.rom,(unsigned long)sms.cart.size);
-  /* The console pairs the table by size alone until the loader checks the
-     digest; this runner has the digest in hand, so a generated table
-     written from another image of the same size is refused here rather
-     than judged against pictures it never drew. */
-  if(z80c_armed && (unsigned long)z80c_rom_fnv != rom_fnv)
+  /* The console leaves a table written from another image unarmed and
+     interprets (src/z80c.c, "rom mismatch"); this runner refuses it
+     instead, rather than judge the interpreter as if it were the table. */
+  if(z80c_block_count != 0UL && (unsigned long)z80c_rom_fnv != rom_fnv)
     {
       printf("FAIL: the table of translated code is another image's "
              "(rom_fnv %08lx, table %08lx)\n",

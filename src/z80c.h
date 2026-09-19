@@ -453,13 +453,15 @@ extern uint32 z80c_ring_n;
 #endif
 
 /*
- * Pairs the table with the cartridge just loaded, after z80_reset. The
- * size alone is compared here and the digest is journaled: a table for
- * another size, or the empty one, leaves the core interpreting with a
- * WARN line. A table written from another image of the same size is not
- * told apart until the loader checks the digest; the host runners
- * (tests/cel8/romrun.c, tests/z80c/sidebyside.c), which have the digest
- * in hand, refuse it.
+ * Pairs the table with the cartridge just loaded, after z80_reset: the
+ * table is armed only when the loaded image has its size AND its FNV-1a
+ * digest (the tool's, tests/z80c/translate.c), the digest walked once
+ * here and only when the size agrees. Another image -- of another size,
+ * or of the same size with other bytes -- leaves the core interpreting
+ * with an ERR line naming both size/digest pairs ("rom mismatch"); the
+ * empty table leaves it interpreting with a WARN line. The host runners
+ * (tests/cel8/romrun.c, tests/z80c/sidebyside.c) refuse a generated
+ * table the image does not match rather than judge the interpreter.
  */
 void z80c_init(void);
 

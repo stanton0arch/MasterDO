@@ -55,7 +55,28 @@
 #   - it runs a loop at two levels over three blocks of one region, so
 #     that the translator's line of regions is held to exact figures,
 #     its C to carrying gotos, the runs to a frontier above zero, and
-#     the mutations "edge" and "regexit" below have a form to break.
+#     the mutations "edge" and "regexit" below have a form to break;
+#   - it carries, where no run goes, code dense enough in memory
+#     accesses that the translator must keep it apart and cut it, and
+#     the mutations "accjoin" and "acccut" below break that;
+#   - it is translated again as a table over the boot binary's ceiling:
+#     under a named budget the translator must refuse it with status 5
+#     and nothing written (z80c_over_ceiling below); under the default
+#     budget it must lower the budget once and write the second table,
+#     and under the same budget named, refuse it (z80c_lowered);
+#   - its table is paired with it by the console's own z80c_init
+#     (z80c_pairing): the image arms it, a copy with one byte changed
+#     or of another size does not, and the mutation "pairing" breaks
+#     that.
+#
+# Every table written, of every ROM, must carry the console compiler's
+# weighing, "z80c: arm_bytes= est_launchme= ceiling=155648 base= ok"
+# (CEILING below), before "written:"; its lines of regions must stay
+# under the three sizes that compiler lives by, and its choice must
+# charge no more bytes than the budget. The weighing needs the console's
+# compiler, armcc and decaof under bin/compiler/linux of the devkit,
+# found as the Makefile finds it (TDO_DEVKIT_PATH, else .devkit-path,
+# else this directory): without it every translation fails.
 #
 # Two VARIANTS of it are each held to one refusal of the runners, and to
 # nothing else; they are judged after the cartridge and played under no
@@ -148,6 +169,8 @@ if [ "${MUTATE:-0}" = 1 ] && [ "$FRAMES" -lt 3 ]; then
   exit 2
 fi
 CC=${CC:-gcc}
+# The boot binary's ceiling, as tests/z80c/translate.sh holds it.
+CEILING=155648
 S=src
 H=tests/cel8/3do
 B=tests/z80c
@@ -193,9 +216,9 @@ set -- "$FIXTURE" "$INDIRECT" "$UNDERFLOW" "$@"
 
 # The written cartridge's direct path and regions, held to figures: the
 # translator's report of what it proved on the seeded table -- the whole
-# one and the chosen one, which prove the same instructions -- its line
-# of regions on each (the chosen table leaves out the one block the run
-# never enters, the filler at the non-maskable vector), and, in the C it
+# one and the chosen one; the whole one also proves the dense code at
+# the non-maskable vector, which no run enters and the chosen table
+# leaves out -- its line of regions on each, and, in the C it
 # wrote, at least one of every form the image was written to exercise,
 # direct and full alike, and as many gotos as the line says edges and as
 # many functions as it says regions. A proof gone silent draws the very
@@ -207,26 +230,57 @@ set -- "$FIXTURE" "$INDIRECT" "$UNDERFLOW" "$@"
 # figure of the 3000 frames -- the image is deterministic, and an edge
 # that leaves by its exit instead of its goto (a window test written
 # the wrong way, a guard that fires) draws the same frames and is seen
-# by that count alone. The two sizes the console's compiler lives by
-# are held under their caps (translate.c, MAX_INSNS and
-# MAX_REGION_INSNS). Counter and floor, the way a speed bench is held.
+# by that count alone. The three sizes the console's compiler lives by
+# are held under their caps (translate.c, MAX_INSNS, MAX_REGION_INSNS
+# and MAX_REGION_ACCESSES). Counter and floor, the way a speed bench is
+# held. The chosen table's densest function makes 34 accesses; the whole
+# table's makes exactly the cap, 96: the run of ex (sp),hl at the
+# non-maskable vector, cut after its 24th (tests/z80c/rom_bank.c,
+# lay_nmi). That code, which no run enters, is also why the whole
+# table has more blocks, more regions and more accesses proved than the
+# chosen one: 60 ldi on the full path, 26 exchanges and a call, a retn
+# and a ret on the proved stack.
 #
-# The direct figures: 13.3 wrote 18/22 and 30/37; the two reads of the
-# frame counter the regions added to the image (ld a,($C002) before the
-# fill and before the call) are two more, proved.
+# The direct figures, chosen table: 22 of 26 reads and 30 of 37 writes
+# proved; whole table: 24 of 28 and 57 of 124 (the code above).
+FIXTURE_DIRECT_FULL='z80c: direct rd=24/28 wr=57/124 stack=proven rom_fixed=0'
 FIXTURE_DIRECT='z80c: direct rd=22/26 wr=30/37 stack=proven rom_fixed=0'
-FIXTURE_REGIONS_FULL='z80c: regions=13 entries=19 edges=12 exits=22 loads=29 stores=98 longest_block=32 longest_region=55'
-FIXTURE_REGIONS_CHOSEN='z80c: regions=12 entries=18 edges=12 exits=21 loads=29 stores=98 longest_block=32 longest_region=55'
+FIXTURE_REGIONS_FULL='z80c: regions=17 entries=23 edges=12 exits=26 loads=53 stores=119 longest_block=32 longest_region=55 longest_accesses=96'
+FIXTURE_REGIONS_CHOSEN='z80c: regions=12 entries=18 edges=12 exits=21 loads=29 stores=98 longest_block=32 longest_region=55 longest_accesses=34'
 FIXTURE_GOTOS=12
 FIXTURE_FUNCTIONS=12
 FIXTURE_FRONTIER=1690554
 FIXTURE_EDGES=348132
 MAX_INSNS=32
 MAX_REGION_INSNS=128
+MAX_REGION_ACCESSES=96
+
+# The three sizes the console's compiler lives by, held on every line of
+# regions a translation printed -- every ROM's, not only the written
+# cartridge's.
+#
+#   z80c_caps <file> <name>
+z80c_caps() {
+  zc_n=$(grep -c '^z80c: regions=' "$1" || true)
+  zc_ok=$(grep -c '^z80c: regions=.* longest_block=[0-9]* longest_region=[0-9]* longest_accesses=[0-9]*$' "$1" || true)
+  if [ "${zc_n:-0}" -eq 0 ] || [ "$zc_n" != "$zc_ok" ]; then
+    echo "FAIL: $2: the translator's lines of regions are missing or unread ($zc_ok of $zc_n)"
+    return 1
+  fi
+  zc_lb=$(sed -n 's/^z80c: regions=.* longest_block=\([0-9]*\) longest_region=\([0-9]*\) longest_accesses=\([0-9]*\)$/\1/p' "$1" | sort -n | tail -n 1)
+  zc_lr=$(sed -n 's/^z80c: regions=.* longest_block=\([0-9]*\) longest_region=\([0-9]*\) longest_accesses=\([0-9]*\)$/\2/p' "$1" | sort -n | tail -n 1)
+  zc_la=$(sed -n 's/^z80c: regions=.* longest_block=\([0-9]*\) longest_region=\([0-9]*\) longest_accesses=\([0-9]*\)$/\3/p' "$1" | sort -n | tail -n 1)
+  if [ "$zc_lb" -gt "$MAX_INSNS" ] || [ "$zc_lr" -gt "$MAX_REGION_INSNS" ] || [ "$zc_la" -gt "$MAX_REGION_ACCESSES" ]; then
+    echo "FAIL: $2: the longest block ($zc_lb), region ($zc_lr) or accesses ($zc_la) is over the sizes the console's compiler lives by ($MAX_INSNS, $MAX_REGION_INSNS, $MAX_REGION_ACCESSES)"
+    return 1
+  fi
+  return 0
+}
+
 z80c_fixture_floors() {
   ff_rc=0
-  if [ "$(grep -c "^$FIXTURE_DIRECT\$" "$1/translate.out")" -lt 2 ]; then
-    echo "FAIL: the written cartridge's proof does not report '$FIXTURE_DIRECT' on both seeded tables: $(grep '^z80c: direct rd=' "$1/translate.out" | tr '\n' ' ')"
+  if ! grep -q "^$FIXTURE_DIRECT_FULL\$" "$1/translate.out" || ! grep -q "^$FIXTURE_DIRECT\$" "$1/translate.out"; then
+    echo "FAIL: the written cartridge's proof does not report '$FIXTURE_DIRECT_FULL' then '$FIXTURE_DIRECT': $(grep '^z80c: direct rd=' "$1/translate.out" | tr '\n' ' ')"
     ff_rc=1
   fi
   if ! grep -q "^$FIXTURE_REGIONS_FULL\$" "$1/translate.out" || ! grep -q "^$FIXTURE_REGIONS_CHOSEN\$" "$1/translate.out"; then
@@ -235,12 +289,6 @@ z80c_fixture_floors() {
   fi
   if [ "$(grep -c 'goto L_' "$1/rom_code.c")" -ne "$FIXTURE_GOTOS" ] || [ "$(grep -c '^r_' "$1/rom_code.c")" -ne "$FIXTURE_FUNCTIONS" ]; then
     echo "FAIL: the written cartridge's C does not carry the $FIXTURE_GOTOS gotos and $FIXTURE_FUNCTIONS regions its line says ($(grep -c 'goto L_' "$1/rom_code.c") gotos, $(grep -c '^r_' "$1/rom_code.c") regions)"
-    ff_rc=1
-  fi
-  ff_lb=$(sed -n 's/^z80c: regions=.* longest_block=\([0-9]*\) longest_region=\([0-9]*\)$/\1/p' "$1/translate.out" | sort -n | tail -n 1)
-  ff_lr=$(sed -n 's/^z80c: regions=.* longest_block=\([0-9]*\) longest_region=\([0-9]*\)$/\2/p' "$1/translate.out" | sort -n | tail -n 1)
-  if [ -z "$ff_lb" ] || [ -z "$ff_lr" ] || [ "$ff_lb" -gt "$MAX_INSNS" ] || [ "$ff_lr" -gt "$MAX_REGION_INSNS" ]; then
-    echo "FAIL: the written cartridge's longest block (${ff_lb:-?}) or region (${ff_lr:-?}) is over the sizes the console's compiler lives by ($MAX_INSNS, $MAX_REGION_INSNS)"
     ff_rc=1
   fi
   if [ "$(grep -c '^z80c: direct=[1-9][0-9]* full=[1-9][0-9]*$' "$1/translate.out")" -ne 2 ]; then
@@ -469,12 +517,166 @@ z80c_region_mutations() {
   return $z80c_rm_rc
 }
 
+# A table over the boot binary's ceiling, on the written cartridge: every
+# block taken (a budget far over its code) and the boot binary said to
+# weigh the ceiling already without it (Z80C_BASE=$CEILING), so that any
+# object is over -- the cartridge's few blocks (some 5 kilobytes of ARM)
+# never are on the true base, and no base leaves them over while room
+# stays under the margin, so the report here is the one that says no
+# budget holds. The translator must exit 5, name both figures and the
+# ceiling, leave the file it would have written as it was, and -- the
+# budget being named -- never lower it and try again.
+z80c_over_ceiling() {
+  z80c_oc_out=$2/over.c
+  echo "/* left as it was */" > "$z80c_oc_out"
+  cp "$z80c_oc_out" "$2/over.before"
+  set +e
+  OUT="$z80c_oc_out" Z80C_BUDGET=100000 Z80C_BASE=$CEILING Z80C_PICREF="$2/picture.fnv" \
+    sh "$B/translate.sh" "$1" >"$2/over.out" 2>&1
+  z80c_oc_rc=$?
+  set -e
+  if [ "$z80c_oc_rc" -ne 5 ] \
+     || ! grep -q "^z80c: arm_bytes=[0-9]* est_launchme=[0-9]* ceiling=$CEILING base=$CEILING over\$" "$2/over.out" \
+     || ! grep -q '^z80c: [0-9]* bytes of ARM for [0-9]* bytes of Z80 covered; no budget holds' "$2/over.out" \
+     || grep -q '^written: ' "$2/over.out" \
+     || grep -q '^z80c: over the ceiling at the default budget' "$2/over.out" \
+     || ! cmp -s "$z80c_oc_out" "$2/over.before"; then
+    echo "FAIL: $name: a table over the ceiling was not refused with status 5 and nothing written (status $z80c_oc_rc: $(grep -m1 '^z80c: arm_bytes=\|^FAIL' "$2/over.out" || echo 'no line'))"
+    return 1
+  fi
+  echo "z80c: $name over the ceiling refused: $(grep -m1 '^FAIL' "$2/over.out")"
+  return 0
+}
+
+# The lowering of the default budget, on the written cartridge, and its
+# twin under a named budget. The boot binary is said to weigh, without
+# the table, 50 bytes less than what the ceiling leaves the cartridge's
+# table (its arm_bytes, read off its own translation): the default
+# table is over by 50. With a margin of 300 bytes the room is its weight
+# less 350, and the budget said to hold, at the table's ratio, some 20
+# bytes under what it covers -- a table that still chains its regions
+# and, measured on 2026-09-19, weighs 216 bytes less (5136 against
+# 5352), under the ceiling. The default budget must be lowered once, to
+# a smaller budget, the second table weighed ok and written; a named
+# budget on the same base must exit 5 with the budget that would have
+# held and no second choice.
+#
+#   z80c_lowered <rom> <dir>
+z80c_lowered() {
+  zl_arm=$(sed -n 's/^z80c: arm_bytes=\([0-9]*\) est_launchme=.* ok$/\1/p' "$2/translate.out" | tail -n 1)
+  if [ -z "$zl_arm" ]; then
+    echo "FAIL: $name: no weight read off the cartridge's translation"
+    return 1
+  fi
+  zl_base=$(( CEILING - zl_arm + 50 ))
+  set +e
+  OUT="$2/lowered.c" Z80C_BASE=$zl_base Z80C_MARGIN=300 Z80C_PICREF="$2/picture.fnv" \
+    sh "$B/translate.sh" "$1" >"$2/lowered.out" 2>&1
+  zl_rc=$?
+  set -e
+  zl_from=$(sed -n 's/^z80c: over the ceiling at the default budget: Z80C_BUDGET \([0-9]*\) -> \([0-9]*\), .*$/\1/p' "$2/lowered.out")
+  zl_to=$(sed -n 's/^z80c: over the ceiling at the default budget: Z80C_BUDGET \([0-9]*\) -> \([0-9]*\), .*$/\2/p' "$2/lowered.out")
+  if [ "$zl_rc" -ne 0 ] || [ -z "$zl_from" ] || [ -z "$zl_to" ] || [ "$zl_to" -ge "$zl_from" ] \
+     || ! sed -n "/^z80c: arm_bytes=[0-9]* est_launchme=[0-9]* ceiling=$CEILING base=$zl_base ok\$/,\$p" "$2/lowered.out" | grep -q '^written: '; then
+    echo "FAIL: $name: the default budget over the ceiling was not lowered once and written (status $zl_rc, from ${zl_from:-?} to ${zl_to:-?}): $(grep -m1 '^FAIL' "$2/lowered.out" || true)"
+    return 1
+  fi
+  echo "z80c: $name default budget lowered on base $zl_base: $zl_from -> $zl_to, $(grep '^z80c: arm_bytes=' "$2/lowered.out" | tail -n 1 | sed 's/^z80c: //')"
+  echo "/* left as it was */" > "$2/named.c"
+  cp "$2/named.c" "$2/named.before"
+  set +e
+  OUT="$2/named.c" Z80C_BUDGET="$zl_from" Z80C_BASE=$zl_base Z80C_MARGIN=300 Z80C_PICREF="$2/picture.fnv" \
+    sh "$B/translate.sh" "$1" >"$2/named.out" 2>&1
+  zl_rc=$?
+  set -e
+  if [ "$zl_rc" -ne 5 ] \
+     || ! grep -q "^z80c: [0-9]* bytes of ARM for [0-9]* bytes of Z80 covered; Z80C_BUDGET=$zl_to would have held" "$2/named.out" \
+     || grep -q '^z80c: over the ceiling at the default budget' "$2/named.out" \
+     || [ "$(grep -c '^== choosing under ' "$2/named.out")" -ne 1 ] \
+     || grep -q '^written: ' "$2/named.out" \
+     || ! cmp -s "$2/named.c" "$2/named.before"; then
+    echo "FAIL: $name: the named budget $zl_from on base $zl_base was not refused with status 5, Z80C_BUDGET=$zl_to named and no second choice (status $zl_rc)"
+    return 1
+  fi
+  echo "z80c: $name named budget $zl_from on base $zl_base refused: $(grep -m1 '^z80c: [0-9]* bytes of ARM' "$2/named.out" | sed 's/^z80c: //')"
+  return 0
+}
+
+# The console's pairing of the table with the image, played by the
+# runner in its pairing mode (tests/z80c/sidebyside.c): the real
+# z80c_init, none of the runner's own refusal. On the written cartridge:
+# the image itself arms the table ("paired"); a copy with one byte
+# changed, of the same size, does not ("rom mismatch", both digests);
+# the image twice over, of another size, does not either ("rom
+# mismatch", the digest never taken: dashes). With a fourth argument, a
+# z80c.c to take the place of the core's: how the mutation "pairing"
+# is played.
+#
+#   z80c_pairing <rom> <dir> [z80c.c]
+z80c_pairing() {
+  zp_d=$2/pairing${3:+.mutated}
+  mkdir -p "$zp_d"
+  [ -f "$WORK/obj/sidebyside.o" ] || z80c_runner "$WORK/obj" || return 2
+  z80c_build "$2/rom_code.c" "$zp_d/run" "$WORK/obj" ${3:+"$3"} >"$zp_d/build.log" 2>&1 || { cat "$zp_d/build.log"; return 2; }
+  cp "$1" "$zp_d/same.sms"
+  # One byte of the first bank's filler, well past the code, turned.
+  printf '\377' | dd of="$zp_d/same.sms" bs=1 seek=12288 conv=notrunc 2>/dev/null
+  cat "$1" "$1" > "$zp_d/other.sms"
+  zp_rc=0
+  "$zp_d/run" "$1" pairing >"$zp_d/own.out" 2>"$zp_d/own.log" || zp_rc=1
+  if [ "$zp_rc" -ne 0 ] || ! grep -q '^z80c: pairing armed=1$' "$zp_d/own.out" \
+     || ! grep -q 'converted code: blocks=.* paired$' "$zp_d/own.log"; then
+    echo "  the image itself: $(cat "$zp_d/own.out" "$zp_d/own.log" | grep -m2 'pairing\|converted')"
+    zp_rc=1
+  fi
+  "$zp_d/run" "$zp_d/same.sms" pairing >"$zp_d/same.out" 2>"$zp_d/same.log" || zp_rc=1
+  if ! grep -q '^z80c: pairing armed=0$' "$zp_d/same.out" \
+     || ! grep -q '\[ERR\] converted code: rom mismatch ([0-9]*/[0-9a-f]\{8\} vs [0-9]*/[0-9a-f]\{8\}), interpreter only$' "$zp_d/same.log"; then
+    echo "  one byte changed: $(cat "$zp_d/same.out" "$zp_d/same.log" | grep -m2 'pairing\|converted')"
+    zp_rc=1
+  fi
+  "$zp_d/run" "$zp_d/other.sms" pairing >"$zp_d/other.out" 2>"$zp_d/other.log" || zp_rc=1
+  if ! grep -q '^z80c: pairing armed=0$' "$zp_d/other.out" \
+     || ! grep -q '\[ERR\] converted code: rom mismatch ([0-9]*/[0-9a-f]\{8\} vs [0-9]*/--------), interpreter only$' "$zp_d/other.log"; then
+    echo "  another size: $(cat "$zp_d/other.out" "$zp_d/other.log" | grep -m2 'pairing\|converted')"
+    zp_rc=1
+  fi
+  return $zp_rc
+}
+
+# The translator broken, compiled on the side and run alone on the
+# written cartridge (its whole table, no run): the line of regions must
+# go over the cap on accesses. accjoin: regions joined whatever their
+# accesses; acccut: no block cut on its accesses.
+#
+#   z80c_translator_mutation <name> <sed> <rom> <dir>
+z80c_translator_mutation() {
+  zt_d=$4/$1
+  mkdir -p "$zt_d"
+  sed "$2" "$B/translate.c" > "$zt_d/translate.c"
+  if cmp -s "$B/translate.c" "$zt_d/translate.c"; then
+    echo "  [FAIL] mutation $1 matches nothing in translate.c"
+    return 1
+  fi
+  PLAYED="$PLAYED$1 "
+  $CC -O1 -std=gnu89 -w -o "$zt_d/translate" "$zt_d/translate.c" || { echo "  [FAIL] mutation $1 does not compile"; return 1; }
+  "$zt_d/translate" "$3" "$zt_d/out.c" >"$zt_d/out.txt" 2>&1 || true
+  if z80c_caps "$zt_d/out.txt" "$1" >"$zt_d/caps.txt"; then
+    echo "  [FAIL] mutation $1 left every function under the caps: $(grep '^z80c: regions=' "$zt_d/out.txt")"
+    return 1
+  fi
+  echo "  [OK] mutation $1 turns the check red: $(sed 's/^FAIL: //' "$zt_d/caps.txt")"
+  RED_SEEN="$RED_SEEN$1 "
+  return 0
+}
+
 if [ "${MUTATE:-0}" = 1 ]; then
   z80c_runner "$WORK/obj"
 fi
 
 fail=0
 refused=0
+retried=0
 for rom in "$@"; do
   [ -f "$rom" ] || continue
   # rom.sms and rom.gg each get their own directory and their own name.
@@ -517,13 +719,61 @@ for rom in "$@"; do
     refused=$(( refused + 1 ))
     continue
   fi
+  # Two judgements, three when the default budget was lowered once and
+  # the second chosen table judged again.
+  judged=2
+  if grep -q '^z80c: over the ceiling at the default budget: ' "$dir/translate.out"; then
+    judged=3
+  fi
   if [ "$trc" -ne 0 ] \
-     || [ "$(grep -c "^z80c: events PASS $FRAMES/$FRAMES memory=same insns/frame=[0-9]*\$" "$dir/translate.out")" -ne 2 ] \
+     || [ "$(grep -c "^z80c: events PASS $FRAMES/$FRAMES memory=same insns/frame=[0-9]*\$" "$dir/translate.out")" -ne "$judged" ] \
      || ! grep -q "^written: " "$dir/translate.out"; then
-    echo "FAIL: $name: the two judgements did not both pass, or nothing was written"
+    echo "FAIL: $name: the $judged judgements did not all pass, or nothing was written"
     fail=1
     continue
   fi
+  # Every table written was weighed by the console's compiler and held
+  # under the boot binary's ceiling before it was written.
+  if ! sed -n "/^z80c: arm_bytes=[0-9]* est_launchme=[0-9]* ceiling=$CEILING base=[0-9]* ok\$/,\$p" "$dir/translate.out" | grep -q "^written: "; then
+    echo "FAIL: $name: no 'z80c: arm_bytes= est_launchme= ceiling=$CEILING base= ok' line before 'written:'"
+    fail=1
+    continue
+  fi
+  # The sizes the console's compiler lives by, on every line of regions
+  # this ROM's translation printed.
+  if ! z80c_caps "$dir/translate.out" "$name"; then
+    fail=1
+    continue
+  fi
+  # The budget holds on every choice: bytes charged at most the budget,
+  # unless the waits alone were over it (said by the translator).
+  if ! grep -q '^translate: the waits alone cover ' "$dir/translate.out"; then
+    zb_bad=$(sed -n 's/^z80c: selected blocks=[0-9]*\/[0-9]* bytes=\([0-9]*\) budget=\([0-9]*\) .*$/\1 \2/p' "$dir/translate.out" \
+             | awk '$1 > $2 { print } END { if (NR == 0) print "none" }')
+    if [ -n "$zb_bad" ]; then
+      echo "FAIL: $name: a choice charged more bytes than its budget, or no choice was read ($zb_bad)"
+      fail=1
+      continue
+    fi
+  fi
+  # A default budget over the ceiling is lowered once: the line says from
+  # what to what, the second budget is the smaller, and it is the second
+  # table that is weighed ok and written. Counted, so the summary says
+  # whether the path ran on this checkout's ROMs.
+  if grep -q '^z80c: over the ceiling at the default budget: ' "$dir/translate.out"; then
+    rt_from=$(sed -n 's/^z80c: over the ceiling at the default budget: Z80C_BUDGET \([0-9]*\) -> \([0-9]*\), .*$/\1/p' "$dir/translate.out")
+    rt_to=$(sed -n 's/^z80c: over the ceiling at the default budget: Z80C_BUDGET \([0-9]*\) -> \([0-9]*\), .*$/\2/p' "$dir/translate.out")
+    if [ -z "$rt_from" ] || [ -z "$rt_to" ] || [ "$rt_to" -ge "$rt_from" ] \
+       || [ "$(grep -c '^z80c: arm_bytes=.* over$' "$dir/translate.out")" -ne 1 ] \
+       || [ "$(grep -c "^== choosing under Z80C_BUDGET=$rt_to bytes ==\$" "$dir/translate.out")" -ne 1 ]; then
+      echo "FAIL: $name: the default budget was lowered but not as said (from ${rt_from:-?} to ${rt_to:-?})"
+      fail=1
+      continue
+    fi
+    retried=$(( retried + 1 ))
+    echo "z80c: $name default budget lowered $rt_from -> $rt_to"
+  fi
+  echo "z80c: $name $(grep '^z80c: arm_bytes=' "$dir/translate.out" | tail -n 1 | sed 's/^z80c: //')"
   # The written cartridge alone: the classic interpreter, which shares
   # nothing with the clock by events, must draw the very same frames,
   # frame for frame, under both judgements. On a real ROM the two clocks
@@ -538,6 +788,23 @@ for rom in "$@"; do
     fail=1
     continue
   fi
+  if [ "$rom" = "$FIXTURE" ] && ! z80c_over_ceiling "$rom" "$dir"; then
+    fail=1
+    continue
+  fi
+  if [ "$rom" = "$FIXTURE" ] && ! z80c_lowered "$rom" "$dir"; then
+    fail=1
+    continue
+  fi
+  if [ "$rom" = "$FIXTURE" ]; then
+    if z80c_pairing "$rom" "$dir"; then
+      echo "z80c: $name pairing: the image paired, one byte changed and another size refused"
+    else
+      echo "FAIL: $name: the console's pairing of the table with the image does not hold (above)"
+      fail=1
+      continue
+    fi
+  fi
 
   [ "${MUTATE:-0}" = 1 ] || continue
 
@@ -546,6 +813,34 @@ for rom in "$@"; do
   # below, which are forms only a real program carries, and its video
   # memory holds nothing to flip.
   if [ "$rom" = "$FIXTURE" ]; then
+    echo "== $name: the digest no longer compared at boot =="
+    # The size alone pairs the table: the copy with one byte changed is
+    # armed, and the pairing check must say so.
+    mkdir -p "$dir/pairmut"
+    sed 's/^  if(z80c_rom_fnv != fnv)$/  if(0)/' "$S/z80c.c" > "$dir/pairmut/z80c.c"
+    if cmp -s "$S/z80c.c" "$dir/pairmut/z80c.c"; then
+      echo "  [FAIL] mutation pairing matches nothing in z80c.c"
+      fail=1
+    else
+      PLAYED="${PLAYED}pairing "
+      set +e
+      z80c_pairing "$rom" "$dir" "$dir/pairmut/z80c.c" >"$dir/pairmut/verdict" 2>&1
+      zpm_rc=$?
+      set -e
+      if [ "$zpm_rc" -eq 1 ]; then
+        echo "  [OK] mutation pairing turns the check red: $(grep -m1 'one byte changed' "$dir/pairmut/verdict" || head -n 1 "$dir/pairmut/verdict")"
+        RED_SEEN="${RED_SEEN}pairing "
+      else
+        echo "  [FAIL] mutation pairing (the digest no longer compared) proved nothing (status $zpm_rc)"
+        cat "$dir/pairmut/verdict"
+        fail=1
+      fi
+    fi
+    echo "== $name: the translator's cap on accesses broken two ways =="
+    z80c_translator_mutation accjoin 's/^  if(region_access\[ra\] + region_access\[rb\] > (unsigned long)MAX_REGION_ACCESSES)$/  if(0)/' \
+      "$rom" "$dir" || fail=1
+    z80c_translator_mutation acccut 's/^      if(b->n > 0 \&\& accesses + insn_accesses(in) > (unsigned long)MAX_REGION_ACCESSES)$/      if(0)/' \
+      "$rom" "$dir" || fail=1
     echo "== $name: the epoch of the mapper taken out of the core =="
     # Without it the chain trusts the successor a block rendered while
     # the bank behind that address was being turned: the block of the
@@ -666,9 +961,9 @@ done
 if [ "${MUTATE:-0}" = 1 ]; then
   echo "== the mutations over every rom =="
   if [ "$found" -eq 1 ]; then
-    wanted="epoch corepush memory cp jr load succ vram colour wait nowait direct stack bankend edge dispatch regexit"
+    wanted="epoch corepush memory cp jr load succ vram colour wait nowait direct stack bankend edge dispatch regexit pairing accjoin acccut"
   else
-    wanted="epoch corepush memory wait nowait direct stack bankend edge dispatch regexit"
+    wanted="epoch corepush memory wait nowait direct stack bankend edge dispatch regexit pairing accjoin acccut"
   fi
   for m in $wanted; do
     case "$RED_SEEN" in
@@ -682,5 +977,6 @@ if [ "${MUTATE:-0}" = 1 ]; then
   done
 fi
 
+echo "z80c: default budget lowered on $retried rom(s)"
 echo "failed=$fail refused=$refused"
 exit $fail

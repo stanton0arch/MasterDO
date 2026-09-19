@@ -73,6 +73,15 @@
  *                header: how a script checks that a take it kept is this
  *                ROM's.
  *
+ *   pairing      boots the ROM as the console does -- z80c_init with the
+ *                table linked, nothing of this runner's own refusal of
+ *                a table written from another image -- and prints
+ *                "z80c: pairing armed=<0|1>"; the line z80c_init
+ *                journals goes to stderr. How tests/z80c/run_z80c.sh
+ *                holds the console's pairing: the image the table was
+ *                written from arms it, another of the same size or of
+ *                another size does not.
+ *
  *   events       THE VERDICT. Two takes of the picture runner
  *                (tests/cel8/romrun.c, write mode, one picture every
  *                frame), the translated run's first and the reference's
@@ -124,6 +133,7 @@
  *
  *   sidebyside <rom> <frames> translated [counts [seeds]]
  *   sidebyside <rom> romid
+ *   sidebyside <rom> pairing
  *   sidebyside events <translated take> <reference take>
  *   sidebyside pictures <translated take> <its colours> <interpreter take> <its colours>
  *
@@ -792,10 +802,10 @@ static int run(const char *rom, long frames, const char *counts_path,
           return 2;
         }
     }
-  /* The console pairs the table by size alone; this runner has the digest
-     in hand and refuses a table written from another image of the same
-     size, rather than judging two programs that never were one. */
-  if(z80c_armed && (unsigned long)z80c_rom_fnv != rom_fnv)
+  /* The console leaves a table written from another image unarmed and
+     interprets (src/z80c.c, "rom mismatch"); this runner refuses it with
+     its own status, rather than judge two programs that never were one. */
+  if(z80c_block_count != 0UL && (unsigned long)z80c_rom_fnv != rom_fnv)
     {
       printf("FAIL: table digest %08lx is not the rom's %08lx\n",
              (unsigned long)z80c_rom_fnv,rom_fnv);
@@ -920,10 +930,17 @@ int main(int argc, char **argv)
       printf("rom_bytes=%lu rom_fnv=%08lx\n",(unsigned long)sms.cart.size,rom_fnv);
       return 0;
     }
+  if(argc == 3 && strcmp(argv[2],"pairing") == 0)
+    {
+      if(boot(argv[1],&rom_fnv) != 0) return 2;
+      printf("z80c: pairing armed=%d\n",z80c_armed ? 1 : 0);
+      return 0;
+    }
   if((argc < 4 || argc > 6) || strcmp(argv[3],"translated") != 0)
     {
       fprintf(stderr,"usage: sidebyside <rom> <frames> translated [counts [seeds]]\n"
               "       sidebyside <rom> romid\n"
+              "       sidebyside <rom> pairing\n"
               "       sidebyside events <translated take> <reference take>\n"
               "       sidebyside pictures <translated take> <its colours> "
               "<interpreter take> <its colours>\n"

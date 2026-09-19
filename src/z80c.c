@@ -53,9 +53,30 @@ static uint32 z80c_ram_said       = 0;
 #define Z80C_COUNT(counter) ((void)0)
 #endif
 
+/*
+ * FNV-1a over the loaded image, as the tool takes it (tests/z80c/
+ * translate.c, fnv1a): offset basis 2166136261, prime 16777619, kept to
+ * 32 bits. One walk of the image, at boot only.
+ */
+static uint32
+z80c_digest(const uint8 *p, uint32 n)
+{
+  uint32 h = 2166136261UL;
+  uint32 i;
+
+  for(i = 0; i < n; i++)
+    {
+      h ^= (uint32)p[i];
+      h *= 16777619UL;
+    }
+  return h;
+}
+
 void
 z80c_init(void)
 {
+  uint32 fnv;
+
   z80c_armed     = 0;
   z80c_map_epoch = 0;
   z80c_miss_pc   = Z80C_NO_PC;
@@ -93,27 +114,42 @@ z80c_init(void)
 
   if(z80c_block_count == 0UL)
     {
-      LOG_WARN(LOG_CAT_Z80,("translated code: none, interpreter only"));
+      LOG_WARN(LOG_CAT_Z80,("converted code: none, interpreter only"));
       return;
     }
 
   /*
-   * The size alone decides here; the digest is journaled so that a reader
-   * of the trace can hold it against the tool's report. Checking it at
-   * boot -- a walk of the whole image -- is the loader's third operation
-   * and is not written yet.
+   * The table is armed only on the image it was written from: the size
+   * first, then the digest the tool took (tests/z80c/translate.c,
+   * fnv1a), walked here once over the loaded image. A ROM of another
+   * size is told apart without the walk, and its digest, never taken,
+   * is printed as dashes; one of the same size -- another game of 512
+   * kilobytes -- only by the digest. Either way the core interprets the
+   * whole program, and the line names both pairs.
    */
   if(z80c_rom_size != sms.cart.size)
     {
-      LOG_WARN(LOG_CAT_Z80,
-               ("translated code: rom size %lu vs %lu, interpreter only",
-                (unsigned long)z80c_rom_size,
-                (unsigned long)sms.cart.size));
+      LOG_ERR(LOG_CAT_Z80,
+              ("converted code: rom mismatch (%lu/%08lx vs %lu/--------), interpreter only",
+               (unsigned long)z80c_rom_size,
+               (unsigned long)z80c_rom_fnv,
+               (unsigned long)sms.cart.size));
+      return;
+    }
+  fnv = z80c_digest(sms.cart.rom,sms.cart.size);
+  if(z80c_rom_fnv != fnv)
+    {
+      LOG_ERR(LOG_CAT_Z80,
+              ("converted code: rom mismatch (%lu/%08lx vs %lu/%08lx), interpreter only",
+               (unsigned long)z80c_rom_size,
+               (unsigned long)z80c_rom_fnv,
+               (unsigned long)sms.cart.size,
+               (unsigned long)fnv));
       return;
     }
 
   LOG_INFO(LOG_CAT_Z80,
-           ("translated code: blocks=%lu bytes=%lu rom=%lu/%08lx paired",
+           ("converted code: blocks=%lu bytes=%lu rom=%lu/%08lx paired",
             (unsigned long)z80c_block_count,
             (unsigned long)z80c_code_bytes,
             (unsigned long)z80c_rom_size,

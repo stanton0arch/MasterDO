@@ -209,6 +209,13 @@ static Item sys_audio_item[SYS_AUDIO_COUNT];
 #define SYS_FALLBACK_WIDTH  320
 #define SYS_FALLBACK_HEIGHT 240
 
+/*
+ * The DRAM that must still be free at boot, in bytes: the measured floor
+ * the boot binary's ceiling (155648 bytes, tests/z80c/translate.sh) is
+ * set against. sys_mem_report warns below it.
+ */
+#define SYS_DRAM_FLOOR 32768UL
+
 void *
 sys_alloc(const char *name,
           int32       size,
@@ -274,13 +281,18 @@ sys_mem_report(void)
    * to throw the answer away.
    *
    * The condition is on the summary's own level rather than on tracing at
-   * large: below it the two locals holding the free figures would have no
+   * large: below it the locals holding the free figures would have no
    * reader, which is one more warning in a build that must produce none.
+   * The warning on a short DRAM pool is the lowest level here, so the
+   * body exists down to it and the video pool's figure only with the
+   * summary.
    */
-#if LOG_ENABLE && ((LOG_LVL_INFO) <= (LOG_LEVEL))
+#if LOG_ENABLE && ((LOG_LVL_WARN) <= (LOG_LEVEL))
   MemInfo mi;
   uint32 dram_free;
+#if (LOG_LVL_INFO) <= (LOG_LEVEL)
   uint32 vram_free;
+#endif
 
   /*
    * Two calls, one memory type each, and not a single call asking for both:
@@ -296,6 +308,7 @@ sys_mem_report(void)
            (unsigned long)mi.minfo_TaskFree,
            (unsigned long)mi.minfo_TaskLargest));
 
+#if (LOG_LVL_INFO) <= (LOG_LEVEL)
   AvailMem(&mi,MEMTYPE_VRAM);
   vram_free = mi.minfo_SysFree;
   LOG_DBG(LOG_CAT_SYS,
@@ -319,7 +332,21 @@ sys_mem_report(void)
                         (unsigned long)sys_mem_total,
                         (unsigned long)dram_free,
                         (unsigned long)vram_free));
-#endif /* LOG_ENABLE && INFO */
+#endif /* INFO */
+
+  /*
+   * The floor of the memory budget (the boot binary under 152 kilobytes,
+   * at least 32 kilobytes of DRAM left at boot): below it the figure is
+   * said as a warning -- again, where the summary line above is
+   * compiled in; the only time, in a build that keeps warnings and not
+   * the summary. A table of converted code grown past its measure is
+   * the usual cause.
+   */
+  if(dram_free < SYS_DRAM_FLOOR)
+    LOG_WARN(LOG_CAT_SYS,("mem dram_free=%lu under the floor of %lu",
+                          (unsigned long)dram_free,
+                          (unsigned long)SYS_DRAM_FLOOR));
+#endif /* LOG_ENABLE && WARN */
 }
 
 void

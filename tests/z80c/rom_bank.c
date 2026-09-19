@@ -118,6 +118,13 @@
  * dispatch (every case sent to the head) and the stores at the exits
  * (the accumulator no longer stored), each demanded red or refused.
  *
+ * THE ACCESSES. The console's compiler overflows on a function that
+ * makes too many memory accesses (translate.c, MAX_REGION_ACCESSES).
+ * At the vector of the non-maskable interrupt, which never comes, this
+ * image carries a run of ldi and a run of ex (sp),hl dense enough that
+ * the translator must keep them apart and cut them (lay_nmi, below);
+ * run_z80c.sh holds its line of regions to the cap.
+ *
  * THE VARIANTS. Two more images, each held to one refusal of the PC and
  * to nothing else (run_z80c.sh):
  *
@@ -406,6 +413,41 @@ static const unsigned char irq[] = {
   0xED, 0x4D              /* reti                                      */
 };
 
+/* At the vector of the non-maskable interrupt, which never comes: code
+   the translator walks (the vector is one of its three starts) and no
+   run executes, so that it is in the whole table and never in the
+   chosen one. It carries the densest code the console's compiler is
+   handed, to hold the cap on a function's memory accesses (translate.c,
+   MAX_REGION_ACCESSES, 96) on a checkout with no ROM: a call, then 60
+   ldi and a retn -- two blocks of 32 and 29 instructions, 64 and 58
+   accesses, which the cap keeps apart -- and the routine called, 26
+   ex (sp),hl and a ret -- 106 accesses, which the cap cuts after the
+   24th (96). Without the cap at the joins, or without the cut, a
+   function over 96 accesses is written and the translator's line of
+   regions says so (longest_accesses=). */
+#define NMI_VECTOR 0x66UL
+#define NMI_SUB    0x100UL
+
+static void
+lay_nmi(void)
+{
+  unsigned long p = NMI_VECTOR;
+  int i;
+
+  rom[p++] = 0xCD;                            /* call sub              */
+  rom[p++] = (unsigned char)(NMI_SUB & 0xFFUL);
+  rom[p++] = (unsigned char)(NMI_SUB >> 8);
+  for(i = 0; i < 60; i++)
+    {
+      rom[p++] = 0xED; rom[p++] = 0xA0;       /* ldi                   */
+    }
+  rom[p++] = 0xED; rom[p++] = 0x45;           /* retn                  */
+  p = NMI_SUB;
+  for(i = 0; i < 26; i++)
+    rom[p++] = 0xE3;                          /* sub: ex (sp),hl       */
+  rom[p++] = 0xC9;                            /* ret                   */
+}
+
 /* The emitter of a bank's body: a cursor, bytes, three byte forms with
    a sixteen bit operand, and the displacement of a relative branch
    from the byte after its operand to a label. */
@@ -562,6 +604,7 @@ main(int argc, char **argv)
   fill();
   memcpy(rom,boot,sizeof boot);
   memcpy(rom + IRQ_VECTOR,irq,sizeof irq);
+  lay_nmi();
   /* The stack at $C001 for the underflow variant: the operand of the
      ld sp,nn at the second byte of the boot, still in the work RAM. */
   if(underflow)

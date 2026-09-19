@@ -32,7 +32,8 @@
  * conditional branch; never a call, a restart or a return, never an edge
  * onto a block that starts a wait or that closes on a mapper write, nor
  * one out of a block so closed -- are joined into a region, while its
- * instructions stay under MAX_REGION_INSNS -- greedily, in the order of
+ * instructions stay under MAX_REGION_INSNS and their memory accesses
+ * under MAX_REGION_ACCESSES -- greedily, in the order of
  * the positions, with no preference for a hot or a backward edge: a
  * routine longer than the cap keeps its first blocks by position and
  * the rest form regions of their own -- and one function is written
@@ -50,14 +51,15 @@
  * lands on and passes the guard of the line (src/z80c.h, Z80C_EDGE).
  * The report says what was written:
  *
- *   z80c: regions=<n> entries=<n> edges=<n> exits=<n> loads=<n> stores=<n> longest_block=<n> longest_region=<n>
+ *   z80c: regions=<n> entries=<n> edges=<n> exits=<n> loads=<n> stores=<n> longest_block=<n> longest_region=<n> longest_accesses=<n>
  *
  * regions being the functions, entries the table's, edges the gotos
  * (`grep -c 'goto L_'` counts the same), exits the returns, loads and
  * stores the registers loaded at the heads and stored at the exits, as
- * written, and the two longest the instructions of the longest block
- * and of the longest region -- what holds the two sizes above on the
- * PC (tests/z80c/run_z80c.sh holds them under the caps).
+ * written, the two longest the instructions of the longest block and
+ * of the longest region, and the memory accesses of the region that
+ * makes the most -- what holds the three sizes above on the PC
+ * (tests/z80c/run_z80c.sh holds them under the caps).
  *
  * Registers live in locals for the length of a region. The register
  * names of z80_ops.h are retargeted at the head of the generated file
@@ -220,9 +222,9 @@
  * substitute in consumes no displacement, so the instruction is two
  * bytes and not three (z80.c, Z80_DDFD_INERT).
  *
- * THE SIZES. MAX_INSNS bounds a block, MAX_REGION_INSNS a region, and
- * both are sizes for the console's compiler, which is what is measured
- * for them: handed a straight run of instructions that read through a
+ * THE SIZES. MAX_INSNS bounds a block, MAX_REGION_INSNS and
+ * MAX_REGION_ACCESSES a region, and all are sizes for the console's
+ * compiler, which is what is measured for them: handed a straight run of instructions that read through a
  * pair and step it, it takes 0.015 s for 32 of them, 5 s for 80, more
  * than five minutes for 200, and fails on 239 and 268 (its expression
  * table overflows); handed 192 with a label every 32 that a branch
@@ -253,6 +255,33 @@
    of the compiler for the measure that sets it, and for that alone. */
 #ifndef MAX_INSNS
 #define MAX_INSNS 32
+#endif
+
+/* The most memory accesses a function's instructions make -- a region's,
+   and so a block's too: a block that would go over it is cut there, as
+   at MAX_INSNS, and a region is joined only while it stays under it.
+   The accesses are the bytes read or written, each counted (an ldi reads
+   one and writes one), on either path, taken exits included -- what
+   insn_t counts in acc_direct, acc_full, taken_direct and taken_full.
+   The console's compiler fills its table of expressions with accesses
+   faster than with instructions. Measured on 2026-09-19: Space Harrier's
+   chosen table carried two regions of two blocks of 32 ldi each (128
+   accesses) under the 128-instruction cap, and the compiler failed on
+   "CSE exprn table overflow" in 4.5 s. The same regions, pure ldi, the
+   second block cut short:
+     32 ldi,  64 accesses: compiles (5.6 s for the whole file)
+     56 ldi, 112 accesses: compiles (10.4 s)
+     60 ldi, 120 accesses: overflows
+     64 ldi, 128 accesses: overflows
+   The chosen tables of five ROMs, their regions capped at 32, 48, 64,
+   80, 96, 112, 120, 128, 160, 200 accesses or not at all, all compiled
+   up to 120 (their densest mixed region, 110 accesses, Virtua Fighter)
+   and Space Harrier's overflowed from 128 on. Mixed tables compile at
+   120 while a pure ldi region overflows at 120: the cap is 96, a margin
+   under the 112 that compiled pure. Overridable from the command line
+   of the compiler for the measure that sets it, and for that alone. */
+#ifndef MAX_REGION_ACCESSES
+#define MAX_REGION_ACCESSES 96
 #endif
 
 /* The most instructions a wait loop holds, its closing branch included:
@@ -883,6 +912,13 @@ typedef struct
   int acc_direct, acc_full;
   int taken_direct, taken_full;
 } insn_t;
+
+/* The memory accesses of one instruction (MAX_REGION_ACCESSES). */
+static unsigned long insn_accesses(const insn_t *in)
+{
+  return (unsigned long)(in->acc_direct + in->acc_full +
+                         in->taken_direct + in->taken_full);
+}
 
 static void set_text(insn_t *in, const char *s)
 {
@@ -2476,6 +2512,7 @@ static void scan_block(unsigned long start, block_t *b)
   unsigned long end  = (bank + 1UL) * BANK_SIZE;
   unsigned long pos  = start;
   regs_t regs, before;
+  unsigned long accesses = 0;
 
   if(start < SLOT0_FIXED)
     end = SLOT0_FIXED;
@@ -2529,6 +2566,16 @@ static void scan_block(unsigned long start, block_t *b)
           add_start(pos + (unsigned long)len);
           break;
         }
+      /* The accesses would go over the cap a function lives by: cut
+         here like a full table, the instruction starts the next block
+         (MAX_REGION_ACCESSES). A lone instruction never does. */
+      if(b->n > 0 && accesses + insn_accesses(in) > (unsigned long)MAX_REGION_ACCESSES)
+        {
+          b->kind = END_CUT;
+          add_start(pos);
+          break;
+        }
+      accesses += insn_accesses(in);
 
       b->n++;
       b->loaded |= in->rd & ~b->written;
@@ -2596,6 +2643,34 @@ typedef struct
 static blockinfo_t *blocks;
 static unsigned long nblocks;
 
+/* The bytes of the image the chosen blocks cover, each counted once:
+   two blocks that overlap -- a start inside another block's run -- add
+   their common bytes to the budget once. */
+static unsigned char chosen_byte[ROM_CAPACITY];
+
+/* The bytes of a block that no block chosen so far covers. */
+static unsigned long chosen_new(const blockinfo_t *b)
+{
+  unsigned long p, end = b->pos + b->bytes, n = 0;
+
+  if(end > rom_size)
+    end = rom_size;
+  for(p = b->pos; p < end; p++)
+    n += (chosen_byte[p] == 0);
+  return n;
+}
+
+/* A block chosen: its bytes covered. */
+static void chosen_take(const blockinfo_t *b)
+{
+  unsigned long p, end = b->pos + b->bytes;
+
+  if(end > rom_size)
+    end = rom_size;
+  for(p = b->pos; p < end; p++)
+    chosen_byte[p] = 1;
+}
+
 /* The position of the block at each index of the written table. */
 static unsigned long *index_pos;
 
@@ -2657,6 +2732,18 @@ static unsigned long blocks_flags_at(unsigned long pos)
 #ifndef MAX_REGION_INSNS
 #define MAX_REGION_INSNS 128
 #endif
+
+
+/* The memory accesses of a block's instructions (above). */
+static unsigned long block_accesses(const block_t *b)
+{
+  unsigned long n = 0;
+  int i;
+
+  for(i = 0; i < b->n; i++)
+    n += insn_accesses(&b->ins[i]);
+  return n;
+}
 
 /* The C of one region, accumulated before its head is written: what the
    body names -- the window, the registers -- decides what the head
@@ -2914,10 +3001,11 @@ static void block_edges(rblock_t *rb)
    by the eligible edges while the instructions stay under the cap. */
 static long *region_root;
 static unsigned long *region_insns;
+static unsigned long *region_access;
 static long *region_next;     /* the next block of the region, by index */
 static long *region_first;    /* the first block of the region, by root */
 static unsigned long n_regions, n_edges, n_exits, n_loads, n_stores;
-static unsigned long n_longest_block, n_longest_region;
+static unsigned long n_longest_block, n_longest_region, n_longest_access;
 
 static long region_find(long k)
 {
@@ -2939,15 +3027,19 @@ static int region_join(long a, long b)
     return 1;
   if(region_insns[ra] + region_insns[rb] > (unsigned long)MAX_REGION_INSNS)
     return 0;
+  if(region_access[ra] + region_access[rb] > (unsigned long)MAX_REGION_ACCESSES)
+    return 0;
   if(ra < rb)
     {
       region_root[rb] = ra;
       region_insns[ra] += region_insns[rb];
+      region_access[ra] += region_access[rb];
     }
   else
     {
       region_root[ra] = rb;
       region_insns[rb] += region_insns[ra];
+      region_access[rb] += region_access[ra];
     }
   return 1;
 }
@@ -2967,9 +3059,11 @@ static void form_regions(block_t *blk)
     }
   region_root  = malloc(((n_blocks == 0UL) ? 1UL : n_blocks) * sizeof *region_root);
   region_insns = malloc(((n_blocks == 0UL) ? 1UL : n_blocks) * sizeof *region_insns);
+  region_access = malloc(((n_blocks == 0UL) ? 1UL : n_blocks) * sizeof *region_access);
   region_next  = malloc(((n_blocks == 0UL) ? 1UL : n_blocks) * sizeof *region_next);
   region_first = malloc(((n_blocks == 0UL) ? 1UL : n_blocks) * sizeof *region_first);
-  if(region_root == NULL || region_insns == NULL || region_next == NULL || region_first == NULL)
+  if(region_root == NULL || region_insns == NULL || region_access == NULL ||
+     region_next == NULL || region_first == NULL)
     {
       fprintf(stderr,"translate: out of memory\n");
       exit(2);
@@ -2978,6 +3072,7 @@ static void form_regions(block_t *blk)
     {
       region_root[k] = k;
       region_insns[k] = 0;
+      region_access[k] = 0;
       region_next[k] = -1L;
       region_first[k] = -1L;
     }
@@ -2987,6 +3082,7 @@ static void form_regions(block_t *blk)
         k = table_index(pos);
         scan_block(pos,blk);
         region_insns[k] = (unsigned long)blk->n;
+        region_access[k] = block_accesses(blk);
       }
   for(pos = 0; pos < rom_size; pos++)
     if(mark[pos] & M_BLOCK)
@@ -3313,18 +3409,21 @@ static void emit_region(FILE *out, long first)
     }
   while(changed);
   {
-    unsigned long total = 0;
+    unsigned long total = 0, access = 0;
 
     for(j = 0; j < nb; j++)
       {
         headload |= rbs[j].live_in;
         declared |= rbs[j].b.loaded | rbs[j].b.written;
         total += (unsigned long)rbs[j].b.n;
+        access += block_accesses(&rbs[j].b);
         if((unsigned long)rbs[j].b.n > n_longest_block)
           n_longest_block = (unsigned long)rbs[j].b.n;
       }
     if(total > n_longest_region)
       n_longest_region = total;
+    if(access > n_longest_access)
+      n_longest_access = access;
   }
   declared |= headload;
 
@@ -3627,7 +3726,7 @@ int main(int argc, char **argv)
   int have_budget = 0;
   int i;
   unsigned long n_all;
-  unsigned long sel_bytes = 0, sel_weight = 0, all_weight = 0;
+  unsigned long sel_bytes = 0, sel_weight = 0, all_weight = 0, wait_bytes = 0;
   block_t *blk;
 
   if(argc < 3)
@@ -3755,7 +3854,8 @@ int main(int argc, char **argv)
   /* The choice under the budget: the blocks that start a wait are in
      first, whatever they ran -- a wait left out of the table is a line
      that never ends -- then blocks never run are out, and the others are
-     taken by the instructions they ran while the bytes fit. */
+     taken by the instructions they ran while the bytes fit -- the bytes
+     of the image covered, each once, whatever blocks share it. */
   if(counts_path != NULL)
     {
       blockinfo_t *order;
@@ -3776,12 +3876,14 @@ int main(int argc, char **argv)
           if(blocks[j].wait)
             {
               blocks[j].selected = 1;
-              sel_bytes += blocks[j].bytes;
+              sel_bytes += chosen_new(&blocks[j]);
+              chosen_take(&blocks[j]);
               sel_weight += blocks[j].weight;
             }
         }
       /* The waits alone may cover more than the budget: they are in all
          the same, said so, and nothing else is taken. */
+      wait_bytes = sel_bytes;
       if(sel_bytes > budget)
         fprintf(stderr,"translate: the waits alone cover %lu bytes, over the budget of %lu\n",
                 sel_bytes,budget);
@@ -3789,10 +3891,21 @@ int main(int argc, char **argv)
       for(j = 0; j < nblocks; j++)
         {
           unsigned long lo = 0, hi = nblocks;
+          unsigned long more;
 
+          /* The budget spent: nothing more is taken, not even a block
+             whose bytes are all covered already. */
+          if(sel_bytes >= budget)
+            break;
           if(order[j].wait || order[j].hits == 0UL)
             continue;
-          if(sel_bytes + order[j].bytes > budget)
+          /* A block's new bytes; one whose bytes other blocks cover
+             already still emits a function's worth of code, and is
+             charged its own bytes. */
+          more = chosen_new(&order[j]);
+          if(more == 0UL)
+            more = order[j].bytes;
+          if(sel_bytes + more > budget)
             continue;
           while(lo < hi)
             {
@@ -3813,7 +3926,8 @@ int main(int argc, char **argv)
               return 2;
             }
           blocks[lo].selected = 1;
-          sel_bytes += order[j].bytes;
+          chosen_take(&order[j]);
+          sel_bytes += more;
           sel_weight += order[j].weight;
         }
       free(order);
@@ -3975,8 +4089,8 @@ int main(int argc, char **argv)
   /* The regions of the written table: the functions, the entries, the
      gotos, the returns, and the registers loaded at the heads and
      stored at the exits, as written. */
-  printf("z80c: regions=%lu entries=%lu edges=%lu exits=%lu loads=%lu stores=%lu longest_block=%lu longest_region=%lu\n",
-         n_regions,n_blocks,n_edges,n_exits,n_loads,n_stores,n_longest_block,n_longest_region);
+  printf("z80c: regions=%lu entries=%lu edges=%lu exits=%lu loads=%lu stores=%lu longest_block=%lu longest_region=%lu longest_accesses=%lu\n",
+         n_regions,n_blocks,n_edges,n_exits,n_loads,n_stores,n_longest_block,n_longest_region,n_longest_access);
   if(n_ram_targets != 0UL)
     printf("z80c: ram targets=%lu walked, first %04lX reached from %06lx: code without a position, not translated\n",
            n_ram_targets,ram_target_addr,ram_target_from);
@@ -3995,9 +4109,13 @@ int main(int argc, char **argv)
       unsigned long p10 = (run != 0UL) ? (unsigned long)(((double)sel_weight * 1000.0) / (double)run) : 0UL;
       unsigned long a10 = (run != 0UL) ? (unsigned long)(((double)all_weight * 1000.0) / (double)run) : 0UL;
 
-      printf("z80c: selected blocks=%lu/%lu bytes=%lu insns=%lu.%lu%% of the recorded run "
+      /* bytes= is what the choice charged -- the image covered, each
+         byte once, and a block whose bytes were covered already its own
+         -- against the budget it was chosen under; waits= the bytes the
+         waits alone cover, which no budget goes under. */
+      printf("z80c: selected blocks=%lu/%lu bytes=%lu budget=%lu waits=%lu insns=%lu.%lu%% of the recorded run "
              "(every block: %lu.%lu%%, %lu frames)\n",
-             n_blocks,n_all,sel_bytes,p10 / 10UL,p10 % 10UL,a10 / 10UL,a10 % 10UL,counts_frames);
+             n_blocks,n_all,sel_bytes,budget,wait_bytes,p10 / 10UL,p10 % 10UL,a10 / 10UL,a10 % 10UL,counts_frames);
     }
   fprintf(stderr,
           "z80c: starts=%lu reached=%lu ends: next=%lu jump=%lu fallback=%lu "
