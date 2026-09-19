@@ -36,11 +36,13 @@
  * ROM still green. This image never halts: it waits by a loop on a byte
  * of RAM the frame interrupt sets, which the core MUST end the line on
  * (a line that never ends is refused, and on this image a refusal is a
- * failure, tests/z80c/run_z80c.sh). And it carries one loop of the other
- * kind, 128 turns long, that reads a fixed byte of RAM AND writes memory:
- * a fill, not a wait. Marked by mistake it would cost 128 lines, and the
- * write of the backdrop below would land inside the visible lines of the
- * next frame, which the comparison with the classic interpreter sees.
+ * failure, tests/z80c/run_z80c.sh). And it carries two loops of the other
+ * kind, one inside the other -- 32 turns a row, three or four rows --
+ * that read a fixed byte of RAM AND write memory: a fill, not a wait.
+ * Marked by mistake the inner one would cost 96 or 128 lines, and the
+ * write of the backdrop below would land inside the visible lines of
+ * the next frame, which the comparison with the classic interpreter
+ * sees.
  *
  * THE MEMORY. The byte the program keeps at $C000 is what the mutation
  * "memory" of run_z80c.sh redirects: the picture does not read it back,
@@ -62,8 +64,9 @@
  *     the two bytes of the direct POP, broken in the core's header)
  *     shows the wrong byte as the backdrop; PUSH HL / EX (SP),HL /
  *     POP HL then LD ($C00C),HL keep the exchanged word where the
- *     memory digest reads it; CALL sub with RET NZ and RET walk the
- *     call, the taken conditional return and the plain one;
+ *     memory digest reads it; CALL sub, two frames in four, with RET
+ *     NZ and RET walks the call, the taken conditional return and the
+ *     plain one;
  *   - a read of the ROM by absolute address: the mask of the frame
  *     counter is a data byte after the code, read by LD A,(nn), and the
  *     mutation "direct" (every absolute read of the ROM turned into the
@@ -89,6 +92,31 @@
  *     (the flag cleared) gets the program refused on the PC, where a
  *     block that sees the epoch move its own bytes without the flag is
  *     refused.
+ *
+ * THE REGIONS. The translator joins the blocks a routine hands PC
+ * between into one function, the registers living in its locals across
+ * the gotos (translate.c, REGIONS). This image carries, in one region:
+ * a loop at two levels over three blocks -- the row counter in c, the
+ * byte counter in b, the pointer in hl, all three alive across both
+ * back edges -- with a conditional relative jump before it, over the
+ * fourth row and onto the head of the outer loop, taken two frames in
+ * four (bit 1 of the frame counter: each bank runs every other frame,
+ * so bit 0 would give each bank one arm for ever); then an ABSOLUTE
+ * conditional jump, jp nz,skip, taken on the same frames, over the
+ * call of the subroutine: a goto under the window test on those
+ * frames, and on the others the call, whose return lands on skip -- a block of the region that is not its head,
+ * so that the region is entered through its dispatch, at a case that
+ * is not the first. The jp $8000 at the end is not such an edge: it
+ * lands on the block closed on the mapper write, which the core alone
+ * enters. The pointer the fill leaves in hl ($C160 or $C180) is kept
+ * at $C00C, where the memory digest reads it, so an edge that lands
+ * one block off, or a register not stored at the exit, is seen.
+ * run_z80c.sh holds the translator's line of regions on this image to
+ * the exact figures, its C to carrying gotos, the runs to the exact
+ * count of edges taken and of registers moved at the frontiers, and
+ * breaks the edges (every goto sent to the head of its region), the
+ * dispatch (every case sent to the head) and the stores at the exits
+ * (the accumulator no longer stored), each demanded red or refused.
  *
  * THE VARIANTS. Two more images, each held to one refusal of the PC and
  * to nothing else (run_z80c.sh):
@@ -209,20 +237,37 @@
  *       ld b,$80
  *       push bc            the stack, proved
  *       ld hl,$C100
+ *       ld c,$03           three rows
+ *       ld a,($C002)
+ *       and $02            bit 1 of the frame counter -- not bit 0,
+ *                          which the two banks share out between
+ *                          them, a bank running every other frame
+ *       jr nz,fo           when it is set; when it is clear
+ *       inc c              four rows
+ *   fo: ld b,$20           of 32 bytes: the outer loop, a block of one
+ *                          instruction the two edges below land on
  *   fl: ld a,($C000)       the fill: a fixed byte of RAM read, memory
  *       ld (hl),a          written -- not a wait, though it reads one;
  *       inc hl             hl is not known here: fl starts a block
- *       djnz fl            128 turns, about 5000 T-states
+ *       djnz fl            32 turns a row
+ *       dec c
+ *       jr nz,fo           96 or 128 bytes, under 5000 T-states; b, c
+ *                          and hl live across both back edges
  *       pop bc             b and c back
- *       push hl            hl is $C180 after the fill
+ *       push hl            hl is $C160 or $C180 after the fill
  *       ex (sp),hl         the same word, through the stack
  *       pop hl
  *       ld ($C00C),hl      kept where the memory digest reads it
  *       ld hl,($DFFF)      the seam of the mirror: the full path
- *       ld a,c             the backdrop, from the register
- *       call sub           $C00E <- the backdrop; ret nz on the odd
- *                          frames, ret on the even ones
- *       di                 no interrupt between the two writes below:
+ *       ld a,($C002)
+ *       and $02            bit 1 of the frame counter, in the flags
+ *       ld a,c             the backdrop, from the register (no flag)
+ *       jp nz,skip         bit set: an absolute jump inside the
+ *                          region, a goto under the window test
+ *       call sub           bit clear: $C00E <- the backdrop, and the
+ *                          return lands on skip, an entry of the
+ *                          region that is not its head
+ * skip: di                 no interrupt between the two writes below:
  *                          the handler's in a,($BF) would reset the
  *                          control port's latch and the second byte
  *                          would be taken as a first
@@ -394,14 +439,16 @@ put_rel(unsigned long target)
    in -- by the proved absolute write, or through a pointer for the
    variant -- then a byte of its own into c, folded with the bank just
    turned in and with the frame counter, kept in the work RAM, carried
-   across the fill on the stack, shown as the backdrop, and the wait
-   for the next frame. The two banks differ by the bank they turn in
-   and the byte they load, and by nothing else. */
+   across the fill on the stack -- the fill a loop at two levels, three
+   rows or four by bit 1 of the frame counter -- handed to the
+   subroutine or jumped over by the same bit, shown as the backdrop,
+   and the wait for the next frame. The two banks differ by the bank
+   they turn in and the byte they load, and by nothing else. */
 static void
 lay_slot2(unsigned long bank, unsigned char other, unsigned char mark, int indirect)
 {
   unsigned long base = bank * BANK_SIZE;
-  unsigned long maskref, subref, fl, wait, mask, sub;
+  unsigned long maskref, subref, fo, fl, wait, mask, sub;
 
   at = base;
   put(0x3E); put(other);                      /* ld a,other            */
@@ -441,21 +488,33 @@ lay_slot2(unsigned long bank, unsigned char other, unsigned char mark, int indir
   put(0x06); put(0x80);                       /* ld b,$80              */
   put(0xC5);                                  /* push bc               */
   put3(0x21,0xC100UL);                        /* ld hl,$C100           */
+  put(0x0E); put(0x03);                       /* ld c,$03              */
+  put3(0x3A,0xC002UL);                        /* ld a,($C002)          */
+  put(0xE6); put(0x02);                       /* and $02               */
+  put(0x20); put_rel(at + 2UL);               /* jr nz,fo              */
+  put(0x0C);                                  /* inc c                 */
+  fo = at;
+  put(0x06); put(0x20);                       /* fo: ld b,$20          */
   fl = at;
   put3(0x3A,0xC000UL);                        /* fl: ld a,($C000)      */
   put(0x77);                                  /* ld (hl),a             */
   put(0x23);                                  /* inc hl                */
   put(0x10); put_rel(fl);                     /* djnz fl               */
+  put(0x0D);                                  /* dec c                 */
+  put(0x20); put_rel(fo);                     /* jr nz,fo              */
   put(0xC1);                                  /* pop bc                */
   put(0xE5);                                  /* push hl               */
   put(0xE3);                                  /* ex (sp),hl            */
   put(0xE1);                                  /* pop hl                */
   put3(0x22,0xC00CUL);                        /* ld ($C00C),hl         */
   put3(0x2A,0xDFFFUL);                        /* ld hl,($DFFF)         */
+  put3(0x3A,0xC002UL);                        /* ld a,($C002)          */
+  put(0xE6); put(0x02);                       /* and $02               */
   put(0x79);                                  /* ld a,c                */
+  put3(0xC2,0x8000UL + (at + 6UL - base));    /* jp nz,skip            */
   subref = at;
   put3(0xCD,0UL);                             /* call sub, patched     */
-  put(0xF3);                                  /* di                    */
+  put(0xF3);                                  /* skip: di              */
   put(0xD3); put(0xBF);                       /* out ($BF),a           */
   put(0x3E); put(0x87);                       /* ld a,$87              */
   put(0xD3); put(0xBF);                       /* out ($BF),a           */

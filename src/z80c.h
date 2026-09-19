@@ -8,8 +8,9 @@
  * the small module that lets the processor core run it.
  *
  * The tool (tests/z80c/translate.c) reads the image once, on the PC, and
- * writes src/rom_code.c: one static function per block of instructions,
- * and a table from the block's POSITION IN THE CARTRIDGE to that function.
+ * writes src/rom_code.c: one static function per REGION -- a group of
+ * blocks of instructions, below -- and a table from each block's
+ * POSITION IN THE CARTRIDGE to the function of its region.
  * A position, never a Z80 address: the page tables of the core hold raw
  * pointers into the resident image (z80.h), the mapper moves them and the
  * core reads them, so at run time the page a PC falls on says where in the
@@ -42,22 +43,42 @@
  * line; a line that runs entirely in translated blocks whose successors
  * are rendered never ends at all, the blocks spending nothing. That is
  * why the host runners refuse such a program on the PC, before the
- * console ever sees it (the guard below), and why the code that only a
- * pad reaches -- menus, later levels -- is not proved by the check: a
- * wait the tool missed there is a line that never ends, on the console.
+ * console ever sees it (the guard below, which every edge inside a
+ * region passes as well, Z80C_EDGE), and why the code that only a pad
+ * reaches -- menus, later levels -- is not proved by the check: a wait
+ * the tool missed there is a line that never ends, on the console.
  *
- * The block's contract. It is entered with the structure sms.z80 exact --
- * the core has flushed its resident window (z80.c) -- PC on its first
- * byte, and THE BASE OF THE WORK RAM as its one argument. It loads the
- * registers it reads into locals, executes its instructions through the
- * very macros of z80_ops.h the interpreter uses -- the register names
- * retargeted onto those locals for the length of the generated file,
- * the way z80_run retargets its five hot names -- stores the registers
- * it wrote, and leaves PC on the next instruction to run. It ends on a
- * transfer, on the instruction before one it does not translate, on the
- * edge of its bank, in front of the start of another block, or after a
- * write proved to land on the mapper's registers; a conditional branch
- * may end it with two exits.
+ * The region's contract. A block ends on a transfer, on the instruction
+ * before one it does not translate, on the edge of its bank, in front
+ * of the start of another block, at the tool's size, or after a write
+ * proved to land on the mapper's registers; a conditional branch gives
+ * it a second exit. The tool groups the blocks of one bank -- on one
+ * side of the fixed kilobyte -- that hand PC to one another by a static
+ * transfer (the linear continuation, a cut, a jump, a conditional
+ * branch; never a call, a restart or a return, never an edge onto a
+ * block that waits or that closes on a mapper write, nor one out of a
+ * block so closed) into a REGION, and writes one function per region:
+ * a label per block, a goto for every edge inside it, the registers
+ * loaded into locals once at the head and stored at the exits alone.
+ * Every block's start stays an entry of the table -- a return, an
+ * interrupt, a jump through a table land on one -- so the function
+ * receives the index of the entry it is entered at, kept in the high
+ * bits of the entry's word of flags, and jumps to that block's label;
+ * nothing is known at a label, and what the tool proves of the
+ * registers (the direct path, below) it proves inside one block. The
+ * function is entered with the structure sms.z80 exact -- the core has
+ * flushed its resident window (z80.c) -- PC on the entry's first byte,
+ * and THE BASE OF THE WORK RAM as its first argument; it reads its
+ * window once, PC & 0xC000, and every address it writes to PC is that
+ * window plus a position in its bank. It executes its instructions
+ * through the very macros of z80_ops.h the interpreter uses -- the
+ * register names retargeted onto its locals for the length of the
+ * generated file, the way z80_run retargets its five hot names -- and
+ * at each exit stores the registers written on a path to it, leaves PC
+ * on the next instruction to run, and returns its successor. An
+ * absolute jump onto a block of the same region is a goto only while
+ * the region runs in the window of its target, tested as a rendered
+ * successor is; otherwise it is an exit with no successor.
  *
  * THE DIRECT PATH. Every access of the interpreter goes through the page
  * tables: the table, its entry, the byte. The tables exist for the
@@ -82,14 +103,14 @@
  * and so is a direct stack access outside $C000-$FFFB; the console
  * runs what the PC accepted, and tests nothing per access.
  *
- * WHAT A BLOCK RETURNS IS ITS SUCCESSOR: the table entry of the block
+ * WHAT A REGION RETURNS IS ITS SUCCESSOR: the table entry of the block
  * that starts where it left PC, when the tool knew it at emission -- the
  * linear continuation, the target of a jump, the callee of a call or a
  * restart, either exit of a conditional -- and null when it did not (a
  * return, a jump through a pair, a target no block starts at). An absolute
- * successor is rendered only while the block runs in the same 16k window
- * of the address space as its target, which the block tests at run time
- * against its own entry address: the same window is the same slot of the
+ * successor is rendered only while the region runs in the same 16k window
+ * of the address space as its target, which the region tests at run time
+ * against its own window: the same window is the same slot of the
  * mapper, so the target's bytes are the ones the tool translated. Every
  * other case goes through z80c_find, which reads the live page tables.
  * z80c_run chains the successors and stops in front of a wait, at a null
@@ -114,23 +135,29 @@
  */
 
 /*
- * A block: a function that takes the base of the work RAM, works on the
- * structure, and returns the table entry of its successor, or null. The
- * entry type and the function type name each other, hence the forward
- * declaration. The third word of an entry holds the block's flags: the
- * wait (bit 0), and the close on a mapper write (bit 1).
+ * A region: a function that takes the base of the work RAM and the
+ * index of the table entry it is entered at, works on the structure,
+ * and returns the table entry of its successor, or null. The entry
+ * type and the function type name each other, hence the forward
+ * declaration. The third word of an entry holds the block's flags in
+ * its two low bits -- the wait (bit 0), the close on a mapper write
+ * (bit 1) -- and the entry's own index in the table above them, which
+ * z80c_run hands to the function.
  */
 typedef struct z80c_entry z80c_entry_t;
-typedef const z80c_entry_t *(*z80c_fn)(uint8 *ram);
+typedef const z80c_entry_t *(*z80c_fn)(uint8 *ram, uint32 entry);
 
 #define Z80C_FLAG_WAIT    1UL /* the block starts a loop the program waits in */
 #define Z80C_FLAG_BANKEND 2UL /* the block closes on a write to the mapper's registers */
+#define Z80C_ENTRY(index, flags) (((uint32)(index) << 2) | (uint32)(flags))
+#define Z80C_ENTRY_INDEX(word)   ((uint32)(word) >> 2)
+#define Z80C_ENTRY_FLAGS(word)   ((uint32)(word) & 3UL)
 
 struct z80c_entry
 {
-  uint32  pos;  /* position of the block's first byte in the cartridge */
-  z80c_fn fn;
-  uint32  wait; /* the flags above */
+  uint32  pos;   /* position of the block's first byte in the cartridge */
+  z80c_fn fn;    /* the function of the block's region */
+  uint32  flags; /* Z80C_ENTRY(index, flags) */
 };
 
 /*
@@ -178,11 +205,12 @@ extern uint32 z80c_miss_pc;
 
 /*
  * The per-block counters of the host runner: two tables indexed like the
- * block table -- how often each block was entered, and the instructions
- * its exits ran -- filled by the generated code when the runner builds it
- * with Z80C_HITS=1 (tests/z80c/play.sh) and nothing on the console. The
- * generated file defines both tables, sized to its block count; the tool
- * chooses a table under a budget from what the runner writes of them.
+ * block table -- how often each block was entered, at its label, and
+ * the instructions its edges and exits ran -- filled by the generated
+ * code when the runner builds it with Z80C_HITS=1 (tests/z80c/play.sh)
+ * and nothing on the console. The generated file defines both tables,
+ * sized to its block count; the tool chooses a table under a budget
+ * from what the runner writes of them.
  */
 #ifndef Z80C_HITS
 #define Z80C_HITS 0
@@ -191,24 +219,38 @@ extern uint32 z80c_miss_pc;
 extern uint32 z80c_hits[];
 extern uint32 z80c_ran[];
 /* The bytes the blocks moved by each memory path, direct and through
-   the tables: each exit adds the counts of the instructions it ran,
-   which the tool knows at emission. Printed by the runners as direct=
-   and full=. */
+   the tables: each edge and exit adds the counts of the instructions
+   it ran, which the tool knows at emission. Printed by the runners as
+   direct= and full=. */
 extern uint32 z80c_direct_total;
 extern uint32 z80c_full_total;
+/* The registers loaded at the heads of the regions and stored at
+   their exits, as executed: the frontier the program paid. Printed by
+   the runners as frontier=. */
+extern uint32 z80c_frontier_total;
+/* The edges inside the regions taken, as executed -- the gotos, counted
+   just before each: the one witness that the code runs THROUGH a
+   region and not around it, a region whose every edge left by its
+   exits being found again by the tables and drawing the same frames.
+   Printed by the runners as edges=. */
+extern uint32 z80c_edges_total;
 #define Z80C_HIT(k)       (z80c_hits[(k)]++)
 #define Z80C_RAN(k, n)    (z80c_ran[(k)] += (uint32)(n))
 #define Z80C_ACCESS(d, f) ((void)(z80c_direct_total += (uint32)(d), \
                                   z80c_full_total += (uint32)(f)))
+#define Z80C_FRONTIER(n)  ((void)(z80c_frontier_total += (uint32)(n)))
+#define Z80C_EDGE_TAKEN() (z80c_edges_total++)
 #else
 #define Z80C_HIT(k)       ((void)0)
 #define Z80C_RAN(k, n)    ((void)0)
 #define Z80C_ACCESS(d, f) ((void)0)
+#define Z80C_FRONTIER(n)  ((void)0)
+#define Z80C_EDGE_TAKEN() ((void)0)
 #endif
 
 /*
- * The counters, all under the telemetry: blocks run (z80c_run), emitted
- * instructions run (each exit of a block adds the count it ran),
+ * The counters, all under the telemetry: regions run (z80c_run), emitted
+ * instructions run (each edge and exit of a region adds the count it ran),
  * instructions the interpreter executed while a line was run by events,
  * and among those the ones whose page was not the image -- the page test
  * is the one z80c_find makes, written out so that the core's loop pays no
@@ -299,6 +341,13 @@ uint32 z80c_chains(void);
  *                  turns another window moves nothing under the block
  *                  and is not refused.
  *
+ *   z80c_bad_entry the index a region was entered with that names no
+ *                  block of it, or Z80C_NO_PC: the table and the tool
+ *                  disagree. The region runs from its head, as it does
+ *                  on the console, and the runner refuses the program
+ *                  at the end of the line ("bad entry"), naming the
+ *                  index and the block entered (z80c_last_pos).
+ *
  *   z80c_word_addr the address of a direct word access whose two bytes
  *                  would straddle the end of the 8k, or Z80C_NO_PC: a
  *                  word the tool proved wrongly (the seam of the
@@ -333,6 +382,7 @@ extern uint8 *z80c_seen;
 extern uint32 z80c_bank_pos;
 extern uint32 z80c_stack_sp;
 extern uint32 z80c_word_addr;
+extern uint32 z80c_bad_entry;
 /* The direct word check, on the PC alone: a word the tool proved is
    two bytes of one page of the work RAM, so its address masked is
    never the last byte of the 8k -- a word there would read past the
@@ -424,10 +474,11 @@ void z80c_init(void);
 const z80c_entry_t *z80c_find(uint16 pc);
 
 /*
- * Runs a block, then its successor -- the one the block rendered when the
- * mapper has not moved since, the one the page tables give otherwise --
- * for as long as a block starts at PC and that block is not a wait.
- * Called by the core, inside a line run by events, with sms.z80 exact;
+ * Runs the region of a block, entered at that block, then its successor
+ * -- the one the region rendered when the mapper has not moved since,
+ * the one the page tables give otherwise -- for as long as a block
+ * starts at PC and that block is not a wait. Called by the core, inside
+ * a line run by events, with sms.z80 exact;
  * returns with it exact, PC on the wait it stopped in front of, on the
  * next instruction to interpret, or on the address of a miss, left in
  * z80c_miss_pc. On the PC it also returns once the line has run past the
@@ -466,12 +517,30 @@ void z80c_report(uint32 z80_tenths_ms, uint32 frames);
  *                reads the interpreter makes;
  *
  *   the direct   the forms on the work RAM, under names of this module
- *   path         too, bound to the base every block receives as `ram`:
+ *   path         too, bound to the base every region receives as `ram`:
  *                the four accesses at a proved address -- the two words
  *                running the word check of the host runners first --
  *                and the stack's five, each running their stack check
  *                first; the console compiles both checks away. `grep -c 'Z80C_RAM_\|Z80C_STK_' src/rom_code.c`
- *                counts the instructions the tool proved.
+ *                counts the instructions the tool proved;
+ *
+ *   the edge     what an edge inside a region does before its goto, on
+ *                the PC alone: it marks the block it lands on, as
+ *                z80c_run marks the one it enters, and passes the guard
+ *                -- a region looping on its gotos never comes back to
+ *                z80c_run, and without the test here a program that
+ *                never waits would spin for ever instead of being
+ *                refused, and the ring would not see the cycle. Over
+ *                the guard the region leaves as at any exit: PC on the
+ *                target, the stores the tool wrote for that edge (one
+ *                expression, the third argument), no successor. On the
+ *                console the edge is the goto and nothing else;
+ *
+ *   the entry    what the dispatch of a region does with an index that
+ *                names none of its blocks: on the PC it is kept for
+ *                the runner to refuse (z80c_bad_entry, above) and the
+ *                region runs from its head all the same, which is all
+ *                the console does.
  * ---------------------------------------------------------------------------
  */
 #ifdef Z80C_BLOCK_FILE
@@ -521,6 +590,28 @@ void z80c_report(uint32 z80_tenths_ms, uint32 frames);
     }                                                   \
   while(0)
 #define Z80C_STK_RETI() Z80C_STK_RET()
+#if Z80C_BENCH
+#define Z80C_BAD_ENTRY(k)                               \
+  ((void)(z80c_bad_entry == Z80C_NO_PC                  \
+          ? (z80c_bad_entry = (uint32)(k)) : 0UL))
+#define Z80C_EDGE(pos, pc, stores)                      \
+  do                                                    \
+    {                                                   \
+      Z80C_BLOCK_SEEN(pos);                             \
+      if(Z80C_LINE_OVER())                              \
+        {                                               \
+          Z80_PC = (uint16)(pc);                        \
+          stores;                                       \
+          return 0;                                     \
+        }                                               \
+    }                                                   \
+  while(0)
+#else
+#define Z80C_BAD_ENTRY(k) ((void)0)
+/* The address alone, evaluated for nothing: the window it names is
+   then a local the region uses, whatever else it does with it. */
+#define Z80C_EDGE(pos, pc, stores) ((void)(pc))
+#endif
 #define Z80C_STK_EXSP(hi, lo)                           \
   do                                                    \
     {                                                   \

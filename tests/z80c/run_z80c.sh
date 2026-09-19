@@ -51,7 +51,11 @@
 #     translator proves (the stack, an absolute read of the ROM, a pair
 #     the tool knows, the seam of the mirror, the write to the mapper
 #     that closes its block), so that the mutations "direct", "stack"
-#     and "bankend" below have a form to break without a real ROM.
+#     and "bankend" below have a form to break without a real ROM;
+#   - it runs a loop at two levels over three blocks of one region, so
+#     that the translator's line of regions is held to exact figures,
+#     its C to carrying gotos, the runs to a frontier above zero, and
+#     the mutations "edge" and "regexit" below have a form to break.
 #
 # Two VARIANTS of it are each held to one refusal of the runners, and to
 # nothing else; they are judged after the cartridge and played under no
@@ -110,7 +114,13 @@
 #                                           a mapper write cleared --
 #                                           the written cartridge carries
 #                                           all three forms, a real ROM
-#                                           may carry none.
+#                                           may carry none; and the
+#                                           regions broken three ways:
+#                                           every goto sent to the head
+#                                           of its region, every case of
+#                                           a dispatch sent to the head,
+#                                           and the accumulator no
+#                                           longer stored at the exits.
 #                                           Every broken copy is held to
 #                                           the reference of the intact
 #                                           table.
@@ -181,24 +191,68 @@ $CC -O1 -std=c89 -Wall -Wextra -Werror -o "$WORK/rom_bank" "$B/rom_bank.c"
 "$WORK/rom_bank" "$UNDERFLOW" underflow
 set -- "$FIXTURE" "$INDIRECT" "$UNDERFLOW" "$@"
 
-# The written cartridge's direct path, held to figures: the translator's
-# report of what it proved on the seeded table -- the whole one and the
-# chosen one, which are the same twelve blocks -- and, in the C it
+# The written cartridge's direct path and regions, held to figures: the
+# translator's report of what it proved on the seeded table -- the whole
+# one and the chosen one, which prove the same instructions -- its line
+# of regions on each (the chosen table leaves out the one block the run
+# never enters, the filler at the non-maskable vector), and, in the C it
 # wrote, at least one of every form the image was written to exercise,
-# direct and full alike. A proof gone silent draws the very same frames
-# (the full path and the direct one agree to the byte), so only the
-# figures can tell; the runner's own count of bytes moved directly must
-# be above zero on both judgements. Counter and floor, the way a speed
-# bench is held.
-FIXTURE_DIRECT='z80c: direct rd=18/22 wr=30/37 stack=proven rom_fixed=0'
+# direct and full alike, and as many gotos as the line says edges and as
+# many functions as it says regions. A proof gone silent draws the very
+# same frames (the full path and the direct one agree to the byte), and
+# so does a region cut back into blocks, so only the figures can tell;
+# the runner's own count of bytes moved directly must be above zero on
+# both judgements, and its counts of registers loaded and stored at the
+# frontiers and of edges taken inside the regions are held to the EXACT
+# figure of the 3000 frames -- the image is deterministic, and an edge
+# that leaves by its exit instead of its goto (a window test written
+# the wrong way, a guard that fires) draws the same frames and is seen
+# by that count alone. The two sizes the console's compiler lives by
+# are held under their caps (translate.c, MAX_INSNS and
+# MAX_REGION_INSNS). Counter and floor, the way a speed bench is held.
+#
+# The direct figures: 13.3 wrote 18/22 and 30/37; the two reads of the
+# frame counter the regions added to the image (ld a,($C002) before the
+# fill and before the call) are two more, proved.
+FIXTURE_DIRECT='z80c: direct rd=22/26 wr=30/37 stack=proven rom_fixed=0'
+FIXTURE_REGIONS_FULL='z80c: regions=13 entries=19 edges=12 exits=22 loads=29 stores=98 longest_block=32 longest_region=55'
+FIXTURE_REGIONS_CHOSEN='z80c: regions=12 entries=18 edges=12 exits=21 loads=29 stores=98 longest_block=32 longest_region=55'
+FIXTURE_GOTOS=12
+FIXTURE_FUNCTIONS=12
+FIXTURE_FRONTIER=1690554
+FIXTURE_EDGES=348132
+MAX_INSNS=32
+MAX_REGION_INSNS=128
 z80c_fixture_floors() {
   ff_rc=0
   if [ "$(grep -c "^$FIXTURE_DIRECT\$" "$1/translate.out")" -lt 2 ]; then
     echo "FAIL: the written cartridge's proof does not report '$FIXTURE_DIRECT' on both seeded tables: $(grep '^z80c: direct rd=' "$1/translate.out" | tr '\n' ' ')"
     ff_rc=1
   fi
+  if ! grep -q "^$FIXTURE_REGIONS_FULL\$" "$1/translate.out" || ! grep -q "^$FIXTURE_REGIONS_CHOSEN\$" "$1/translate.out"; then
+    echo "FAIL: the written cartridge's regions are not '$FIXTURE_REGIONS_FULL' then '$FIXTURE_REGIONS_CHOSEN': $(grep '^z80c: regions=' "$1/translate.out" | tr '\n' ' ')"
+    ff_rc=1
+  fi
+  if [ "$(grep -c 'goto L_' "$1/rom_code.c")" -ne "$FIXTURE_GOTOS" ] || [ "$(grep -c '^r_' "$1/rom_code.c")" -ne "$FIXTURE_FUNCTIONS" ]; then
+    echo "FAIL: the written cartridge's C does not carry the $FIXTURE_GOTOS gotos and $FIXTURE_FUNCTIONS regions its line says ($(grep -c 'goto L_' "$1/rom_code.c") gotos, $(grep -c '^r_' "$1/rom_code.c") regions)"
+    ff_rc=1
+  fi
+  ff_lb=$(sed -n 's/^z80c: regions=.* longest_block=\([0-9]*\) longest_region=\([0-9]*\)$/\1/p' "$1/translate.out" | sort -n | tail -n 1)
+  ff_lr=$(sed -n 's/^z80c: regions=.* longest_block=\([0-9]*\) longest_region=\([0-9]*\)$/\2/p' "$1/translate.out" | sort -n | tail -n 1)
+  if [ -z "$ff_lb" ] || [ -z "$ff_lr" ] || [ "$ff_lb" -gt "$MAX_INSNS" ] || [ "$ff_lr" -gt "$MAX_REGION_INSNS" ]; then
+    echo "FAIL: the written cartridge's longest block (${ff_lb:-?}) or region (${ff_lr:-?}) is over the sizes the console's compiler lives by ($MAX_INSNS, $MAX_REGION_INSNS)"
+    ff_rc=1
+  fi
   if [ "$(grep -c '^z80c: direct=[1-9][0-9]* full=[1-9][0-9]*$' "$1/translate.out")" -ne 2 ]; then
     echo "FAIL: the written cartridge's runs do not both count bytes on the direct path and the full one: $(grep '^z80c: direct=' "$1/translate.out" | tr '\n' ' ')"
+    ff_rc=1
+  fi
+  if [ "$(grep -c "^z80c: frontier=$FIXTURE_FRONTIER\$" "$1/translate.out")" -ne 2 ]; then
+    echo "FAIL: the written cartridge's runs do not both move $FIXTURE_FRONTIER registers at the frontiers: $(grep '^z80c: frontier=' "$1/translate.out" | tr '\n' ' ')"
+    ff_rc=1
+  fi
+  if [ "$(grep -c "^z80c: edges=$FIXTURE_EDGES\$" "$1/translate.out")" -ne 2 ]; then
+    echo "FAIL: the written cartridge's runs do not both take $FIXTURE_EDGES edges inside the regions: $(grep '^z80c: edges=' "$1/translate.out" | tr '\n' ' ')"
     ff_rc=1
   fi
   for ff_form in \
@@ -305,6 +359,14 @@ mutate() {
   m_why=$3
   m_dir=$7
   broken "$1" "$2" "$4" "$5" "$6" "$7" ${8:+"$8"}
+  # The runner's own check that chains are followed stops a broken copy
+  # before any judgement (status 2): on a mutated table that is the
+  # check biting, not a failure of this script, so it counts as refused.
+  # Any other status 2 still proves nothing.
+  if [ "$mrc" = 2 ] &&
+     grep -q '^FAIL: no chain ran a second region' "$m_dir/$m_name/verdict"; then
+    mrc=4
+  fi
   case "$mrc" in
     9) echo "  [INFO] mutation $m_name ($m_why) has no form to break here: not played"
        return 0;;
@@ -364,13 +426,47 @@ z80c_direct_mutations() {
   else
     echo "  [INFO] mutation stack (the two bytes of the direct pop swapped) has no form to break here: not played"
   fi
-  if grep -q ', [23]UL },$' "$1/rom_code.c"; then
-    mutate bankend 's/, 2UL },$/, 0UL },/; s/, 3UL },$/, 1UL },/' \
+  if grep -q ',[23]UL) },$' "$1/rom_code.c"; then
+    mutate bankend 's/,2UL) },$/,0UL) },/; s/,3UL) },$/,1UL) },/' \
            "the flag of the blocks closed on a mapper write cleared" "$1/rom_code.c" "$1/rom_code.c" "$2" "$1" || z80c_dm_rc=1
   else
     echo "  [INFO] mutation bankend (the flag of the blocks closed on a mapper write cleared) has no form to break here: not played"
   fi
   return $z80c_dm_rc
+}
+
+# The three breakings of the regions, played on the written cartridge
+# and on every ROM alike, each demanded red or refused:
+#
+#   edge      every goto inside a region sent to the region's head: a
+#             loop turns on the wrong block, and either the program
+#             never waits on the line (the guard refuses it) or what it
+#             writes differs;
+#   dispatch  every case of a region's dispatch sent to its head: a
+#             region entered at a block that is not its first -- the
+#             return of a call landing on it -- runs from its first
+#             instead (on the written cartridge the return of sub lands
+#             on skip, and from the head the call is made again, for
+#             ever);
+#   regexit   the accumulator no longer stored at the exits of the
+#             regions: what a region computed in A is lost when it
+#             leaves.
+#
+#   z80c_region_mutations <dir> <rom>
+#
+# A table with no goto -- no two of its blocks joined -- has no edge to
+# send, and one with no region of two blocks no case to send, and each
+# is said not played, the way "broken" says it of a pattern that
+# matches nothing.
+z80c_region_mutations() {
+  z80c_rm_rc=0
+  mutate edge 's/^\( *\)goto L_[0-9a-f]*;/\1goto head;/' \
+         "every goto sent to the head of its region" "$1/rom_code.c" "$1/rom_code.c" "$2" "$1" || z80c_rm_rc=1
+  mutate dispatch 's/^\( *case [0-9]*UL: \)goto E_[0-9a-f]*;/\1goto head;/' \
+         "every case of the dispatch sent to the head of its region" "$1/rom_code.c" "$1/rom_code.c" "$2" "$1" || z80c_rm_rc=1
+  mutate regexit 's/^\( *\)Z80_A_STATE = z80c_a;$/\1;/' \
+         "the accumulator no longer stored at the exits" "$1/rom_code.c" "$1/rom_code.c" "$2" "$1" || z80c_rm_rc=1
+  return $z80c_rm_rc
 }
 
 if [ "${MUTATE:-0}" = 1 ]; then
@@ -479,14 +575,16 @@ for rom in "$@"; do
     # no block a wait the loop at wait never ends its line and the
     # program is refused; with one block in two a wait the fill is one,
     # and every turn of it ends a line. The flags share one word (bit 0
-    # the wait, bit 1 the close on a mapper write), so each breaking
-    # touches bit 0 of both values.
-    mutate nowait 's/, 1UL },$/, 0UL },/; s/, 3UL },$/, 2UL },/' \
+    # the wait, bit 1 the close on a mapper write, the entry's index
+    # above), so each breaking touches bit 0 of both values.
+    mutate nowait 's/,1UL) },$/,0UL) },/; s/,3UL) },$/,2UL) },/' \
          "no block marked as a wait" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
-    mutate wait 's/^\(  { 0x[0-9A-F]*[02468ACE]UL, b_[0-9a-f]*\), 0UL },$/\1, 1UL },/; s/^\(  { 0x[0-9A-F]*[02468ACE]UL, b_[0-9a-f]*\), 2UL },$/\1, 3UL },/' \
+    mutate wait 's/^\(  { 0x[0-9A-F]*[02468ACE]UL, r_[0-9a-f]*, Z80C_ENTRY([0-9]*UL\),0UL) },$/\1,1UL) },/; s/^\(  { 0x[0-9A-F]*[02468ACE]UL, r_[0-9a-f]*, Z80C_ENTRY([0-9]*UL\),2UL) },$/\1,3UL) },/' \
          "one block in two marked as a wait" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
     echo "== $name: the direct path broken three ways =="
     z80c_direct_mutations "$dir" "$rom" || fail=1
+    echo "== $name: the regions broken three ways =="
+    z80c_region_mutations "$dir" "$rom" || fail=1
     continue
   fi
 
@@ -495,9 +593,16 @@ for rom in "$@"; do
   # next conditional branch goes the other way.
   mutate cp 's/^\(  Z80_OP_CP(0x[0-9A-F]*U);\)\( \/\* cp n \*\/\)$/\1 Z80_F ^= 0x01U;\2/' \
          "the carry flag inverted after every cp n" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
-  # Every relative jump lands one byte past its target.
-  mutate jr 's/^\(  *Z80_PC = (uint16)(z80_pc0 + 0x[0-9A-F]*U\)); \/\* jr /\1 + 1U); \/* jr /' \
-         "every jr one byte past its target" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
+  # Every relative jump that leaves its region lands one byte past its
+  # target (the ones inside a region are gotos, broken by "edge" below);
+  # a table whose every jr is inside a region has no such form, and is
+  # said not played.
+  if grep -q '^ *Z80_PC = (uint16)(z80_win + 0x[0-9A-F]*U); /\* jr ' "$dir/rom_code.c"; then
+    mutate jr 's/^\(  *Z80_PC = (uint16)(z80_win + 0x[0-9A-F]*U\)); \/\* jr /\1 + 1U); \/* jr /' \
+           "every jr one byte past its target" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
+  else
+    echo "  [INFO] mutation jr (every jr one byte past its target) has no form to break here: not played"
+  fi
   # Every block that loads B loads it from the field of C.
   mutate load 's/^\(  uint8 z80c_b\) = Z80_B_STATE;$/\1 = Z80_C_STATE;/' \
          "register b loaded from the field of c" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
@@ -538,18 +643,21 @@ for rom in "$@"; do
   # No block a wait: the program spins in its loop and the line never
   # ends -- the guard refuses it. A table whose waits are all halts has
   # no mark to take out and says so.
-  mutate nowait 's/, 1UL },$/, 0UL },/; s/, 3UL },$/, 2UL },/' \
+  mutate nowait 's/,1UL) },$/,0UL) },/; s/,3UL) },$/,2UL) },/' \
          "no block marked as a wait" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
   # One block in two a wait (the ones whose position is even): a line
   # ends where the program does not wait, it falls behind its clock, and
   # the frames no longer match the reference taken with the intact
   # table's waits. Not every block: a table of nothing but waits never
   # chains two blocks, and the free run refuses it before anything is
-  # judged. Bit 1 of the flags, the close on a mapper write, is kept.
-  mutate wait 's/^\(  { 0x[0-9A-F]*[02468ACE]UL, b_[0-9a-f]*\), 0UL },$/\1, 1UL },/; s/^\(  { 0x[0-9A-F]*[02468ACE]UL, b_[0-9a-f]*\), 2UL },$/\1, 3UL },/' \
+  # judged. Bit 1 of the flags, the close on a mapper write, is kept,
+  # and so is the entry's index above them.
+  mutate wait 's/^\(  { 0x[0-9A-F]*[02468ACE]UL, r_[0-9a-f]*, Z80C_ENTRY([0-9]*UL\),0UL) },$/\1,1UL) },/; s/^\(  { 0x[0-9A-F]*[02468ACE]UL, r_[0-9a-f]*, Z80C_ENTRY([0-9]*UL\),2UL) },$/\1,3UL) },/' \
          "one block in two marked as a wait" "$dir/rom_code.c" "$dir/rom_code.c" "$rom" "$dir" || fail=1
   echo "== $name: the direct path broken three ways =="
   z80c_direct_mutations "$dir" "$rom" || fail=1
+  echo "== $name: the regions broken three ways =="
+  z80c_region_mutations "$dir" "$rom" || fail=1
 done
 
 # The mutations, over every ROM played: each seen red or refused at
@@ -558,9 +666,9 @@ done
 if [ "${MUTATE:-0}" = 1 ]; then
   echo "== the mutations over every rom =="
   if [ "$found" -eq 1 ]; then
-    wanted="epoch corepush memory cp jr load succ vram colour wait nowait direct stack bankend"
+    wanted="epoch corepush memory cp jr load succ vram colour wait nowait direct stack bankend edge dispatch regexit"
   else
-    wanted="epoch corepush memory wait nowait direct stack bankend"
+    wanted="epoch corepush memory wait nowait direct stack bankend edge dispatch regexit"
   fi
   for m in $wanted; do
     case "$RED_SEEN" in

@@ -11,26 +11,65 @@
  * not know: any title, any per-game figure, and any price in T-states.
  * Every image is treated alike.
  *
- * The output (src/rom_code.c) holds one function per block, a table from
- * the block's position in the cartridge to the function, the size and the
- * digest of the image, and the bytes the blocks cover -- and nothing
- * else: no byte of the image is copied out, no data, no name. A block is
- * an exact translation of the bytes at its position, written with the
- * macros the interpreter itself expands (src/z80_ops.h) or the very form
- * the interpreter's switch writes in line (src/z80.c), every immediate
- * and every target folded at emission, so that there is one semantics
- * and not two. Each emitted form names, in a comment beside it here, the
- * macro or the case it transcribes.
+ * The output (src/rom_code.c) holds one function per REGION of blocks
+ * (below), a table from each block's position in the cartridge to the
+ * function of its region, the size and the digest of the image, and the
+ * bytes the blocks cover -- and nothing else: no byte of the image is
+ * copied out, no data, no name. A block is an exact translation of the
+ * bytes at its position, written with the macros the interpreter itself
+ * expands (src/z80_ops.h) or the very form the interpreter's switch
+ * writes in line (src/z80.c), every immediate and every target folded
+ * at emission, so that there is one semantics and not two. Each emitted
+ * form names, in a comment beside it here, the macro or the case it
+ * transcribes.
  *
- * Registers live in locals for the length of a block. The register names
- * of z80_ops.h are retargeted at the head of the generated file onto
- * thirteen locals -- A, F, B, C, D, E, H, L, the four index halves, SP --
- * the way z80_run retargets its five hot names (src/z80.c); a block
- * declares the ones it touches, loads at its entry those it reads before
- * writing them, stores at each of its exits those it has written by then,
- * and nothing else. PC stays on the structure. The compiler keeps the
- * accounts: a register used and not declared does not compile, one
- * declared and not used is a warning the build refuses.
+ * REGIONS. A block is a function's worth of straight code; a routine is
+ * many blocks, and a frontier between two -- the registers stored, PC
+ * written, the successor returned, the registers loaded again -- costs
+ * more than the instructions between them. So the blocks of one bank
+ * (on one side of the fixed kilobyte) that hand PC to one another by a
+ * static transfer -- the linear continuation, a cut, a jump, a
+ * conditional branch; never a call, a restart or a return, never an edge
+ * onto a block that starts a wait or that closes on a mapper write, nor
+ * one out of a block so closed -- are joined into a region, while its
+ * instructions stay under MAX_REGION_INSNS -- greedily, in the order of
+ * the positions, with no preference for a hot or a backward edge: a
+ * routine longer than the cap keeps its first blocks by position and
+ * the rest form regions of their own -- and one function is written
+ * per region: a label per block, a goto per edge inside it, the
+ * registers loaded once at the head and stored at the exits alone.
+ * Every block's start stays an entry of the table -- a return, an
+ * interrupt, a jump through a table land on one -- and the function
+ * receives the index of the entry it is entered at and dispatches to
+ * its label; nothing is known at a label, and the proof below is by
+ * block. The region reads its window once, z80_win = PC & 0xC000, and
+ * every address it writes to PC is the window plus a position in its
+ * bank. An absolute jump inside the region is a goto only under the
+ * window test its successor would be rendered under; past the test it
+ * is an exit with no successor. On the PC every edge marks the block it
+ * lands on and passes the guard of the line (src/z80c.h, Z80C_EDGE).
+ * The report says what was written:
+ *
+ *   z80c: regions=<n> entries=<n> edges=<n> exits=<n> loads=<n> stores=<n> longest_block=<n> longest_region=<n>
+ *
+ * regions being the functions, entries the table's, edges the gotos
+ * (`grep -c 'goto L_'` counts the same), exits the returns, loads and
+ * stores the registers loaded at the heads and stored at the exits, as
+ * written, and the two longest the instructions of the longest block
+ * and of the longest region -- what holds the two sizes above on the
+ * PC (tests/z80c/run_z80c.sh holds them under the caps).
+ *
+ * Registers live in locals for the length of a region. The register
+ * names of z80_ops.h are retargeted at the head of the generated file
+ * onto thirteen locals -- A, F, B, C, D, E, H, L, the four index halves,
+ * SP -- the way z80_run retargets its five hot names (src/z80.c); a
+ * region declares the ones it touches, loads at its head those that are
+ * live at some label -- read before written from there, or stored by an
+ * exit reached from there without being written on the way -- and
+ * stores at each exit those written on some path to it, and nothing
+ * else. PC stays on the structure. The compiler keeps the accounts: a
+ * register used and not declared does not compile, one declared and not
+ * used is a warning the build refuses.
  *
  * NO ACCOUNT OF TIME. A block spends no T-state, ticks no refresh
  * register and is cut by no quota: it runs its instructions and hands
@@ -180,6 +219,16 @@
  * an index prefix in front of an instruction it has nothing to
  * substitute in consumes no displacement, so the instruction is two
  * bytes and not three (z80.c, Z80_DDFD_INERT).
+ *
+ * THE SIZES. MAX_INSNS bounds a block, MAX_REGION_INSNS a region, and
+ * both are sizes for the console's compiler, which is what is measured
+ * for them: handed a straight run of instructions that read through a
+ * pair and step it, it takes 0.015 s for 32 of them, 5 s for 80, more
+ * than five minutes for 200, and fails on 239 and 268 (its expression
+ * table overflows); handed 192 with a label every 32 that a branch
+ * lands on, 0.18 s. A cut is free inside a region -- the next block's
+ * label, and a goto the compiler folds -- so blocks are short and the
+ * labels are what keeps the compiler on its feet.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -199,8 +248,12 @@
 
 /* The most instructions a block holds: a block that reaches this many is
    cut there and its continuation is a start. A size, never a time: it
-   bounds the function the compiler is handed, nothing else. */
-#define MAX_INSNS 256
+   bounds the straight run the compiler is handed between two labels,
+   nothing else (THE SIZES, above). Overridable from the command line
+   of the compiler for the measure that sets it, and for that alone. */
+#ifndef MAX_INSNS
+#define MAX_INSNS 32
+#endif
 
 /* The most instructions a wait loop holds, its closing branch included:
    the short loops a program spins in while it waits are two to six
@@ -800,7 +853,8 @@ typedef struct
   unsigned rd, wr;        /* the registers read and written */
   enum kind kind;
   enum fb_reason fb;
-  int uses_pc0;           /* whether the text names z80_pc0 */
+  int uses_win;           /* whether the text names z80_win */
+  int call;               /* a call or a restart: never an edge inside a region */
   char text[512];         /* the instruction, or the part before the test */
   char cond[64];          /* K_COND: the test */
   char taken[256];        /* K_COND: what the taken exit runs before leaving */
@@ -1172,11 +1226,22 @@ static void ixaddr_text(char *buf, size_t cap, const char *pair, long d)
   snprintf(buf,cap,"uint16 ixaddr = (uint16)((int32)(uint32)%s + (%ld))",pair,d);
 }
 
+/* The address of a position, as an offset from the window the region
+   of the block at start runs in: PC is z80_win plus this. A position
+   past the bank's edge is an offset past 16k, which is right too -- the
+   window after this one -- and one before the bank wraps the same way. */
+static unsigned long win_off(unsigned long start, long pos)
+{
+  long base = (long)(start - (start & (BANK_SIZE - 1UL)));
+
+  return (unsigned long)(pos - base) & 0xFFFFUL;
+}
+
 /* The relative target of a branch at offset off, of length 2, in the
-   block at start: as a position, and as the fold from the entry
-   address. Relative targets need no window test: a target position in
-   the block's bank is at the same offset from the block's address
-   whatever slot the bank sits in. */
+   block at start: as a position, and as the fold from the window.
+   Relative targets need no window test: a target position in the
+   block's bank is at the same offset from the window whatever slot the
+   bank sits in. */
 static void set_rel_target(insn_t *in, unsigned long start, unsigned long off, long d)
 {
   long t = (long)(start + off) + 2L + d;
@@ -1184,8 +1249,8 @@ static void set_rel_target(insn_t *in, unsigned long start, unsigned long off, l
   in->target_known = 1;
   in->target_rel = 1;
   in->target_pos = (t < 0L) ? ROM_CAPACITY : (unsigned long)t;
-  in->target_addr = (unsigned long)((long)off + 2L + d) & 0xFFFFUL;
-  in->uses_pc0 = 1;
+  in->target_addr = win_off(start,t);
+  in->uses_win = 1;
 }
 
 static void set_abs_target(insn_t *in, unsigned long start, unsigned long addr)
@@ -1474,10 +1539,10 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
       if(sub & 0x10U)
         {
           in->kind = K_REPEAT;
-          in->uses_pc0 = 1;
+          in->uses_win = 1;
           snprintf(buf,sizeof buf,
-                   "  Z80_PC = (uint16)(z80_pc0 + 0x%04lXU); Z80_OP_%s(); /* %s: PC past it first, the macro backs PC up when it repeats */",
-                   (off + 2UL) & 0xFFFFUL,(sub & 8U) ? "LDDR" : "LDIR",(sub & 8U) ? "lddr" : "ldir");
+                   "  Z80_PC = (uint16)(z80_win + 0x%04lXU); Z80_OP_%s(); /* %s: PC past it first, the macro backs PC up when it repeats */",
+                   win_off(start,(long)(start + off + 2UL)),(sub & 8U) ? "LDDR" : "LDIR",(sub & 8U) ? "lddr" : "ldir");
         }
       else
         snprintf(buf,sizeof buf,"  Z80_OP_%s(); /* %s */",(sub & 8U) ? "LDD" : "LDI",(sub & 8U) ? "ldd" : "ldi");
@@ -1491,10 +1556,10 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
       if(sub & 0x10U)
         {
           in->kind = K_REPEAT;
-          in->uses_pc0 = 1;
+          in->uses_win = 1;
           snprintf(buf,sizeof buf,
-                   "  Z80_PC = (uint16)(z80_pc0 + 0x%04lXU); Z80_OP_%s(); /* %s: PC past it first, the macro backs PC up when it repeats */",
-                   (off + 2UL) & 0xFFFFUL,(sub & 8U) ? "CPDR" : "CPIR",(sub & 8U) ? "cpdr" : "cpir");
+                   "  Z80_PC = (uint16)(z80_win + 0x%04lXU); Z80_OP_%s(); /* %s: PC past it first, the macro backs PC up when it repeats */",
+                   win_off(start,(long)(start + off + 2UL)),(sub & 8U) ? "CPDR" : "CPIR",(sub & 8U) ? "cpdr" : "cpir");
         }
       else
         snprintf(buf,sizeof buf,"  Z80_OP_%s(); /* %s */",(sub & 8U) ? "CPD" : "CPI",(sub & 8U) ? "cpd" : "cpi");
@@ -1521,10 +1586,10 @@ static void decode_ed(insn_t *in, const unsigned char *p, unsigned long start, u
         if(sub & 0x10U)
           {
             in->kind = K_REPEAT;
-            in->uses_pc0 = 1;
+            in->uses_win = 1;
             snprintf(buf,sizeof buf,
-                     "  Z80_PC = (uint16)(z80_pc0 + 0x%04lXU); Z80_OP_%s(); /* PC past it first, the macro backs PC up when it repeats */",
-                     (off + 2UL) & 0xFFFFUL,rname);
+                     "  Z80_PC = (uint16)(z80_win + 0x%04lXU); Z80_OP_%s(); /* PC past it first, the macro backs PC up when it repeats */",
+                     win_off(start,(long)(start + off + 2UL)),rname);
           }
         else
           snprintf(buf,sizeof buf,"  Z80_OP_%s();",name);
@@ -1977,7 +2042,7 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
       set_text(in,"");
       snprintf(in->cond,sizeof in->cond,"%s",cc[c]);
       set_rel_target(in,start,off,disp8(p[1]));
-      snprintf(in->taken,sizeof in->taken,"Z80_PC = (uint16)(z80_pc0 + 0x%04lXU); /* jr %s,%ld */",
+      snprintf(in->taken,sizeof in->taken,"Z80_PC = (uint16)(z80_win + 0x%04lXU); /* jr %s,%ld */",
                in->target_addr,ccname[c],disp8(p[1]));
       return;
     }
@@ -2000,13 +2065,14 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
       in->kind = K_COND;
       in->rd = R_F | R_SP;
       in->wr = R_SP;
-      in->uses_pc0 = 1;
+      in->uses_win = 1;
+      in->call = 1;
       set_text(in,"");
       snprintf(in->cond,sizeof in->cond,"%s",cc[c]);
       set_abs_target(in,start,imm16(p + 1));
       snprintf(in->taken,sizeof in->taken,
-               "%s((uint16)(z80_pc0 + 0x%04lXU)); Z80_PC = 0x%04lXU; /* call %s,nn */",
-               STK_PUSH(in,1),(off + 3UL) & 0xFFFFUL,in->target_addr,ccname[c]);
+               "%s((uint16)(z80_win + 0x%04lXU)); Z80_PC = 0x%04lXU; /* call %s,nn */",
+               STK_PUSH(in,1),win_off(start,(long)(start + off + 3UL)),in->target_addr,ccname[c]);
       return;
     }
   if((op & 0xC7U) == 0xC0U)
@@ -2028,10 +2094,11 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
       in->kind = K_JUMP;
       in->rd = R_SP;
       in->wr = R_SP;
-      in->uses_pc0 = 1;
+      in->uses_win = 1;
+      in->call = 1;
       set_abs_target(in,start,(unsigned long)(op & 0x38U));
-      snprintf(buf,sizeof buf,"  %s((uint16)(z80_pc0 + 0x%04lXU)); Z80_PC = 0x%04lXU; /* rst */",
-               STK_PUSH(in,0),(off + 1UL) & 0xFFFFUL,in->target_addr);
+      snprintf(buf,sizeof buf,"  %s((uint16)(z80_win + 0x%04lXU)); Z80_PC = 0x%04lXU; /* rst */",
+               STK_PUSH(in,0),win_off(start,(long)(start + off + 1UL)),in->target_addr);
       set_text(in,buf);
       return;
     }
@@ -2155,13 +2222,13 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
       set_text(in,"  Z80_B = (uint8)(Z80_B - 1U); /* djnz: the counter, then the test */");
       snprintf(in->cond,sizeof in->cond,"Z80_B != 0U");
       set_rel_target(in,start,off,disp8(p[1]));
-      snprintf(in->taken,sizeof in->taken,"Z80_PC = (uint16)(z80_pc0 + 0x%04lXU); /* djnz %ld */",
+      snprintf(in->taken,sizeof in->taken,"Z80_PC = (uint16)(z80_win + 0x%04lXU); /* djnz %ld */",
                in->target_addr,disp8(p[1]));
       return;
     case 0x18: /* z80.c, case 0x18: Z80_OP_JR, the target folded */
       in->kind = K_JUMP;
       set_rel_target(in,start,off,disp8(p[1]));
-      snprintf(buf,sizeof buf,"  Z80_PC = (uint16)(z80_pc0 + 0x%04lXU); /* jr %ld */",in->target_addr,disp8(p[1]));
+      snprintf(buf,sizeof buf,"  Z80_PC = (uint16)(z80_win + 0x%04lXU); /* jr %ld */",in->target_addr,disp8(p[1]));
       set_text(in,buf);
       return;
     case 0xC3: /* z80.c, case 0xC3: Z80_OP_JP, the target folded */
@@ -2186,10 +2253,11 @@ static void decode_form(const unsigned char *p, unsigned long start, unsigned lo
       in->kind = K_JUMP;
       in->rd = R_SP;
       in->wr = R_SP;
-      in->uses_pc0 = 1;
+      in->uses_win = 1;
+      in->call = 1;
       set_abs_target(in,start,imm16(p + 1));
-      snprintf(buf,sizeof buf,"  %s((uint16)(z80_pc0 + 0x%04lXU)); Z80_PC = 0x%04lXU; /* call nn */",
-               STK_PUSH(in,0),(off + 3UL) & 0xFFFFUL,in->target_addr);
+      snprintf(buf,sizeof buf,"  %s((uint16)(z80_win + 0x%04lXU)); Z80_PC = 0x%04lXU; /* call nn */",
+               STK_PUSH(in,0),win_off(start,(long)(start + off + 3UL)),in->target_addr);
       set_text(in,buf);
       return;
     case 0x08: /* z80.c, case 0x08: Z80_OP_EX_AF */
@@ -2528,6 +2596,14 @@ typedef struct
 static blockinfo_t *blocks;
 static unsigned long nblocks;
 
+/* The position of the block at each index of the written table. */
+static unsigned long *index_pos;
+
+static unsigned long blocks_pos_of_index(long k)
+{
+  return index_pos[k];
+}
+
 /* The index in the written table of the block at a position, or -1. */
 static long table_index(unsigned long pos)
 {
@@ -2569,223 +2645,850 @@ static unsigned long blocks_flags_at(unsigned long pos)
   return 0UL;
 }
 
-/* One block's C, accumulated before its head is written: whether the
-   entry address is used decides whether the local is declared at all.
-   Sized for MAX_INSNS instructions of the longest form, each with an
-   exit of its own. */
-static char body[MAX_INSNS * 1024];
-static size_t body_n;
-static int uses_pc0;
+/* ---- regions ---------------------------------------------------------- */
+
+/* The most instructions a region holds: blocks are joined while the sum
+   of theirs stays under it. A size for the compiler, never a time --
+   the console's compiler is handed one function per region, and its
+   table of expressions is one per function, which a straight suite of
+   cut blocks fills whatever the labels between them (THE SIZES, above).
+   Overridable from the command line of the compiler for the measure
+   that sets it, and for that alone. */
+#ifndef MAX_REGION_INSNS
+#define MAX_REGION_INSNS 128
+#endif
+
+/* The C of one region, accumulated before its head is written: what the
+   body names -- the window, the registers -- decides what the head
+   declares. Grown as needed. */
+static char *body;
+static size_t body_n, body_cap;
+static int uses_win;
 
 static void emit(const char *line)
 {
   size_t n = strlen(line);
 
-  if(body_n + n + 1 >= sizeof body)
+  if(body_n + n + 1 >= body_cap)
     {
-      fprintf(stderr,"translate: a block outgrew its buffer\n");
-      exit(2);
+      size_t cap = (body_cap == 0) ? 65536 : body_cap * 2;
+      char *grown;
+
+      while(body_n + n + 1 >= cap)
+        cap *= 2;
+      grown = realloc(body,cap);
+      if(grown == NULL)
+        {
+          fprintf(stderr,"translate: out of memory\n");
+          exit(2);
+        }
+      body = grown;
+      body_cap = cap;
     }
   memcpy(body + body_n,line,n);
   body_n += n;
 }
 
-/* The successor a transfer renders: the table entry of the block at the
-   target, when the target is in the block's bank, on the same side of
-   the fixed kilobyte, and a block is written there; behind the window
-   test for an absolute target. "0" otherwise. */
-static void succ_expr(char *buf, size_t cap, unsigned long start, const insn_t *in)
-{
-  long k;
+/* The test an edge inside a region runs before its goto, the very one
+   its successor would be rendered under (z80c.h): none for a relative
+   target, the window's for an absolute one, and, for a relative target
+   under the first kilobyte of a bank that is not bank 0, that the
+   region is not running in window 0 -- where the mapper keeps bank 0's
+   kilobyte in place, so the bytes at the address are not the ones
+   translated. */
+enum edge_test { T_NONE, T_WIN0, T_ABS };
 
-  if(!in->target_known || in->target_pos >= rom_size)
+/* An edge a block leaves by: a conditional branch's taken exit, or the
+   block's end. Where it lands, as the table knows it, whether it may
+   join the two blocks into one region, what runs to it, and what it
+   stores when it leaves the region. */
+typedef struct
+{
+  int at;                 /* the instruction, or -1 for the block's end */
+  long k;                 /* the table index of the block it lands on, or -1 */
+  unsigned long pos;      /* the position it lands on */
+  unsigned long pc;       /* the address, relative to the window or absolute */
+  int rel;
+  enum edge_test test;
+  int eligible;           /* it may be an edge inside a region */
+  int internal;           /* it is one: a goto */
+  unsigned wr_before;     /* the registers written before it, in its block */
+  unsigned store;         /* the registers it stores when it leaves the region */
+  int insns;              /* the instructions run to it */
+  int direct, full;       /* the bytes each memory path moved to it */
+  char comment[96];
+} edge_t;
+
+/* A block of a region: its scan, its edges, and the two sets of the
+   dataflow -- the registers live at its label, and those a path into
+   it may have written. */
+typedef struct
+{
+  block_t b;
+  long k;
+  edge_t edges[MAX_INSNS + 1];
+  int nedges;
+  unsigned live_in;
+  unsigned mw_in;
+  int labelled;           /* an edge inside the region lands on it */
+} rblock_t;
+
+/* Where an edge lands, as the table knows it: the block at the target
+   position when it is in the leaving block's bank, on the same side of
+   the fixed kilobyte, and written in the table; -1 otherwise. Whether
+   it may join a region: the block it lands on is neither a wait --
+   which the core must stop in front of -- nor closed on a mapper write
+   -- which the core alone enters, so that the flag it reads is that
+   block's. The test of window 0 (T_WIN0) is a relative BRANCH's alone:
+   a linear continuation under the first kilobyte of a bank that is not
+   bank 0 follows a block that already ran there, in a window that is
+   not 0. Whether the edge is a call, or leaves a block closed on a
+   mapper write, the caller decides. */
+static void edge_fill(edge_t *e, unsigned long start, unsigned long target_pos,
+                      int rel, int branch, unsigned long addr)
+{
+  e->k = -1L;
+  e->pos = target_pos;
+  e->rel = rel;
+  e->pc = addr;
+  e->test = rel ? T_NONE : T_ABS;
+  e->eligible = 0;
+  e->internal = 0;
+  if(target_pos >= rom_size)
+    return;
+  if(target_pos / BANK_SIZE != start / BANK_SIZE)
+    return;
+  if(start < SLOT0_FIXED && target_pos >= SLOT0_FIXED)
+    return;
+  e->k = table_index(target_pos);
+  if(e->k < 0L)
+    return;
+  if(rel && branch && start / BANK_SIZE != 0UL && (target_pos % BANK_SIZE) < SLOT0_FIXED)
+    e->test = T_WIN0;
+  e->eligible = (blocks_flags_at(target_pos) == 0UL);
+}
+
+/* The successor an edge renders when it leaves the region: the table
+   entry it lands on, behind its test. "0" when the table holds none. */
+static void succ_text(char *buf, size_t cap, const edge_t *e)
+{
+  if(e->k < 0L)
     {
       snprintf(buf,cap,"0");
       return;
     }
-  if(in->target_pos / BANK_SIZE != start / BANK_SIZE)
+  switch(e->test)
     {
-      snprintf(buf,cap,"0");
-      return;
+    case T_NONE:
+      snprintf(buf,cap,"&z80c_table[%ld]",e->k);
+      break;
+    case T_WIN0:
+      snprintf(buf,cap,"(((z80_win & 0xC000U) != 0U) ? &z80c_table[%ld] : 0)",e->k);
+      uses_win = 1;
+      break;
+    case T_ABS:
+      snprintf(buf,cap,"((((z80_win ^ 0x%04lXU) & 0xC000U) == 0U) ? &z80c_table[%ld] : 0)",
+               e->pc,e->k);
+      uses_win = 1;
+      break;
     }
-  if(start < SLOT0_FIXED && in->target_pos >= SLOT0_FIXED)
+}
+
+/* The test of an edge inside a region, as the condition of its goto. */
+static void test_text(char *buf, size_t cap, const edge_t *e)
+{
+  if(e->test == T_WIN0)
+    snprintf(buf,cap,"(z80_win & 0xC000U) != 0U");
+  else
+    snprintf(buf,cap,"((z80_win ^ 0x%04lXU) & 0xC000U) == 0U",e->pc);
+  uses_win = 1;
+}
+
+/* The address an edge sets PC to when it leaves. */
+static void pc_text(char *buf, size_t cap, const edge_t *e)
+{
+  if(e->rel)
     {
-      snprintf(buf,cap,"0");
-      return;
-    }
-  k = table_index(in->target_pos);
-  if(k < 0L)
-    {
-      snprintf(buf,cap,"0");
-      return;
-    }
-  if(in->target_rel)
-    {
-      /* A relative target under the first kilobyte of its bank, from a
-         bank that is not bank 0: in window 0 the mapper keeps bank 0's
-         kilobyte in place there, so the bytes at the address are not
-         the ones translated; rendered only while the block runs in
-         another window. */
-      if(start / BANK_SIZE != 0UL && (in->target_pos % BANK_SIZE) < SLOT0_FIXED)
-        {
-          snprintf(buf,cap,"(((z80_pc0 & 0xC000U) != 0U) ? &z80c_table[%ld] : 0)",k);
-          uses_pc0 = 1;
-        }
-      else
-        snprintf(buf,cap,"&z80c_table[%ld]",k);
+      snprintf(buf,cap,"(uint16)(z80_win + 0x%04lXU)",e->pc);
+      uses_win = 1;
     }
   else
-    {
-      snprintf(buf,cap,"((((z80_pc0 ^ 0x%04lXU) & 0xC000U) == 0U) ? &z80c_table[%ld] : 0)",
-               in->target_addr,k);
-      uses_pc0 = 1;
-    }
+    snprintf(buf,cap,"0x%04lXU",e->pc);
 }
 
-/* The stores of an exit: every register written so far, back to its
-   field. */
-static void emit_stores(unsigned written, const char *indent)
+/* The edges of a block, scanned: one per conditional branch, one for
+   the end. What each runs to, what is written before it, where it
+   lands. The block's own kind says which ends may be joined: a linear
+   continuation or a cut, and a jump that is not a call; never the end
+   of a block closed on a mapper write, whatever edge leaves it. */
+static void block_edges(rblock_t *rb)
 {
-  unsigned i;
-  char line[128];
-
-  for(i = 0; i < R_COUNT; i++)
-    if(written & (1U << i))
-      {
-        snprintf(line,sizeof line,"%s%s = %s;\n",indent,reg_state[i],reg_local[i]);
-        emit(line);
-      }
-}
-
-/* The tail of an exit: the instructions run to it, counted for the
-   telemetry and for the block's own count, and the bytes each memory
-   path moved, counted by the host runner (src/z80c.h). */
-static void emit_tail(long k, int insns, int direct, int full, const char *indent)
-{
-  char line[192];
-
-  snprintf(line,sizeof line,"%sZ80C_INSNS(%d);\n",indent,insns);
-  emit(line);
-  snprintf(line,sizeof line,"%sZ80C_RAN(%ld,%d);\n",indent,k,insns);
-  emit(line);
-  snprintf(line,sizeof line,"%sZ80C_ACCESS(%d,%d);\n",indent,direct,full);
-  emit(line);
-}
-
-/* Writes the block at index k of the table. */
-static void emit_block(FILE *out, const block_t *b, long k)
-{
+  const block_t *b = &rb->b;
   unsigned written = 0;
-  int i;
   int direct = 0, full = 0;
-  char line[1024];
-  char succ[128];
-  const insn_t *last = (b->n > 0) ? &b->ins[b->n - 1] : NULL;
+  int i;
+  int closed = (b->kind == END_BANKEND);
 
-  body_n = 0;
-  uses_pc0 = 0;
-
-  snprintf(line,sizeof line,"  Z80C_HIT(%ld);\n",k);
-  emit(line);
-
+  rb->nedges = 0;
   for(i = 0; i < b->n; i++)
     {
       const insn_t *in = &b->ins[i];
 
-      if(in->uses_pc0)
-        uses_pc0 = 1;
-      if(in->text[0] != '\0')
-        {
-          emit(in->text);
-          emit("\n");
-        }
       written |= in->wr;
       direct += in->acc_direct;
       full += in->acc_full;
-
       if(in->kind == K_COND)
         {
-          succ_expr(succ,sizeof succ,b->start,in);
-          snprintf(line,sizeof line,"  if(%s)\n    {\n      %s\n",in->cond,in->taken);
-          emit(line);
-          emit_stores(written,"      ");
-          emit_tail(k,i + 1,direct + in->taken_direct,full + in->taken_full,"      ");
-          snprintf(line,sizeof line,"      return %s;\n    }\n",succ);
-          emit(line);
+          edge_t *e = &rb->edges[rb->nedges++];
+
+          memset(e,0,sizeof *e);
+          e->at = i;
+          e->k = -1L;
+          e->wr_before = written;
+          e->insns = i + 1;
+          e->direct = direct + in->taken_direct;
+          e->full = full + in->taken_full;
+          if(in->target_known)
+            {
+              edge_fill(e,b->start,in->target_pos,in->target_rel,1,in->target_addr);
+              if(in->call || closed)
+                e->eligible = 0;
+            }
+          {
+            const char *c = strstr(in->taken,"/*");
+
+            snprintf(e->comment,sizeof e->comment,"%s",(c != NULL) ? c : "");
+          }
         }
     }
+  {
+    edge_t *e = &rb->edges[rb->nedges++];
+    const insn_t *last = (b->n > 0) ? &b->ins[b->n - 1] : NULL;
 
-  /* The last exit: PC left where the block stops when no transfer set
-     it, the stores, the tail, the successor. */
-  if(b->kind != END_JUMP && b->kind != END_REPEAT)
-    {
-      snprintf(line,sizeof line,"  Z80_PC = (uint16)(z80_pc0 + 0x%04lXU); /* %s */\n",
-               (b->end - b->start) & 0xFFFFUL,
-               (b->kind == END_NEXT) ? "next block" :
-               (b->kind == END_FALLBACK) ? "fallback: interpreted from here" :
-               (b->kind == END_CUT) ? "cut" :
-               (b->kind == END_BANKEND) ? "mapper written: the bank behind the next byte may have turned" :
-               "bank edge");
-      emit(line);
-      uses_pc0 = 1;
-    }
-  emit_stores(written,"  ");
-  emit_tail(k,b->n,direct,full,"  ");
-
-  /* The successor after a mapper write is the linear one, as after any
-     other instruction: the core drops it when the epoch has moved, and
-     keeps it when the write turned nothing (the same bank written
-     again), in which case the bytes are the ones translated. */
-  switch(b->kind)
-    {
-    case END_NEXT:
-    case END_CUT:
-    case END_BANKEND:
+    memset(e,0,sizeof *e);
+    e->at = -1;
+    e->k = -1L;
+    e->wr_before = written;
+    e->insns = b->n;
+    e->direct = direct;
+    e->full = full;
+    switch(b->kind)
       {
-        long kn = table_index(b->end);
+      case END_NEXT:
+      case END_CUT:
+      case END_BANKEND:
+        edge_fill(e,b->start,b->end,1,0,win_off(b->start,(long)b->end));
+        if(closed)
+          e->eligible = 0;
+        snprintf(e->comment,sizeof e->comment,"/* %s */",
+                 (b->kind == END_NEXT) ? "next block" :
+                 (b->kind == END_CUT) ? "cut" :
+                 "mapper written: the bank behind the next byte may have turned");
+        break;
+      case END_JUMP:
+        if(last != NULL && last->kind == K_JUMP && last->target_known)
+          {
+            const char *c = strstr(last->text,"/*");
 
-        if(kn >= 0L && b->end / BANK_SIZE == b->start / BANK_SIZE &&
-           !(b->start < SLOT0_FIXED && b->end >= SLOT0_FIXED))
-          snprintf(succ,sizeof succ,"&z80c_table[%ld]",kn);
-        else
-          snprintf(succ,sizeof succ,"0");
+            edge_fill(e,b->start,last->target_pos,last->target_rel,1,last->target_addr);
+            if(last->call || closed)
+              e->eligible = 0;
+            snprintf(e->comment,sizeof e->comment,"%s",(c != NULL) ? c : "");
+          }
+        break;
+      case END_FALLBACK:
+      case END_BANK:
+      case END_REPEAT:
+        /* PC is set by the exit itself (or by the repeat's own form)
+           and no successor is rendered: the table is asked. */
+        e->rel = 1;
+        e->pc = win_off(b->start,(long)b->end);
+        snprintf(e->comment,sizeof e->comment,"/* %s */",
+                 (b->kind == END_FALLBACK) ? "fallback: interpreted from here" : "bank edge");
+        break;
       }
-      break;
-    case END_JUMP:
-      succ_expr(succ,sizeof succ,b->start,last);
-      break;
-    default:
-      snprintf(succ,sizeof succ,"0");
-      break;
+  }
+}
+
+/* The regions: one root per region over the table's indices, joined
+   by the eligible edges while the instructions stay under the cap. */
+static long *region_root;
+static unsigned long *region_insns;
+static long *region_next;     /* the next block of the region, by index */
+static long *region_first;    /* the first block of the region, by root */
+static unsigned long n_regions, n_edges, n_exits, n_loads, n_stores;
+static unsigned long n_longest_block, n_longest_region;
+
+static long region_find(long k)
+{
+  while(region_root[k] != k)
+    {
+      region_root[k] = region_root[region_root[k]];
+      k = region_root[k];
     }
-  snprintf(line,sizeof line,"  return %s;\n",succ);
+  return k;
+}
+
+/* Joins the regions of two blocks, unless the region would outgrow the
+   cap. Returns whether the two blocks are now in one region. */
+static int region_join(long a, long b)
+{
+  long ra = region_find(a), rb = region_find(b);
+
+  if(ra == rb)
+    return 1;
+  if(region_insns[ra] + region_insns[rb] > (unsigned long)MAX_REGION_INSNS)
+    return 0;
+  if(ra < rb)
+    {
+      region_root[rb] = ra;
+      region_insns[ra] += region_insns[rb];
+    }
+  else
+    {
+      region_root[ra] = rb;
+      region_insns[rb] += region_insns[ra];
+    }
+  return 1;
+}
+
+/* Forms the regions over the written table: every selected block
+   scanned, its eligible edges joined. */
+static void form_regions(block_t *blk)
+{
+  unsigned long pos;
+  long k;
+  rblock_t *rb = malloc(sizeof *rb);
+
+  if(rb == NULL)
+    {
+      fprintf(stderr,"translate: out of memory\n");
+      exit(2);
+    }
+  region_root  = malloc(((n_blocks == 0UL) ? 1UL : n_blocks) * sizeof *region_root);
+  region_insns = malloc(((n_blocks == 0UL) ? 1UL : n_blocks) * sizeof *region_insns);
+  region_next  = malloc(((n_blocks == 0UL) ? 1UL : n_blocks) * sizeof *region_next);
+  region_first = malloc(((n_blocks == 0UL) ? 1UL : n_blocks) * sizeof *region_first);
+  if(region_root == NULL || region_insns == NULL || region_next == NULL || region_first == NULL)
+    {
+      fprintf(stderr,"translate: out of memory\n");
+      exit(2);
+    }
+  for(k = 0; k < (long)n_blocks; k++)
+    {
+      region_root[k] = k;
+      region_insns[k] = 0;
+      region_next[k] = -1L;
+      region_first[k] = -1L;
+    }
+  for(pos = 0; pos < rom_size; pos++)
+    if(mark[pos] & M_BLOCK)
+      {
+        k = table_index(pos);
+        scan_block(pos,blk);
+        region_insns[k] = (unsigned long)blk->n;
+      }
+  for(pos = 0; pos < rom_size; pos++)
+    if(mark[pos] & M_BLOCK)
+      {
+        int i;
+
+        k = table_index(pos);
+        scan_block(pos,&rb->b);
+        rb->k = k;
+        block_edges(rb);
+        for(i = 0; i < rb->nedges; i++)
+          if(rb->edges[i].eligible)
+            region_join(k,rb->edges[i].k);
+      }
+  /* The members of each region, in position order, threaded from the
+     root's first. */
+  for(k = (long)n_blocks - 1L; k >= 0L; k--)
+    {
+      long r = region_find(k);
+
+      region_next[k] = region_first[r];
+      region_first[r] = k;
+    }
+  free(rb);
+}
+
+/* The stores of an exit: the registers of the set, back to their
+   fields. */
+static void emit_stores(unsigned set, const char *indent)
+{
+  unsigned i;
+  char line[128];
+  int n = 0;
+
+  for(i = 0; i < R_COUNT; i++)
+    if(set & (1U << i))
+      {
+        snprintf(line,sizeof line,"%s%s = %s;\n",indent,reg_state[i],reg_local[i]);
+        emit(line);
+        n++;
+      }
+  if(n > 0)
+    {
+      snprintf(line,sizeof line,"%sZ80C_FRONTIER(%d);\n",indent,n);
+      emit(line);
+    }
+  n_stores += (unsigned long)n;
+}
+
+/* The same stores as one expression, for the guard of an edge (z80c.h,
+   Z80C_EDGE): what the region would store were the line over there. */
+static void stores_expr(char *buf, size_t cap, unsigned set)
+{
+  unsigned i;
+  size_t at = 0;
+  int n = 0;
+
+  for(i = 0; i < R_COUNT; i++)
+    if(set & (1U << i))
+      n++;
+  if(n == 0)
+    {
+      snprintf(buf,cap,"(void)0");
+      return;
+    }
+  at += (size_t)snprintf(buf + at,cap - at,"(Z80C_FRONTIER(%d)",n);
+  for(i = 0; i < R_COUNT; i++)
+    if(set & (1U << i) && at < cap)
+      at += (size_t)snprintf(buf + at,cap - at,", %s = %s",reg_state[i],reg_local[i]);
+  if(at + 2 >= cap)
+    {
+      fprintf(stderr,"translate: a stores expression outgrew its buffer\n");
+      exit(2);
+    }
+  snprintf(buf + at,cap - at,")");
+}
+
+/* The tail of an edge or an exit: the instructions run to it, counted
+   for the telemetry and for the block's own count, and the bytes each
+   memory path moved, counted by the host runner (src/z80c.h). */
+static void emit_tail(long k, const edge_t *e, const char *indent)
+{
+  char line[192];
+
+  snprintf(line,sizeof line,"%sZ80C_INSNS(%d);\n",indent,e->insns);
   emit(line);
+  snprintf(line,sizeof line,"%sZ80C_RAN(%ld,%d);\n",indent,k,e->insns);
+  emit(line);
+  snprintf(line,sizeof line,"%sZ80C_ACCESS(%d,%d);\n",indent,e->direct,e->full);
+  emit(line);
+}
+
+/* An exit: PC, unless the instruction set it; the stores; the tail;
+   the successor. */
+static void emit_exit(long k, const edge_t *e, int set_pc, const char *succ, const char *indent)
+{
+  char line[256];
+  char pc[64];
+
+  if(set_pc)
+    {
+      pc_text(pc,sizeof pc,e);
+      snprintf(line,sizeof line,"%sZ80_PC = %s; %s\n",indent,pc,e->comment);
+      emit(line);
+    }
+  emit_stores(e->store,indent);
+  emit_tail(k,e,indent);
+  snprintf(line,sizeof line,"%sreturn %s;\n",indent,succ);
+  emit(line);
+  n_exits++;
+}
+
+/* An edge inside the region: the tail, the mark and the guard of the
+   PC, the goto -- under its test when it has one, the failed test
+   going to the region's one shared exit (over), PC handed to it in a
+   local, with no successor. */
+static int uses_over;
+
+static void emit_edge(long k, const edge_t *e, const char *indent)
+{
+  char line[1024];
+  char pc[64];
+  char stores[512];
+  char test[96];
+  char deeper[32];
+  const char *at = indent;
+
+  pc_text(pc,sizeof pc,e);
+  stores_expr(stores,sizeof stores,e->store);
+  emit_tail(k,e,indent);
+  if(e->test != T_NONE)
+    {
+      test_text(test,sizeof test,e);
+      snprintf(line,sizeof line,"%sif(%s)\n%s  {\n",indent,test,indent);
+      emit(line);
+      snprintf(deeper,sizeof deeper,"%s    ",indent);
+      at = deeper;
+    }
+  snprintf(line,sizeof line,"%sZ80C_EDGE(0x%06lXUL, %s, %s);\n",at,e->pos,pc,stores);
+  emit(line);
+  snprintf(line,sizeof line,"%sZ80C_EDGE_TAKEN();\n",at);
+  emit(line);
+  snprintf(line,sizeof line,"%sgoto L_%06lx; %s\n",at,e->pos,e->comment);
+  emit(line);
+  n_edges++;
+  if(e->test != T_NONE)
+    {
+      snprintf(line,sizeof line,"%s  }\n",indent);
+      emit(line);
+      /* Past the test the edge leaves: PC on the target, nothing
+         rendered -- the core asks the tables. */
+      snprintf(line,sizeof line,"%sz80_over = %s;\n%sgoto over; %s\n",indent,pc,indent,e->comment);
+      emit(line);
+      uses_over = 1;
+    }
+}
+
+/* Writes the region whose first block is at index first: its blocks
+   scanned, their edges resolved -- inside the region, a goto; outside,
+   an exit -- the two sets of the dataflow settled, the body written,
+   then the head. */
+static void emit_region(FILE *out, long first)
+{
+  long k;
+  int nb = 0, j, i;
+  rblock_t *rbs;
+  unsigned headload = 0, declared = 0, over_store = 0;
+  int changed;
+  int dispatch;
+  char line[1024];
+  char succ[128];
+
+  for(k = first; k >= 0L; k = region_next[k])
+    nb++;
+  rbs = malloc((size_t)nb * sizeof *rbs);
+  if(rbs == NULL)
+    {
+      fprintf(stderr,"translate: out of memory\n");
+      exit(2);
+    }
+  for(j = 0, k = first; k >= 0L; k = region_next[k], j++)
+    {
+      rblock_t *rb = &rbs[j];
+
+      scan_block(blocks_pos_of_index(k),&rb->b);
+      rb->k = k;
+      rb->live_in = 0;
+      rb->mw_in = 0;
+      rb->labelled = 0;
+      block_edges(rb);
+      for(i = 0; i < rb->nedges; i++)
+        {
+          edge_t *e = &rb->edges[i];
+
+          e->internal = e->eligible && region_find(e->k) == region_find(k);
+        }
+    }
+  /* A region needs an exit: one made of blocks that only hand PC to
+     one another -- a jump to itself, two jumps face to face -- would be
+     a function with no return, and is a program that never waits. Its
+     edges leave as they did, with the successor rendered, and the core
+     chains them; the guard of the PC refuses the program if it ever
+     runs there. */
+  {
+    int exits = 0;
+
+    for(j = 0; j < nb; j++)
+      for(i = 0; i < rbs[j].nedges; i++)
+        if(!rbs[j].edges[i].internal)
+          exits++;
+    if(exits == 0)
+      for(j = 0; j < nb; j++)
+        for(i = 0; i < rbs[j].nedges; i++)
+          rbs[j].edges[i].internal = 0;
+  }
+  /* Which block an internal edge lands on, by index in the region. */
+  for(j = 0; j < nb; j++)
+    for(i = 0; i < rbs[j].nedges; i++)
+      if(rbs[j].edges[i].internal)
+        {
+          int t;
+
+          for(t = 0; t < nb; t++)
+            if(rbs[t].k == rbs[j].edges[i].k)
+              {
+                rbs[t].labelled = 1;
+                break;
+              }
+          if(t == nb)
+            {
+              fprintf(stderr,"translate: an edge of the region at %06lx lands outside it\n",
+                      rbs[0].b.start);
+              exit(2);
+            }
+        }
+
+  /* Forward: the registers a path into a block may have written; the
+     stores of an edge are those plus its block's own before it. */
+  do
+    {
+      changed = 0;
+      for(j = 0; j < nb; j++)
+        for(i = 0; i < rbs[j].nedges; i++)
+          {
+            const edge_t *e = &rbs[j].edges[i];
+
+            if(e->internal)
+              {
+                int t;
+                unsigned w = rbs[j].mw_in | e->wr_before;
+
+                for(t = 0; t < nb; t++)
+                  if(rbs[t].k == e->k)
+                    break;
+                if((rbs[t].mw_in | w) != rbs[t].mw_in)
+                  {
+                    rbs[t].mw_in |= w;
+                    changed = 1;
+                  }
+              }
+          }
+    }
+  while(changed);
+  for(j = 0; j < nb; j++)
+    for(i = 0; i < rbs[j].nedges; i++)
+      {
+        edge_t *e = &rbs[j].edges[i];
+
+        e->store = rbs[j].mw_in | e->wr_before;
+      }
+  /* The edges inside the region that run a test share one exit for
+     the failed test, which stores the union of their sets: each of
+     them is given that union, so that the pass below loads what the
+     shared exit stores wherever a path reaches it without writing it. */
+  {
+    unsigned over = 0;
+
+    for(j = 0; j < nb; j++)
+      for(i = 0; i < rbs[j].nedges; i++)
+        if(rbs[j].edges[i].internal && rbs[j].edges[i].test != T_NONE)
+          over |= rbs[j].edges[i].store;
+    for(j = 0; j < nb; j++)
+      for(i = 0; i < rbs[j].nedges; i++)
+        if(rbs[j].edges[i].internal && rbs[j].edges[i].test != T_NONE)
+          rbs[j].edges[i].store = over;
+    over_store = over;
+  }
+
+  /* Backward: the registers live at a block's label -- read before
+     written in the block, or stored by an edge (leaving, or the guard
+     of one inside) or live at the block an inside edge lands on,
+     without being written before that edge. Every block is an entry,
+     so the head loads the union: a local not loaded is then written on
+     every path to every edge that stores it. */
+  do
+    {
+      changed = 0;
+      for(j = 0; j < nb; j++)
+        {
+          unsigned live = rbs[j].b.loaded;
+
+          for(i = 0; i < rbs[j].nedges; i++)
+            {
+              const edge_t *e = &rbs[j].edges[i];
+              unsigned need = e->store;
+
+              if(e->internal)
+                {
+                  int t;
+
+                  for(t = 0; t < nb; t++)
+                    if(rbs[t].k == e->k)
+                      break;
+                  need |= rbs[t].live_in;
+                }
+              live |= need & ~e->wr_before;
+            }
+          if(live != rbs[j].live_in)
+            {
+              rbs[j].live_in = live;
+              changed = 1;
+            }
+        }
+    }
+  while(changed);
+  {
+    unsigned long total = 0;
+
+    for(j = 0; j < nb; j++)
+      {
+        headload |= rbs[j].live_in;
+        declared |= rbs[j].b.loaded | rbs[j].b.written;
+        total += (unsigned long)rbs[j].b.n;
+        if((unsigned long)rbs[j].b.n > n_longest_block)
+          n_longest_block = (unsigned long)rbs[j].b.n;
+      }
+    if(total > n_longest_region)
+      n_longest_region = total;
+  }
+  declared |= headload;
+
+  /* The body. */
+  body_n = 0;
+  uses_win = 0;
+  uses_over = 0;
+  dispatch = (nb > 1);
+  for(j = 0; j < nb; j++)
+    for(i = 0; i < rbs[j].nedges; i++)
+      if(rbs[j].edges[i].internal)
+        dispatch = 1;
+  for(j = 0; j < nb; j++)
+    {
+      rblock_t *rb = &rbs[j];
+      const block_t *b = &rb->b;
+      const edge_t *end = &rb->edges[rb->nedges - 1];
+      int ei = 0;
+
+      if(dispatch && j == 0)
+        emit("head:\n");
+      if(dispatch && j > 0)
+        {
+          snprintf(line,sizeof line,"E_%06lx:\n",b->start);
+          emit(line);
+        }
+      if(rb->labelled)
+        {
+          snprintf(line,sizeof line,"L_%06lx:\n",b->start);
+          emit(line);
+        }
+      snprintf(line,sizeof line,"  Z80C_HIT(%ld);\n",rb->k);
+      emit(line);
+
+      for(i = 0; i < b->n; i++)
+        {
+          const insn_t *in = &b->ins[i];
+          int end_here = (i == b->n - 1 && b->kind == END_JUMP && end->internal);
+
+          if(in->uses_win)
+            uses_win = 1;
+          /* A jump whose edge is a goto leaves its text out: the text
+             must then be the write of PC and nothing else, which the
+             two forms that can get here (jp nn, jr) are -- held, not
+             assumed. */
+          if(end_here)
+            {
+              const char *semi = strchr(in->text,';');
+
+              if(strncmp(in->text,"  Z80_PC = ",11) != 0 || semi == NULL ||
+                 strncmp(semi,"; /*",4) != 0 || strchr(semi + 1,';') != NULL)
+                {
+                  fprintf(stderr,"translate: the jump at %06lx is not a bare write of PC: %s\n",
+                          b->start + (unsigned long)(in - b->ins),in->text);
+                  exit(2);
+                }
+            }
+          else if(in->text[0] != '\0')
+            {
+              emit(in->text);
+              emit("\n");
+            }
+          if(in->kind == K_COND)
+            {
+              const edge_t *e = &rb->edges[ei++];
+
+              snprintf(line,sizeof line,"  if(%s)\n    {\n",in->cond);
+              emit(line);
+              if(e->internal)
+                emit_edge(rb->k,e,"      ");
+              else
+                {
+                  snprintf(line,sizeof line,"      %s\n",in->taken);
+                  emit(line);
+                  succ_text(succ,sizeof succ,e);
+                  emit_exit(rb->k,e,0,succ,"      ");
+                }
+              emit("    }\n");
+            }
+        }
+
+      /* The end: an edge inside the region, or the last exit -- PC left
+         where the block stops when no transfer set it. A block closed
+         on a mapper write renders its linear successor like any other:
+         the core drops it when the epoch has moved, and keeps it when
+         the write turned nothing (the same bank written again), in
+         which case the bytes are the ones translated. */
+      if(end->internal)
+        emit_edge(rb->k,end,"  ");
+      else
+        {
+          int set_pc = (b->kind != END_JUMP && b->kind != END_REPEAT);
+
+          if(b->kind == END_JUMP || b->kind == END_NEXT || b->kind == END_CUT ||
+             b->kind == END_BANKEND)
+            succ_text(succ,sizeof succ,end);
+          else
+            snprintf(succ,sizeof succ,"0");
+          emit_exit(rb->k,end,set_pc,succ,"  ");
+        }
+    }
+  /* The shared exit of the failed tests. */
+  if(uses_over)
+    {
+      edge_t x;
+
+      memset(&x,0,sizeof x);
+      x.store = over_store;
+      emit("over:\n  Z80_PC = z80_over;\n");
+      emit_stores(x.store,"  ");
+      emit("  return 0;\n");
+      n_exits++;
+    }
 
   /* The head, now that it is known what the body names: the base of
-     the work RAM, which the direct forms index and every block takes;
-     the entry address; and the locals -- loaded where read first, bare
-     where written first. */
-  fprintf(out,"static const z80c_entry_t *\nb_%06lx(uint8 *ram)\n{\n",b->start);
-  if(uses_pc0)
-    fprintf(out,"  uint16 z80_pc0 = Z80_PC;\n");
+     the work RAM, which the direct forms index and every region takes;
+     the window; the locals -- loaded where live at some label, bare
+     otherwise -- then the dispatch on the entry. */
+  fprintf(out,"static const z80c_entry_t *\nr_%06lx(uint8 *ram, uint32 entry)\n{\n",
+          rbs[0].b.start);
+  if(uses_win)
+    fprintf(out,"  uint16 z80_win = (uint16)(Z80_PC & 0xC000U);\n");
+  if(uses_over)
+    fprintf(out,"  uint16 z80_over;\n");
   {
     unsigned i2;
+    int n = 0;
 
     for(i2 = 0; i2 < R_COUNT; i2++)
       {
         unsigned bit = 1U << i2;
 
-        if(!((b->loaded | b->written) & bit))
+        if(!(declared & bit))
           continue;
-        if(b->loaded & bit)
-          fprintf(out,"  %s %s = %s;\n",(bit == R_SP) ? "uint16" : "uint8",reg_local[i2],reg_state[i2]);
+        if(headload & bit)
+          {
+            fprintf(out,"  %s %s = %s;\n",(bit == R_SP) ? "uint16" : "uint8",reg_local[i2],reg_state[i2]);
+            n++;
+          }
         else
           fprintf(out,"  %s %s;\n",(bit == R_SP) ? "uint16" : "uint8",reg_local[i2]);
       }
+    fprintf(out,"\n  (void)ram;\n");
+    if(n > 0)
+      fprintf(out,"  Z80C_FRONTIER(%d);\n",n);
+    n_loads += (unsigned long)n;
   }
-  fprintf(out,"\n  (void)ram;\n");
+  if(dispatch)
+    {
+      /* Every entry named, the head's too; an index that names none is
+         a disagreement between the table and the tool, kept for the
+         runner on the PC, and the head run all the same. */
+      fprintf(out,"  switch(entry)\n    {\n");
+      fprintf(out,"    case %ldUL: goto head;\n",rbs[0].k);
+      for(j = 1; j < nb; j++)
+        fprintf(out,"    case %ldUL: goto E_%06lx;\n",rbs[j].k,rbs[j].b.start);
+      fprintf(out,"    default: Z80C_BAD_ENTRY(entry); goto head;\n    }\n");
+    }
+  else
+    fprintf(out,"  (void)entry;\n");
   fwrite(body,1,body_n,out);
   fprintf(out,"}\n\n");
+  n_regions++;
+  free(rbs);
 }
 
 /* ---- the counts and the choice --------------------------------------- */
@@ -3121,17 +3824,27 @@ int main(int argc, char **argv)
   {
     unsigned long j, k = 0;
 
+    index_pos = malloc(((nblocks == 0UL) ? 1UL : nblocks) * sizeof *index_pos);
+    if(index_pos == NULL)
+      {
+        fprintf(stderr,"translate: out of memory\n");
+        return 2;
+      }
     for(j = 0; j < nblocks; j++)
       {
         blocks[j].index = -1L;
         if(blocks[j].selected)
           {
             mark[blocks[j].pos] |= M_BLOCK;
+            index_pos[k] = blocks[j].pos;
             blocks[j].index = (long)k++;
           }
       }
     n_blocks = k;
   }
+
+  /* The regions, over the table just fixed. */
+  form_regions(blk);
 
   out = fopen(argv[2],"w");
   if(out == NULL)
@@ -3144,19 +3857,21 @@ int main(int argc, char **argv)
           "/*\n"
           " * Translated cartridge code, written by tests/z80c/translate.c.\n"
           " * Generated: not tracked, not edited by hand. One function per\n"
-          " * block, then the table from positions in the cartridge to the\n"
+          " * region of blocks -- a label per block, a goto per edge between\n"
+          " * them -- then the table from positions in the cartridge to the\n"
           " * functions, each entry carrying the block's flags (a wait, a\n"
-          " * close on a mapper write); src/z80c.h says how the core runs\n"
-          " * them, and that no block keeps an account of time. Every block\n"
-          " * takes the base of the work RAM: the accesses the tool proved\n"
-          " * to land there index it directly, the others go through the\n"
-          " * page tables.\n"
+          " * close on a mapper write) and its own index, which the function\n"
+          " * dispatches on; src/z80c.h says how the core runs them, and that\n"
+          " * no region keeps an account of time. Every region takes the base\n"
+          " * of the work RAM: the accesses the tool proved to land there\n"
+          " * index it directly, the others go through the page tables.\n"
           " *\n"
           " * The thirteen register names of z80_ops.h are retargeted below\n"
-          " * onto locals of the block, the way z80.c retargets its five hot\n"
-          " * names inside z80_run: a block declares the ones it touches,\n"
-          " * loads at its entry those it reads first, stores at each exit\n"
-          " * those it has written. PC stays on the structure.\n"
+          " * onto locals of the region, the way z80.c retargets its five hot\n"
+          " * names inside z80_run: a region declares the ones it touches,\n"
+          " * loads at its head those live at one of its labels, stores at\n"
+          " * each exit those written on a path to it. PC stays on the\n"
+          " * structure; the window the region runs in is read once.\n"
           " */\n"
           "#define Z80C_BLOCK_FILE 1\n"
           "#include \"z80_ops.h\"\n"
@@ -3166,16 +3881,18 @@ int main(int argc, char **argv)
   fprintf(out,"\n#if Z80C_HITS\nuint32 z80c_hits[%lu];\nuint32 z80c_ran[%lu];\n#endif\n\n",
           (n_blocks == 0UL) ? 1UL : n_blocks,(n_blocks == 0UL) ? 1UL : n_blocks);
 
-  /* Emission in position order, which is the table's order. */
+  /* Emission in position order, which is the table's order: a region
+     is written where its first block is. */
   for(pos = 0; pos < rom_size; pos++)
     if(mark[pos] & M_BLOCK)
       {
         long k = table_index(pos);
         unsigned long i2;
 
-        scan_block(pos,blk);
-        emit_block(out,blk,k);
+        if(region_find(k) == k)
+          emit_region(out,k);
 
+        scan_block(pos,blk);
         n_emitted += (unsigned long)blk->n;
         if(blk->wait)
           n_waits++;
@@ -3231,8 +3948,13 @@ int main(int argc, char **argv)
           {
             long k = table_index(pos);
 
-            fprintf(out,"  { 0x%06lXUL, b_%06lx, %luUL },\n",pos,pos,
-                    (k >= 0L) ? blocks_flags_at(pos) : 0UL);
+            if(k < 0L)
+              {
+                fprintf(stderr,"translate: the block at %06lx has no index in the table\n",pos);
+                return 2;
+              }
+            fprintf(out,"  { 0x%06lXUL, r_%06lx, Z80C_ENTRY(%ldUL,%luUL) },\n",pos,
+                    index_pos[region_find(k)],k,blocks_flags_at(pos));
           }
       fprintf(out,"};\n");
     }
@@ -3250,6 +3972,11 @@ int main(int argc, char **argv)
          n_emitted,n_end_fallback);
   printf("z80c: fallback ops: halt=%lu im=%lu ld_a_r=%lu ld_r_a=%lu refused=%lu waits=%lu seeds=%lu\n",
          n_fb_halt,n_fb_im,n_fb_ld_a_r,n_fb_ld_r_a,n_fb_refused,n_waits,n_seeds);
+  /* The regions of the written table: the functions, the entries, the
+     gotos, the returns, and the registers loaded at the heads and
+     stored at the exits, as written. */
+  printf("z80c: regions=%lu entries=%lu edges=%lu exits=%lu loads=%lu stores=%lu longest_block=%lu longest_region=%lu\n",
+         n_regions,n_blocks,n_edges,n_exits,n_loads,n_stores,n_longest_block,n_longest_region);
   if(n_ram_targets != 0UL)
     printf("z80c: ram targets=%lu walked, first %04lX reached from %06lx: code without a position, not translated\n",
            n_ram_targets,ram_target_addr,ram_target_from);
@@ -3279,5 +4006,11 @@ int main(int argc, char **argv)
           n_end_bank,n_end_repeat,n_end_bankend);
   free(blocks);
   free(blk);
+  free(index_pos);
+  free(region_root);
+  free(region_insns);
+  free(region_next);
+  free(region_first);
+  free(body);
   return 0;
 }

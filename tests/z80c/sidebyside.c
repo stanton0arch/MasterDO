@@ -21,7 +21,7 @@
  *                presentation once line 191 is counted -- without drawing
  *                anything. It compares nothing: it refuses a table that
  *                did not pair with the ROM, a run in which no block ran
- *                and a run in which no chain ran a second block; it
+ *                and a run in which no chain ran a second region; it
  *                refuses the PROGRAM when a line never waits (the guard of
  *                src/z80c.h), naming where; it prints the counters of the
  *                translated code and the instructions a frame ran; and,
@@ -609,9 +609,15 @@ static int report_translated(long frames, const char *counts_path)
          (unsigned long)z80c_ram);
   printf("z80c: insns/frame=%lu\n",all / (unsigned long)frames);
   /* The bytes the blocks moved by each memory path: the work RAM
-     indexed directly, and the page tables (src/z80c.h). */
+     indexed directly, and the page tables; and the registers the
+     regions loaded at their heads and stored at their exits, the
+     frontier the program paid (src/z80c.h). */
   printf("z80c: direct=%lu full=%lu\n",
          (unsigned long)z80c_direct_total,(unsigned long)z80c_full_total);
+  printf("z80c: frontier=%lu\n",(unsigned long)z80c_frontier_total);
+  /* The edges inside the regions taken: the gotos run, the one count
+     that says the regions were run through and not around. */
+  printf("z80c: edges=%lu\n",(unsigned long)z80c_edges_total);
   /* A translated run in which no block ran is the interpreter judged
      against itself. */
   if(z80c_exec == 0UL)
@@ -634,7 +640,7 @@ static int report_translated(long frames, const char *counts_path)
    * is refused, the way a run in which no block ran at all is refused.
    */
   chains = z80c_chains();
-  printf("z80c: chains %lu entered, %lu blocks, %lu.%02lu blocks a chain\n",
+  printf("z80c: chains %lu entered, %lu regions, %lu.%02lu regions a chain\n",
          (unsigned long)chains,(unsigned long)z80c_exec,
          chains != 0UL ? (unsigned long)(z80c_exec / chains) : 0UL,
          chains != 0UL
@@ -642,7 +648,7 @@ static int report_translated(long frames, const char *counts_path)
            : 0UL);
   if(z80c_exec <= chains)
     {
-      printf("FAIL: no chain ran a second block (%lu blocks for %lu chains):"
+      printf("FAIL: no chain ran a second region (%lu regions for %lu chains):"
              " the successors are not being followed\n",
              (unsigned long)z80c_exec,(unsigned long)chains);
       return 2;
@@ -806,6 +812,18 @@ static int run(const char *rom, long frames, const char *counts_path,
       for(line = 0; line < LINES_PER_FRAME; line++)
         {
           z80_run_events();
+          /* A region entered with an index that names none of its
+             blocks: the table and the tool disagree (src/z80c.h). Read
+             first, since the region then ran from its head and may
+             have gone anywhere. */
+          if(z80c_bad_entry != Z80C_NO_PC)
+            {
+              printf("z80c: REFUSED bad entry %lu at %06lx frame %ld\n",
+                     (unsigned long)z80c_bad_entry,(unsigned long)z80c_last_pos,fr);
+              printf("z80c: the region was entered with an index that names none of its blocks\n");
+              if(seeds_path != NULL) (void)write_seeds(seeds_path,rom_fnv,-1L);
+              return 4;
+            }
           /* The two refusals of the direct path (src/z80c.h): a bank
              turned inside a block not closed for it, and the proved
              stack out of the work RAM. */

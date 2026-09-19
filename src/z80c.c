@@ -21,11 +21,14 @@ uint32 z80c_ring_n     = 0;
 uint32 z80c_bank_pos   = Z80C_NO_PC;
 uint32 z80c_stack_sp   = Z80C_NO_PC;
 uint32 z80c_word_addr  = Z80C_NO_PC;
+uint32 z80c_bad_entry  = Z80C_NO_PC;
 #endif
 
 #if Z80C_HITS
-uint32 z80c_direct_total = 0;
-uint32 z80c_full_total   = 0;
+uint32 z80c_direct_total   = 0;
+uint32 z80c_full_total     = 0;
+uint32 z80c_frontier_total = 0;
+uint32 z80c_edges_total    = 0;
 #endif
 
 #if LOG_ENABLE && SMS_TELEMETRY
@@ -67,10 +70,13 @@ z80c_init(void)
   z80c_bank_pos   = Z80C_NO_PC;
   z80c_stack_sp   = Z80C_NO_PC;
   z80c_word_addr  = Z80C_NO_PC;
+  z80c_bad_entry  = Z80C_NO_PC;
 #endif
 #if Z80C_HITS
-  z80c_direct_total = 0;
-  z80c_full_total   = 0;
+  z80c_direct_total   = 0;
+  z80c_full_total     = 0;
+  z80c_frontier_total = 0;
+  z80c_edges_total    = 0;
 #endif
 
 #if LOG_ENABLE && SMS_TELEMETRY
@@ -170,8 +176,8 @@ z80c_run(const z80c_entry_t *e)
   uint32 epoch = z80c_map_epoch;
   /*
    * The base of the work RAM, loaded once for the chain and handed to
-   * every block: the accesses the tool proved index it directly
-   * (z80c.h, the direct path). A pointer read here, never in a block.
+   * every region: the accesses the tool proved index it directly
+   * (z80c.h, the direct path). A pointer read here, never in a region.
    */
   uint8 *ram = cart_work_ram;
 #if Z80C_BENCH
@@ -188,23 +194,32 @@ z80c_run(const z80c_entry_t *e)
 #if Z80C_BENCH
       entry_pc = sms.z80.pc;
 #endif
-      next = e->fn(ram);
+      /* The region of the block, entered at the block's own entry: the
+         index in the high bits of the flags word says which label. */
+      next = e->fn(ram,Z80C_ENTRY_INDEX(e->flags));
 
       Z80C_COUNT(z80c_exec_total);
 
 #if Z80C_BENCH
       /*
-       * The mapper moved while this block ran, the block was not closed
-       * for it, and THE BLOCK'S OWN BYTES MOVED: the address it was
-       * entered at no longer holds its position in the image, so the
-       * instructions after the write ran on the bytes of the bank that
-       * left. The runner refuses the program; the block is named. A
-       * write that turns another window -- a program in the fixed
-       * kilobyte setting the mapper's registers one by one through a
-       * pointer -- moves nothing under the block and is let through:
-       * the chain asks the live tables next, as after any move.
+       * The mapper moved while this region ran, the block it was
+       * entered at was not closed for it, and THE BLOCK'S OWN BYTES
+       * MOVED: the address it was entered at no longer holds its
+       * position in the image, so the instructions after the write ran
+       * on the bytes of the bank that left -- and so did every block
+       * the region went on to, which are of the same bank in the same
+       * window. The runner refuses the program; the entry block is
+       * named. A write that turns another window -- a program in the
+       * fixed kilobyte setting the mapper's registers one by one
+       * through a pointer -- moves nothing under the region and is let
+       * through: the chain asks the live tables next, as after any
+       * move. A block closed on a mapper write is only ever entered
+       * from here, never by an edge inside a region (the tool joins
+       * none onto it), so the flag read is the flag of the block that
+       * wrote.
        */
-      if(z80c_map_epoch != epoch && (e->wait & Z80C_FLAG_BANKEND) == 0UL &&
+      if(z80c_map_epoch != epoch &&
+         (Z80C_ENTRY_FLAGS(e->flags) & Z80C_FLAG_BANKEND) == 0UL &&
          z80c_bank_pos == Z80C_NO_PC)
         {
           uint32 pos;
@@ -221,8 +236,8 @@ z80c_run(const z80c_entry_t *e)
 #endif
 
       /*
-       * The successor the block rendered is trusted while the mapper has
-       * not moved a page since this chain started: the block tested the
+       * The successor the region rendered is trusted while the mapper has
+       * not moved a page since this chain started: the region tested the
        * window, the epoch tests the pages behind it. Otherwise -- a
        * null, or a moved page -- the live tables say what starts at PC,
        * and a miss ends the chain with the address left for the core's
@@ -248,7 +263,7 @@ z80c_run(const z80c_entry_t *e)
        * where it waits, and the core's loop, which finds the same entry
        * at PC, ends the line there.
        */
-      if((next->wait & Z80C_FLAG_WAIT) != 0UL)
+      if((Z80C_ENTRY_FLAGS(next->flags) & Z80C_FLAG_WAIT) != 0UL)
         return;
 
       e = next;
@@ -338,10 +353,10 @@ z80c_counts(uint32 *exec, uint32 *fallback, uint32 *insns, uint32 *ram_exec)
 /*
  * How many times a chain was entered. Held apart from the four counts
  * above because it answers one question and one only: whether the chain
- * is followed at all. Blocks run divided by chains entered is the length
- * of the average chain, and a run where the two are equal is a run in
- * which every block was found again by the core's loop -- which is what
- * this whole path exists to avoid.
+ * is followed at all. Regions run divided by chains entered is the
+ * length of the average chain, and a run where the two are equal is a
+ * run in which every region was found again by the core's loop -- which
+ * is what this whole path exists to avoid.
  */
 uint32
 z80c_chains(void)

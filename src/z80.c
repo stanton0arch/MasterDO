@@ -1092,7 +1092,8 @@ z80_run(int32 quota)
                    * taken first -- runs the loop again. Not on the first
                    * turn of a line, which has to run the loop once.
                    */
-                  if((z80c_block->wait & Z80C_FLAG_WAIT) != 0UL && z80_events_ran)
+                  if((Z80C_ENTRY_FLAGS(z80c_block->flags) & Z80C_FLAG_WAIT) != 0UL &&
+                     z80_events_ran)
                     {
                       Z80_RESIDENT_FLUSH();
                       return 0;

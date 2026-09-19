@@ -3175,6 +3175,16 @@ int main(int argc, char **argv)
                   if(writing) { fclose(ref); remove(tmp); }
                   return 4;
                 }
+              /* A region entered with an index that names none of its
+                 blocks (src/z80c.h): read before the rest, the region
+                 having run from its head. */
+              if(z80c_bad_entry != Z80C_NO_PC)
+                {
+                  printf("z80c: REFUSED bad entry %lu at %06lx frame %ld\n",
+                         (unsigned long)z80c_bad_entry,(unsigned long)z80c_last_pos,fr);
+                  if(writing) { fclose(ref); remove(tmp); }
+                  return 4;
+                }
               /* The two refusals of the host runners (src/z80c.h): code
                  executed from a page that is not the image, and a line
                  that never waited. The program is refused, never
@@ -3430,9 +3440,12 @@ int main(int argc, char **argv)
     printf("z80c exec=%lu fallback=%lu\n",
            (unsigned long)z80c_exec,(unsigned long)z80c_fallback);
 #if Z80C_HITS
-    /* The bytes the blocks moved by each memory path (src/z80c.h). */
+    /* The bytes the blocks moved by each memory path, and the registers
+       the regions loaded and stored at their frontiers (src/z80c.h). */
     printf("z80c direct=%lu full=%lu\n",
            (unsigned long)z80c_direct_total,(unsigned long)z80c_full_total);
+    printf("z80c frontier=%lu\n",(unsigned long)z80c_frontier_total);
+    printf("z80c edges=%lu\n",(unsigned long)z80c_edges_total);
 #endif
   }
 #endif
