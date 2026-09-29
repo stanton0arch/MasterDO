@@ -39,7 +39,8 @@ $S/sim -img $S/sim.bin -sym $S/sim.sym -frames 3000 -dump 250 \
 
 Options: `-frames n` frames of the cartridge run (after the translation of
 the reachable code), `-bench` benchmarks first, `-dump n` debug view every n
-frames, `-from n` profile only from frame n, `-rom file`.
+frames, `-from n` profile only from frame n, `-rom file`, `-interp` run
+everything through the interpreter (nothing translated).
 
 Environment variables:
 - `SIMPAD="1600:10,1606:0,2100:8"`: buttons held from each frame on
@@ -58,3 +59,7 @@ Pictures are PPM files; any image tool converts them.
 
 Requirements: `gcc`, `python3`, and the compiler tools of the SDK in
 `bin/compiler/linux`.
+
+`../z80int_test/` holds the reference Z80 interpreter in C (the assembly
+one of `src/z80int_a.s` follows it) with a native ZEXDOC harness; see the
+comment at the top of `zex.c` for building and running it.

@@ -36,6 +36,12 @@ CHECK_OFF(port_outn, GOFF(port_outn) == 0x4A4);
 CHECK_OFF(mdata, GOFF(mdata) == 0x4A8);
 CHECK_OFF(write_a, GOFF(write_a) == 0x4AC);
 CHECK_OFF(wdata, GOFF(wdata) == 0x4B0);
+CHECK_OFF(hot_tab, GOFF(hot_tab) == 0x4B4);
+CHECK_OFF(hot_queue_at, GOFF(hot_queue_at) == 0x4B8);
+CHECK_OFF(hot_sync_at, GOFF(hot_sync_at) == 0x4BC);
+CHECK_OFF(ei_saved, GOFF(ei_saved) == 0x4C0);
+CHECK_OFF(int_leave, GOFF(int_leave) == 0x4C4);
+CHECK_OFF(int_runs, GOFF(int_runs) == 0x4C8);
 CHECK_OFF(f2, GOFF(f2) == 0x428);
 CHECK_OFF(bc2, GOFF(bc2) == 0x430);
 CHECK_OFF(slot_bank, GOFF(slot_bank) == 0x47C);
@@ -952,6 +958,9 @@ static void evict_zone(z80j_state *j, uint32 z)
         if (e >= lo && e < hi) {
             unhash_block(j, blk);
             ctx->lookup[blk->pc] = j->glue.miss;
+            /* Interpreted again until it proves hot, in spare time. */
+            if (j->hot != 0 && j->queue_at != 0)
+                j->hot[blk->pc] = (uint8)(j->queue_at - 1);
             free_block(j, blk);
             freed++;
         }
@@ -1042,7 +1051,7 @@ void z80j_flush(z80j_state *j)
     area_reset(j, &j->area[1], j->nzones - nhot, nhot);
     j->cur = j->area[0].cur;
     j->zone_end = j->area[0].end;
-    j->qhead = j->qtail = 0;
+    j->nqueue = 0;
     j->generation++;
     j->ctx->resume_host = 0;
     j->stats.flushes++;
@@ -1074,17 +1083,32 @@ void jit_link_stub(z80j_state *j, uint32 *d, uint32 host)
     j->links[j->nlinks++] = JIT_ADDR(d);
 }
 
-/* Queues a static target for translation in spare time. */
-static void queue_target(z80j_state *j, uint32 target)
+/* Queues a hot address for translation in spare time; when the queue is
+ * full, the address replaces the coldest entry if it is hotter. */
+static void queue_hot(z80j_state *j, uint32 pc)
 {
-    uint32 next = (j->qtail + 1) & (Z80J_QUEUE - 1);
+    uint32 k;
 
-    target &= 0xFFFFu;
-    if (next == j->qhead || jit_block_key(j->ctx, target) == KEY_RAM ||
-        find_block(j, target, jit_block_key(j->ctx, target)) != 0)
+    pc &= 0xFFFFu;
+    for (k = 0; k < j->nqueue; k++) {
+        if (j->queue[k] == pc)
+            return;
+    }
+    if (j->nqueue < Z80J_QUEUE) {
+        j->queue[j->nqueue++] = pc;
         return;
-    j->queue[j->qtail] = target;
-    j->qtail = next;
+    }
+    j->stats.queue_full++;
+    {
+        uint32 low = 0;
+
+        for (k = 1; k < Z80J_QUEUE; k++) {
+            if (j->hot[j->queue[k]] < j->hot[j->queue[low]])
+                low = k;
+        }
+        if (j->hot[j->queue[low]] < j->hot[pc])
+            j->queue[low] = pc;
+    }
 }
 
 static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
@@ -1358,6 +1382,9 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
     return blk;
 }
 
+static uint32 take_interrupt(z80j_state *j);
+static uint32 boundary(z80j_state *j);
+
 static uint32 jit_abort(z80j_state *j, uint32 pc)
 {
     j->ctx->exit_reason = Z80J_EXIT_ABORT;
@@ -1365,52 +1392,120 @@ static uint32 jit_abort(z80j_state *j, uint32 pc)
     return j->glue.abort;
 }
 
-/* Generated code for pc under the current mapping, translated if needed. */
-static uint32 host_for(z80j_state *j, uint32 pc)
+/* Generated code for pc under the current mapping, translated now. */
+static uint32 host_force(z80j_state *j, uint32 pc)
 {
     z80j_block *blk;
-    uint32 targets[8];
-    uint32 nt = 0;
-    uint32 k;
 
     pc &= 0xFFFFu;
     blk = find_block(j, pc, jit_block_key(j->ctx, pc));
-    if (blk == 0) {
-        blk = translate_block(j, pc, targets, 8, &nt);
-        if (j->prefetch) {
-            for (k = 0; k < nt; k++)
-                queue_target(j, targets[k]);
-        }
-    }
+    if (blk == 0)
+        blk = translate_block(j, pc, 0, 0, 0);
     if (blk == 0)
         return jit_abort(j, pc);
     j->ctx->lookup[pc] = JIT_ADDR(blk->entry);
     return JIT_ADDR(blk->entry);
 }
 
+/* Code to run for pc: its translation when it exists, else, with the
+ * interpreter, the interpreter entry until the address has proven hot
+ * (queued in the meantime), else a fresh translation. */
+static uint32 host_for(z80j_state *j, uint32 pc)
+{
+    z80j_block *blk;
+
+    pc &= 0xFFFFu;
+    blk = find_block(j, pc, jit_block_key(j->ctx, pc));
+    if (blk != 0) {
+        j->ctx->lookup[pc] = JIT_ADDR(blk->entry);
+        return JIT_ADDR(blk->entry);
+    }
+    if (j->hot != 0) {
+        uint32 n = j->hot[pc];
+
+        if (n < 255)
+            j->hot[pc] = (uint8)++n;
+        if (n < j->sync_at || j->sync_left == 0) {
+            if (n >= j->queue_at)
+                queue_hot(j, pc);
+            return j->glue.interp;
+        }
+        j->sync_left--;
+        j->stats.sync++;
+    }
+    return host_force(j, pc);
+}
+
 uint32 z80j_prefetch(z80j_state *j)
 {
-    uint32 targets[8];
-    uint32 nt = 0;
+    while (j->nqueue != 0) {
+        uint32 best = 0;
+        uint32 pc;
+        uint32 k;
 
-    while (j->qhead != j->qtail) {
-        uint32 pc = j->queue[j->qhead];
-
-        j->qhead = (j->qhead + 1) & (Z80J_QUEUE - 1);
+        for (k = 1; k < j->nqueue; k++) {
+            if (j->hot[j->queue[k]] > j->hot[j->queue[best]])
+                best = k;
+        }
+        pc = j->queue[best];
+        j->queue[best] = j->queue[--j->nqueue];
         if (find_block(j, pc, jit_block_key(j->ctx, pc)) != 0)
             continue;
-        /* The targets of a prefetched block are not queued: only the
-         * direct successors of the code that runs are translated ahead. */
-        if (translate_block(j, pc, targets, 8, &nt) != 0)
+        if (translate_block(j, pc, 0, 0, 0) != 0)
             j->stats.prefetched++;
         return 1;
     }
     return 0;
 }
 
+void z80j_set_interp(z80j_state *j, uint8 *hot, uint32 queue_at, uint32 sync_at)
+{
+    j->hot = hot;
+    j->queue_at = queue_at;
+    j->sync_at = sync_at;
+    if (hot != 0)
+        memset(hot, 0, 0x10000);
+    j->ctx->hot_tab = JIT_ADDR(hot);
+    j->ctx->hot_queue_at = queue_at;
+    j->ctx->hot_sync_at = sync_at;
+    j->ctx->ei_saved = 0;
+    j->ctx->int_leave = 0;
+}
+
 uint32 z80j_translate(z80j_state *j, uint32 pc)
 {
     return host_for(j, pc);
+}
+
+/* The machine may have moved its event line into the current stretch
+ * (the stretch then ends there) or raised an interrupt line: taken now. */
+static void leave_check(z80j_state *j)
+{
+    z80j_ctx *ctx = j->ctx;
+    uint32 ev = ctx->line - ctx->event_line;
+
+    if (ev != 0 && ev < MAX_STRETCH && ev * (LINE_CYCLES * CYCLE) < ctx->regs[5] &&
+        (int32)ctx->regs[5] > 0) {
+        ctx->regs[5] -= ev * (LINE_CYCLES * CYCLE);
+        ctx->line = ctx->event_line;
+    }
+    take_interrupt(j);
+}
+
+/* The interpreter counted an entry of regs[6] up to a threshold: the
+ * address is translated at once when it is hot enough and the frame
+ * still allows it, else queued for spare time and interpreted on. */
+uint32 z80j_hot(z80j_state *j)
+{
+    uint32 pc = j->ctx->regs[6] & 0xFFFFu;
+
+    if (j->hot[pc] >= j->sync_at && j->sync_left != 0) {
+        j->sync_left--;
+        j->stats.sync++;
+        return host_force(j, pc);
+    }
+    queue_hot(j, pc);
+    return j->glue.interp;
 }
 
 /* Does the RAM block still describe the code at its address? Its entry
@@ -1448,7 +1543,16 @@ uint32 z80j_retranslate(z80j_state *j, uint32 pc)
     if (old != 0)
         unhash_block(j, old);
     j->stats.retranslations++;
+    /* Code rewritten since its translation starts again as cold: code
+     * that changes often is interpreted rather than translated again
+     * and again. */
+    if (j->hot != 0)
+        j->hot[pc] = 0;
     host = host_for(j, pc);
+    if (host == j->glue.interp) {
+        j->ctx->regs[6] = pc;
+        return 0;
+    }
     /* Links into the stale block now lead to the new one, through a
      * trampoline that an eviction of the new block undoes. */
     if (old != 0 && host != j->glue.abort && j->generation == generation) {
@@ -1473,9 +1577,15 @@ uint32 z80j_link(z80j_state *j, uint32 data)
 
     if (host == 0) {
         host = host_for(j, target);
+        if (host == j->glue.interp) {
+            j->ctx->regs[6] = target;
+            return 0;
+        }
         if (host == j->glue.abort || j->generation != generation)
             return host;
         host = jit_link_host(j, target, from_key);
+        if (host == 0)
+            return j->ctx->lookup[target];
     }
     /* The call to the linker becomes a plain branch, and so does the
      * conditional jump that led to it. */
@@ -1636,18 +1746,8 @@ uint32 z80j_stretch_end(z80j_state *j)
 
 uint32 z80j_leave(z80j_state *j)
 {
-    z80j_ctx *ctx = j->ctx;
-    uint32 ev = ctx->line - ctx->event_line;
-
-    /* The machine may have moved its event line into the current stretch:
-     * the stretch then ends there. */
-    if (ev != 0 && ev < MAX_STRETCH && ev * (LINE_CYCLES * CYCLE) < ctx->regs[5] &&
-        (int32)ctx->regs[5] > 0) {
-        ctx->regs[5] -= ev * (LINE_CYCLES * CYCLE);
-        ctx->line = ctx->event_line;
-    }
-    take_interrupt(j);
-    return host_for(j, ctx->regs[6]);
+    leave_check(j);
+    return host_for(j, j->ctx->regs[6]);
 }
 
 uint32 z80j_io_write(z80j_state *j, uint32 addr, uint32 value)
@@ -1759,6 +1859,10 @@ void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
     ctx->mdata = 0;
     ctx->write_a = JIT_ADDR(z80j_write_generic);
     ctx->wdata = 0;
+    ctx->hot_tab = 0;
+    ctx->ei_saved = 0;
+    ctx->int_leave = 0;
+    ctx->int_runs = 0;
 
     ctx->state = JIT_ADDR(j);
     ctx->exit_reason = Z80J_EXIT_LINES;
@@ -1784,4 +1888,5 @@ void z80j_default_glue(z80j_glue *glue)
     glue->verify = JIT_ADDR(z80j_glue_verify);
     glue->daa = JIT_ADDR(z80j_glue_daa);
     glue->push_slow = JIT_ADDR(z80j_glue_push_slow);
+    glue->interp = JIT_ADDR(z80j_glue_interp);
 }

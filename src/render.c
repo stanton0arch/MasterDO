@@ -110,6 +110,8 @@ void render_free(renderer *r)
     if (r->pluts != NULL) FreeMem(r->pluts, 96 * 2);
     if (r->cels != NULL) FreeMem(r->cels, N_CELS * sizeof(CCB));
     if (r->wlist != NULL) FreeMem(r->wlist, WLIST_WORDS * 4);
+    if (r->dlist != NULL) FreeMem(r->dlist, VDP_TILES * 4);
+    if (r->stamp != NULL) FreeMem(r->stamp, RENDER_NT_CELLS);
     if (r->prev != NULL) FreeMem(r->prev, RENDER_NT_CELLS * 2);
     if (r->next != NULL) FreeMem(r->next, RENDER_NT_CELLS * 2);
     if (r->head != NULL) FreeMem(r->head, VDP_TILES * 2);
@@ -138,13 +140,15 @@ Err render_init(renderer *r)
     r->next = (uint16 *)AllocMem(RENDER_NT_CELLS * 2, PLAIN_MEM);
     r->prev = (uint16 *)AllocMem(RENDER_NT_CELLS * 2, PLAIN_MEM);
     r->wlist = (uint32 *)AllocMem(WLIST_WORDS * 4, PLAIN_MEM);
+    r->dlist = (uint32 *)AllocMem(VDP_TILES * 4, PLAIN_MEM);
+    r->stamp = (uint8 *)AllocMem(RENDER_NT_CELLS, PLAIN_MEM);
     r->cels = (CCB *)AllocMem(N_CELS * sizeof(CCB), CEL_MEM);
     r->pluts = (uint16 *)AllocMem(96 * 2, CEL_MEM);
     r->blank = (uint32 *)AllocMem(16, CEL_MEM);
     r->xtab = (uint32 *)AllocMem(1024 * 4, PLAIN_MEM);
     if (r->bitmap == NULL || r->prio_bm == NULL || r->tiles == NULL || r->tiles_f == NULL || r->shadow == NULL ||
         r->t_ok == NULL || r->head == NULL || r->next == NULL || r->prev == NULL ||
-        r->wlist == NULL || r->cels == NULL || r->pluts == NULL ||
+        r->wlist == NULL || r->dlist == NULL || r->stamp == NULL || r->cels == NULL || r->pluts == NULL ||
         r->blank == NULL || r->xtab == NULL) {
         printf("ERROR: renderer out of memory\n");
         render_free(r);
@@ -264,6 +268,7 @@ static void draw_cell(renderer *r, uint32 i, uint32 e, const uint8 *vram)
     }
     render_cell_copy((uint32 *)(r->bitmap + off), s0, pal, step,
                      (e & 0x1000) ? (uint32 *)(r->prio_bm + off) : 0);
+    r->stamp[i] = (uint8)r->stamp_now;
     r->st.cells++;
 }
 
@@ -331,13 +336,16 @@ static void rebuild(renderer *r, const uint8 *vram)
     r->st.rebuilds++;
 }
 
-/* Redraws the cells of a tile that was written. */
+/* Redraws the cells of a tile that was written, except those drawn
+ * already in this update (an entry change). */
 static void redraw_tile_cells(renderer *r, uint32 t, const uint8 *vram)
 {
     const uint8 *sh = r->shadow;
     uint32 i;
 
     for (i = r->head[t]; i != NONE; i = r->next[i]) {
+        if (r->stamp[i] == (uint8)r->stamp_now)
+            continue;
         draw_cell(r, i, NT_ENTRY(sh, i), vram);
         r->st.tile_cells++;
     }
@@ -801,28 +809,42 @@ void render_update(renderer *r, vdp_state *v)
     if (!r->display_on)
         return;
 
+    /* Each cell is drawn at most once per update: the stamp of the
+     * update marks the cells drawn (a wrap makes a cell drawn 256
+     * updates ago look drawn now, which only costs a redraw). */
+    r->stamp_now = (r->stamp_now + 1) & 0xFF;
+    if (r->stamp_now == 0)
+        memset(r->stamp, 0xFF, RENDER_NT_CELLS);
+
     if (nt_base != r->nt_base || !r->valid) {
         r->nt_base = nt_base;
         rebuild(r, vram);
         rebuilt = 1;
     }
 
-    /* Written tiles: forget their conversions, redraw their cells, note
-     * the name table chunks among them. */
+    /* Written tiles: forget their conversions and note the name table
+     * chunks among them; the changed entries are drawn first (with the
+     * tiles converted again), then the other cells of the written tiles. */
     nt_mask[0] = nt_mask[1] = 0;
-    nd = render_dirty_scan(v->dirty, r->wlist);
+    nd = render_dirty_scan(v->dirty, r->dlist);
     for (k = 0; k < nd; k++) {
-        uint32 j = r->wlist[k];
+        uint32 j = r->dlist[k];
         uint32 d = j - nt_first;
 
         r->t_ok[j] = 0;
-        if (r->head[j] != NONE && !rebuilt)
-            redraw_tile_cells(r, j, vram);
         if (d < NT_CHUNKS)
             nt_mask[d >> 5] |= (uint32)1 << (d & 31);
     }
     if (!rebuilt && (nt_mask[0] | nt_mask[1]) != 0)
         update_entries(r, nt_mask, vram);
+    if (!rebuilt) {
+        for (k = 0; k < nd; k++) {
+            uint32 j = r->dlist[k];
+
+            if (r->head[j] != NONE)
+                redraw_tile_cells(r, j, vram);
+        }
+    }
 
     np = update_pieces(r, v, &npr, &nbl, &any_on);
     if (!any_on) {

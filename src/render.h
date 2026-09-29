@@ -89,7 +89,10 @@ typedef struct {
     uint16 *head;           /* VDP_TILES */
     uint16 *next;           /* RENDER_NT_CELLS */
     uint16 *prev;
-    uint32 *wlist;          /* work list: dirty tiles, changed words, tiles to convert */
+    uint32 *wlist;          /* work list: changed words, tiles to convert */
+    uint32 *dlist;          /* dirty tiles of the update */
+    uint8  *stamp;          /* update in which each cell was last drawn */
+    uint32  stamp_now;
     CCB    *cels;           /* pieces, blank column, sprites, terminator */
     uint16 *pluts;          /* background (32), sprites (32), priority (32) */
     uint32 *blank;          /* 8 x 1 uncoded 16 bpp source of the blank column */

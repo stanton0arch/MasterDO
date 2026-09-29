@@ -110,7 +110,13 @@ typedef struct {
     uint32 mdata;           /* +0x4A8: data of the machine's handlers */
     uint32 write_a;         /* +0x4AC: special write handler (see below) */
     uint32 wdata;           /* +0x4B0: data of that handler */
-    uint32 pad0[19];
+    uint32 hot_tab;         /* +0x4B4: interpreter: entry counts per address, or 0 */
+    uint32 hot_queue_at;    /* +0x4B8: counts at which the interpreter stops */
+    uint32 hot_sync_at;     /* +0x4BC */
+    uint32 ei_saved;        /* +0x4C0: interpreter: T-state counter saved by EI */
+    uint32 int_leave;       /* +0x4C4: interpreter: a write asked to leave */
+    uint32 int_runs;        /* +0x4C8: interpreter: stretches of interpretation */
+    uint32 pad0[13];
     uint8  page_kind[256];  /* +0x500 */
     uint8  pzst[256];       /* +0x600: sign / zero / parity flags of a byte */
     uint8  fenc[256];       /* +0x700: internal flags -> Z80 F */
@@ -204,6 +210,7 @@ typedef struct {
     uint32 verify;          /* RAM block check */
     uint32 daa;             /* DAA on r3 / r4 */
     uint32 push_slow;       /* push to a special page: r0 = value */
+    uint32 interp;          /* interpreter entry (registers in the context) */
 } z80j_glue;
 
 typedef struct {
@@ -223,11 +230,13 @@ typedef struct {
     uint32 nmis;            /* non-maskable interrupts taken */
     uint32 prefetched;      /* blocks translated ahead, in spare time */
     uint32 promoted;        /* blocks translated again after an eviction */
+    uint32 sync;            /* blocks translated at once, hot without spare time */
+    uint32 queue_full;      /* hot addresses dropped for lack of room */
 } z80j_stats;
 
 typedef struct z80j_block z80j_block;
 
-#define Z80J_QUEUE 64           /* static targets waiting to be translated */
+#define Z80J_QUEUE 256          /* hot addresses waiting to be translated */
 
 /* A range of zones filled in turn. */
 typedef struct {
@@ -254,6 +263,14 @@ typedef struct {
  * thus never pushes the code that runs all the time out of the buffer.
  * The code reachable from the entry points, translated before the run,
  * goes straight to the hot area (seed_hot).
+ *
+ * With an interpreter (z80j_set_interp), code is interpreted the first
+ * times it runs: a table counts the entries of each Z80 address, an
+ * address reaching queue_at is queued for translation in spare time
+ * (z80j_prefetch, the hottest first) and one reaching sync_at is
+ * translated at once, within the number the caller allows per frame
+ * (sync_left). Code that runs once never enters the buffer, and
+ * translation mostly leaves the frames of the game for their spare time.
  */
 typedef struct {
     z80j_ctx   *ctx;
@@ -277,12 +294,14 @@ typedef struct {
     uint32      max_links;
     uint32      generation; /* incremented by each flush or eviction */
     int32       error;      /* an instruction could not be encoded */
-    uint32      prefetch;   /* queue the static targets of run-time blocks */
     uint32      seed_hot;   /* translate straight into the hot area (code */
                             /* reachable from the entry points, before the run) */
-    uint32      queue[Z80J_QUEUE];
-    uint32      qhead;
-    uint32      qtail;
+    uint8      *hot;        /* entry counts per Z80 address (0: no interpreter) */
+    uint32      queue_at;
+    uint32      sync_at;
+    uint32      sync_left;  /* translations at once still allowed (set per frame) */
+    uint32      queue[Z80J_QUEUE];  /* unordered; the hottest goes first */
+    uint32      nqueue;
     z80j_stats  stats;
 } z80j_state;
 
@@ -306,9 +325,13 @@ void   z80j_reset(z80j_ctx *ctx);
 /* Forgets every translation. */
 void   z80j_flush(z80j_state *j);
 
-/* Translates one block waiting in the queue of static targets (filled by
- * the run-time translations while j->prefetch is set); returns 0 when
- * the queue is empty. Meant for the spare time at the end of a frame. */
+/* Enables the interpreter: hot is a table of 65536 entry counts, cleared
+ * here; an address is queued for translation when its count reaches
+ * queue_at and translated at once when it reaches sync_at. */
+void   z80j_set_interp(z80j_state *j, uint8 *hot, uint32 queue_at, uint32 sync_at);
+
+/* Translates one queued hot address; returns 0 when the queue is empty.
+ * Meant for the spare time at the end of a frame. */
 uint32 z80j_prefetch(z80j_state *j);
 
 /* Translates the block at pc if needed, and reports its static exits
@@ -325,6 +348,8 @@ void   z80j_insn_info(const z80j_ctx *ctx, uint32 pc, uint32 *len, uint32 *t,
  * jump to (0: the run is over); the registers are in the context for
  * entry, stretch end and leave. */
 uint32 z80j_translate(z80j_state *j, uint32 pc);
+/* These two return 0 when the code at the address must be interpreted
+ * instead (the address is then in regs[6]). */
 uint32 z80j_retranslate(z80j_state *j, uint32 pc);
 uint32 z80j_link(z80j_state *j, uint32 data);
 uint32 z80j_entry(z80j_state *j, int32 lines);
@@ -332,9 +357,13 @@ uint32 z80j_stretch_end(z80j_state *j);
 uint32 z80j_leave(z80j_state *j);
 uint32 z80j_io_write(z80j_state *j, uint32 addr, uint32 value);
 void   z80j_push_slow(z80j_state *j, uint32 sp, uint32 value);
+/* The interpreter reached an address whose entry count hit a threshold
+ * (regs[6]): translated now, or queued and interpreted on. */
+uint32 z80j_hot(z80j_state *j);
 
-/* Implemented in z80jit_glue.s. */
+/* Implemented in z80jit_glue.s and z80int_a.s (the interpreter). */
 void   z80j_run(z80j_ctx *ctx, int32 lines);
+void   z80i_loop(void);
 void   z80j_glue_link(void);
 void   z80j_glue_miss(void);
 void   z80j_glue_seg_timeout(void);
@@ -344,6 +373,7 @@ void   z80j_glue_abort(void);
 void   z80j_glue_io_in(void);
 void   z80j_glue_io_out(void);
 void   z80j_glue_io_outn(void);
+void   z80j_glue_interp(void);
 
 /* Generic port handlers (machine C callbacks), for the port tables. */
 void   z80j_port_in_c(void);

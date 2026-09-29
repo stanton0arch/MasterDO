@@ -25,6 +25,9 @@
         EXPORT  z80j_glue_io_in
         EXPORT  z80j_glue_io_out
         EXPORT  z80j_glue_io_outn
+        EXPORT  z80j_glue_interp
+        EXPORT  jit_save
+        EXPORT  jit_continue
         EXPORT  z80j_port_in_c
         EXPORT  z80j_port_out_c
         EXPORT  z80j_port_outn_loop
@@ -44,6 +47,7 @@
         IMPORT  z80j_leave
         IMPORT  z80j_io_write
         IMPORT  z80j_push_slow
+        IMPORT  z80i_loop
 
 ; Context fields, relative to the global pointer (= &ctx->wtab[0]).
 GLOBAL          EQU     0x400           ; global pointer - context
@@ -100,15 +104,35 @@ z80j_run
         str     r12,[r2,#EXIT_REASON]
         mov     r10,r2
         callc   z80j_entry              ; r1 = lines
-jit_continue                            ; r0 = code to run, 0: the run is over
-        teq     r0,#0
+jit_continue                            ; r0 = code to run, 0: the run is over,
+        teq     r0,#0                   ; or the interpreter entry
         ldmeqfd sp!,{r4-r11,pc}
+        adr     r1,z80j_glue_interp
+        cmp     r0,r1
+        beq     z80j_glue_interp
 jit_enter                               ; registers in the context
         mov     r12,r0
         add     r0,r10,#REGS
         ldmia   r0,{r3-r9,r11}
         ldr     r9,[r10,#IX]
         mov     pc,r12
+
+;----------------------------------------------------------------------------
+; Interpreter (z80int_a.s): runs with the registers of the generated code
+; and the Z80 PC in r12, from the context here, until translated code is
+; reached or the stretch ends.
+;----------------------------------------------------------------------------
+z80j_glue_interp
+        add     r0,r10,#REGS
+        ldmia   r0,{r3-r9,r11}
+        mov     r12,r9                  ; PC
+        ldr     r9,[r10,#IX]
+        b       z80i_loop
+
+; Live registers, Z80 PC in the context: to the interpreter.
+jit_to_interp
+        ldr     r12,[r10,#R_PC]
+        b       z80i_loop
 
 ; Registers to the context. In: r0 = Z80 PC.
 jit_save
@@ -146,7 +170,7 @@ z80j_glue_leave
         add     r8,r8,r1
         bl      jit_save
         callc   z80j_leave
-        b       jit_enter
+        b       jit_continue
 
 ;----------------------------------------------------------------------------
 ; HALT: the rest of the stretch goes by idle, and so do the next ones until
@@ -167,8 +191,14 @@ z80j_glue_halt
 ; Untranslated code, or code of another bank. In: r0 = Z80 PC.
 ;----------------------------------------------------------------------------
 z80j_glue_miss
+        str     r0,[r10,#R_PC]
         mov     r1,r0
         callc   z80j_translate
+        adr     r1,z80j_glue_interp
+        cmp     r0,r1
+        bne     jit_go                  ; translated
+        b       jit_to_interp
+jit_go
         mov     pc,r0
 
 ;----------------------------------------------------------------------------
@@ -178,7 +208,9 @@ z80j_glue_miss
 z80j_glue_link
         mov     r1,lr
         callc   z80j_link
-        mov     pc,r0
+        teq     r0,#0
+        movne   pc,r0
+        b       jit_to_interp           ; the target is interpreted
 
 ;----------------------------------------------------------------------------
 ; Translation failed: exit_reason and exit_arg (Z80 PC) set by C.
@@ -333,7 +365,9 @@ verify_loop
 verify_fail
         ldmfd   sp!,{r1}
         callc   z80j_retranslate
-        mov     pc,r0
+        teq     r0,#0
+        movne   pc,r0
+        b       jit_to_interp           ; the code is interpreted
 
 ;----------------------------------------------------------------------------
 ; void z80j_fill_words(uint32 *dst, uint32 count, uint32 value)

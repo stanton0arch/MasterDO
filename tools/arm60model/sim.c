@@ -585,6 +585,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-bench")) args[1] = 1;
         else if (!strcmp(argv[i], "-dump") && i + 1 < argc) args[2] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-from") && i + 1 < argc) args[3] = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-interp")) args[4] = 1;
     }
     mem = calloc(1, MEM_SIZE);
     execmap = calloc(1, MEM_SIZE / 4);

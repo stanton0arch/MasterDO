@@ -17,7 +17,7 @@
 
 #define GAME_WINDOW     100     /* frames per log line */
 #define GAME_HIST       32      /* frame time histogram, 1 ms per bucket */
-#define GAME_SLOW_LOGS  40      /* frames over the NTSC budget logged alone */
+#define GAME_SLOW_LOGS  120     /* frames over the NTSC budget logged alone */
 
 /* Cumulative counters of the machine and the translator. */
 typedef struct {
@@ -31,6 +31,8 @@ typedef struct {
     uint32 evicted;         /* blocks lost to them */
     uint32 prefetched;      /* blocks translated in spare time */
     uint32 promoted;        /* blocks translated again into the hot area */
+    uint32 interp;          /* stretches of interpretation */
+    uint32 sync;            /* hot blocks translated at once */
     uint32 vdp_data_w;
     uint32 vdp_data_r;
     uint32 vdp_ctrl_w;
@@ -63,6 +65,7 @@ typedef struct {
     uint32       *code;
     void         *blocks;
     uint32       *links;
+    uint8        *hot;      /* entry counts of the interpreter */
     sms_machine  *sms;
     renderer     *rd;
     z80j_state    jit;
@@ -105,6 +108,7 @@ typedef struct {
     uint32        f_data;
     uint32        f_tiles;
     uint32        f_cells;
+    uint32        f_interp;
 } game;
 
 /* Allocates the translator and the machine for a cartridge image. */

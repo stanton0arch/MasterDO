@@ -232,7 +232,12 @@ void hmain(void)
         return;
     if (game_init(&g, rom, size) != 0)
         return;
-    game_translate_rom(&g);
+    if (sim_arg(4)) {
+        /* -interp: nothing is translated, everything is interpreted. */
+        z80j_set_interp(&g.jit, g.hot, 255, 255);
+    } else {
+        game_translate_rom(&g);
+    }
     game_reset(&g);
     for (f = 0; f < frames; f++) {
         uint32 pad = sim_pad(f);
