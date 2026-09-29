@@ -1,0 +1,3 @@
+ARM Linker: (Warning) -bin output file format will not be supported by future releases of armlink.
+ARM Linker: (Warning) No entry point for image.
+ARM Linker: finished,  0 informational, 2 warning and 0 error messages.

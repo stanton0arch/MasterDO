@@ -1,0 +1,148 @@
+#ifndef RENDER_H_INCLUDED
+#define RENDER_H_INCLUDED
+
+/*
+ * Picture of the SMS VDP with the CEL engine.
+ *
+ * Background: the whole name table (32 x 28 cells) is kept as a 256 x 224
+ * bitmap in the 8 bpp coded cel format (pixel = colour index 0-31, the two
+ * halves of the colour RAM as one 32-entry PLUT). A cell is redrawn into
+ * it only when its name table entry changes or when its tile is written,
+ * flips being applied by the copy. The visible 256 x 192 window is then a
+ * few rectangular pieces of that bitmap, one cel each: the horizontal and
+ * vertical scroll wraps, the scroll inhibit bits of register 0 and the
+ * horizontal scroll changes recorded during the active display (bands)
+ * only add pieces. Pieces are positioned in the clip window of the
+ * bitmap they are drawn into, which the caller sets to the picture.
+ *
+ * Sprites: one 8 bpp coded cel per active sprite (8x8 or 8x16), colour 0
+ * transparent, drawn after the background in reverse order so that
+ * sprite 0 ends on top. The 8 per line limit and zoom are left for a
+ * later step.
+ *
+ * Display enable: changes of register 1 bit 6 recorded during the active
+ * display split the picture like the scroll bands: the background and
+ * the strips are only drawn on the lines where the display is on, and
+ * the other lines are covered, after the sprites, by rectangles of the
+ * backdrop colour. A picture with no line on is not drawn at all
+ * (render_display_on() is 0): the caller fills it with the backdrop.
+ *
+ * Priority tiles: a second bitmap holds the pixels of the cells whose
+ * entry has the priority bit (zero elsewhere). After the sprites, the
+ * rows of cells that hold priority cells are drawn from it as strips
+ * with a PLUT whose colour 0 of both palettes is 000, transparent: their
+ * other pixels cover the sprites as on the hardware. Rows without
+ * priority cells cost nothing.
+ *
+ * Tiles are converted from the VDP's planar format into 8 bpp rows of 8
+ * bytes (two words) the first time a cell or a sprite needs them after
+ * they were written; the horizontally flipped copy has its own store.
+ *
+ * The caller: render_update() after each emulated frame, then, if the
+ * display is on, DrawCels(bitmap, render_chain()) into a bitmap whose clip
+ * window is the 256 x 192 picture; the border around the picture and the
+ * whole picture while the display is off take the backdrop colour
+ * (render_backdrop()).
+ */
+
+#include "types.h"
+#include "graphics.h"
+#include "vdp.h"
+
+#define RENDER_W        256
+#define RENDER_H        192
+#define RENDER_NT_COLS  32
+#define RENDER_NT_ROWS  28
+#define RENDER_NT_CELLS (RENDER_NT_COLS * RENDER_NT_ROWS)
+#define RENDER_NT_BYTES 0x700
+#define RENDER_BM_H     (RENDER_NT_ROWS * 8)        /* 224 */
+#define RENDER_MAX_PIECES 48
+#define RENDER_MAX_PRIO   96        /* priority strips */
+#define RENDER_MAX_DBLANK (VDP_DE_LOG + 1)  /* blanked line ranges */
+#define RENDER_SPRITES  64
+
+/* Cumulative counters, logged as differences by the caller. */
+typedef struct {
+    uint32 tiles;           /* tile conversions (either store) */
+    uint32 cells;           /* cells redrawn into the bitmap */
+    uint32 rebuilds;        /* whole bitmap rebuilt (name table base moved) */
+    uint32 tile_cells;      /* cells redrawn because their tile was written */
+    uint32 palettes;        /* PLUT rebuilds */
+    uint32 backdrops;       /* backdrop colour changes */
+    uint32 sprites;         /* sprite cels set up */
+    uint32 pieces;          /* background pieces */
+    uint32 prio_strips;     /* priority strips */
+    uint32 bands;           /* frames with more than one scroll band */
+    uint32 dbands;          /* frames with the display off on some lines */
+    uint32 dropped;         /* bands beyond the piece capacity */
+} render_stats;
+
+typedef struct {
+    uint8  *bitmap;         /* RENDER_W x RENDER_BM_H, 8 bpp */
+    uint8  *prio_bm;        /* same, priority cells only */
+    uint32 *tiles;          /* VDP_TILES x 16 words */
+    uint32 *tiles_f;        /* horizontally flipped copies */
+    uint8  *shadow;         /* name table bytes as drawn (RENDER_NT_BYTES) */
+    uint8  *t_ok;           /* tile converted (bit 0: tiles, bit 1: tiles_f) */
+    /* Cells using each tile, as doubly linked lists (RENDER_NT_CELLS
+     * means none), so that a written tile only redraws its cells. */
+    uint16 *head;           /* VDP_TILES */
+    uint16 *next;           /* RENDER_NT_CELLS */
+    uint16 *prev;
+    uint32 *wlist;          /* work list: dirty tiles, changed words, tiles to convert */
+    CCB    *cels;           /* pieces, blank column, sprites, terminator */
+    uint16 *pluts;          /* background (32), sprites (32), priority (32) */
+    uint32 *blank;          /* 8 x 1 uncoded 16 bpp source of the blank column */
+    uint32 *xtab;           /* expansion tables (4 x 256 words) */
+    uint8   prio_rows[RENDER_NT_ROWS];  /* priority cells per row */
+    uint8   prio_min[RENDER_NT_ROWS];   /* their column range */
+    uint8   prio_max[RENDER_NT_ROWS];
+    uint8   prio_dirty[RENDER_NT_ROWS]; /* range to recompute */
+    uint32  nt_base;        /* VRAM address of the name table drawn */
+    uint32  valid;          /* shadow and lists describe the bitmap */
+    uint32  backdrop;       /* RGB 5:5:5 */
+    uint32  display_on;
+    uint32  n_sprites;
+    uint32  spr_tall;       /* sprite cels set up for 8x16 sprites */
+    CCB    *chain;          /* first cel to draw */
+    CCB    *last_cel;       /* the cel carrying CCB_LAST */
+    render_stats st;
+} renderer;
+
+Err   render_init(renderer *r);
+void  render_free(renderer *r);
+
+/* Forgets the picture: everything is rebuilt at the next update. */
+void  render_reset(renderer *r);
+
+/* Brings the bitmap, the pieces and the sprite cels up to date with the
+ * VDP; clears the VDP's dirty flags. */
+void  render_update(renderer *r, vdp_state *v);
+
+/* Assembly helpers (render_a.s). CONTRACT: render_sprite_args matches
+ * the SA_* equates of render_a.s. */
+typedef struct {
+    uint32 *tiles;
+    uint8  *t_ok;
+    uint32  tbase;          /* 0 or 256 */
+    uint32  tmask;          /* 0xFF, or 0xFE for tall sprites */
+    uint32  xoff;           /* 0 or 8 */
+    uint32 *need;           /* tiles whose conversion is missing */
+    uint32  tall;           /* 0 or 1 */
+} render_sprite_args;
+
+/* Indices of the words of the dirty name table chunks that differ from
+ * the shadow; returns their count. */
+uint32 render_nt_scan(const uint32 *nt, const uint32 *shadow, const uint32 *mask,
+                      uint32 *out);
+/* Indices of the dirty tiles, which are cleared; returns their count. */
+uint32 render_dirty_scan(uint8 *dirty, uint32 *out);
+/* Source and position of the cels of sprites 0 to n - 1; returns the
+ * number of tiles appended to a->need. */
+uint32 render_sprites(const uint8 *sat, uint32 n, CCB *cel, const render_sprite_args *a);
+
+#define render_chain(r)     ((r)->chain)
+#define render_backdrop(r)  ((r)->backdrop)
+#define render_display_on(r) ((r)->display_on)
+
+#endif /* RENDER_H_INCLUDED */
