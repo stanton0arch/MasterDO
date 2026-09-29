@@ -112,6 +112,8 @@ typedef struct {
     uint32  fused;          /* FU_* valid in the ARM flags for the next jump */
     int32   internal;       /* index of the target inside the block, or -1 */
     uint32  busy;           /* jump back of a busy-wait loop */
+    uint32  irq_check;      /* instruction after EI: check for a pending */
+                            /* interrupt after it */
     uint32  run;            /* first of a run of OUTI / OUTD: its length; */
                             /* RUN_PART for the others */
     uint32 *host;           /* generated code of the instruction */
@@ -144,9 +146,9 @@ typedef struct {
 struct z80j_block {
     uint32      pc;         /* Z80 address */
     uint32      key;        /* page kind and bank of the code */
-    uint32     *entry;      /* generated code, entry check included */
+    uint32     *entry;      /* generated code, entry check included; 0: free */
     uint32     *body;       /* generated code after the entry check */
-    z80j_block *next;       /* hash chain */
+    z80j_block *next;       /* hash chain, or free list */
 };
 
 #define SCAN_MEMO 16
@@ -184,5 +186,9 @@ uint32 jit_byte(const z80j_ctx *ctx, uint32 addr);
 /* Generated code of an exit to target from a block of key from_key, or 0
  * when the target is not translated yet. */
 uint32 jit_link_host(z80j_state *j, uint32 target, uint32 from_key);
+/* Makes the link stub whose data words are at d (target, conditional
+ * jump site or 0, key), preceded by its call to the linker, a direct
+ * branch to host, and logs it; does nothing when the log is full. */
+void   jit_link_stub(z80j_state *j, uint32 *d, uint32 host);
 
 #endif /* Z80JIT_INT_H */

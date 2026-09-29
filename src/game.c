@@ -9,10 +9,18 @@
 #include "string.h"
 #include "mem.h"
 
-#define JIT_CODE_BYTES  (256 * 1024)
-#define JIT_BLOCKS      2048
+#define JIT_ZONE_BYTES  (32 * 1024)
+#define JIT_ZONES       14
+#define JIT_HOT_ZONES   10
+#define JIT_CODE_BYTES  (JIT_ZONE_BYTES * JIT_ZONES)
+#define JIT_BLOCKS      3072
+#define JIT_LINKS       (2 * JIT_BLOCKS)
 #define ROM_QUEUE       1024
 #define ROM_MAX_BLOCKS  4000
+
+/* Spare-time translation goes on while the frame is under this, leaving
+ * room for the translation of one block before the budget. */
+#define SPARE_LIMIT_US  (PLAT_NTSC_FRAME_US - 2500)
 
 #define FRAME_T         (VDP_LINES_NTSC * VDP_LINE_T)   /* T-states per frame */
 
@@ -24,6 +32,10 @@ static void read_counters(const game *g, game_counters *c)
     c->banks = g->sms->mem.remaps;
     c->blocks = g->jit.stats.translations;
     c->flushes = g->jit.stats.flushes;
+    c->evictions = g->jit.stats.evictions;
+    c->evicted = g->jit.stats.evicted;
+    c->prefetched = g->jit.stats.prefetched;
+    c->promoted = g->jit.stats.promoted;
     c->vdp_data_w = g->sms->vdp.n_data_w;
     c->vdp_data_r = g->sms->vdp.n_data_r;
     c->vdp_ctrl_w = g->sms->vdp.n_ctrl_w;
@@ -67,11 +79,13 @@ void game_free(game *g)
     }
     if (g->sms != NULL) FreeMem(g->sms, sizeof(sms_machine));
     if (g->blocks != NULL) FreeMem(g->blocks, (int32)z80j_block_bytes(JIT_BLOCKS));
+    if (g->links != NULL) FreeMem(g->links, (int32)z80j_link_bytes(JIT_LINKS));
     if (g->code != NULL) FreeMem(g->code, JIT_CODE_BYTES);
     if (g->ctx != NULL) FreeMem(g->ctx, sizeof(z80j_ctx));
     g->rd = NULL;
     g->sms = NULL;
     g->blocks = NULL;
+    g->links = NULL;
     g->code = NULL;
     g->ctx = NULL;
 }
@@ -86,13 +100,15 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
     g->ctx = (z80j_ctx *)AllocMem(sizeof(z80j_ctx), MEMTYPE_DRAM | MEMTYPE_FILL);
     g->code = (uint32 *)AllocMem(JIT_CODE_BYTES, MEMTYPE_DRAM);
     g->blocks = AllocMem((int32)z80j_block_bytes(JIT_BLOCKS), MEMTYPE_DRAM);
+    g->links = (uint32 *)AllocMem((int32)z80j_link_bytes(JIT_LINKS), MEMTYPE_DRAM);
     g->sms = (sms_machine *)AllocMem(sizeof(sms_machine), MEMTYPE_DRAM);
     g->rd = (renderer *)AllocMem(sizeof(renderer), MEMTYPE_DRAM | MEMTYPE_FILL);
-    if (g->ctx == NULL || g->code == NULL || g->blocks == NULL || g->sms == NULL ||
-        g->rd == NULL) {
-        printf("ERROR: out of memory for the machine (%lu + %lu + %lu + %lu bytes)\n",
+    if (g->ctx == NULL || g->code == NULL || g->blocks == NULL || g->links == NULL ||
+        g->sms == NULL || g->rd == NULL) {
+        printf("ERROR: out of memory for the machine (%lu + %lu + %lu + %lu + %lu bytes)\n",
                (unsigned long)sizeof(z80j_ctx), (unsigned long)JIT_CODE_BYTES,
-               (unsigned long)z80j_block_bytes(JIT_BLOCKS), (unsigned long)sizeof(sms_machine));
+               (unsigned long)z80j_block_bytes(JIT_BLOCKS), (unsigned long)z80j_link_bytes(JIT_LINKS),
+               (unsigned long)sizeof(sms_machine));
         game_free(g);
         return -1;
     }
@@ -101,7 +117,8 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
         return -1;
     }
     z80j_default_glue(&glue);
-    z80j_init(&g->jit, g->ctx, g->code, JIT_CODE_BYTES / 4, g->blocks, JIT_BLOCKS, &glue);
+    z80j_init(&g->jit, g->ctx, g->code, JIT_CODE_BYTES / 4, JIT_ZONES, JIT_HOT_ZONES,
+              g->blocks, JIT_BLOCKS, g->links, JIT_LINKS, &glue);
     sms_init(g->sms, g->ctx, rom, rom_size, VDP_LINES_NTSC);
     game_reset(g);
     return 0;
@@ -132,10 +149,11 @@ void game_translate_rom(game *g)
     queue[tail++] = 0x0066;
 
     t0 = plat_usec_now();
+    j->prefetch = 0;
+    j->seed_hot = 1;
     while (head != tail && g->rom_blocks < ROM_MAX_BLOCKS) {
         uint32 pc = queue[head];
-        uint32 *before = j->cur;
-        uint32 generation = j->generation;
+        uint32 bytes = j->stats.code_bytes;
         uint32 n;
         uint32 nt;
 
@@ -148,7 +166,7 @@ void game_translate_rom(game *g)
             continue;
         g->rom_blocks++;
         g->rom_insns += n;
-        g->rom_bytes += 4u * (uint32)(j->generation == generation ? j->cur - before : j->cur - j->code);
+        g->rom_bytes += j->stats.code_bytes - bytes;
         for (k = 0; k < nt; k++) {
             uint32 tg = targets[k] & 0xFFFFu;
 
@@ -161,16 +179,20 @@ void game_translate_rom(game *g)
     }
     g->rom_us = plat_usec_now() - t0;
     g->rom_busy = j->stats.busy_loops - busy0;
+    j->seed_hot = 0;
+    j->prefetch = 1;
 
     FreeMem(queue, ROM_QUEUE * 4);
     FreeMem(visited, 0x10000 / 8);
 
     printf("ROM translation: %lu blocks, %lu instructions, %lu bytes of ARM code, %lu us "
-           "(%lu us per instruction), %lu busy-wait loops, %lu flushes\n",
+           "(%lu us per instruction), %lu busy-wait loops, %lu evictions; code buffer "
+           "%d zones of %d bytes (%d hot), %d block descriptors, %d link entries\n",
            (unsigned long)g->rom_blocks, (unsigned long)g->rom_insns,
            (unsigned long)g->rom_bytes, (unsigned long)g->rom_us,
            (unsigned long)(g->rom_insns ? g->rom_us / g->rom_insns : 0),
-           (unsigned long)g->rom_busy, (unsigned long)j->stats.flushes);
+           (unsigned long)g->rom_busy, (unsigned long)j->stats.evictions,
+           JIT_ZONES, JIT_ZONE_BYTES, JIT_HOT_ZONES, JIT_BLOCKS, JIT_LINKS);
 }
 
 void game_reset(game *g)
@@ -221,7 +243,8 @@ static void log_window(game *g)
            "%lu draw errors, %lu long presents, Z80 idle %lu%%, "
            "%lu IRQ, %lu NMI, VDP %lu data writes, %lu data reads, %lu control writes, "
            "%lu status reads, %lu counter reads, PSG %lu, pad %lu, other %lu, %lu leaves, "
-           "%lu bank switches, %lu blocks, %lu flushes, pad read %lu us\n",
+           "%lu bank switches, %lu blocks (%lu ahead, %lu promoted, %lu us of spare time), "
+           "%lu evictions (%lu blocks), pad read %lu us\n",
            (unsigned long)first, (unsigned long)(g->frame - 1),
            (unsigned long)g->win_avg_us, (unsigned long)w->max_us,
            (unsigned long)w->max_frame,
@@ -237,7 +260,9 @@ static void log_window(game *g)
            (unsigned long)d.io.counter_r, (unsigned long)d.io.psg_w,
            (unsigned long)d.io.pad_r, (unsigned long)d.io.other,
            (unsigned long)d.io.leaves, (unsigned long)d.banks, (unsigned long)d.blocks,
-           (unsigned long)d.flushes, (unsigned long)(w->pad_us / w->frames));
+           (unsigned long)d.prefetched, (unsigned long)d.promoted, (unsigned long)w->spare_us,
+           (unsigned long)d.evictions, (unsigned long)d.evicted,
+           (unsigned long)(w->pad_us / w->frames));
     printf("Picture: frames %lu-%lu: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
            "%lu cells for written tiles, %lu palettes, %lu backdrop changes, %lu sprite cels, "
            "%lu pieces, %lu priority strips, %lu frames in scroll bands, %lu frames partly blanked, "
@@ -262,7 +287,7 @@ int32 game_frame(game *g, uint32 pad, uint32 pause)
         return g->status;
     idle0 = ctx->idle;
     g->f_blocks = g->jit.stats.translations;
-    g->f_flush = g->jit.stats.flushes;
+    g->f_flush = g->jit.stats.evictions;
     g->f_data = g->sms->vdp.n_data_w;
     g->f_tiles = g->rd->st.tiles;
     g->f_cells = g->rd->st.cells;
@@ -318,7 +343,7 @@ void game_frame_done(game *g, uint32 draw_us)
                    (unsigned long)g->last_upd_us, (unsigned long)draw_us,
                    (unsigned long)percent(g->f_idle, FRAME_T),
                    (unsigned long)(g->jit.stats.translations - g->f_blocks),
-                   g->jit.stats.flushes != g->f_flush ? " after a code buffer flush" : "",
+                   g->jit.stats.evictions != g->f_flush ? " after an eviction" : "",
                    (unsigned long)(g->sms->vdp.n_data_w - g->f_data),
                    (unsigned long)(g->rd->st.tiles - g->f_tiles),
                    (unsigned long)(g->rd->st.cells - g->f_cells));
@@ -356,6 +381,20 @@ void game_pad_time(game *g, uint32 us)
     g->win.pad_us += us;
 }
 
+uint32 game_spare_time(game *g, uint32 frame_start)
+{
+    uint32 t0 = plat_usec_now();
+    uint32 now = t0;
+
+    while (now - frame_start < SPARE_LIMIT_US) {
+        if (!z80j_prefetch(&g->jit))
+            break;
+        now = plat_usec_now();
+    }
+    g->win.spare_us += now - t0;
+    return now - t0;
+}
+
 void game_note_draw_error(game *g)
 {
     g->win.draw_err++;
@@ -380,8 +419,8 @@ void game_log_summary(const game *g)
     printf("Game summary: %lu frames, emulation %lu us average (%lu%% of %d us), worst %lu us "
            "(frame %lu), update %lu us average, draw %lu us average, total %lu us average "
            "(%lu%%), worst %lu us (frame %lu), %lu frames over %d us, Z80 idle %lu%%, %lu IRQ, "
-           "%lu NMI, %lu bank switches, %lu blocks translated while running, %lu flushes, "
-           "%lu busy-wait loops found, status %ld\n",
+           "%lu NMI, %lu bank switches, %lu blocks translated while running (%lu ahead, "
+           "%lu promoted), %lu evictions (%lu blocks), %lu busy-wait loops found, status %ld\n",
            (unsigned long)n, (unsigned long)avg,
            (unsigned long)percent(avg, PLAT_NTSC_FRAME_US), PLAT_NTSC_FRAME_US,
            (unsigned long)g->max_us, (unsigned long)g->max_frame,
@@ -392,7 +431,8 @@ void game_log_summary(const game *g)
            (unsigned long)g->over, PLAT_NTSC_FRAME_US,
            (unsigned long)percent(g->idle_t16, n * (FRAME_T / 16)),
            (unsigned long)d.irqs, (unsigned long)d.nmis, (unsigned long)d.banks,
-           (unsigned long)d.blocks, (unsigned long)d.flushes,
+           (unsigned long)d.blocks, (unsigned long)d.prefetched, (unsigned long)d.promoted,
+           (unsigned long)d.evictions, (unsigned long)d.evicted,
            (unsigned long)g->jit.stats.busy_loops, (long)g->status);
     printf("Game summary: picture: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
            "%lu cells for written tiles, %lu palettes, %lu sprite cels, %lu pieces, %lu priority strips, "

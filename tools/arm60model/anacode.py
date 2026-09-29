@@ -59,6 +59,13 @@ while i < n:
             cat['stub z80j_glue_verify'] += k
             i += k
             continue
+        # A link stub already resolved: a plain branch followed by its
+        # data words (Z80 target, jump site or 0, block key).
+        if not link and name is None and i + 3 < n and words[i + 1] < 0x10000 and \
+                (words[i + 2] == 0 or code <= words[i + 2] < cur) and words[i + 3] < 0x90000:
+            cat['stub z80j_glue_link (resolved)'] += 4
+            i += 4
+            continue
         cat['branch' + (' to ' + name if name else '')] += 1
     elif kind in (2, 3):
         cat['load/store'] += 1

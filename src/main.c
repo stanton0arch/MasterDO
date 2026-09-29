@@ -1,7 +1,8 @@
 /*
- * Step 3: the cartridge runs on the Z80 translator with the VDP core, and
+ * Step 3b: the cartridge runs on the Z80 translator with the VDP core, and
  * its picture is drawn every frame with the CEL engine (background bitmap
- * pieces and sprite cels, render.c).
+ * pieces and sprite cels, render.c). The spare time at the end of a frame
+ * goes to the translation of code the game is about to reach.
  *
  * Boot: display, cartridge image, the CPU and CEL benchmarks of steps 0
  * and 1 (logged), then the code reachable in the cartridge is translated
@@ -70,7 +71,7 @@ static void text_line(const platform *p, int32 screen, int32 line, Color color,
 static void show_message(platform *p, const char *text)
 {
     plat_clear(p, p->back);
-    text_line(p, p->back, 0, COLOR_TITLE, "MASTERDO - STEP 3");
+    text_line(p, p->back, 0, COLOR_TITLE, "MASTERDO - STEP 3B");
     text_line(p, p->back, 2, COLOR_TEXT, text);
     plat_present(p);
 }
@@ -255,6 +256,7 @@ static void run_game(platform *p, app_state *st)
         }
         draw_us = draw_picture(p, st);
         game_frame_done(&g, draw_us);
+        game_spare_time(&g, t0);
         plat_present(p);
         if (st->locked && plat_usec_now() - shown < LONG_VBL_US)
             plat_wait_vbl(p);
@@ -311,7 +313,7 @@ static void draw_results(platform *p, const app_state *st)
     uint32 frames = g.frame ? g.frame : 1;
 
     plat_clear(p, s);
-    text_line(p, s, n++, COLOR_TITLE, "MASTERDO - STEP 3 RESULTS");
+    text_line(p, s, n++, COLOR_TITLE, "MASTERDO - STEP 3B RESULTS");
     if (st->rom.size <= 0)
         sprintf(buf, "ROM not loaded (0x%lx)", (unsigned long)st->rom.size);
     else
@@ -365,7 +367,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo step 3: cartridge run with the picture drawn by the CEL engine\n");
+    printf("masterdo step 3b: cartridge run with the picture drawn by the CEL engine, optimisation pass\n");
     if (plat_init(&plat) < 0)
         return 1;
     memset(&st, 0, sizeof(st));

@@ -105,9 +105,16 @@ static __inline void dp_i(z80j_state *j, uint32 cond, uint32 op, uint32 s,
     uint32 enc = value;
 
     if (value >= 256) {
-        enc = arm_imm(value);
+        /* The usual forms of the generated code: a byte in bits 16-23 or
+         * 24-31 (register pairs and A). */
+        if ((value & 0xFF00FFFFu) == 0)
+            enc = (8u << 8) | (value >> 16);
+        else if ((value & 0x00FFFFFFu) == 0)
+            enc = (4u << 8) | (value >> 24);
+        else
+            enc = arm_imm(value);
         if (enc == IMM_NONE)
-            j->error = 1;
+            j->error = 1;               /* immediate not encodable */
     }
     emit(j, (cond << 28) | (1u << 25) | (op << 21) | (s << 20) |
             (rn << 16) | (rd << 12) | enc);
@@ -148,7 +155,7 @@ static __inline void mem_i(z80j_state *j, uint32 cond, uint32 load, uint32 byte,
         off = -off;
     }
     if (off > 4095)
-        j->error = 1;
+        j->error = 2;                   /* offset out of range */
     emit(j, (cond << 28) | (1u << 26) | (1u << 24) | (up << 23) | (byte << 22) |
             (load << 20) | (rn << 16) | (rd << 12) | ((uint32)off & 0xFFFu));
 }
@@ -195,6 +202,18 @@ static void emit_mrs(z80j_state *j, uint32 rd)
     emit(j, (C_AL << 28) | 0x010F0000u | (rd << 12));
 }
 
+/* LDM / STM rn,{list} without write-back: increment after (db = 0) or
+ * decrement before (db = 1, the words below rn). */
+static void emit_ldm(z80j_state *j, uint32 rn, uint32 list, uint32 db)
+{
+    emit(j, (C_AL << 28) | (db ? 0x09100000u : 0x08900000u) | (rn << 16) | list);
+}
+
+static void emit_stm(z80j_state *j, uint32 rn, uint32 list, uint32 db)
+{
+    emit(j, (C_AL << 28) | (db ? 0x09000000u : 0x08800000u) | (rn << 16) | list);
+}
+
 /* rd = value (32 bits), one to four instructions. */
 static void emit_mov32(z80j_state *j, uint32 rd, uint32 value)
 {
@@ -235,7 +254,7 @@ static jit_stub *new_stub(jit_block_ctx *b, uint32 kind)
     jit_stub *s = &b->stubs[b->nstubs++];
 
     if (b->nstubs > MAX_STUBS)
-        b->j->error = 1;
+        b->j->error = 3;                /* too many stubs */
     s->kind = kind;
     s->site = b->j->cur;
     s->pc = 0;
@@ -540,24 +559,32 @@ static void set8(z80j_state *j, uint32 r, uint32 idx, opnd o)
         rp = pair_of(j, r, idx, RLR);
     }
     if ((r & 1) == 0) {                         /* high byte */
-        dp_i(j, C_AL, OP_AND, 0, rp, rp, 0x00FF0000u);
-        if (o.is_imm)
+        if (o.is_imm && o.imm == 0) {
+            dp_i(j, C_AL, OP_BIC, 0, rp, rp, 0xFF000000u);
+        } else if (o.is_imm) {
+            dp_i(j, C_AL, OP_AND, 0, rp, rp, 0x00FF0000u);
             dp_i(j, C_AL, OP_ORR, 0, rp, rp, o.imm << 24);
-        else
+        } else {
+            dp_i(j, C_AL, OP_AND, 0, rp, rp, 0x00FF0000u);
             dp_r(j, C_AL, OP_ORR, 0, rp, rp, o.reg, SH_LSL, o.lsl);
+        }
     } else {                                    /* low byte */
         if (!o.is_imm && o.lsl == 8) {
             mov_r(j, R1, o.reg, SH_LSL, 8);
             o.reg = R1;
             o.lsl = 0;
         }
-        dp_i(j, C_AL, OP_AND, 0, rp, rp, 0xFF000000u);
-        if (o.is_imm)
-            dp_i(j, C_AL, OP_ORR, 0, rp, rp, o.imm << 16);
-        else if (o.lsl == 24)
-            dp_r(j, C_AL, OP_ORR, 0, rp, rp, o.reg, SH_LSL, 16);
-        else
-            dp_r(j, C_AL, OP_ORR, 0, rp, rp, o.reg, SH_LSR, 8);
+        if (o.is_imm && o.imm == 0) {
+            dp_i(j, C_AL, OP_BIC, 0, rp, rp, 0x00FF0000u);
+        } else {
+            dp_i(j, C_AL, OP_AND, 0, rp, rp, 0xFF000000u);
+            if (o.is_imm)
+                dp_i(j, C_AL, OP_ORR, 0, rp, rp, o.imm << 16);
+            else if (o.lsl == 24)
+                dp_r(j, C_AL, OP_ORR, 0, rp, rp, o.reg, SH_LSL, 16);
+            else
+                dp_r(j, C_AL, OP_ORR, 0, rp, rp, o.reg, SH_LSR, 8);
+        }
     }
     if (iy)
         str_g(j, RLR, GOFF(iy));
@@ -893,6 +920,7 @@ static void emit_exit(jit_block_ctx *b, uint32 target)
 {
     z80j_state *j = b->j;
     uint32 host;
+    uint32 *d;
 
     target &= 0xFFFFu;
     if (b->end_leave) {
@@ -901,15 +929,16 @@ static void emit_exit(jit_block_ctx *b, uint32 target)
         emit_b(j, C_AL, 0, j->glue.leave);
         return;
     }
+    /* A link stub even when the target is known: the direct branch must
+     * be undone if the target is evicted. */
+    emit_b(j, C_AL, 1, j->glue.link);
+    d = j->cur;
+    emit(j, target);
+    emit(j, 0);
+    emit(j, b->key);
     host = jit_link_host(j, target, b->key);
-    if (host != 0) {
-        emit_b(j, C_AL, 0, host);
-    } else {
-        emit_b(j, C_AL, 1, j->glue.link);
-        emit(j, target);
-        emit(j, 0);
-        emit(j, b->key);
-    }
+    if (host != 0)
+        jit_link_stub(j, d, host);
 }
 
 /* Jump to the address in r0 through the lookup table. */
@@ -960,7 +989,6 @@ static void emit_jump_cond(jit_block_ctx *b, uint32 cond, const jit_insn *in,
                            int32 index, uint32 extra)
 {
     z80j_state *j = b->j;
-    uint32 host;
 
     if (in->busy) {
         emit_idle(j, cond);
@@ -979,10 +1007,7 @@ static void emit_jump_cond(jit_block_ctx *b, uint32 cond, const jit_insn *in,
         emit(j, (cond << 28) | (5u << 25));
         return;
     }
-    host = jit_link_host(j, in->target, b->key);
-    if (host != 0) {
-        emit_b(j, cond, 0, host);
-    } else {
+    {
         jit_stub *s = new_stub(b, STUB_LINK);
         s->pc = in->target;
         emit(j, (cond << 28) | (5u << 25));
@@ -1378,12 +1403,14 @@ static void emit_main(jit_block_ctx *b, jit_insn *in, int32 index)
             case 0:                                 /* NOP */
                 break;
             case 1:                                 /* EX AF,AF' */
-                ldr_g(j, R0, GOFF(a2));
-                ldr_g(j, R1, GOFF(f2));
-                str_g(j, RA, GOFF(a2));
-                str_g(j, RF, GOFF(f2));
-                mov_r(j, RA, R0, SH_LSL, 0);
-                mov_r(j, RF, R1, SH_LSL, 0);
+                /* F' and A' are the two words below BC' in the context,
+                 * in the order of r3 and r4 (their own offset is not an
+                 * ARM immediate). */
+                dp_i(j, C_AL, OP_ADD, 0, RAD, RG, (uint32)GOFF(bc2));
+                emit_ldm(j, RAD, (1u << R0) | (1u << R1), 1);
+                emit_stm(j, RAD, (1u << RF) | (1u << RA), 1);
+                mov_r(j, RF, R0, SH_LSL, 0);
+                mov_r(j, RA, R1, SH_LSL, 0);
                 break;
             case 2:                                 /* DJNZ */
                 dp_i(j, C_AL, OP_SUB, 0, RBC, RBC, 0x01000000u);
@@ -1645,12 +1672,10 @@ static void emit_main(jit_block_ctx *b, jit_insn *in, int32 index)
                 dp_r(j, C_AL, OP_ORR, 0, R0, R2, R1, SH_LSL, 8);
                 emit_dynamic(b);
             } else if (p == 1) {                    /* EXX */
-                ldr_g(j, R0, GOFF(bc2));
-                ldr_g(j, R1, GOFF(de2));
-                ldr_g(j, R2, GOFF(hl2));
-                str_g(j, RBC, GOFF(bc2));
-                str_g(j, RDE, GOFF(de2));
-                str_g(j, RHL, GOFF(hl2));
+                /* BC', DE' and HL' are consecutive in the context. */
+                dp_i(j, C_AL, OP_ADD, 0, RAD, RG, (uint32)GOFF(bc2));
+                emit_ldm(j, RAD, (1u << R0) | (1u << R1) | (1u << R2), 0);
+                emit_stm(j, RAD, (1u << RBC) | (1u << RDE) | (1u << RHL), 0);
                 mov_r(j, RBC, R0, SH_LSL, 0);
                 mov_r(j, RDE, R1, SH_LSL, 0);
                 mov_r(j, RHL, R2, SH_LSL, 0);
@@ -1812,6 +1837,8 @@ void emit_block_code(jit_block_ctx *b)
     int32 i;
     int32 k;
     uint32 *miss_site = 0;
+    uint32 *d;
+    uint32 host;
 
     b->nstubs = 0;
 
@@ -1860,6 +1887,16 @@ void emit_block_code(jit_block_ctx *b)
             emit(j, (C_MI << 28) | (5u << 25));
         }
         emit_insn(b, in, i);
+        if (in->irq_check) {
+            /* The instruction after EI: a pending interrupt is taken
+             * now (the block is left for it), otherwise the block goes
+             * on. */
+            ldr_g(j, R0, GOFF(irq_line));
+            ldr_g(j, R1, GOFF(nmi));
+            dp_r(j, C_AL, OP_ORR, 1, R0, R0, R1, SH_LSL, 0);
+            emit_stub_branch(b, C_NE, 0, STUB_LEAVE, (in->pc + in->len) & 0xFFFFu,
+                             in->t_after, 0);
+        }
     }
 
     /* Fall-through exit when the block did not end with a transfer. */
@@ -1889,9 +1926,13 @@ void emit_block_code(jit_block_ctx *b)
         case STUB_LINK:
             patch_b(s->site, JIT_ADDR(j->cur));
             emit_b(j, C_AL, 1, j->glue.link);
+            d = j->cur;
             emit(j, s->pc);
             emit(j, JIT_ADDR(s->site));
             emit(j, b->key);
+            host = jit_link_host(j, s->pc, b->key);
+            if (host != 0)
+                jit_link_stub(j, d, host);
             break;
         case STUB_TAKEN:
             patch_b(s->site, JIT_ADDR(j->cur));
@@ -1915,6 +1956,6 @@ void emit_block_code(jit_block_ctx *b)
             break;
         }
     }
-    if (j->code_end - j->cur < 16)
-        j->error = 1;
+    if (j->zone_end - j->cur < 16)
+        j->error = 4;                   /* code buffer full */
 }

@@ -149,20 +149,66 @@ ctrl_count
 ;----------------------------------------------------------------------------
 ; Run of OUTI / OUTD to the data port. In: r0 = count (negative for OUTD),
 ; r7 = HL (bits 16-31), the source of the first byte. Video RAM runs are
-; copied in one loop; colour RAM or a pending control word goes byte by
-; byte through sms_vdp_data_w.
+; copied in one loop, by words when the alignment allows it; colour RAM
+; or a pending control word goes byte by byte through sms_vdp_data_w.
 ;----------------------------------------------------------------------------
 sms_vdp_data_wn
+        ldr     r12,[r10,#MDATA]
+        ldr     r2,[r12,#V_CTL]
+        cmp     r2,#3
+        bhs     wn_slow_entry
+        cmp     r0,#1
+        blo     wn_general              ; OUTD
+        cmp     r0,#4
+        bhi     wn_general
+        ; Short forward run (1-4 bytes, the usual name table update):
+        ; nothing is saved but the return address.
+        ldr     r1,[r12,#V_ADDR]
+        mov     r2,r7,lsr#16
+        and     r2,r2,#0xFF
+        cmp     r2,#0xFC
+        bhi     wn_general              ; the source may cross a page
+        add     r2,r1,r0
+        cmp     r2,#0x4000
+        bhi     wn_general              ; the destination may wrap
+        str     lr,[sp,#-4]!
+        str     r2,[r12,#V_ADDR]
+        sub     r2,r2,#1
+        add     lr,r12,#V_DIRTY
+        strb    r0,[lr,r1,lsr#5]        ; first and last tile written
+        strb    r0,[lr,r2,lsr#5]
+        ldr     r2,[r12,#V_NDATAW]
+        add     r2,r2,r0
+        str     r2,[r12,#V_NDATAW]
+        mvn     lr,r7,lsr#24
+        ldr     lr,[r10,lr,lsl#2]
+        add     lr,lr,r7,lsr#16         ; host source
+        add     r1,r1,r12
+        add     r1,r1,#V_VRAM           ; host destination
+wn_short_loop
+        ldrb    r2,[lr],#1
+        strb    r2,[r1],#1
+        subs    r0,r0,#1
+        bne     wn_short_loop
+        str     r2,[r12,#V_BUFFER]      ; the last byte written: read buffer
+        ldr     pc,[sp],#4
+wn_slow_entry
         stmfd   sp!,{r3-r9,lr}
         mov     r12,#0x10000            ; source step
         movs    r0,r0
         rsbmi   r0,r0,#0
         rsbmi   r12,r12,#0
         ldr     r6,[r10,#MDATA]
-        ldr     r2,[r6,#V_CTL]
         mov     r3,r7                   ; source address (bits 16-31)
-        cmp     r2,#3
-        bhs     wn_slow
+        b       wn_slow
+wn_general
+        stmfd   sp!,{r3-r9,lr}
+        mov     r12,#0x10000            ; source step
+        movs    r0,r0
+        rsbmi   r0,r0,#0
+        rsbmi   r12,r12,#0
+        ldr     r6,[r10,#MDATA]
+        mov     r3,r7                   ; source address (bits 16-31)
         ldr     r1,[r6,#V_NDATAW]
         add     r1,r1,r0
         str     r1,[r6,#V_NDATAW]
@@ -170,6 +216,70 @@ sms_vdp_data_wn
         add     r5,r6,#V_VRAM
         add     r8,r6,#V_DIRTY
         mov     r9,#1
+        ; Forward run whose source stays in one page and whose destination
+        ; does not wrap: the source page entry and the dirty marks are
+        ; taken once, and the bytes are copied by words when both ends are
+        ; word aligned. The other runs go byte by byte below.
+        teq     r12,#0x10000
+        bne     wn_loop
+        mov     r4,r3,lsr#16
+        and     r4,r4,#0xFF
+        add     r4,r4,r0
+        cmp     r4,#0x100
+        bhi     wn_loop
+        add     r4,r1,r0                ; destination end
+        cmp     r4,#0x4000
+        bhi     wn_loop
+        str     r4,[r6,#V_ADDR]         ; address after the run
+        mov     r2,r1,lsr#5             ; tiles written: first to last
+        sub     r4,r4,#1
+        mov     r4,r4,lsr#5
+wn_dirty
+        strb    r9,[r8,r2]
+        add     r2,r2,#1
+        cmp     r2,r4
+        bls     wn_dirty
+        mvn     r2,r3,lsr#24
+        ldr     r2,[r10,r2,lsl#2]
+        add     r2,r2,r3,lsr#16         ; host source
+        add     r4,r5,r1                ; host destination
+        orr     r1,r1,r3,lsr#16
+        tst     r1,#3
+        bne     wn_bytes
+        cmp     r0,#8
+        blo     wn_bytes
+wn_w32
+        subs    r0,r0,#32
+        ldmhsia r2!,{r1,r3,r5,r7,r8,r9,r12,lr}
+        stmhsia r4!,{r1,r3,r5,r7,r8,r9,r12,lr}
+        bhs     wn_w32
+        adds    r0,r0,#32               ; bytes left, 0-31
+        beq     wn_fast_done
+wn_w4
+        subs    r0,r0,#4
+        ldrhs   r1,[r2],#4
+        strhs   r1,[r4],#4
+        bhs     wn_w4
+        adds    r0,r0,#4                ; 0-3
+        beq     wn_fast_done
+wn_bytes
+        tst     r0,#1
+        ldrneb  r1,[r2],#1
+        strneb  r1,[r4],#1
+        bics    r0,r0,#1
+        beq     wn_fast_done
+wn_b2
+        ldrb    r1,[r2],#1
+        ldrb    r3,[r2],#1
+        strb    r1,[r4],#1
+        strb    r3,[r4],#1
+        subs    r0,r0,#2
+        bne     wn_b2
+wn_fast_done
+        ldrb    r1,[r4,#-1]             ; the last byte written: read buffer
+        str     r1,[r6,#V_BUFFER]
+        mov     r0,#0
+        ldmfd   sp!,{r3-r9,pc}
 wn_loop
         mvn     r2,r3,lsr#24
         ldr     r2,[r10,r2,lsl#2]

@@ -27,6 +27,10 @@ typedef struct {
     uint32 banks;           /* paging register writes */
     uint32 blocks;          /* translations */
     uint32 flushes;
+    uint32 evictions;       /* code buffer zones emptied */
+    uint32 evicted;         /* blocks lost to them */
+    uint32 prefetched;      /* blocks translated in spare time */
+    uint32 promoted;        /* blocks translated again into the hot area */
     uint32 vdp_data_w;
     uint32 vdp_data_r;
     uint32 vdp_ctrl_w;
@@ -50,6 +54,7 @@ typedef struct {
     uint32 draw_err;        /* DrawCels errors */
     uint32 long_vbl;        /* frames shown for two VBLs or more */
     uint32 pad_us;          /* pad reads, timed by the caller */
+    uint32 spare_us;        /* spare-time translation */
     game_counters start;    /* counters when the window began */
 } game_window;
 
@@ -57,6 +62,7 @@ typedef struct {
     z80j_ctx     *ctx;
     uint32       *code;
     void         *blocks;
+    uint32       *links;
     sms_machine  *sms;
     renderer     *rd;
     z80j_state    jit;
@@ -127,6 +133,11 @@ void  game_note_long_vbl(game *g);
 
 /* Adds the time of a pad read to the current window. */
 void  game_pad_time(game *g, uint32 us);
+
+/* Spare time at the end of a frame that began at frame_start (microsecond
+ * clock): translates queued code ahead while the frame is still well
+ * inside its budget; returns the time it used. */
+uint32 game_spare_time(game *g, uint32 frame_start);
 
 void  game_log_summary(const game *g);
 

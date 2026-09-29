@@ -140,6 +140,10 @@ uint32 render_dirty_scan(uint8 *dirty, uint32 *out);
 /* Source and position of the cels of sprites 0 to n - 1; returns the
  * number of tiles appended to a->need. */
 uint32 render_sprites(const uint8 *sat, uint32 n, CCB *cel, const render_sprite_args *a);
+/* Copies a converted tile (8 rows of 2 words, src moving by step bytes
+ * per row) into a cell of the bitmap at dst, OR-ing pal into every word,
+ * and into the priority bitmap at prio when prio is not 0. */
+void   render_cell_copy(uint32 *dst, const uint32 *src, uint32 pal, int32 step, uint32 *prio);
 
 #define render_chain(r)     ((r)->chain)
 #define render_backdrop(r)  ((r)->backdrop)

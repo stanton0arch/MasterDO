@@ -76,9 +76,9 @@ typedef struct {
     uint32 regs[8];         /* +0x400: F A BC DE HL cycles PC SP */
     uint32 ix;              /* +0x420: IX in bits 16-31 */
     uint32 iy;              /* +0x424: IY in bits 16-31 */
-    uint32 a2;              /* +0x428: A' (bits 24-31) */
-    uint32 f2;              /* +0x42C: F' (internal format) */
-    uint32 bc2;             /* +0x430 */
+    uint32 f2;              /* +0x428: F' (internal format); F', A' and */
+    uint32 a2;              /* +0x42C: A' (bits 24-31), BC', DE', HL' are */
+    uint32 bc2;             /* +0x430   consecutive for EX AF,AF' and EXX */
     uint32 de2;             /* +0x434 */
     uint32 hl2;             /* +0x438 */
     uint32 i;               /* +0x43C: I register (0-255) */
@@ -108,7 +108,9 @@ typedef struct {
     uint32 port_out;        /* +0x4A0: 256 output handlers */
     uint32 port_outn;       /* +0x4A4: 256 handlers of OUTI / OUTD runs */
     uint32 mdata;           /* +0x4A8: data of the machine's handlers */
-    uint32 pad0[21];
+    uint32 write_a;         /* +0x4AC: special write handler (see below) */
+    uint32 wdata;           /* +0x4B0: data of that handler */
+    uint32 pad0[19];
     uint8  page_kind[256];  /* +0x500 */
     uint8  pzst[256];       /* +0x600: sign / zero / parity flags of a byte */
     uint8  fenc[256];       /* +0x700: internal flags -> Z80 F */
@@ -154,6 +156,19 @@ typedef struct {
  */
 #define Z80J_PORTS 256
 
+/*
+ * Special write handler (ctx->write_a): entered from the generated code
+ * for a write to a page whose write table entry is zero, with r0 = value
+ * (bits 0-7 significant), r12 = Z80 address (bits 16-31), r2 = where to
+ * return when the block goes on, lr -> the three data words of the write
+ * stub (Z80 address of the next instruction or -1, T-states to give back
+ * times 256, key of the block). r3-r11 must be preserved, r0-r1, r12 and
+ * lr may be lost. The default handler, z80j_write_generic, calls the
+ * machine's C write callback; a machine may put a faster handler of its
+ * own there (with its data in ctx->wdata) and fall back to the generic
+ * one, or end with the result code in r0 at z80j_write_result.
+ */
+
 /* Write callback results. */
 #define Z80J_WRITE_STAY   0     /* nothing a block relies on changed */
 #define Z80J_WRITE_LEAVE  1     /* leave the block */
@@ -194,47 +209,107 @@ typedef struct {
 typedef struct {
     uint32 translations;    /* blocks translated */
     uint32 insns;           /* Z80 instructions translated */
-    uint32 code_bytes;      /* ARM code generated */
+    uint32 code_bytes;      /* ARM code generated (cumulative) */
     uint32 fused;           /* flag tests kept in the ARM flags */
     uint32 full_flags;      /* flag computations kept */
-    uint32 flushes;         /* code buffer flushes */
+    uint32 flushes;         /* code buffer flushes (every zone emptied) */
+    uint32 evictions;       /* zones emptied to make room */
+    uint32 evicted;         /* blocks lost to evictions */
+    uint32 unlinked;        /* direct branches undone by evictions */
+    uint32 link_full;       /* links not made for lack of room in the log */
     uint32 retranslations;  /* RAM blocks whose code had changed */
     uint32 busy_loops;      /* busy-wait loops found in translated code */
     uint32 interrupts;      /* maskable interrupts taken */
     uint32 nmis;            /* non-maskable interrupts taken */
+    uint32 prefetched;      /* blocks translated ahead, in spare time */
+    uint32 promoted;        /* blocks translated again after an eviction */
 } z80j_stats;
 
 typedef struct z80j_block z80j_block;
 
+#define Z80J_QUEUE 64           /* static targets waiting to be translated */
+
+/* A range of zones filled in turn. */
+typedef struct {
+    uint32     *cur;        /* next free word */
+    uint32     *end;        /* end of the zone being filled */
+    uint32      zone;       /* zone being filled */
+    uint32      first;      /* zones first to first + count - 1 */
+    uint32      count;
+} z80j_area;
+
+/*
+ * Translator state. The code buffer is split into zones; when a zone to
+ * be filled still holds code, its blocks are evicted: their entries in
+ * the lookup table are reset, and the direct branches leading into the
+ * zone from surviving blocks, recorded in the link log when they were
+ * made, become calls to the linker again. With a single zone an eviction
+ * is a flush of the whole buffer.
+ *
+ * The zones make two areas. A block translated for the first time goes
+ * to the cold area, whose zones are recycled quickly; a block translated
+ * again after being evicted (a bitmap remembers the addresses translated
+ * before) has proven useful and goes to the hot area, whose zones are
+ * recycled only when the hot code outgrows them. Code that runs once
+ * thus never pushes the code that runs all the time out of the buffer.
+ * The code reachable from the entry points, translated before the run,
+ * goes straight to the hot area (seed_hot).
+ */
 typedef struct {
     z80j_ctx   *ctx;
     uint32     *code;       /* code buffer */
     uint32     *code_end;
-    uint32     *cur;        /* next free word */
+    uint32     *cur;        /* next free word, in the area being filled */
+    uint32     *zone_end;   /* end of that zone */
+    uint32      zone_words;
+    uint32      nzones;
+    z80j_area   area[2];    /* 0: cold, 1: hot (count 0: no hot area) */
+    uint32      seen[2048]; /* Z80 addresses translated before */
     z80j_glue   glue;
     z80j_block *blocks;     /* block descriptors */
+    z80j_block *free_blocks;/* descriptors not in use, chained by next */
     uint32      max_blocks;
-    uint32      nblocks;
+    uint32      nblocks;    /* descriptors in use */
     z80j_block *hash[1024]; /* blocks by Z80 address */
-    uint32      generation; /* incremented by each flush */
+    uint32     *links;      /* link log: data words of each resolved link */
+                            /* stub; bit 0 set: a retranslation trampoline */
+    uint32      nlinks;
+    uint32      max_links;
+    uint32      generation; /* incremented by each flush or eviction */
     int32       error;      /* an instruction could not be encoded */
+    uint32      prefetch;   /* queue the static targets of run-time blocks */
+    uint32      seed_hot;   /* translate straight into the hot area (code */
+                            /* reachable from the entry points, before the run) */
+    uint32      queue[Z80J_QUEUE];
+    uint32      qhead;
+    uint32      qtail;
     z80j_stats  stats;
 } z80j_state;
 
-/* Memory for max_blocks block descriptors. */
+/* Memory for max_blocks block descriptors, and for a link log of
+ * max_links entries. */
 uint32 z80j_block_bytes(uint32 max_blocks);
+uint32 z80j_link_bytes(uint32 max_links);
 
 /* Prepares the translator and the context: lookup table, flag tables and
- * register reset. The pages, page kinds, slot banks and machine are set up
- * by the caller before running. */
+ * register reset. The code buffer of code_words words is split into
+ * nzones zones (at least 1), of which the last nhot make the hot area
+ * (nhot < nzones). The pages, page kinds, slot banks and machine are set
+ * up by the caller before running. */
 void   z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
-                 void *block_mem, uint32 max_blocks, const z80j_glue *glue);
+                 uint32 nzones, uint32 nhot, void *block_mem, uint32 max_blocks,
+                 uint32 *link_mem, uint32 max_links, const z80j_glue *glue);
 
 /* Z80 reset: PC 0, interrupts disabled, interrupt mode 0. */
 void   z80j_reset(z80j_ctx *ctx);
 
 /* Forgets every translation. */
 void   z80j_flush(z80j_state *j);
+
+/* Translates one block waiting in the queue of static targets (filled by
+ * the run-time translations while j->prefetch is set); returns 0 when
+ * the queue is empty. Meant for the spare time at the end of a frame. */
+uint32 z80j_prefetch(z80j_state *j);
 
 /* Translates the block at pc if needed, and reports its static exits
  * (jump and call targets, fall-through) in targets. Returns the number of
@@ -275,6 +350,8 @@ void   z80j_port_in_c(void);
 void   z80j_port_out_c(void);
 void   z80j_port_outn_loop(void);
 void   z80j_glue_write(void);
+void   z80j_write_generic(void);
+void   z80j_write_result(void);
 void   z80j_glue_verify(void);
 void   z80j_glue_daa(void);
 void   z80j_glue_push_slow(void);

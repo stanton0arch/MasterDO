@@ -31,6 +31,7 @@
 
 #define JIT_CODE_BYTES (256 * 1024)
 #define JIT_BLOCKS     2048
+#define JIT_LINKS      256
 
 static const uint32 ldr_table[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
 
@@ -105,6 +106,7 @@ typedef struct {
     z80j_ctx  *ctx;
     uint32    *code;
     void      *blocks;
+    uint32     links[JIT_LINKS];
     z80j_state state;
     sms_mem    mem;
 } jit_env;
@@ -132,7 +134,8 @@ static Err jit_env_alloc(jit_env *e)
         return -1;
     }
     z80j_default_glue(&glue);
-    z80j_init(&e->state, e->ctx, e->code, JIT_CODE_BYTES / 4, e->blocks, JIT_BLOCKS, &glue);
+    z80j_init(&e->state, e->ctx, e->code, JIT_CODE_BYTES / 4, 1, 0, e->blocks, JIT_BLOCKS,
+              e->links, JIT_LINKS, &glue);
     return 0;
 }
 

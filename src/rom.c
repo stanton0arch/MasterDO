@@ -51,7 +51,9 @@ Err rom_load(rom_image *rom, const char *path)
     memset(rom, 0, sizeof(*rom));
     rom->header_offset = -1;
 
-    rom->data = (uint8 *)LoadFile(path, &size, MEMTYPE_DRAM);
+    /* The image goes to VRAM, which the CPU reads like DRAM, to leave
+     * the DRAM to the translator (code buffer) and the renderer. */
+    rom->data = (uint8 *)LoadFile(path, &size, MEMTYPE_VRAM);
     if (rom->data == NULL) {
         rom->size = size < 0 ? size : -1;
         printf("ERROR: cannot load %s (0x%lx)\n", path, (unsigned long)size);

@@ -30,6 +30,8 @@
         EXPORT  z80j_port_outn_loop
         EXPORT  z80j_fill_words
         EXPORT  z80j_glue_write
+        EXPORT  z80j_write_generic
+        EXPORT  z80j_write_result
         EXPORT  z80j_glue_verify
         EXPORT  z80j_glue_daa
         EXPORT  z80j_glue_push_slow
@@ -61,6 +63,7 @@ IDLE            EQU     0x498
 PORT_IN         EQU     0x49C
 PORT_OUT        EQU     0x4A0
 PORT_OUTN       EQU     0x4A4
+WRITE_A         EQU     0x4AC
 PZST            EQU     0x600
 
 ; Machine callbacks (z80j_machine).
@@ -258,15 +261,22 @@ outn_loop
 ; Write to a special page. In: r0 = value, r12 = Z80 address (bits 16-31),
 ; r2 = where to return; lr -> Z80 PC of the next instruction (-1: never
 ; leave), T-states to give back when leaving, and the key of the block.
-; After a change of paged banks (Z80J_WRITE_PAGING) the block goes on
-; unless its own code comes from a slot that no longer shows its bank.
+; The machine's handler (ctx->write_a, see z80jit.h) runs first; the
+; generic one below calls the machine's C write callback. The result
+; (Z80J_WRITE_*) is then acted on at z80j_write_result: after a change of
+; paged banks (Z80J_WRITE_PAGING) the block goes on unless its own code
+; comes from a slot that no longer shows its bank.
 ;----------------------------------------------------------------------------
 z80j_glue_write
+        ldr     pc,[r10,#WRITE_A]
+
+z80j_write_generic
         stmfd   sp!,{r2,lr}
         mov     r2,r0
         mov     r1,r12,lsr#16
         callc   z80j_io_write
         ldmfd   sp!,{r2,lr}
+z80j_write_result
         teq     r0,#0
         moveq   pc,r2
         cmp     r0,#2

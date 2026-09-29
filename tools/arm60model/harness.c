@@ -22,6 +22,7 @@
 #include "game.h"
 #include "dbgview.h"
 #include "bench_cpu.h"
+#include "platform.h"
 #include "stdio.h"
 #include "string.h"
 
@@ -238,9 +239,16 @@ void hmain(void)
 
         if (f == sim_arg(3))
             sim_mark(15);           /* profile from here on */
-        if (game_frame(&g, pad & 0x3F, (pad >> 8) & 1) != 0)
-            break;
-        game_frame_done(&g, 0);
+        {
+            uint32 t0 = plat_usec_now();
+
+            if (game_frame(&g, pad & 0x3F, (pad >> 8) & 1) != 0)
+                break;
+            /* A DrawCels of 3.5 ms is added to the frame time, as on
+             * the console, before the spare time is used. */
+            game_frame_done(&g, 3500);
+            game_spare_time(&g, t0 - 3500);
+        }
         {
             const vdp_state *v = &g.sms->vdp;
             uint32 k;

@@ -5,8 +5,17 @@
 #include "smsmem.h"
 
 #include "string.h"
+#include "stddef.h"
 
 #define SLOT_PAGES 64u          /* 16 KiB of 256-byte pages */
+
+/* Offsets used by smsmem_a.s. */
+#define CHECK_OFF(name, cond) typedef char check_##name[(cond) ? 1 : -1]
+CHECK_OFF(rom, offsetof(sms_mem, rom) == 24);
+CHECK_OFF(cart_ram, offsetof(sms_mem, cart_ram) == 36);
+CHECK_OFF(reg, offsetof(sms_mem, reg) == 40);
+CHECK_OFF(remaps, offsetof(sms_mem, remaps) == 68);
+CHECK_OFF(bank_mask, offsetof(sms_mem, bank_mask) == 72);
 
 static uint32 bank_of(const sms_mem *s, uint32 reg)
 {
@@ -126,6 +135,7 @@ void sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
     s->banks = (rom_size + 0x3FFFu) / 0x4000u;
     if (s->banks == 0)
         s->banks = 1;
+    s->bank_mask = ((s->banks & (s->banks - 1)) == 0) ? s->banks - 1 : 0xFFFFFFFFu;
     s->cart_ram = cart_ram;
 
     s->m.in = sms_mem_in;
@@ -134,6 +144,8 @@ void sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
     s->m.event = sms_mem_event;
     s->m.user = s;
     ctx->machine = JIT_ADDR(&s->m);
+    ctx->write_a = JIT_ADDR(sms_mem_write_a);
+    ctx->wdata = JIT_ADDR(s);
 
     /* System RAM, $C000-$DFFF mirrored at $E000-$FFFF; the last page
      * holds the paging registers, so its writes go through the machine. */

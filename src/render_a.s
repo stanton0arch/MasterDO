@@ -5,6 +5,7 @@
         EXPORT  render_nt_scan
         EXPORT  render_dirty_scan
         EXPORT  render_sprites
+        EXPORT  render_cell_copy
 
 ; CCB fields (graphics.h).
 CCB_SOURCE      EQU     8
@@ -195,5 +196,61 @@ spr_done
         sub     r0,r9,r0
         mov     r0,r0,lsr #2
         ldmfd   sp!,{r4-r11,pc}
+
+;----------------------------------------------------------------------------
+; void render_cell_copy(uint32 *dst, const uint32 *src, uint32 pal,
+;                       int32 step, uint32 *prio)
+;
+; Copies the 8 rows of two words of a converted tile into a cell of the
+; 256-byte-wide bitmap at dst, OR-ing the palette bits into every pixel;
+; src moves by step bytes per row (8, or -8 from the last row for a
+; vertical flip). The same rows go to prio when it is not 0.
+;----------------------------------------------------------------------------
+        MACRO
+        CELLROW $off
+        ldmia   r1,{r4,r5}
+        orr     r4,r4,r2
+        orr     r5,r5,r2
+        add     r1,r1,r3
+        stmia   r0,{r4,r5}
+        add     r0,r0,#256
+        MEND
+
+        MACRO
+        CELLROWP $off
+        ldmia   r1,{r4,r5}
+        orr     r4,r4,r2
+        orr     r5,r5,r2
+        add     r1,r1,r3
+        stmia   r0,{r4,r5}
+        add     r0,r0,#256
+        stmia   r12,{r4,r5}
+        add     r12,r12,#256
+        MEND
+
+render_cell_copy
+        stmfd   sp!,{r4,r5,lr}
+        ldr     r12,[sp,#12]            ; prio
+        teq     r12,#0
+        bne     cell_prio
+        CELLROW
+        CELLROW
+        CELLROW
+        CELLROW
+        CELLROW
+        CELLROW
+        CELLROW
+        CELLROW
+        ldmfd   sp!,{r4,r5,pc}
+cell_prio
+        CELLROWP
+        CELLROWP
+        CELLROWP
+        CELLROWP
+        CELLROWP
+        CELLROWP
+        CELLROWP
+        CELLROWP
+        ldmfd   sp!,{r4,r5,pc}
 
         END

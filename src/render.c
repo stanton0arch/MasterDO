@@ -253,35 +253,17 @@ static void draw_cell(renderer *r, uint32 i, uint32 e, const uint8 *vram)
     uint32 pal = (e & 0x800) ? 0x10101010u : 0;
     uint32 off = (i >> 5) * (8 * BM_PITCH) + (i & 31) * 8;
     const uint32 *s0;
-    const uint32 *s;
-    uint32 *d = (uint32 *)(r->bitmap + off);
-    int32 step = 2;
-    uint32 k;
+    int32 step = 8;
 
     if (!(r->t_ok[t] & (1 << flip)))
         tile_conv(r, t, flip, vram);
     s0 = (flip ? r->tiles_f : r->tiles) + t * TILE_WORDS;
     if (e & 0x400) {
         s0 += 14;
-        step = -2;
+        step = -8;
     }
-    s = s0;
-    for (k = 0; k < 8; k++) {
-        d[0] = s[0] | pal;
-        d[1] = s[1] | pal;
-        d += BM_WORDS;
-        s += step;
-    }
-    if (e & 0x1000) {
-        d = (uint32 *)(r->prio_bm + off);
-        s = s0;
-        for (k = 0; k < 8; k++) {
-            d[0] = s[0] | pal;
-            d[1] = s[1] | pal;
-            d += BM_WORDS;
-            s += step;
-        }
-    }
+    render_cell_copy((uint32 *)(r->bitmap + off), s0, pal, step,
+                     (e & 0x1000) ? (uint32 *)(r->prio_bm + off) : 0);
     r->st.cells++;
 }
 

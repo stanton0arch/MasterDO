@@ -49,7 +49,10 @@ Environment variables:
 
 Scripts on `code.bin` (written at the end of a cartridge run):
 - `hotblocks.py code.bin [rom] [count]`: generated code time per Z80 block;
-- `anacode.py code.bin [sim.sym]`: composition of the generated code.
+- `anacode.py code.bin [sim.sym]`: composition of the generated code;
+- `disblock.py code.bin pc [key]` or `disblock.py code.bin rank N`: the
+  generated code of a block, disassembled, with the cycles spent on each
+  instruction.
 
 Pictures are PPM files; any image tool converts them.
 

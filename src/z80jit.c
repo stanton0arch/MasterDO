@@ -7,6 +7,7 @@
 #include "z80jit_int.h"
 
 #include "string.h"
+#include "stdio.h"
 
 /* The offsets used by z80jit_glue.s (from the global pointer &wtab[0]). */
 #define GOFF(f) (offsetof(z80j_ctx, f) - offsetof(z80j_ctx, wtab))
@@ -33,6 +34,10 @@ CHECK_OFF(port_in, GOFF(port_in) == 0x49C);
 CHECK_OFF(port_out, GOFF(port_out) == 0x4A0);
 CHECK_OFF(port_outn, GOFF(port_outn) == 0x4A4);
 CHECK_OFF(mdata, GOFF(mdata) == 0x4A8);
+CHECK_OFF(write_a, GOFF(write_a) == 0x4AC);
+CHECK_OFF(wdata, GOFF(wdata) == 0x4B0);
+CHECK_OFF(f2, GOFF(f2) == 0x428);
+CHECK_OFF(bc2, GOFF(bc2) == 0x430);
 CHECK_OFF(slot_bank, GOFF(slot_bank) == 0x47C);
 CHECK_OFF(page_kind, GOFF(page_kind) == 0x500);
 CHECK_OFF(pzst, GOFF(pzst) == Z80J_PZST_OFF);
@@ -44,13 +49,17 @@ CHECK_OFF(lookup, GOFF(lookup) == Z80J_TAB_OFF);
 #define SEG_MAX_T   200     /* a segment always fits in a fresh scanline */
 #define SCAN_INSNS  8       /* forward scan for the flags a target reads */
 #define SCAN_DEPTH  1       /* conditional jumps followed by the scan */
-#define BLOCK_WORDS 3072    /* free words required before a translation */
+#define BLOCK_WORDS 1024    /* free words required before a translation */
 #define HASH(pc)    ((pc) & 1023u)
 
 /* Translation scratch (not re-entrant, kept off the small task stack). */
 static jit_insn jit_insns[MAX_INSNS];
 static jit_stub jit_stubs[MAX_STUBS];
 static uint32   jit_last_n;
+/* Instruction index + 1 for each offset from the start of the block being
+ * translated, tagged with the translation serial so that the map never
+ * needs clearing (a block spans at most 256 bytes). */
+static uint32   jit_pcmap[256];
 
 /* Port tables of the generic handlers (machine C callbacks). */
 static uint32   port_in_c[Z80J_PORTS];
@@ -873,6 +882,11 @@ uint32 z80j_block_bytes(uint32 max_blocks)
     return max_blocks * (uint32)sizeof(z80j_block);
 }
 
+uint32 z80j_link_bytes(uint32 max_links)
+{
+    return max_links * 4u;
+}
+
 static z80j_block *find_block(z80j_state *j, uint32 pc, uint32 key)
 {
     z80j_block *b;
@@ -897,12 +911,138 @@ static void unhash_block(z80j_state *j, z80j_block *blk)
     }
 }
 
+static void free_block(z80j_state *j, z80j_block *blk)
+{
+    blk->entry = 0;
+    blk->next = j->free_blocks;
+    j->free_blocks = blk;
+    j->nblocks--;
+}
+
+/* Target of the branch instruction at site. */
+static uint32 branch_target(const uint32 *site)
+{
+    uint32 w = *site;
+    uint32 off = (w & 0x00FFFFFFu) << 2;
+
+    if (off & 0x02000000u)
+        off |= 0xFC000000u;
+    return JIT_ADDR(site) + 8 + off;
+}
+
+/*
+ * Empties zone z: its blocks lose their descriptors and their lookup
+ * entries, and every direct branch into the zone recorded in the link
+ * log becomes a call to the linker again (a trampoline left by a
+ * retranslation becomes a jump to the translator).
+ */
+static void evict_zone(z80j_state *j, uint32 z)
+{
+    z80j_ctx *ctx = j->ctx;
+    uint32 lo = JIT_ADDR(j->code + z * j->zone_words);
+    uint32 hi = lo + j->zone_words * 4;
+    uint32 k;
+    uint32 n;
+    uint32 freed = 0;
+
+    for (k = 0; k < j->max_blocks; k++) {
+        z80j_block *blk = &j->blocks[k];
+        uint32 e = JIT_ADDR(blk->entry);
+
+        if (e >= lo && e < hi) {
+            unhash_block(j, blk);
+            ctx->lookup[blk->pc] = j->glue.miss;
+            free_block(j, blk);
+            freed++;
+        }
+    }
+    if (freed == 0)
+        return;
+    j->stats.evicted += freed;
+    n = 0;
+    for (k = 0; k < j->nlinks; k++) {
+        uint32 e = j->links[k];
+        uint32 *site;
+
+        if (e & 1) {
+            site = (uint32 *)JIT_PTR(e & ~1u);
+            if (e - 1 >= lo && e - 1 < hi)
+                continue;
+            if (branch_target(site) >= lo && branch_target(site) < hi) {
+                /* The trampoline of a retranslated RAM block: its target
+                 * goes, so it jumps to the translator with the block's
+                 * address (kept in the word after it by the entry check
+                 * it replaced). */
+                uint32 pc = site[1] & 0xFFFFu;
+                site[0] = 0xE3A00C00u | (pc >> 8);              /* mov r0,#pc & 0xFF00 */
+                site[1] = 0xE3800000u | (pc & 0xFFu);           /* orr r0,r0,#pc & 0xFF */
+                site[2] = arm_branch(0xEu, 0, JIT_ADDR(site + 2), j->glue.miss);
+                j->stats.unlinked++;
+                continue;
+            }
+        } else {
+            uint32 *d = (uint32 *)JIT_PTR(e);
+            site = d - 1;
+            if (e >= lo && e < hi)
+                continue;
+            if (branch_target(site) >= lo && branch_target(site) < hi) {
+                *site = arm_branch(0xEu, 1, JIT_ADDR(site), j->glue.link);
+                if (d[1] != 0)
+                    patch_b((uint32 *)JIT_PTR(d[1]), JIT_ADDR(site));
+                j->stats.unlinked++;
+                continue;
+            }
+        }
+        j->links[n++] = e;
+    }
+    j->nlinks = n;
+    ctx->resume_host = 0;
+    j->generation++;
+    j->stats.evictions++;
+}
+
+/* Moves an area on to its next zone, emptied first if it holds code. */
+static void next_zone(z80j_state *j, z80j_area *a)
+{
+    a->zone = (a->zone + 1 < a->first + a->count) ? a->zone + 1 : a->first;
+    a->cur = j->code + a->zone * j->zone_words;
+    a->end = a->cur + j->zone_words;
+    evict_zone(j, a->zone);
+    if (j->nzones == 1)
+        j->stats.flushes++;
+}
+
+static void area_reset(z80j_state *j, z80j_area *a, uint32 first, uint32 count)
+{
+    a->first = first;
+    a->count = count;
+    a->zone = first;
+    a->cur = j->code + first * j->zone_words;
+    a->end = a->cur + j->zone_words;
+}
+
 void z80j_flush(z80j_state *j)
 {
+    uint32 k;
+    uint32 nhot = j->area[1].count;
+
     z80j_fill_words(j->ctx->lookup, 0x10000u, j->glue.miss);
     memset(j->hash, 0, sizeof(j->hash));
+    memset(j->seen, 0, sizeof(j->seen));
+    j->free_blocks = 0;
+    for (k = j->max_blocks; k > 0; k--) {
+        z80j_block *blk = &j->blocks[k - 1];
+        blk->entry = 0;
+        blk->next = j->free_blocks;
+        j->free_blocks = blk;
+    }
     j->nblocks = 0;
-    j->cur = j->code;
+    j->nlinks = 0;
+    area_reset(j, &j->area[0], 0, j->nzones - nhot);
+    area_reset(j, &j->area[1], j->nzones - nhot, nhot);
+    j->cur = j->area[0].cur;
+    j->zone_end = j->area[0].end;
+    j->qhead = j->qtail = 0;
     j->generation++;
     j->ctx->resume_host = 0;
     j->stats.flushes++;
@@ -922,6 +1062,31 @@ uint32 jit_link_host(z80j_state *j, uint32 target, uint32 from_key)
     return JIT_ADDR(blk->entry);
 }
 
+void jit_link_stub(z80j_state *j, uint32 *d, uint32 host)
+{
+    if (j->nlinks >= j->max_links) {
+        j->stats.link_full++;
+        return;
+    }
+    d[-1] = arm_branch(0xEu, 0, JIT_ADDR(d - 1), host);
+    if (d[1] != 0)
+        patch_b((uint32 *)JIT_PTR(d[1]), host);
+    j->links[j->nlinks++] = JIT_ADDR(d);
+}
+
+/* Queues a static target for translation in spare time. */
+static void queue_target(z80j_state *j, uint32 target)
+{
+    uint32 next = (j->qtail + 1) & (Z80J_QUEUE - 1);
+
+    target &= 0xFFFFu;
+    if (next == j->qhead || jit_block_key(j->ctx, target) == KEY_RAM ||
+        find_block(j, target, jit_block_key(j->ctx, target)) != 0)
+        return;
+    j->queue[j->qtail] = target;
+    j->qtail = next;
+}
+
 static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
                                    uint32 max_targets, uint32 *ntargets)
 {
@@ -934,6 +1099,8 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
     uint32 run;
     uint32 page;
     uint32 span;
+    uint32 serial;
+    z80j_area *area;
     int32 n = 0;
     jit_insn *seg;
     jit_insn *p;
@@ -941,32 +1108,59 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
     int32 i;
     int32 k;
 
-    if (j->code_end - j->cur < BLOCK_WORDS || j->nblocks >= j->max_blocks)
-        z80j_flush(j);
+    /* Area: hot for a block translated before (evicted since), cold
+     * otherwise; the zone is emptied when it cannot take another block
+     * (an eviction may also be needed for a descriptor). */
+    {
+        uint32 bit = (uint32)1 << (addr & 31);
+        uint32 hot = (j->seen[addr >> 5] & bit) != 0 && j->area[1].count != 0;
 
-    memset(&bc, 0, sizeof(bc));
+        if (hot)
+            j->stats.promoted++;
+        else if (j->seed_hot && j->area[1].count != 0)
+            hot = 1;
+        j->seen[addr >> 5] |= bit;
+        area = &j->area[hot];
+        if (area->end - area->cur < BLOCK_WORDS || j->free_blocks == 0)
+            next_zone(j, area);
+        j->cur = area->cur;
+        j->zone_end = area->end;
+    }
+
     bc.j = j;
     bc.ins = ins;
     bc.stubs = jit_stubs;
+    bc.nstubs = 0;
+    bc.end_leave = 0;
+    bc.nmemo = 0;
     bc.key = jit_block_key(ctx, addr);
+    serial = (j->stats.translations + 1) << 8;
 
-    /* Decode up to an unconditional transfer, the instruction after EI,
-     * a page of another kind or the size limit. The key only needs to be
-     * checked when a page boundary is crossed. */
+    /* Decode up to an unconditional transfer, a page of another kind or
+     * the size limit. The instruction after EI gets an interrupt check,
+     * unless it is a transfer or a conditional instruction: the block
+     * then ends after it and is left, so that a pending interrupt is
+     * taken. The key only needs to be checked when a page boundary is
+     * crossed. */
     page = addr >> 8;
     for (;;) {
         jit_insn *in = &ins[n++];
 
+        jit_pcmap[(addr - pc) & 0xFFu] = serial | (uint32)n;
         jit_decode(ctx, addr, in);
         in->internal = -1;
         in->busy = 0;
+        in->irq_check = 0;
         in->run = 0;
         in->seg_start = 0;
         in->fused = 0;
         addr = (addr + in->len) & 0xFFFFu;
         if (n >= 2 && in[-1].ei) {
-            bc.end_leave = 1;
-            break;
+            if (in->kind != K_NORMAL) {
+                bc.end_leave = 1;
+                break;
+            }
+            in->irq_check = 1;
         }
         if (IS_END(in->kind) || n == MAX_INSNS)
             break;
@@ -985,18 +1179,19 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
     span = (addr - pc) & 0xFFFFu;
     for (p = ins; p < end; p++) {
         uint32 kd = p->kind;
-        jit_insn *q;
+        uint32 off;
+        uint32 m;
 
         if (!(IS_COND(kd) && kd != K_RETCC && kd != K_CALLCC) && kd != K_JR && kd != K_JP)
             continue;
-        if (((p->target - pc) & 0xFFFFu) >= span)
+        off = (p->target - pc) & 0xFFFFu;
+        if (off >= span)
             continue;
-        for (q = ins, k = 0; q < end; q++, k++) {
-            if (q->pc == p->target) {
-                p->internal = k;
-                q->seg_start = 1;
-                break;
-            }
+        m = jit_pcmap[off];
+        if ((m & ~0xFFu) == serial) {
+            k = (int32)(m & 0xFFu) - 1;
+            p->internal = k;
+            ins[k].seg_start = 1;
         }
     }
 
@@ -1089,7 +1284,8 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
         uint32 fm;
         uint32 after;
 
-        if (c->seg_start || c->kind == K_DJNZ || c->kind == K_REP || !IS_COND(c->kind))
+        if (c->seg_start || c->kind == K_DJNZ || c->kind == K_REP || !IS_COND(c->kind) ||
+            p->irq_check)
             continue;
         fm = fuse_mask(p) & cc_fuse_need(c->cc);
         if (fm == 0)
@@ -1123,24 +1319,42 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
     }
 
     /* Code. */
-    blk = &j->blocks[j->nblocks];
+    blk = j->free_blocks;
     blk->pc = pc & 0xFFFFu;
     blk->key = bc.key;
     blk->entry = j->cur;
     bc.entry_check = (bc.key == KEY_FIXED) ? 0 : (bc.key == KEY_RAM) ? 2 : 1;
     j->error = 0;
     emit_block_code(&bc);
-    if (j->error)
+    if (j->error == 4) {
+        /* The zone was too full for this block: emit it again in the
+         * next one. */
+        next_zone(j, area);
+        blk = j->free_blocks;
+        blk->pc = pc & 0xFFFFu;
+        blk->key = bc.key;
+        blk->entry = j->cur = area->cur;
+        j->zone_end = area->end;
+        j->error = 0;
+        emit_block_code(&bc);
+    }
+    if (j->error) {
+        printf("Z80 translator: block at $%04lx not translated (error %ld, %ld instructions)\n",
+               (unsigned long)blk->pc, (long)j->error, (long)n);
+        blk->entry = 0;
         return 0;
-    blk->body = ins[0].host;
+    }
+    area->cur = j->cur;
+    j->free_blocks = blk->next;
     j->nblocks++;
+    blk->body = ins[0].host;
     blk->next = j->hash[HASH(blk->pc)];
     j->hash[HASH(blk->pc)] = blk;
     ctx->lookup[blk->pc] = JIT_ADDR(blk->entry);
 
     j->stats.translations++;
     j->stats.insns += (uint32)n;
-    j->stats.code_bytes = (uint32)(j->cur - j->code) * 4;
+    j->stats.code_bytes += (uint32)(j->cur - blk->entry) * 4;
     return blk;
 }
 
@@ -1155,20 +1369,66 @@ static uint32 jit_abort(z80j_state *j, uint32 pc)
 static uint32 host_for(z80j_state *j, uint32 pc)
 {
     z80j_block *blk;
+    uint32 targets[8];
+    uint32 nt = 0;
+    uint32 k;
 
     pc &= 0xFFFFu;
     blk = find_block(j, pc, jit_block_key(j->ctx, pc));
-    if (blk == 0)
-        blk = translate_block(j, pc, 0, 0, 0);
+    if (blk == 0) {
+        blk = translate_block(j, pc, targets, 8, &nt);
+        if (j->prefetch) {
+            for (k = 0; k < nt; k++)
+                queue_target(j, targets[k]);
+        }
+    }
     if (blk == 0)
         return jit_abort(j, pc);
     j->ctx->lookup[pc] = JIT_ADDR(blk->entry);
     return JIT_ADDR(blk->entry);
 }
 
+uint32 z80j_prefetch(z80j_state *j)
+{
+    uint32 targets[8];
+    uint32 nt = 0;
+
+    while (j->qhead != j->qtail) {
+        uint32 pc = j->queue[j->qhead];
+
+        j->qhead = (j->qhead + 1) & (Z80J_QUEUE - 1);
+        if (find_block(j, pc, jit_block_key(j->ctx, pc)) != 0)
+            continue;
+        /* The targets of a prefetched block are not queued: only the
+         * direct successors of the code that runs are translated ahead. */
+        if (translate_block(j, pc, targets, 8, &nt) != 0)
+            j->stats.prefetched++;
+        return 1;
+    }
+    return 0;
+}
+
 uint32 z80j_translate(z80j_state *j, uint32 pc)
 {
     return host_for(j, pc);
+}
+
+/* Does the RAM block still describe the code at its address? Its entry
+ * check holds the address, the length and the bytes it was made from. */
+static uint32 block_bytes_match(const z80j_ctx *ctx, const z80j_block *blk)
+{
+    const uint32 *h = blk->entry;
+    uint32 len = h[2];
+    const uint8 *bytes = (const uint8 *)(h + 3);
+    uint32 k;
+
+    if ((h[0] & 0x0F000000u) != 0x0B000000u)    /* not a bl: a trampoline */
+        return 0;
+    for (k = 0; k < len; k++) {
+        if (jit_byte(ctx, h[1] + k) != bytes[k])
+            return 0;
+    }
+    return 1;
 }
 
 uint32 z80j_retranslate(z80j_state *j, uint32 pc)
@@ -1179,13 +1439,26 @@ uint32 z80j_retranslate(z80j_state *j, uint32 pc)
 
     pc &= 0xFFFFu;
     old = find_block(j, pc, KEY_RAM);
+    /* A stale entry reached through an old link (its trampoline gone
+     * with an eviction) while the current translation is valid. */
+    if (old != 0 && block_bytes_match(j->ctx, old)) {
+        j->ctx->lookup[pc] = JIT_ADDR(old->entry);
+        return JIT_ADDR(old->entry);
+    }
     if (old != 0)
         unhash_block(j, old);
     j->stats.retranslations++;
     host = host_for(j, pc);
-    /* Links into the stale block now lead to the new one. */
-    if (old != 0 && host != j->glue.abort && j->generation == generation)
-        *old->entry = arm_branch(0xEu, 0, JIT_ADDR(old->entry), host);
+    /* Links into the stale block now lead to the new one, through a
+     * trampoline that an eviction of the new block undoes. */
+    if (old != 0 && host != j->glue.abort && j->generation == generation) {
+        if (j->nlinks < j->max_links) {
+            *old->entry = arm_branch(0xEu, 0, JIT_ADDR(old->entry), host);
+            j->links[j->nlinks++] = JIT_ADDR(old->entry) | 1u;
+        } else {
+            j->stats.link_full++;
+        }
+    }
     return host;
 }
 
@@ -1206,9 +1479,8 @@ uint32 z80j_link(z80j_state *j, uint32 data)
     }
     /* The call to the linker becomes a plain branch, and so does the
      * conditional jump that led to it. */
-    d[-1] = arm_branch(0xEu, 0, data - 4, host);
-    if (site != 0)
-        patch_b((uint32 *)JIT_PTR(site), host);
+    (void)site;
+    jit_link_stub(j, d, host);
     return host;
 }
 
@@ -1414,7 +1686,8 @@ void z80j_reset(z80j_ctx *ctx)
 }
 
 void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
-               void *block_mem, uint32 max_blocks, const z80j_glue *glue)
+               uint32 nzones, uint32 nhot, void *block_mem, uint32 max_blocks,
+               uint32 *link_mem, uint32 max_links, const z80j_glue *glue)
 {
     uint32 v;
 
@@ -1422,9 +1695,13 @@ void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
     j->ctx = ctx;
     j->code = code;
     j->code_end = code + code_words;
-    j->cur = code;
+    j->nzones = (nzones != 0) ? nzones : 1;
+    j->zone_words = code_words / j->nzones;
+    j->area[1].count = (nhot < j->nzones) ? nhot : j->nzones - 1;
     j->blocks = (z80j_block *)block_mem;
     j->max_blocks = max_blocks;
+    j->links = link_mem;
+    j->max_links = (link_mem != 0) ? max_links : 0;
     memcpy(&j->glue, glue, sizeof(j->glue));
 
     for (v = 0; v < 256; v++) {
@@ -1480,6 +1757,8 @@ void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
     ctx->port_out = JIT_ADDR(port_out_c);
     ctx->port_outn = JIT_ADDR(port_outn_c);
     ctx->mdata = 0;
+    ctx->write_a = JIT_ADDR(z80j_write_generic);
+    ctx->wdata = 0;
 
     ctx->state = JIT_ADDR(j);
     ctx->exit_reason = Z80J_EXIT_LINES;

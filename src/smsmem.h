@@ -24,7 +24,12 @@ typedef struct {
     uint32       reg[4];    /* $FFFC-$FFFF */
     uint32       slot_ram[3]; /* slot currently showing cartridge RAM */
     uint32       remaps;    /* paging changes (statistics) */
+    uint32       bank_mask; /* banks - 1, or 0xFFFFFFFF when banks is not a power of two */
 } sms_mem;
+
+/* Special write handler in assembly (smsmem_a.s), installed by
+ * sms_mem_init. CONTRACT: the field offsets above match its equates. */
+void   sms_mem_write_a(void);
 
 /* Sets up the pages of ctx (system RAM in ctx->mram) for a ROM image and
  * the machine callbacks. */
