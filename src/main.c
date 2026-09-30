@@ -31,7 +31,7 @@
 #include "string.h"
 #include "event.h"
 
-#define ROM_PATH "roms/rom.sms"
+#define MENU_LINES 20           /* ROM names shown at once */
 
 #define TEXT_X 8
 #define TEXT_Y 4
@@ -47,6 +47,7 @@
 #define DRAW_ERR_LOGS   20      /* DrawCels errors logged one by one */
 
 typedef struct {
+    rom_list           roms;
     rom_image          rom;
     bench_cpu_result   cpu;
     bench_video_result video;
@@ -319,6 +320,63 @@ static void run_game(platform *p, app_state *st)
 }
 
 /*--------------------------------------------------------------------------
+ * ROM menu
+ *------------------------------------------------------------------------*/
+
+static void draw_menu(platform *p, const app_state *st, int32 cur)
+{
+    int32 s = p->back;
+    int32 first = (cur / MENU_LINES) * MENU_LINES;
+    int32 k;
+    char buf[64];
+
+    plat_clear(p, s);
+    sprintf(buf, "MASTERDO - CHOOSE A CARTRIDGE (%ld FILES)   A: RUN  X: QUIT",
+            (long)st->roms.count);
+    text_line(p, s, 0, COLOR_TITLE, buf);
+    for (k = first; k < st->roms.count && k < first + MENU_LINES; k++) {
+        sprintf(buf, "%c %-32s %4luK", k == cur ? '>' : ' ', st->roms.name[k],
+                (unsigned long)((st->roms.size[k] + 1023) / 1024));
+        text_line(p, s, 2 + k - first, k == cur ? COLOR_GOOD : COLOR_TEXT, buf);
+    }
+    plat_present(p);
+}
+
+/* Returns the index of the file chosen, or -1 to quit. */
+static int32 rom_menu(platform *p, const app_state *st)
+{
+    int32 cur = 0;
+    uint32 prev = plat_pad_state();
+    uint32 hold = 0;
+
+    if (st->roms.count == 1)
+        return 0;
+    draw_menu(p, st, cur);
+    for (;;) {
+        uint32 held = plat_pad_state();
+        uint32 pressed = held & ~prev;
+        int32 was = cur;
+
+        /* Auto-repeat of the direction keys after a while. */
+        hold = (held & (ControlUp | ControlDown)) ? hold + 1 : 0;
+        if (hold > 20 && (hold & 3) == 0)
+            pressed |= held & (ControlUp | ControlDown);
+        prev = held;
+        if (pressed & ControlX)
+            return -1;
+        if (pressed & (ControlA | ControlStart))
+            return cur;
+        if ((pressed & ControlUp) && cur > 0)
+            cur--;
+        if ((pressed & ControlDown) && cur + 1 < st->roms.count)
+            cur++;
+        if (cur != was)
+            draw_menu(p, st, cur);
+        plat_wait_vbl(p);
+    }
+}
+
+/*--------------------------------------------------------------------------
  * Benchmarks and results
  *------------------------------------------------------------------------*/
 
@@ -366,7 +424,7 @@ static void draw_results(platform *p, const app_state *st)
     if (st->rom.size <= 0)
         sprintf(buf, "ROM not loaded (0x%lx)", (unsigned long)st->rom.size);
     else
-        sprintf(buf, "ROM %ld bytes, %s, DRAM %luK free", (long)st->rom.size,
+        sprintf(buf, "%s: %ld bytes, %s, DRAM %luK free", st->rom.name, (long)st->rom.size,
                 p->is_pal ? "PAL" : "NTSC", (unsigned long)(st->run_free / 1024));
     text_line(p, s, n++, st->rom.size > 0 ? COLOR_TEXT : COLOR_BAD, buf);
 
@@ -404,7 +462,8 @@ static void draw_results(platform *p, const app_state *st)
                 (unsigned long)g.over, (unsigned long)p->frame_us);
         text_line(p, s, n++, g.over == 0 ? COLOR_GOOD : COLOR_TEXT, buf);
     }
-    text_line(p, s, n + 1, COLOR_HEAD, st->have_game ? "B: RUN AGAIN   X: QUIT" : "X: QUIT");
+    text_line(p, s, n + 1, COLOR_HEAD, st->have_game ? "B: RUN AGAIN   X: BACK TO THE MENU"
+                                                     : "X: BACK TO THE MENU");
     plat_present(p);
 }
 
@@ -417,61 +476,82 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo step 3d: cartridge run with queued presentation, buffered log records and cells in assembly\n");
+    printf("masterdo step 3e: cartridge chosen from the roms directory, run with queued presentation\n");
     if (plat_init(&plat) < 0)
         return 1;
     memset(&st, 0, sizeof(st));
     st.pic_x = (plat.width - RENDER_W) / 2;
     st.pic_y = ((plat.height - RENDER_H) / 2) & ~1;
 
-    show_message(&plat, "Loading " ROM_PATH "...");
-    if (rom_load(&st.rom, ROM_PATH) == 0)
-        rom_log(&st.rom);
-    plat_mem_free(&st.dram_free, &st.vram_free);
-    printf("Memory: %lu bytes of DRAM and %lu bytes of VRAM free before the benchmarks\n",
-           (unsigned long)st.dram_free, (unsigned long)st.vram_free);
-
     show_message(&plat, "Benchmarks of steps 0 and 1...");
     run_benchmarks(&plat, &st);
+    plat_mem_free(&st.dram_free, &st.vram_free);
+    printf("Memory: %lu bytes of DRAM and %lu bytes of VRAM free before the cartridge\n",
+           (unsigned long)st.dram_free, (unsigned long)st.vram_free);
 
-    if (st.rom.data != NULL && st.rom.size >= 0x4000 &&
-        game_init(&g, st.rom.data, (uint32)st.rom.size) == 0) {
-        uint32 vram;
-
-        st.have_game = 1;
-        game_set_frame_us(&g, plat.frame_us);
-        show_message(&plat, "Translating the cartridge code...");
-        game_translate_rom(&g);
-        plat_mem_free(&st.run_free, &vram);
-        printf("Memory: %lu bytes of DRAM free during the run; picture at (%ld,%ld)\n",
-               (unsigned long)st.run_free, (long)st.pic_x, (long)st.pic_y);
-    }
-
-    for (;;) {
-        if (st.have_game) {
-            game_reset(&g);
-            run_game(&plat, &st);
-        }
-        draw_results(&plat, &st);
-        prev = plat_pad_state();
+    if (rom_scan(&st.roms) <= 0) {
+        show_message(&plat, "No cartridge image in the " ROM_DIR " directory");
+        printf("ROM: no file in " ROM_DIR "\n");
+        plat_wait_vbl(&plat);
         for (;;) {
-            uint32 held = plat_pad_state();
-            uint32 pressed = held & ~prev;
-
-            prev = held;
-            if (pressed & ControlX)
+            if (plat_pad_pressed() & ControlX)
                 goto quit;
-            if ((pressed & ControlB) && st.have_game)
-                break;
             plat_wait_vbl(&plat);
         }
+    }
+    for (;;) {
+        int32 pick = rom_menu(&plat, &st);
+        char buf[64];
+
+        if (pick < 0)
+            goto quit;
+        sprintf(buf, "Loading %s...", st.roms.name[pick]);
+        show_message(&plat, buf);
+        st.have_game = 0;
+        if (rom_load(&st.rom, st.roms.name[pick]) == 0)
+            rom_log(&st.rom);
+        if (st.rom.data != NULL && st.rom.size >= 0x4000 &&
+            game_init(&g, st.rom.data, (uint32)st.rom.size) == 0) {
+            uint32 vram;
+
+            st.have_game = 1;
+            game_set_frame_us(&g, plat.frame_us);
+            show_message(&plat, "Translating the cartridge code...");
+            game_translate_rom(&g);
+            plat_mem_free(&st.run_free, &vram);
+            printf("Memory: %lu bytes of DRAM free during the run; picture at (%ld,%ld)\n",
+                   (unsigned long)st.run_free, (long)st.pic_x, (long)st.pic_y);
+        }
+
+        for (;;) {
+            if (st.have_game) {
+                game_reset(&g);
+                run_game(&plat, &st);
+            }
+            draw_results(&plat, &st);
+            prev = plat_pad_state();
+            for (;;) {
+                uint32 held = plat_pad_state();
+                uint32 pressed = held & ~prev;
+
+                prev = held;
+                if (pressed & ControlX)
+                    goto leave;
+                if ((pressed & ControlB) && st.have_game)
+                    break;
+                plat_wait_vbl(&plat);
+            }
+        }
+leave:
+        if (st.have_game)
+            game_free(&g);
+        rom_unload(&st.rom);
+        if (st.roms.count == 1)
+            goto quit;
     }
 
 quit:
     printf("masterdo: quit\n");
-    if (st.have_game)
-        game_free(&g);
-    rom_unload(&st.rom);
     plat_shutdown(&plat);
     return 0;
 }

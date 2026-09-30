@@ -15,6 +15,10 @@
 #include "string.h"
 #include "mem.h"
 #include "blockfile.h"
+#include "filesystem.h"
+#include "directory.h"
+#include "directoryfunctions.h"
+#include "filefunctions.h"
 
 static const char rom_signature[8] = { 'T', 'M', 'R', ' ', 'S', 'E', 'G', 'A' };
 static const int32 rom_header_offsets[3] = { 0x7FF0, 0x3FF0, 0x1FF0 };
@@ -44,30 +48,87 @@ static void rom_parse_header(rom_image *rom)
     rom->size_code = (uint32)h[0x0F] & 0x0F;
 }
 
-Err rom_load(rom_image *rom, const char *path)
+int32 rom_scan(rom_list *list)
 {
+    Directory *dir;
+    DirectoryEntry de;
+
+    list->count = 0;
+    dir = OpenDirectoryPath(ROM_DIR);
+    if (dir == NULL) {
+        /* Relative to the current directory, spelled out. */
+        char path[256];
+
+        if (GetDirectory(path, sizeof(path) - 8) >= 0) {
+            strcat(path, "/" ROM_DIR);
+            dir = OpenDirectoryPath(path);
+        }
+        if (dir == NULL) {
+            printf("ERROR: cannot open the " ROM_DIR " directory (%s)\n", path);
+            return -1;
+        }
+    }
+    while (ReadDirectory(dir, &de) >= 0) {
+        int32 k;
+        int32 n = list->count;
+
+        if (de.de_Flags & FILE_IS_DIRECTORY)
+            continue;
+        if (n >= ROM_LIST_MAX) {
+            printf("ROM: more than %d files in " ROM_DIR ", the rest is ignored\n",
+                   ROM_LIST_MAX);
+            break;
+        }
+        /* Insertion in name order. */
+        for (k = n; k > 0 && strcmp(list->name[k - 1], de.de_FileName) > 0; k--) {
+            strcpy(list->name[k], list->name[k - 1]);
+            list->size[k] = list->size[k - 1];
+        }
+        strncpy(list->name[k], de.de_FileName, ROM_NAME_LEN - 1);
+        list->name[k][ROM_NAME_LEN - 1] = 0;
+        list->size[k] = de.de_ByteCount;
+        list->count++;
+    }
+    CloseDirectory(dir);
+    return list->count;
+}
+
+Err rom_load(rom_image *rom, const char *name)
+{
+    char path[ROM_NAME_LEN + 8];
     int32 size = 0;
 
     memset(rom, 0, sizeof(*rom));
     rom->header_offset = -1;
+    strncpy(rom->name, name, ROM_NAME_LEN - 1);
+    strcpy(path, ROM_DIR "/");
+    strcat(path, rom->name);
 
     /* The image goes to VRAM, which the CPU reads like DRAM, to leave
      * the DRAM to the translator (code buffer) and the renderer. */
-    rom->data = (uint8 *)LoadFile(path, &size, MEMTYPE_VRAM);
-    if (rom->data == NULL) {
+    rom->raw = (uint8 *)LoadFile(path, &size, MEMTYPE_VRAM);
+    if (rom->raw == NULL) {
         rom->size = size < 0 ? size : -1;
         printf("ERROR: cannot load %s (0x%lx)\n", path, (unsigned long)size);
         return rom->size;
     }
+    rom->data = rom->raw;
     rom->size = size;
+    /* Some dumps carry a 512-byte copier header before the image. */
+    if (size > 512 && (size & 0x3FFF) == 512) {
+        rom->data += 512;
+        rom->size -= 512;
+        printf("ROM: %s has a 512-byte header, skipped\n", rom->name);
+    }
     rom_parse_header(rom);
     return 0;
 }
 
 void rom_unload(rom_image *rom)
 {
-    if (rom->data != NULL)
-        UnloadFile(rom->data);
+    if (rom->raw != NULL)
+        UnloadFile(rom->raw);
+    rom->raw = NULL;
     rom->data = NULL;
 }
 
@@ -77,7 +138,7 @@ void rom_log(const rom_image *rom)
         printf("ROM: not loaded\n");
         return;
     }
-    printf("ROM: %ld bytes, first bytes %02x %02x %02x %02x\n",
+    printf("ROM: %s, %ld bytes, first bytes %02x %02x %02x %02x\n", rom->name,
            (long)rom->size, rom->data[0], rom->data[1], rom->data[2], rom->data[3]);
     if (rom->header_offset < 0) {
         printf("ROM: no TMR SEGA header\n");
