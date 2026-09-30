@@ -11,7 +11,7 @@
 
 #define JIT_ZONE_BYTES  (32 * 1024)
 #define JIT_ZONES       16
-#define JIT_HOT_ZONES   10      /* code translated again after an eviction goes there */
+#define JIT_HOT_ZONES   6       /* code translated again after an eviction goes there */
 #define JIT_CODE_BYTES  (JIT_ZONE_BYTES * JIT_ZONES)
 #define JIT_BLOCKS      3072
 #define JIT_LINKS       (2 * JIT_BLOCKS)
@@ -26,14 +26,19 @@
  * the frame. */
 #define HOT_QUEUE_AT    2
 #define HOT_SYNC_AT     2
+#define HOT_FORCE_AT    8       /* translated whatever the budget from this entry */
 #define HOT_SYNC_US     3000
 #define HOT_INT_COST    100
 
-/* Spare-time translation goes on while the frame is under SPARE_LIMIT_US,
- * and at least one queued block is translated while it is under
- * SPARE_ONE_US, so that the queue drains even in busy stretches. */
-#define SPARE_LIMIT_US  (PLAT_NTSC_FRAME_US - 2500)
-#define SPARE_ONE_US    (PLAT_NTSC_FRAME_US - 1800)
+/* Time of a frame outside the emulation, the picture update and the
+ * drawing: the pad read, the presentation and the system. A translation
+ * in spare time, or at once with the floor budget, must leave the frame
+ * this margin on top of what the update and the drawing took in the
+ * previous frame; a window log needs LOG_ROOM_US. */
+#define FRAME_MARGIN_US 800
+#define LOG_ROOM_US     3000
+
+uint32 game_hot_zones = JIT_HOT_ZONES;
 
 #define FRAME_T         (VDP_LINES_NTSC * VDP_LINE_T)   /* T-states per frame */
 
@@ -138,10 +143,11 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
         return -1;
     }
     z80j_default_glue(&glue);
-    z80j_init(&g->jit, g->ctx, g->code, JIT_CODE_BYTES / 4, JIT_ZONES, JIT_HOT_ZONES,
+    z80j_init(&g->jit, g->ctx, g->code, JIT_CODE_BYTES / 4, JIT_ZONES, game_hot_zones,
               g->blocks, JIT_BLOCKS, g->links, JIT_LINKS, &glue);
     z80j_set_interp(&g->jit, g->hot, HOT_QUEUE_AT, HOT_SYNC_AT);
-    z80j_set_budget(&g->jit, plat_usec_now, HOT_SYNC_US, HOT_INT_COST);
+    z80j_set_force(&g->jit, HOT_FORCE_AT);
+    z80j_set_budget(&g->jit, plat_usec_now, HOT_SYNC_US, HOT_INT_COST, PLAT_NTSC_FRAME_US);
     sms_init(g->sms, g->ctx, rom, rom_size, VDP_LINES_NTSC);
     game_reset(g);
     return 0;
@@ -209,13 +215,14 @@ void game_translate_rom(game *g)
            "(%lu us per instruction), %lu busy-wait loops, %lu evictions; code buffer "
            "%d zones of %d bytes (%d hot), %d block descriptors, %d link entries; "
            "interpreter: translation queued at %d entries, at once from %d within "
-           "%d us per frame plus %d/16 us per interpreted instruction\n",
+           "%d us per frame when the frame has room, plus %d/16 us per interpreted "
+           "instruction, whatever the budget from %d entries\n",
            (unsigned long)g->rom_blocks, (unsigned long)g->rom_insns,
            (unsigned long)g->rom_bytes, (unsigned long)g->rom_us,
            (unsigned long)(g->rom_insns ? g->rom_us / g->rom_insns : 0),
            (unsigned long)g->rom_busy, (unsigned long)j->stats.evictions,
-           JIT_ZONES, JIT_ZONE_BYTES, JIT_HOT_ZONES, JIT_BLOCKS, JIT_LINKS,
-           HOT_QUEUE_AT, HOT_SYNC_AT, HOT_SYNC_US, HOT_INT_COST);
+           JIT_ZONES, JIT_ZONE_BYTES, (int)game_hot_zones, JIT_BLOCKS, JIT_LINKS,
+           HOT_QUEUE_AT, HOT_SYNC_AT, HOT_SYNC_US, HOT_INT_COST, HOT_FORCE_AT);
 }
 
 void game_reset(game *g)
@@ -226,7 +233,12 @@ void game_reset(game *g)
     g->stop_pc = 0;
     g->frame = 0;
     g->last_us = 0;
-    g->last_upd_us = 0;
+    g->last_upd_us = 2000;      /* usual values, for the first frame's budget */
+    g->last_draw_us = 3500;
+    g->last_spare_us = 0;
+    g->last_pad_us = 0;
+    g->long_logged = 0;
+    g->pend.valid = 0;
     g->total_us = 0;
     g->max_us = 0;
     g->max_frame = 0;
@@ -247,19 +259,42 @@ void game_reset(game *g)
     window_start(g);
 }
 
-static void log_window(game *g)
+/* Closes the window: its figures are kept for a log written later, in
+ * the spare time of a frame with room for it (or before the next
+ * window closes), and a new window starts. */
+static void window_close(game *g)
 {
     game_window *w = &g->win;
-    game_counters now;
+    game_pending_log *p = &g->pend;
     game_counters d;
-    uint32 first = g->frame - w->frames;
 
-    read_counters(g, &now);
-    diff_counters(&d, &now, &w->start);
+    read_counters(g, &p->now);
+    diff_counters(&d, &p->now, &w->start);
     g->win_avg_us = w->us / w->frames;
     g->win_max_us = w->max_us;
     g->win_total_us = w->total_us / w->frames;
     g->win_idle_pct = percent(d.idle >> 8, w->frames * FRAME_T);
+    p->first = g->frame - w->frames;
+    p->last = g->frame - 1;
+    memcpy(&p->w, w, sizeof(p->w));
+    p->valid = 1;
+    window_start(g);
+}
+
+static void log_window(game *g)
+{
+    game_pending_log *p = &g->pend;
+    game_window *w = &p->w;
+    game_counters d;
+    uint32 first = p->first;
+    uint32 last = p->last;
+    uint32 idle_pct;
+
+    if (!p->valid)
+        return;
+    p->valid = 0;
+    diff_counters(&d, &p->now, &w->start);
+    idle_pct = percent(d.idle >> 8, w->frames * FRAME_T);
     printf("Game: frames %lu-%lu: emulation %lu us average, %lu us worst (frame %lu), "
            "update %lu us average, %lu us worst, draw %lu us average, %lu us worst, "
            "total %lu us average, %lu us worst (frame %lu), %lu over budget, "
@@ -269,15 +304,15 @@ static void log_window(game *g)
            "%lu bank switches, %lu blocks (%lu in spare time, %lu at once in %lu us, "
            "%lu refused, %lu promoted, %lu us of spare time), %lu interpreted "
            "instructions in %lu stretches, %lu evictions (%lu blocks), pad read %lu us\n",
-           (unsigned long)first, (unsigned long)(g->frame - 1),
-           (unsigned long)g->win_avg_us, (unsigned long)w->max_us,
+           (unsigned long)first, (unsigned long)last,
+           (unsigned long)(w->us / w->frames), (unsigned long)w->max_us,
            (unsigned long)w->max_frame,
            (unsigned long)(w->upd_us / w->frames), (unsigned long)w->max_upd_us,
            (unsigned long)(w->draw_us / w->frames), (unsigned long)w->max_draw_us,
-           (unsigned long)g->win_total_us, (unsigned long)w->max_total_us,
+           (unsigned long)(w->total_us / w->frames), (unsigned long)w->max_total_us,
            (unsigned long)w->max_total_frame, (unsigned long)w->over,
            (unsigned long)w->draw_err, (unsigned long)w->long_vbl,
-           (unsigned long)g->win_idle_pct,
+           (unsigned long)idle_pct,
            (unsigned long)d.irqs, (unsigned long)d.nmis,
            (unsigned long)d.vdp_data_w, (unsigned long)d.vdp_data_r,
            (unsigned long)d.vdp_ctrl_w, (unsigned long)d.io.vdp_stat_r,
@@ -293,7 +328,7 @@ static void log_window(game *g)
            "%lu cells for written tiles, %lu palettes, %lu backdrop changes, %lu sprite cels, "
            "%lu pieces, %lu priority strips, %lu frames in scroll bands, %lu frames partly blanked, "
            "%lu bands dropped\n",
-           (unsigned long)first, (unsigned long)(g->frame - 1),
+           (unsigned long)first, (unsigned long)last,
            (unsigned long)d.rd.tiles, (unsigned long)d.rd.cells, (unsigned long)d.rd.rebuilds,
            (unsigned long)d.rd.tile_cells, (unsigned long)d.rd.palettes,
            (unsigned long)d.rd.backdrops,
@@ -321,8 +356,8 @@ int32 game_frame(game *g, uint32 pad, uint32 pause)
     g->f_interp_insns = g->ctx->int_insns;
     g->f_sync_us = g->jit.stats.sync_us;
 
-    z80j_frame_start(&g->jit);
     t0 = plat_usec_now();
+    z80j_frame_start(&g->jit, t0, g->last_upd_us + g->last_draw_us + FRAME_MARGIN_US);
     sms_frame(g->sms, pad, pause);
     t1 = plat_usec_now();
     g->last_us = t1 - t0;
@@ -347,6 +382,7 @@ void game_frame_done(game *g, uint32 draw_us)
     uint32 total = dt + g->last_upd_us + draw_us;
     uint32 b;
 
+    g->last_draw_us = draw_us;
     g->idle_t16 += g->f_idle >> 4;
     g->total_us += dt;
     if (dt > g->max_us) {
@@ -405,33 +441,33 @@ void game_frame_done(game *g, uint32 draw_us)
         g->win.over++;
     g->frame++;
     if (g->win.frames == GAME_WINDOW) {
-        log_window(g);
-        window_start(g);
+        log_window(g);             /* the previous window, if still pending */
+        window_close(g);
     }
 }
 
 void game_pad_time(game *g, uint32 us)
 {
     g->win.pad_us += us;
+    g->last_pad_us = us;
 }
 
 uint32 game_spare_time(game *g, uint32 frame_start)
 {
     uint32 t0 = plat_usec_now();
     uint32 now = t0;
-    uint32 done = 0;
 
-    for (;;) {
-        uint32 elapsed = now - frame_start;
-
-        if (elapsed >= SPARE_LIMIT_US && (done != 0 || elapsed >= SPARE_ONE_US))
-            break;
+    while (z80j_spare_fits(&g->jit, now - frame_start, FRAME_MARGIN_US)) {
         if (!z80j_prefetch(&g->jit))
             break;
-        done++;
+        now = plat_usec_now();
+    }
+    if (g->pend.valid && now - frame_start + LOG_ROOM_US + FRAME_MARGIN_US <= PLAT_NTSC_FRAME_US) {
+        log_window(g);
         now = plat_usec_now();
     }
     g->win.spare_us += now - t0;
+    g->last_spare_us = now - t0;
     return now - t0;
 }
 
@@ -440,12 +476,25 @@ void game_note_draw_error(game *g)
     g->win.draw_err++;
 }
 
-void game_note_long_vbl(game *g)
+void game_note_long_vbl(game *g, uint32 period_us)
 {
+    uint32 total = g->last_us + g->last_upd_us + g->last_draw_us;
+
     g->win.long_vbl++;
+    if (total <= PLAT_NTSC_FRAME_US && g->long_logged < GAME_LONG_LOGS) {
+        g->long_logged++;
+        printf("Game: frame %lu shown after %lu us though under budget: emulation %lu, "
+               "update %lu, draw %lu, spare time %lu, pad %lu us, %lu us of translations "
+               "at once\n",
+               (unsigned long)(g->frame - 1), (unsigned long)period_us,
+               (unsigned long)g->last_us, (unsigned long)g->last_upd_us,
+               (unsigned long)g->last_draw_us, (unsigned long)g->last_spare_us,
+               (unsigned long)g->last_pad_us,
+               (unsigned long)(g->jit.stats.sync_us - g->f_sync_us));
+    }
 }
 
-void game_log_summary(const game *g)
+void game_log_summary(game *g)
 {
     game_counters now;
     game_counters d;
@@ -454,6 +503,7 @@ void game_log_summary(const game *g)
     uint32 all = n ? g->all_total_us / n : 0;
     uint32 k;
 
+    log_window(g);
     read_counters(g, &now);
     diff_counters(&d, &now, &g->run_start);
     printf("Game summary: %lu frames, emulation %lu us average (%lu%% of %d us), worst %lu us "

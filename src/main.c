@@ -262,7 +262,7 @@ static void run_game(platform *p, app_state *st)
             plat_wait_vbl(p);
         now = plat_usec_now();
         if (now - shown >= LONG_VBL_US)
-            game_note_long_vbl(&g);
+            game_note_long_vbl(&g, now - shown);
         shown = now;
     }
     plat_reset_clip(p);

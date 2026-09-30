@@ -26,8 +26,9 @@
 ; side (z80j_hot), which queues it, and so does every entry from sync_at
 ; on while the frame's budget of translations at once is open: when the
 ; C side refuses one, it sets the count of interpreted instructions from
-; which it may be asked again (hot_sync_gate). Instructions interpreted
-; are counted (int_insns) for the logs and for that budget.
+; which it may be asked again (hot_sync_gate); reaching force_at hands
+; the address over whatever the budget. Instructions interpreted are
+; counted (int_insns) for the logs and for that budget.
 ;
 ; Context layout: CONTRACT with z80j_ctx (z80jit.h) - keep in sync
 ; (z80jit.c checks the offsets at compile time).
@@ -70,6 +71,7 @@ INT_LEAVE       EQU     0x4C4
 INT_RUNS        EQU     0x4C8
 INT_INSNS       EQU     0x4CC
 HOT_SYNC_GATE   EQU     0x4D0
+HOT_FORCE_AT    EQU     0x4D4
 PZST            EQU     0x600
 FENC            EQU     0x700
 FDEC            EQU     0x800
@@ -626,6 +628,9 @@ int_jump
         ldr     r2,[r10,#HOT_SYNC_AT]
         cmp     r0,r2
         blt     next
+        ldr     r2,[r10,#HOT_FORCE_AT]
+        cmp     r0,r2
+        beq     int_hot
         ldr     r2,[r10,#INT_INSNS]
         ldr     r1,[r10,#HOT_SYNC_GATE]
         cmp     r2,r1

@@ -119,7 +119,8 @@ typedef struct {
     uint32 int_insns;       /* +0x4CC: interpreter: instructions interpreted */
     uint32 hot_sync_gate;   /* +0x4D0: interpreter: int_insns from which an address */
                             /* past hot_sync_at is handed to the C side again */
-    uint32 pad0[11];
+    uint32 hot_force_at;    /* +0x4D4: count at which it is handed over regardless */
+    uint32 pad0[10];
     uint8  page_kind[256];  /* +0x500 */
     uint8  pzst[256];       /* +0x600: sign / zero / parity flags of a byte */
     uint8  fenc[256];       /* +0x700: internal flags -> Z80 F */
@@ -308,12 +309,17 @@ typedef struct {
     uint8      *hot;        /* entry counts per Z80 address (0: no interpreter) */
     uint32      queue_at;
     uint32      sync_at;
+    uint32      force_at;   /* entries from which translation ignores the budget */
     uint32    (*clock)(void);   /* microsecond clock, for the budget */
     uint32      sync_floor_us;  /* budget of translations at once per frame */
     uint32      int_cost;       /* estimated cost of an interpreted instruction, */
                                 /* in 1/16 microsecond */
     uint32      sync_spent_us;  /* spent in this frame */
     uint32      int_insns0;     /* interpreted instructions when the frame began */
+    uint32      frame_start_us; /* clock at the start of the frame */
+    uint32      frame_us;       /* length of a frame */
+    uint32      reserve_us;     /* time the frame still needs after the emulation */
+    uint32      est_us;         /* running average of the cost of a translation */
     uint32      queue[Z80J_QUEUE];  /* unordered; the hottest goes first */
     uint32      nqueue;
     uint32      queued[2048];   /* bitmap of the addresses in the queue */
@@ -345,12 +351,25 @@ void   z80j_flush(z80j_state *j);
  * queue_at and translated at once when it reaches sync_at. */
 void   z80j_set_interp(z80j_state *j, uint8 *hot, uint32 queue_at, uint32 sync_at);
 
-/* Budget of the translations at once: floor_us per frame, raised by
- * int_cost (1/16 us) per instruction interpreted in the frame, measured
- * with clock. z80j_frame_start opens a new frame's budget. */
+/* Entries from which an address is translated at once whatever the
+ * budget (0: never): code interpreted that often is either a loop or
+ * code that keeps missing the budget. */
+void   z80j_set_force(z80j_state *j, uint32 force_at);
+
+/* Budget of the translations at once, measured with clock: translations
+ * paid for by the instructions the frame has interpreted (int_cost per
+ * instruction, in 1/16 us) are always allowed; beyond them, up to
+ * floor_us per frame while the frame has room for one (the frame began
+ * at start_us, lasts frame_us and still needs reserve_us after the
+ * emulation). z80j_frame_start opens a new frame's budget. */
 void   z80j_set_budget(z80j_state *j, uint32 (*clock)(void), uint32 floor_us,
-                       uint32 int_cost);
-void   z80j_frame_start(z80j_state *j);
+                       uint32 int_cost, uint32 frame_us);
+void   z80j_frame_start(z80j_state *j, uint32 start_us, uint32 reserve_us);
+
+/* Whether a translation in spare time fits in the frame, elapsed_us
+ * after its start, leaving margin_us: uses the running average of the
+ * cost of a translation, with half as much again for safety. */
+uint32 z80j_spare_fits(const z80j_state *j, uint32 elapsed_us, uint32 margin_us);
 
 /* Translates one queued hot address; returns 0 when the queue is empty.
  * Meant for the spare time at the end of a frame. */

@@ -44,6 +44,7 @@ CHECK_OFF(int_leave, GOFF(int_leave) == 0x4C4);
 CHECK_OFF(int_runs, GOFF(int_runs) == 0x4C8);
 CHECK_OFF(int_insns, GOFF(int_insns) == 0x4CC);
 CHECK_OFF(hot_sync_gate, GOFF(hot_sync_gate) == 0x4D0);
+CHECK_OFF(hot_force_at, GOFF(hot_force_at) == 0x4D4);
 CHECK_OFF(f2, GOFF(f2) == 0x428);
 CHECK_OFF(bc2, GOFF(bc2) == 0x430);
 CHECK_OFF(slot_bank, GOFF(slot_bank) == 0x47C);
@@ -1118,41 +1119,65 @@ static void queue_hot(z80j_state *j, uint32 pc)
 
 static uint32 host_force(z80j_state *j, uint32 pc);
 
-/* Translations at once: allowed while their time in this frame is under
- * the floor plus the estimated cost of what the frame has interpreted.
- * When refused, the interpreter is told from how many more interpreted
- * instructions on it may ask again (hot_sync_gate). */
+/* Translations at once: one is allowed when the instructions the frame
+ * has interpreted have paid for it (their estimated cost covers the time
+ * already spent plus the usual cost of a translation), or, up to the
+ * floor per frame, when the frame still has room for it before the
+ * time it reserves after the emulation. When refused, the interpreter
+ * is told from how many more interpreted instructions on it may ask
+ * again (hot_sync_gate). */
 static uint32 sync_allowed(z80j_state *j)
 {
     z80j_ctx *ctx = j->ctx;
     uint32 interpreted = ctx->int_insns - j->int_insns0;
-    uint32 allowed = j->sync_floor_us + ((interpreted * j->int_cost) >> 4);
+    uint32 paid = (interpreted * j->int_cost) >> 4;
+    uint32 need = j->sync_spent_us + j->est_us;
 
     if (j->sync_at == 0) {
         ctx->hot_sync_gate = 0xFFFFFFFFu;
         return 0;
     }
-    if (j->sync_spent_us < allowed)
+    if (need <= paid)
         return 1;
+    if (j->sync_spent_us < j->sync_floor_us) {
+        uint32 elapsed = (j->clock != 0) ? j->clock() - j->frame_start_us : 0;
+
+        if (elapsed + j->est_us + j->reserve_us <= j->frame_us)
+            return 1;
+    }
     j->stats.sync_refused++;
     if (j->int_cost != 0)
-        ctx->hot_sync_gate = ctx->int_insns +
-                             ((j->sync_spent_us - allowed) * 16) / j->int_cost + 1;
+        ctx->hot_sync_gate = ctx->int_insns + ((need - paid) * 16) / j->int_cost + 1;
     else
         ctx->hot_sync_gate = 0xFFFFFFFFu;
     return 0;
 }
 
-static uint32 sync_translate(z80j_state *j, uint32 pc)
+/* Translates pc now and keeps the running average of the cost. */
+static uint32 timed_translate(z80j_state *j, uint32 pc, uint32 *dt)
 {
     uint32 t0 = (j->clock != 0) ? j->clock() : 0;
     uint32 host = host_force(j, pc);
-    uint32 dt = (j->clock != 0) ? j->clock() - t0 : 1500;  /* no clock: a usual block */
+
+    *dt = (j->clock != 0) ? j->clock() - t0 : j->est_us;
+    j->est_us = (j->est_us * 3 + *dt) >> 2;
+    return host;
+}
+
+static uint32 sync_translate(z80j_state *j, uint32 pc)
+{
+    uint32 dt;
+    uint32 host = timed_translate(j, pc, &dt);
 
     j->sync_spent_us += dt;
     j->stats.sync_us += dt;
     j->stats.sync++;
     return host;
+}
+
+uint32 z80j_spare_fits(const z80j_state *j, uint32 elapsed_us, uint32 margin_us)
+{
+    return elapsed_us + j->est_us + (j->est_us >> 1) + margin_us <= j->frame_us;
 }
 
 static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
@@ -1471,7 +1496,7 @@ static uint32 host_for(z80j_state *j, uint32 pc)
             j->hot[pc] = (uint8)++n;
         if (j->queue_at == 0)
             return j->glue.interp;      /* interpretation only */
-        if (n < j->sync_at || !sync_allowed(j)) {
+        if (n < j->sync_at || ((j->force_at == 0 || n < j->force_at) && !sync_allowed(j))) {
             if (n >= j->queue_at)
                 queue_hot(j, pc);
             return j->glue.interp;
@@ -1497,8 +1522,12 @@ uint32 z80j_prefetch(z80j_state *j)
         j->queued[pc >> 5] &= ~((uint32)1 << (pc & 31));
         if (find_block(j, pc, jit_block_key(j->ctx, pc)) != 0)
             continue;
-        if (translate_block(j, pc, 0, 0, 0) != 0)
-            j->stats.prefetched++;
+        {
+            uint32 dt;
+
+            if (timed_translate(j, pc, &dt) != j->glue.abort)
+                j->stats.prefetched++;
+        }
         return 1;
     }
     return 0;
@@ -1521,18 +1550,29 @@ void z80j_set_interp(z80j_state *j, uint8 *hot, uint32 queue_at, uint32 sync_at)
     memset(j->queued, 0, sizeof(j->queued));
 }
 
+void z80j_set_force(z80j_state *j, uint32 force_at)
+{
+    j->force_at = force_at;
+    j->ctx->hot_force_at = force_at;
+}
+
 void z80j_set_budget(z80j_state *j, uint32 (*clock)(void), uint32 floor_us,
-                     uint32 int_cost)
+                     uint32 int_cost, uint32 frame_us)
 {
     j->clock = clock;
     j->sync_floor_us = floor_us;
     j->int_cost = int_cost;
+    j->frame_us = frame_us;
+    if (j->est_us == 0)
+        j->est_us = 2000;
 }
 
-void z80j_frame_start(z80j_state *j)
+void z80j_frame_start(z80j_state *j, uint32 start_us, uint32 reserve_us)
 {
     j->sync_spent_us = 0;
     j->int_insns0 = j->ctx->int_insns;
+    j->frame_start_us = start_us;
+    j->reserve_us = reserve_us;
     j->ctx->hot_sync_gate = 0;
 }
 
@@ -1567,7 +1607,8 @@ uint32 z80j_hot(z80j_state *j)
         j->ctx->hot_sync_gate = 0xFFFFFFFFu;    /* interpretation only */
         return j->glue.interp;
     }
-    if (j->hot[pc] >= j->sync_at && sync_allowed(j))
+    if (j->hot[pc] >= j->sync_at &&
+        ((j->force_at != 0 && j->hot[pc] >= j->force_at) || sync_allowed(j)))
         return sync_translate(j, pc);
     queue_hot(j, pc);
     return j->glue.interp;
@@ -1930,6 +1971,7 @@ void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
     ctx->int_runs = 0;
     ctx->int_insns = 0;
     ctx->hot_sync_gate = 0;
+    ctx->hot_force_at = 0;
 
     ctx->state = JIT_ADDR(j);
     ctx->exit_reason = Z80J_EXIT_LINES;

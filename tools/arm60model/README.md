@@ -44,7 +44,8 @@ everything through the interpreter (nothing translated), `-budget f:c`
 override the budget of translations at once (f microseconds per frame
 plus c/16 microseconds per interpreted instruction), `-hot q:s` override
 the entry counts at which an address is queued (q) and translated at once
-(s).
+(s), `-seed` translate the reachable code into the hot area, `-hotzones n`
+give n of the 16 zones to the hot area.
 
 Environment variables:
 - `SIMPAD="1600:10,1606:0,2100:8"`: buttons held from each frame on

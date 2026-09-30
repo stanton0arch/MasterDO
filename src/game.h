@@ -18,6 +18,7 @@
 #define GAME_WINDOW     100     /* frames per log line */
 #define GAME_HIST       32      /* frame time histogram, 1 ms per bucket */
 #define GAME_SLOW_LOGS  120     /* frames over the NTSC budget logged alone */
+#define GAME_LONG_LOGS  60      /* frames shown for two VBLs while under budget */
 
 /* Cumulative counters of the machine and the translator. */
 typedef struct {
@@ -63,6 +64,20 @@ typedef struct {
     game_counters start;    /* counters when the window began */
 } game_window;
 
+/* A window closed but not logged yet: the log is written in the spare
+ * time of a later frame, so that it does not push a frame past its VBL. */
+typedef struct {
+    uint32        valid;
+    uint32        first;    /* frames first-last */
+    uint32        last;
+    game_window   w;
+    game_counters now;      /* counters when the window closed */
+} game_pending_log;
+
+/* Zones of the code buffer given to the hot area; set before game_init
+ * (a tuning knob of the analysis harness). */
+extern uint32 game_hot_zones;
+
 typedef struct {
     z80j_ctx     *ctx;
     uint32       *code;
@@ -87,6 +102,11 @@ typedef struct {
     uint32        frame;
     uint32        last_us;  /* last frame: emulation */
     uint32        last_upd_us;
+    uint32        last_draw_us;
+    uint32        last_spare_us;
+    uint32        last_pad_us;
+    uint32        long_logged;
+    game_pending_log pend;
     uint32        total_us; /* emulation */
     uint32        max_us;
     uint32        max_frame;
@@ -137,18 +157,20 @@ int32 game_frame(game *g, uint32 pad, uint32 pause);
 void  game_frame_done(game *g, uint32 draw_us);
 
 /* Notes of the caller about the frame: a DrawCels error, a frame whose
- * presentation took two VBLs or more. */
+ * presentation took two VBLs or more (period_us from the previous
+ * presentation; logged when the frame's own work was under budget). */
 void  game_note_draw_error(game *g);
-void  game_note_long_vbl(game *g);
+void  game_note_long_vbl(game *g, uint32 period_us);
 
 /* Adds the time of a pad read to the current window. */
 void  game_pad_time(game *g, uint32 us);
 
 /* Spare time at the end of a frame that began at frame_start (microsecond
- * clock): translates queued code ahead while the frame is still well
- * inside its budget; returns the time it used. */
+ * clock): translates queued code ahead while a translation still fits in
+ * the frame, then writes a pending window log if there is room for it;
+ * returns the time it used. */
 uint32 game_spare_time(game *g, uint32 frame_start);
 
-void  game_log_summary(const game *g);
+void  game_log_summary(game *g);
 
 #endif /* GAME_H */
