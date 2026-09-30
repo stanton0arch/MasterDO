@@ -613,6 +613,10 @@ static uint32 scan_needed(jit_block_ctx *b, uint32 pc, int32 depth)
 
 static uint32 flags_needed(jit_block_ctx *b, uint32 pc)
 {
+    z80j_state *j = b->j;
+    uint32 ckey = (pc & 0xFFFFu) | (b->key << 16);      /* pc and bank */
+    uint32 ckind = b->key >> 16;                        /* page kind */
+    uint32 slot = (pc ^ (pc >> 9)) & (JIT_SCAN_CACHE - 1);
     int32 k;
     uint32 v;
 
@@ -620,7 +624,19 @@ static uint32 flags_needed(jit_block_ctx *b, uint32 pc)
         if (b->memo_pc[k] == pc)
             return b->memo_val[k];
     }
-    v = scan_needed(b, pc, SCAN_DEPTH);
+    /* ROM code only: the scan stops at RAM anyway (unsafe), and a block
+     * key of RAM is not cached. */
+    if (b->key != KEY_RAM && j->scan_key[slot] == ckey && j->scan_kind[slot] == ckind) {
+        v = j->scan_val[slot];
+        j->stats.scan_hits++;
+    } else {
+        v = scan_needed(b, pc, SCAN_DEPTH);
+        if (b->key != KEY_RAM) {
+            j->scan_key[slot] = ckey;
+            j->scan_kind[slot] = (uint8)ckind;
+            j->scan_val[slot] = (uint8)v;
+        }
+    }
     if (b->nmemo < SCAN_MEMO) {
         b->memo_pc[b->nmemo] = pc;
         b->memo_val[b->nmemo] = v;
@@ -920,8 +936,14 @@ static void unhash_block(z80j_state *j, z80j_block *blk)
     }
 }
 
+static uint32 zone_of(const z80j_state *j, const uint32 *host)
+{
+    return (uint32)(host - j->code) / j->zone_words;
+}
+
 static void free_block(z80j_state *j, z80j_block *blk)
 {
+    j->zone_blocks[zone_of(j, blk->entry)]--;
     blk->entry = 0;
     blk->next = j->free_blocks;
     j->free_blocks = blk;
@@ -954,6 +976,8 @@ static void evict_zone(z80j_state *j, uint32 z)
     uint32 n;
     uint32 freed = 0;
 
+    if (j->zone_blocks[z] == 0)
+        return;                         /* nothing to evict: no scan */
     for (k = 0; k < j->max_blocks; k++) {
         z80j_block *blk = &j->blocks[k];
         uint32 e = JIT_ADDR(blk->entry);
@@ -1041,6 +1065,8 @@ void z80j_flush(z80j_state *j)
     z80j_fill_words(j->ctx->lookup, 0x10000u, j->glue.miss);
     memset(j->hash, 0, sizeof(j->hash));
     memset(j->seen, 0, sizeof(j->seen));
+    memset(j->zone_blocks, 0, sizeof(j->zone_blocks));
+    memset(j->scan_kind, 0xFF, sizeof(j->scan_kind));
     j->free_blocks = 0;
     for (k = j->max_blocks; k > 0; k--) {
         z80j_block *blk = &j->blocks[k - 1];
@@ -1440,6 +1466,7 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
     area->cur = j->cur;
     j->free_blocks = blk->next;
     j->nblocks++;
+    j->zone_blocks[zone_of(j, blk->entry)]++;
     blk->body = ins[0].host;
     blk->next = j->hash[HASH(blk->pc)];
     j->hash[HASH(blk->pc)] = blk;

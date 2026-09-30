@@ -230,6 +230,7 @@ typedef struct {
     uint32 link_full;       /* links not made for lack of room in the log */
     uint32 retranslations;  /* RAM blocks whose code had changed */
     uint32 busy_loops;      /* busy-wait loops found in translated code */
+    uint32 scan_hits;       /* flag scans answered by the cache */
     uint32 interrupts;      /* maskable interrupts taken */
     uint32 nmis;            /* non-maskable interrupts taken */
     uint32 prefetched;      /* blocks translated ahead, in spare time */
@@ -243,6 +244,9 @@ typedef struct {
 typedef struct z80j_block z80j_block;
 
 #define Z80J_QUEUE 256          /* hot addresses waiting to be translated */
+
+#define JIT_MAX_ZONES   64
+#define JIT_SCAN_CACHE  512
 
 /* A range of zones filled in turn. */
 typedef struct {
@@ -292,6 +296,14 @@ typedef struct {
     uint32      nzones;
     z80j_area   area[2];    /* 0: cold, 1: hot (count 0: no hot area) */
     uint32      seen[2048]; /* Z80 addresses translated before */
+    uint32      zone_blocks[JIT_MAX_ZONES]; /* blocks held by each zone */
+    /* Flags read by the code at an address (the forward scan of the
+     * liveness analysis), cached across blocks for ROM code: the scan
+     * result only depends on the bytes at the address and on the key of
+     * the block the scan is made for. */
+    uint32      scan_key[JIT_SCAN_CACHE];   /* pc | bank of the block key << 16 */
+    uint8       scan_kind[JIT_SCAN_CACHE];  /* page kind of the block key, 0xFF: empty */
+    uint8       scan_val[JIT_SCAN_CACHE];
     z80j_glue   glue;
     z80j_block *blocks;     /* block descriptors */
     z80j_block *free_blocks;/* descriptors not in use, chained by next */

@@ -336,7 +336,8 @@ void game_translate_rom(game *g)
     FreeMem(visited, 0x10000 / 8);
 
     printf("ROM translation: %lu blocks, %lu instructions, %lu bytes of ARM code, %lu us "
-           "(%lu us per instruction), %lu busy-wait loops, %lu evictions; code buffer "
+           "(%lu us per instruction), %lu busy-wait loops, %lu flag scans from the cache, "
+           "%lu evictions; code buffer "
            "%d zones of %d bytes (%d hot), %d block descriptors, %d link entries; "
            "interpreter: translation queued at %d entries, at once from %d within "
            "%d us per frame when the frame has room, plus %d/16 us per interpreted "
@@ -344,7 +345,8 @@ void game_translate_rom(game *g)
            (unsigned long)g->rom_blocks, (unsigned long)g->rom_insns,
            (unsigned long)g->rom_bytes, (unsigned long)g->rom_us,
            (unsigned long)(g->rom_insns ? g->rom_us / g->rom_insns : 0),
-           (unsigned long)g->rom_busy, (unsigned long)j->stats.evictions,
+           (unsigned long)g->rom_busy, (unsigned long)j->stats.scan_hits,
+           (unsigned long)j->stats.evictions,
            JIT_ZONES, JIT_ZONE_BYTES, (int)game_hot_zones, JIT_BLOCKS, JIT_LINKS,
            HOT_QUEUE_AT, HOT_SYNC_AT, HOT_SYNC_US, HOT_INT_COST, HOT_FORCE_AT);
 }
