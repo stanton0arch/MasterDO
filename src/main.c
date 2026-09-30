@@ -234,6 +234,7 @@ static void run_game(platform *p, app_state *st)
         if (pressed & ControlX)
             break;
         if (pressed & ControlLeftShift) {
+            game_log_flush(&g);
             prev = show_snapshot(p, st, prev);
             if (prev & ControlX)
                 break;

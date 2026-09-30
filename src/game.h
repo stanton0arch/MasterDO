@@ -19,6 +19,8 @@
 #define GAME_HIST       32      /* frame time histogram, 1 ms per bucket */
 #define GAME_SLOW_LOGS  120     /* frames over the NTSC budget logged alone */
 #define GAME_LONG_LOGS  60      /* frames shown for two VBLs while under budget */
+#define GAME_LOG_SIZE   (64 * 1024)     /* log lines buffered during the run */
+#define GAME_LOG_LINE   1024    /* longest line */
 
 /* Cumulative counters of the machine and the translator. */
 typedef struct {
@@ -46,6 +48,8 @@ typedef struct {
 
 typedef struct {
     uint32 frames;
+    uint32 start_us;        /* clock when the window began */
+    uint32 real_us;         /* real time the window took, once closed */
     uint32 us;              /* emulation */
     uint32 max_us;
     uint32 max_frame;
@@ -84,6 +88,9 @@ typedef struct {
     void         *blocks;
     uint32       *links;
     uint8        *hot;      /* entry counts of the interpreter */
+    char         *log;      /* log lines of the run, written out later */
+    uint32        log_len;
+    uint32        log_from; /* first frame the buffered lines cover */
     sms_machine  *sms;
     renderer     *rd;
     z80j_state    jit;
@@ -170,6 +177,12 @@ void  game_pad_time(game *g, uint32 us);
  * the frame, then writes a pending window log if there is room for it;
  * returns the time it used. */
 uint32 game_spare_time(game *g, uint32 frame_start);
+
+/* Writes out the log lines buffered during the run (printing costs about
+ * 35 us per character on the debug link, so the run only buffers them):
+ * called when the run pauses or ends, and by the run itself when the
+ * buffer is full. */
+void  game_log_flush(game *g);
 
 void  game_log_summary(game *g);
 

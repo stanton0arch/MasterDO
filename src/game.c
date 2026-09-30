@@ -40,6 +40,48 @@
 
 uint32 game_hot_zones = JIT_HOT_ZONES;
 
+/* Log lines of the run go to a buffer: the line is formatted at the
+ * address log_begin returns (at most GAME_LOG_LINE bytes) and log_end
+ * keeps it. A full buffer is written out on the spot. */
+static char *log_begin(game *g)
+{
+    if (g->log_len + GAME_LOG_LINE > GAME_LOG_SIZE)
+        game_log_flush(g);
+    return g->log + g->log_len;
+}
+
+static void log_end(game *g)
+{
+    const char *s = g->log + g->log_len;
+    uint32 n = 0;
+
+    while (s[n] != 0)
+        n++;
+    g->log_len += n;
+}
+
+void game_log_flush(game *g)
+{
+    char *s = g->log;
+    char *end = g->log + g->log_len;
+
+    if (g->log_len == 0)
+        return;
+    printf("Log: %lu bytes buffered from frame %lu, written at frame %lu\n",
+           (unsigned long)g->log_len, (unsigned long)g->log_from, (unsigned long)g->frame);
+    while (s < end) {
+        char *nl = s;
+
+        while (nl < end && *nl != '\n')
+            nl++;
+        *nl = 0;
+        printf("%s\n", s);
+        s = nl + 1;
+    }
+    g->log_len = 0;
+    g->log_from = g->frame;
+}
+
 #define FRAME_T         (VDP_LINES_NTSC * VDP_LINE_T)   /* T-states per frame */
 
 static void read_counters(const game *g, game_counters *c)
@@ -92,6 +134,7 @@ static void window_start(game *g)
 {
     memset(&g->win, 0, sizeof(g->win));
     read_counters(g, &g->win.start);
+    g->win.start_us = plat_usec_now();
 }
 
 void game_free(game *g)
@@ -104,6 +147,7 @@ void game_free(game *g)
     if (g->blocks != NULL) FreeMem(g->blocks, (int32)z80j_block_bytes(JIT_BLOCKS));
     if (g->links != NULL) FreeMem(g->links, (int32)z80j_link_bytes(JIT_LINKS));
     if (g->hot != NULL) FreeMem(g->hot, 0x10000);
+    if (g->log != NULL) FreeMem(g->log, GAME_LOG_SIZE);
     if (g->code != NULL) FreeMem(g->code, JIT_CODE_BYTES);
     if (g->ctx != NULL) FreeMem(g->ctx, sizeof(z80j_ctx));
     g->rd = NULL;
@@ -111,6 +155,7 @@ void game_free(game *g)
     g->blocks = NULL;
     g->links = NULL;
     g->hot = NULL;
+    g->log = NULL;
     g->code = NULL;
     g->ctx = NULL;
 }
@@ -127,10 +172,11 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
     g->blocks = AllocMem((int32)z80j_block_bytes(JIT_BLOCKS), MEMTYPE_DRAM);
     g->links = (uint32 *)AllocMem((int32)z80j_link_bytes(JIT_LINKS), MEMTYPE_DRAM);
     g->hot = (uint8 *)AllocMem(0x10000, MEMTYPE_DRAM);
+    g->log = (char *)AllocMem(GAME_LOG_SIZE, MEMTYPE_DRAM);
     g->sms = (sms_machine *)AllocMem(sizeof(sms_machine), MEMTYPE_DRAM);
     g->rd = (renderer *)AllocMem(sizeof(renderer), MEMTYPE_DRAM | MEMTYPE_FILL);
     if (g->ctx == NULL || g->code == NULL || g->blocks == NULL || g->links == NULL ||
-        g->hot == NULL || g->sms == NULL || g->rd == NULL) {
+        g->hot == NULL || g->log == NULL || g->sms == NULL || g->rd == NULL) {
         printf("ERROR: out of memory for the machine (%lu + %lu + %lu + %lu + %lu bytes)\n",
                (unsigned long)sizeof(z80j_ctx), (unsigned long)JIT_CODE_BYTES,
                (unsigned long)z80j_block_bytes(JIT_BLOCKS), (unsigned long)z80j_link_bytes(JIT_LINKS),
@@ -239,6 +285,8 @@ void game_reset(game *g)
     g->last_pad_us = 0;
     g->long_logged = 0;
     g->pend.valid = 0;
+    g->log_len = 0;
+    g->log_from = 0;
     g->total_us = 0;
     g->max_us = 0;
     g->max_frame = 0;
@@ -276,6 +324,7 @@ static void window_close(game *g)
     g->win_idle_pct = percent(d.idle >> 8, w->frames * FRAME_T);
     p->first = g->frame - w->frames;
     p->last = g->frame - 1;
+    w->real_us = plat_usec_now() - w->start_us;
     memcpy(&p->w, w, sizeof(p->w));
     p->valid = 1;
     window_start(g);
@@ -295,9 +344,11 @@ static void log_window(game *g)
     p->valid = 0;
     diff_counters(&d, &p->now, &w->start);
     idle_pct = percent(d.idle >> 8, w->frames * FRAME_T);
-    printf("Game: frames %lu-%lu: emulation %lu us average, %lu us worst (frame %lu), "
+    sprintf(log_begin(g),
+           "Game: frames %lu-%lu: emulation %lu us average, %lu us worst (frame %lu), "
            "update %lu us average, %lu us worst, draw %lu us average, %lu us worst, "
-           "total %lu us average, %lu us worst (frame %lu), %lu over budget, "
+           "total %lu us average, %lu us worst (frame %lu), real %lu us per frame, "
+           "%lu over budget, "
            "%lu draw errors, %lu long presents, Z80 idle %lu%%, "
            "%lu IRQ, %lu NMI, VDP %lu data writes, %lu data reads, %lu control writes, "
            "%lu status reads, %lu counter reads, PSG %lu, pad %lu, other %lu, %lu leaves, "
@@ -310,7 +361,8 @@ static void log_window(game *g)
            (unsigned long)(w->upd_us / w->frames), (unsigned long)w->max_upd_us,
            (unsigned long)(w->draw_us / w->frames), (unsigned long)w->max_draw_us,
            (unsigned long)(w->total_us / w->frames), (unsigned long)w->max_total_us,
-           (unsigned long)w->max_total_frame, (unsigned long)w->over,
+           (unsigned long)w->max_total_frame, (unsigned long)(w->real_us / w->frames),
+           (unsigned long)w->over,
            (unsigned long)w->draw_err, (unsigned long)w->long_vbl,
            (unsigned long)idle_pct,
            (unsigned long)d.irqs, (unsigned long)d.nmis,
@@ -324,7 +376,9 @@ static void log_window(game *g)
            (unsigned long)w->spare_us, (unsigned long)d.interp_insns, (unsigned long)d.interp,
            (unsigned long)d.evictions, (unsigned long)d.evicted,
            (unsigned long)(w->pad_us / w->frames));
-    printf("Picture: frames %lu-%lu: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
+    log_end(g);
+    sprintf(log_begin(g),
+           "Picture: frames %lu-%lu: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
            "%lu cells for written tiles, %lu palettes, %lu backdrop changes, %lu sprite cels, "
            "%lu pieces, %lu priority strips, %lu frames in scroll bands, %lu frames partly blanked, "
            "%lu bands dropped\n",
@@ -335,6 +389,7 @@ static void log_window(game *g)
            (unsigned long)d.rd.sprites, (unsigned long)d.rd.pieces,
            (unsigned long)d.rd.prio_strips, (unsigned long)d.rd.bands, (unsigned long)d.rd.dbands,
            (unsigned long)d.rd.dropped);
+    log_end(g);
 }
 
 int32 game_frame(game *g, uint32 pad, uint32 pause)
@@ -365,6 +420,7 @@ int32 game_frame(game *g, uint32 pad, uint32 pause)
     if (ctx->exit_reason != Z80J_EXIT_LINES) {
         g->status = (int32)ctx->exit_reason;
         g->stop_pc = ctx->exit_arg;
+        game_log_flush(g);
         printf("Game: stopped at frame %lu, exit reason %ld at PC $%04lx\n",
                (unsigned long)g->frame, (long)g->status, (unsigned long)g->stop_pc);
         return g->status;
@@ -402,7 +458,8 @@ void game_frame_done(game *g, uint32 draw_us)
         g->over++;
         if (g->slow_logged < GAME_SLOW_LOGS) {
             g->slow_logged++;
-            printf("Game: frame %lu took %lu us (emulation %lu, update %lu, draw %lu): "
+            sprintf(log_begin(g),
+                   "Game: frame %lu took %lu us (emulation %lu, update %lu, draw %lu): "
                    "Z80 idle %lu%%, %lu blocks translated%s (%lu us at once), "
                    "%lu interpreted instructions in %lu stretches, "
                    "%lu VDP data writes, %lu tiles converted, %lu cells drawn\n",
@@ -417,6 +474,7 @@ void game_frame_done(game *g, uint32 draw_us)
                    (unsigned long)(g->sms->vdp.n_data_w - g->f_data),
                    (unsigned long)(g->rd->st.tiles - g->f_tiles),
                    (unsigned long)(g->rd->st.cells - g->f_cells));
+            log_end(g);
         }
     }
 
@@ -483,7 +541,8 @@ void game_note_long_vbl(game *g, uint32 period_us)
     g->win.long_vbl++;
     if (total <= PLAT_NTSC_FRAME_US && g->long_logged < GAME_LONG_LOGS) {
         g->long_logged++;
-        printf("Game: frame %lu shown after %lu us though under budget: emulation %lu, "
+        sprintf(log_begin(g),
+               "Game: frame %lu shown after %lu us though under budget: emulation %lu, "
                "update %lu, draw %lu, spare time %lu, pad %lu us, %lu us of translations "
                "at once\n",
                (unsigned long)(g->frame - 1), (unsigned long)period_us,
@@ -491,6 +550,7 @@ void game_note_long_vbl(game *g, uint32 period_us)
                (unsigned long)g->last_draw_us, (unsigned long)g->last_spare_us,
                (unsigned long)g->last_pad_us,
                (unsigned long)(g->jit.stats.sync_us - g->f_sync_us));
+        log_end(g);
     }
 }
 
@@ -504,6 +564,7 @@ void game_log_summary(game *g)
     uint32 k;
 
     log_window(g);
+    game_log_flush(g);
     read_counters(g, &now);
     diff_counters(&d, &now, &g->run_start);
     printf("Game summary: %lu frames, emulation %lu us average (%lu%% of %d us), worst %lu us "

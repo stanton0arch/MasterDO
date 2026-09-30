@@ -202,13 +202,16 @@ static void read_str(uint32_t a, char *buf, int max)
     buf[i] = 0;
 }
 
-static void do_printf(void)
+/* printf (format in r0, arguments from r1) and sprintf (destination in
+ * r0, format in r1, arguments from r2): the text is formatted on the
+ * host and written to stdout or into the ARM memory. */
+static void do_format(int to_memory)
 {
     char fmt[1024], out[4096], spec[32], tmp[512];
-    uint32_t argn = 1;
+    uint32_t argn = to_memory ? 2 : 1;
     char *p, *o = out;
 
-    read_str(r[0], fmt, sizeof(fmt));
+    read_str(r[to_memory ? 1 : 0], fmt, sizeof(fmt));
 #define NEXTARG() (argn <= 3 ? r[argn++] : rd32(r[13] + 4 * (argn++ - 4)))
     for (p = fmt; *p; p++) {
         if (*p != '%') { *o++ = *p; continue; }
@@ -233,6 +236,12 @@ static void do_printf(void)
         }
     }
     *o = 0;
+    if (to_memory) {
+        uint32_t n = (uint32_t)(o - out), i;
+        for (i = 0; i <= n; i++) wr8(r[0] + i, (uint8_t)out[i]);
+        r[0] = n;
+        return;
+    }
     fputs(out, stdout);
     fflush(stdout);
 }
@@ -283,7 +292,8 @@ static void do_swi(uint32_t n)
 {
     switch (n) {
     case 0: done = 1; break;
-    case 1: do_printf(); break;
+    case 1: do_format(0); break;
+    case 12: do_format(1); break;
     case 2: {
         uint32_t size = (r[1] + 7) & ~7u;
         uint32_t a = heap;

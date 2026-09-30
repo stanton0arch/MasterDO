@@ -1523,10 +1523,12 @@ uint32 z80j_prefetch(z80j_state *j)
         if (find_block(j, pc, jit_block_key(j->ctx, pc)) != 0)
             continue;
         {
-            uint32 dt;
+            uint32 t0 = (j->clock != 0) ? j->clock() : 0;
 
-            if (timed_translate(j, pc, &dt) != j->glue.abort)
+            if (translate_block(j, pc, 0, 0, 0) != 0)
                 j->stats.prefetched++;
+            if (j->clock != 0)
+                j->est_us = (j->est_us * 3 + (j->clock() - t0)) >> 2;
         }
         return 1;
     }

@@ -5,6 +5,7 @@
 
         EXPORT  sim_start
         EXPORT  printf
+        EXPORT  sprintf
         EXPORT  AllocMemFromMemLists
         EXPORT  FreeMemToMemLists
         EXPORT  plat_usec_now
@@ -22,6 +23,9 @@ sim_start
         swi     0xF00000
 printf
         swi     0xF00001
+        mov     pc,lr
+sprintf
+        swi     0xF0000C
         mov     pc,lr
 AllocMemFromMemLists
         swi     0xF00002
