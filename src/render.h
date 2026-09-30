@@ -86,9 +86,9 @@ typedef struct {
     uint8  *t_ok;           /* tile converted (bit 0: tiles, bit 1: tiles_f) */
     /* Cells using each tile, as doubly linked lists (RENDER_NT_CELLS
      * means none), so that a written tile only redraws its cells. */
-    uint16 *head;           /* VDP_TILES */
-    uint16 *next;           /* RENDER_NT_CELLS */
-    uint16 *prev;
+    uint32 *head;           /* VDP_TILES */
+    uint32 *next;           /* RENDER_NT_CELLS */
+    uint32 *prev;
     uint32 *wlist;          /* work list: changed words, tiles to convert */
     uint32 *dlist;          /* dirty tiles of the update */
     uint8  *stamp;          /* update in which each cell was last drawn */
@@ -143,10 +143,22 @@ uint32 render_dirty_scan(uint8 *dirty, uint32 *out);
 /* Source and position of the cels of sprites 0 to n - 1; returns the
  * number of tiles appended to a->need. */
 uint32 render_sprites(const uint8 *sat, uint32 n, CCB *cel, const render_sprite_args *a);
-/* Copies a converted tile (8 rows of 2 words, src moving by step bytes
- * per row) into a cell of the bitmap at dst, OR-ing pal into every word,
- * and into the priority bitmap at prio when prio is not 0. */
-void   render_cell_copy(uint32 *dst, const uint32 *src, uint32 pal, int32 step, uint32 *prio);
+/* Cells (render_a.s; CONTRACT: the R_* equates of render_a.s are the
+ * offsets of the renderer fields they use, checked in render.c). Each
+ * draws cells into the bitmap (and the priority bitmap for entries with
+ * the priority bit), converting the tiles found unconverted through
+ * render_tile_conv, stamping the cells drawn and counting them.
+ * render_entries: the n name table words listed in r->wlist, copied to
+ * the shadow; each entry that differs is re-linked in the cell list of
+ * its tile, its priority bookkeeping done, and drawn. render_tile_cells:
+ * the cells of tile t not stamped in this update. render_rebuild_cells:
+ * every cell from the shadow, linked into lists that must be empty. */
+void   render_entries(renderer *r, const uint8 *vram, uint32 n);
+void   render_tile_cells(renderer *r, const uint8 *vram, uint32 t);
+void   render_rebuild_cells(renderer *r, const uint8 *vram);
+/* Converts tile t (flip: mirrored horizontally) from the VDP's four bit
+ * planes to 8 bpp rows (render.c, called by the assembly too). */
+void   render_tile_conv(renderer *r, uint32 t, uint32 flip, const uint8 *vram);
 
 #define render_chain(r)     ((r)->chain)
 #define render_backdrop(r)  ((r)->backdrop)

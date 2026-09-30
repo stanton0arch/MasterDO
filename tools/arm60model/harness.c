@@ -266,7 +266,7 @@ void hmain(void)
             /* A DrawCels of 3.5 ms is added to the frame time, as on
              * the console, before the spare time is used. */
             game_frame_done(&g, 3500);
-            game_spare_time(&g, t0 - 3500);
+            game_spare_time(&g, t0 - 3500, t0 - 3500 + PLAT_NTSC_FRAME_US);
         }
         {
             const vdp_state *v = &g.sms->vdp;

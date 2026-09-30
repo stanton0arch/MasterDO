@@ -11,7 +11,28 @@
 
 #include "stdio.h"
 #include "string.h"
+#include "stddef.h"
 #include "mem.h"
+
+/* Offsets of the renderer fields read by render_a.s (its R_* equates). */
+#define CHECK_OFF(name, cond) typedef char check_##name[(cond) ? 1 : -1]
+CHECK_OFF(bitmap, offsetof(renderer, bitmap) == 0);
+CHECK_OFF(prio_bm, offsetof(renderer, prio_bm) == 4);
+CHECK_OFF(tiles, offsetof(renderer, tiles) == 8);
+CHECK_OFF(tiles_f, offsetof(renderer, tiles_f) == 12);
+CHECK_OFF(shadow, offsetof(renderer, shadow) == 16);
+CHECK_OFF(t_ok, offsetof(renderer, t_ok) == 20);
+CHECK_OFF(head, offsetof(renderer, head) == 24);
+CHECK_OFF(next, offsetof(renderer, next) == 28);
+CHECK_OFF(prev, offsetof(renderer, prev) == 32);
+CHECK_OFF(wlist, offsetof(renderer, wlist) == 36);
+CHECK_OFF(stamp, offsetof(renderer, stamp) == 44);
+CHECK_OFF(stamp_now, offsetof(renderer, stamp_now) == 48);
+CHECK_OFF(prio_rows, offsetof(renderer, prio_rows) == 68);
+CHECK_OFF(prio_dirty, offsetof(renderer, prio_dirty) == 152);
+CHECK_OFF(nt_base, offsetof(renderer, nt_base) == 180);
+CHECK_OFF(st_cells, offsetof(renderer, st.cells) == 216);
+CHECK_OFF(st_tile_cells, offsetof(renderer, st.tile_cells) == 224);
 
 #define BM_PITCH        RENDER_W            /* bytes per bitmap row */
 #define BM_WORDS        (RENDER_W / 4)      /* words per bitmap row */
@@ -112,9 +133,9 @@ void render_free(renderer *r)
     if (r->wlist != NULL) FreeMem(r->wlist, WLIST_WORDS * 4);
     if (r->dlist != NULL) FreeMem(r->dlist, VDP_TILES * 4);
     if (r->stamp != NULL) FreeMem(r->stamp, RENDER_NT_CELLS);
-    if (r->prev != NULL) FreeMem(r->prev, RENDER_NT_CELLS * 2);
-    if (r->next != NULL) FreeMem(r->next, RENDER_NT_CELLS * 2);
-    if (r->head != NULL) FreeMem(r->head, VDP_TILES * 2);
+    if (r->prev != NULL) FreeMem(r->prev, RENDER_NT_CELLS * 4);
+    if (r->next != NULL) FreeMem(r->next, RENDER_NT_CELLS * 4);
+    if (r->head != NULL) FreeMem(r->head, VDP_TILES * 4);
     if (r->t_ok != NULL) FreeMem(r->t_ok, VDP_TILES);
     if (r->shadow != NULL) FreeMem(r->shadow, RENDER_NT_BYTES);
     if (r->tiles_f != NULL) FreeMem(r->tiles_f, VDP_TILES * TILE_WORDS * 4);
@@ -136,9 +157,9 @@ Err render_init(renderer *r)
     r->tiles_f = (uint32 *)AllocMem(VDP_TILES * TILE_WORDS * 4, CEL_MEM);
     r->shadow = (uint8 *)AllocMem(RENDER_NT_BYTES, PLAIN_MEM);
     r->t_ok = (uint8 *)AllocMem(VDP_TILES, PLAIN_MEM);
-    r->head = (uint16 *)AllocMem(VDP_TILES * 2, PLAIN_MEM);
-    r->next = (uint16 *)AllocMem(RENDER_NT_CELLS * 2, PLAIN_MEM);
-    r->prev = (uint16 *)AllocMem(RENDER_NT_CELLS * 2, PLAIN_MEM);
+    r->head = (uint32 *)AllocMem(VDP_TILES * 4, PLAIN_MEM);
+    r->next = (uint32 *)AllocMem(RENDER_NT_CELLS * 4, PLAIN_MEM);
+    r->prev = (uint32 *)AllocMem(RENDER_NT_CELLS * 4, PLAIN_MEM);
     r->wlist = (uint32 *)AllocMem(WLIST_WORDS * 4, PLAIN_MEM);
     r->dlist = (uint32 *)AllocMem(VDP_TILES * 4, PLAIN_MEM);
     r->stamp = (uint8 *)AllocMem(RENDER_NT_CELLS, PLAIN_MEM);
@@ -225,7 +246,7 @@ void render_reset(renderer *r)
 
 /* Converts tile t (flip: mirrored horizontally) from the VDP's four bit
  * planes to 8 bpp rows. */
-static void tile_conv(renderer *r, uint32 t, uint32 flip, const uint8 *vram)
+void render_tile_conv(renderer *r, uint32 t, uint32 flip, const uint8 *vram)
 {
     const uint8 *p = vram + t * 32;
     const uint32 *hi = r->xtab + (flip ? XT_FHI : XT_HI);
@@ -248,71 +269,6 @@ static void tile_conv(renderer *r, uint32 t, uint32 flip, const uint8 *vram)
     r->st.tiles++;
 }
 
-/* Draws name table entry e into cell i of the bitmap, and into the
- * priority bitmap when the entry has the priority bit. */
-static void draw_cell(renderer *r, uint32 i, uint32 e, const uint8 *vram)
-{
-    uint32 t = e & 0x1FF;
-    uint32 flip = (e >> 9) & 1;
-    uint32 pal = (e & 0x800) ? 0x10101010u : 0;
-    uint32 off = (i >> 5) * (8 * BM_PITCH) + (i & 31) * 8;
-    const uint32 *s0;
-    int32 step = 8;
-
-    if (!(r->t_ok[t] & (1 << flip)))
-        tile_conv(r, t, flip, vram);
-    s0 = (flip ? r->tiles_f : r->tiles) + t * TILE_WORDS;
-    if (e & 0x400) {
-        s0 += 14;
-        step = -8;
-    }
-    render_cell_copy((uint32 *)(r->bitmap + off), s0, pal, step,
-                     (e & 0x1000) ? (uint32 *)(r->prio_bm + off) : 0);
-    r->stamp[i] = (uint8)r->stamp_now;
-    r->st.cells++;
-}
-
-/* Cell i no longer has the priority bit. */
-static void clear_prio_cell(renderer *r, uint32 i)
-{
-    uint32 *d = (uint32 *)(r->prio_bm + (i >> 5) * (8 * BM_PITCH) + (i & 31) * 8);
-    uint32 k;
-
-    for (k = 0; k < 8; k++) {
-        d[0] = 0;
-        d[1] = 0;
-        d += BM_WORDS;
-    }
-}
-
-/* Cell lists per tile. */
-static void cell_link(renderer *r, uint32 i, uint32 t)
-{
-    uint32 h = r->head[t];
-
-    r->prev[i] = (uint16)NONE;
-    r->next[i] = (uint16)h;
-    if (h != NONE)
-        r->prev[h] = (uint16)i;
-    r->head[t] = (uint16)i;
-}
-
-static void cell_unlink(renderer *r, uint32 i, uint32 t)
-{
-    uint32 p = r->prev[i];
-    uint32 n = r->next[i];
-
-    if (p == NONE)
-        r->head[t] = (uint16)n;
-    else
-        r->next[p] = (uint16)n;
-    if (n != NONE)
-        r->prev[n] = (uint16)p;
-}
-
-/* Name table entry k of a raw copy. */
-#define NT_ENTRY(p, k) ((uint32)(p)[2 * (k)] | ((uint32)(p)[2 * (k) + 1] << 8))
-
 static void rebuild(renderer *r, const uint8 *vram)
 {
     const uint8 *nt = vram + r->nt_base;
@@ -323,15 +279,8 @@ static void rebuild(renderer *r, const uint8 *vram)
     memset(r->prio_rows, 0, sizeof(r->prio_rows));
     memset(r->prio_dirty, 1, sizeof(r->prio_dirty));
     for (i = 0; i < VDP_TILES; i++)
-        r->head[i] = (uint16)NONE;
-    for (i = 0; i < RENDER_NT_CELLS; i++) {
-        uint32 e = NT_ENTRY(nt, i);
-
-        cell_link(r, i, e & 0x1FF);
-        if (e & 0x1000)
-            r->prio_rows[i >> 5]++;
-        draw_cell(r, i, e, vram);
-    }
+        r->head[i] = NONE;
+    render_rebuild_cells(r, vram);
     r->valid = 1;
     r->st.rebuilds++;
 }
@@ -340,63 +289,18 @@ static void rebuild(renderer *r, const uint8 *vram)
  * already in this update (an entry change). */
 static void redraw_tile_cells(renderer *r, uint32 t, const uint8 *vram)
 {
-    const uint8 *sh = r->shadow;
-    uint32 i;
-
-    for (i = r->head[t]; i != NONE; i = r->next[i]) {
-        if (r->stamp[i] == (uint8)r->stamp_now)
-            continue;
-        draw_cell(r, i, NT_ENTRY(sh, i), vram);
-        r->st.tile_cells++;
-    }
+    render_tile_cells(r, vram, t);
 }
 
-/* Entry change at cell i. */
-static void cell_change(renderer *r, uint32 i, uint32 eo, uint32 en, const uint8 *vram)
-{
-    if ((eo ^ en) & 0x1FF) {
-        cell_unlink(r, i, eo & 0x1FF);
-        cell_link(r, i, en & 0x1FF);
-    }
-    if ((eo ^ en) & 0x1000) {
-        uint32 row = i >> 5;
-
-        if (en & 0x1000) {
-            r->prio_rows[row]++;
-        } else {
-            r->prio_rows[row]--;
-            clear_prio_cell(r, i);
-        }
-        r->prio_dirty[row] = 1;
-    }
-    draw_cell(r, i, en, vram);
-}
-
-/* Name table words of the dirty chunks that differ from the shadow. */
+/* Name table words of the dirty chunks that differ from the shadow:
+ * their entries are re-linked, drawn and copied to the shadow. */
 static void update_entries(renderer *r, const uint32 *nt_mask, const uint8 *vram)
 {
     const uint32 *a = (const uint32 *)(vram + r->nt_base);
-    uint32 *s = (uint32 *)r->shadow;
-    uint32 n = render_nt_scan(a, s, nt_mask, r->wlist);
-    uint32 k;
+    uint32 n = render_nt_scan(a, (const uint32 *)r->shadow, nt_mask, r->wlist);
 
-    for (k = 0; k < n; k++) {
-        uint32 w = r->wlist[k];
-        uint32 nv = a[w];
-        uint32 ov = s[w];
-        uint32 en;
-        uint32 eo;
-
-        s[w] = nv;
-        en = (nv >> 24) | ((nv >> 8) & 0xFF00);
-        eo = (ov >> 24) | ((ov >> 8) & 0xFF00);
-        if (en != eo)
-            cell_change(r, w * 2, eo, en, vram);
-        en = ((nv >> 8) & 0xFF) | ((nv & 0xFF) << 8);
-        eo = ((ov >> 8) & 0xFF) | ((ov & 0xFF) << 8);
-        if (en != eo)
-            cell_change(r, w * 2 + 1, eo, en, vram);
-    }
+    if (n != 0)
+        render_entries(r, vram, n);
 }
 
 /*--------------------------------------------------------------------------
@@ -739,9 +643,9 @@ static uint32 update_pieces(renderer *r, const vdp_state *v, uint32 *nprio, uint
 static void sprite_tiles(renderer *r, uint32 t, uint32 tall, const uint8 *vram)
 {
     if (!(r->t_ok[t] & 1))
-        tile_conv(r, t, 0, vram);
+        render_tile_conv(r, t, 0, vram);
     if (tall && !(r->t_ok[t + 1] & 1))
-        tile_conv(r, t + 1, 0, vram);
+        render_tile_conv(r, t + 1, 0, vram);
 }
 
 /* Sets up the cels of the active sprites (before the $D0 terminator) and

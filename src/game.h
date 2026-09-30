@@ -17,10 +17,9 @@
 
 #define GAME_WINDOW     100     /* frames per log line */
 #define GAME_HIST       32      /* frame time histogram, 1 ms per bucket */
-#define GAME_SLOW_LOGS  120     /* frames over the NTSC budget logged alone */
-#define GAME_LONG_LOGS  60      /* frames shown for two VBLs while under budget */
-#define GAME_LOG_SIZE   (64 * 1024)     /* log lines buffered during the run */
-#define GAME_LOG_LINE   1024    /* longest line */
+#define GAME_SLOW_LOGS  120     /* frames over the budget logged alone */
+#define GAME_LONG_LOGS  60      /* frames shown late while under budget */
+#define GAME_LOG_WORDS  (40 * 1024 / 4) /* record arena of the run's log */
 
 /* Cumulative counters of the machine and the translator. */
 typedef struct {
@@ -65,18 +64,52 @@ typedef struct {
     uint32 long_vbl;        /* frames shown for two VBLs or more */
     uint32 pad_us;          /* pad reads, timed by the caller */
     uint32 spare_us;        /* spare-time translation */
-    game_counters start;    /* counters when the window began */
 } game_window;
 
-/* A window closed but not logged yet: the log is written in the spare
- * time of a later frame, so that it does not push a frame past its VBL. */
+/* The run's log is kept as records in a word arena and only formatted
+ * when it is written out (formatting the two lines of a window costs
+ * about 9 ms on the console and printing them 45 ms, so neither happens
+ * inside a frame): a closed window, a frame over budget, a frame shown
+ * late while under budget. A record starts with a word holding its kind
+ * (top byte) and its length in words; a full arena drops records. */
+#define GAME_REC_WINDOW 1
+#define GAME_REC_SLOW   2
+#define GAME_REC_LONG   3
+
 typedef struct {
-    uint32        valid;
     uint32        first;    /* frames first-last */
     uint32        last;
     game_window   w;
-    game_counters now;      /* counters when the window closed */
-} game_pending_log;
+    game_counters d;        /* counters over the window */
+} game_window_rec;
+
+typedef struct {
+    uint32 frame;
+    uint32 total_us;
+    uint32 us;
+    uint32 upd_us;
+    uint32 draw_us;
+    uint32 idle_pct;
+    uint32 blocks;
+    uint32 evicted;         /* an eviction happened in the frame */
+    uint32 sync_us;
+    uint32 insns;           /* interpreted */
+    uint32 stretches;
+    uint32 data_w;
+    uint32 tiles;
+    uint32 cells;
+} game_slow_rec;
+
+typedef struct {
+    uint32 frame;
+    uint32 period_us;       /* between its presentation and the previous one */
+    uint32 us;
+    uint32 upd_us;
+    uint32 draw_us;
+    uint32 spare_us;
+    uint32 pad_us;
+    uint32 sync_us;
+} game_long_rec;
 
 /* Zones of the code buffer given to the hot area; set before game_init
  * (a tuning knob of the analysis harness). */
@@ -88,9 +121,11 @@ typedef struct {
     void         *blocks;
     uint32       *links;
     uint8        *hot;      /* entry counts of the interpreter */
-    char         *log;      /* log lines of the run, written out later */
-    uint32        log_len;
-    uint32        log_from; /* first frame the buffered lines cover */
+    uint32       *log;      /* records of the run, written out later */
+    uint32        log_len;  /* words used */
+    uint32        log_from; /* first frame the records cover */
+    uint32        log_dropped;
+    uint32        frame_us; /* period of the display: the frame budget */
     sms_machine  *sms;
     renderer     *rd;
     z80j_state    jit;
@@ -113,7 +148,6 @@ typedef struct {
     uint32        last_spare_us;
     uint32        last_pad_us;
     uint32        long_logged;
-    game_pending_log pend;
     uint32        total_us; /* emulation */
     uint32        max_us;
     uint32        max_frame;
@@ -128,6 +162,7 @@ typedef struct {
     uint32        hist[GAME_HIST];  /* total time per frame */
     game_counters run_start;
     game_window   win;
+    game_counters win_start;    /* counters when the window began */
     uint32        win_avg_us;   /* last complete window: emulation */
     uint32        win_max_us;
     uint32        win_total_us; /* average total */
@@ -172,16 +207,20 @@ void  game_note_long_vbl(game *g, uint32 period_us);
 /* Adds the time of a pad read to the current window. */
 void  game_pad_time(game *g, uint32 us);
 
-/* Spare time at the end of a frame that began at frame_start (microsecond
- * clock): translates queued code ahead while a translation still fits in
- * the frame, then writes a pending window log if there is room for it;
- * returns the time it used. */
-uint32 game_spare_time(game *g, uint32 frame_start);
+/* Period of the display, in microseconds: the budget of a frame (NTSC
+ * by default). */
+void  game_set_frame_us(game *g, uint32 us);
 
-/* Writes out the log lines buffered during the run (printing costs about
+/* Spare time at the end of a frame that began at frame_start
+ * (microsecond clock): translates queued code ahead while a translation
+ * still fits before deadline_us (a clock value: the end of the frame, or
+ * later when the presentation queue gives more time); returns the time
+ * it used. */
+uint32 game_spare_time(game *g, uint32 frame_start, uint32 deadline_us);
+
+/* Writes out the records buffered during the run (printing costs about
  * 35 us per character on the debug link, so the run only buffers them):
- * called when the run pauses or ends, and by the run itself when the
- * buffer is full. */
+ * called when the run pauses or ends, never by the run itself. */
 void  game_log_flush(game *g);
 
 void  game_log_summary(game *g);

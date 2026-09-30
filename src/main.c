@@ -1,19 +1,23 @@
 /*
- * Step 3b: the cartridge runs on the Z80 translator with the VDP core, and
- * its picture is drawn every frame with the CEL engine (background bitmap
+ * The cartridge runs on the Z80 translator with the VDP core, and its
+ * picture is drawn every frame with the CEL engine (background bitmap
  * pieces and sprite cels, render.c). The spare time at the end of a frame
  * goes to the translation of code the game is about to reach.
  *
  * Boot: display, cartridge image, the CPU and CEL benchmarks of steps 0
  * and 1 (logged), then the code reachable in the cartridge is translated
  * and the game runs at the pace of the display: one emulated frame, the
- * picture update, DrawCels into the back buffer, then the buffer swap at
- * the VBL. game.c logs the emulation, update and drawing times. Pad during
+ * picture update, DrawCels into a free screen, which is queued for the
+ * presenter thread (platform.c) to show at a VBL; the emulation may thus
+ * run a frame ahead of the display. game.c records the emulation, update
+ * and drawing times, written out when the run pauses or ends. Pad during
  * the run: D-pad, A (button 1) and B (button 2) for the SMS pad, P for
  * PAUSE; L pauses the run and shows the reference picture drawn by the CPU
  * (debug view) to compare with the cels (A: reference, B: cels, L: resume);
- * R toggles the presentation mode (every VBL, or locked to every second
- * VBL); X ends the run. Results go to the debug log and to the screen.
+ * R toggles the presentation between the queue (a presenter thread shows
+ * the finished screens one per VBL, the emulation working a frame ahead)
+ * and the direct mode (present and wait for the VBL after each frame);
+ * X ends the run. Results go to the debug log and to the screen.
  */
 
 #include "platform.h"
@@ -41,7 +45,6 @@
 #define NO_COLOR    0xFFFFFFFFu
 
 #define DRAW_ERR_LOGS   20      /* DrawCels errors logged one by one */
-#define LONG_VBL_US     25000   /* a presentation of two VBLs or more */
 
 typedef struct {
     rom_image          rom;
@@ -55,7 +58,7 @@ typedef struct {
     int32              pic_x;       /* picture position on screen (y even) */
     int32              pic_y;
     uint32             border[PLAT_NUM_SCREENS];  /* colour each screen is filled with */
-    uint32             locked;      /* presentation locked to every second VBL */
+    uint32             direct;      /* presentation without the queue */
     uint32             draw_errors;
 } app_state;
 
@@ -71,7 +74,7 @@ static void text_line(const platform *p, int32 screen, int32 line, Color color,
 static void show_message(platform *p, const char *text)
 {
     plat_clear(p, p->back);
-    text_line(p, p->back, 0, COLOR_TITLE, "MASTERDO - STEP 3B");
+    text_line(p, p->back, 0, COLOR_TITLE, "MASTERDO - STEP 3D");
     text_line(p, p->back, 2, COLOR_TEXT, text);
     plat_present(p);
 }
@@ -213,13 +216,23 @@ static uint32 show_snapshot(platform *p, app_state *st, uint32 prev)
     }
 }
 
+static void reset_borders(app_state *st)
+{
+    int32 i;
+
+    for (i = 0; i < PLAT_NUM_SCREENS; i++)
+        st->border[i] = NO_COLOR;
+}
+
 static void run_game(platform *p, app_state *st)
 {
     uint32 prev = plat_pad_state();
-    uint32 shown = plat_usec_now();     /* return of the last presentation */
+    uint32 shown = plat_usec_now();     /* direct mode: return of the last presentation */
+    uint32 longs = p->long_presents;    /* queued mode: long presents seen */
+    uint32 queued = plat_has_presenter(p) && !st->direct;
     char buf[48];
 
-    st->border[0] = st->border[1] = NO_COLOR;
+    reset_borders(st);
     st->draw_errors = 0;
     plat_set_clip(p, st->pic_x, st->pic_y, RENDER_W, RENDER_H);
     for (;;) {
@@ -234,22 +247,29 @@ static void run_game(platform *p, app_state *st)
         if (pressed & ControlX)
             break;
         if (pressed & ControlLeftShift) {
+            plat_drain(p);
             game_log_flush(&g);
             prev = show_snapshot(p, st, prev);
             if (prev & ControlX)
                 break;
-            st->border[0] = st->border[1] = NO_COLOR;
+            reset_borders(st);
             plat_set_clip(p, st->pic_x, st->pic_y, RENDER_W, RENDER_H);
             shown = plat_usec_now();
+            longs = p->long_presents;
             continue;
         }
         if (pressed & ControlRightShift) {
-            st->locked = !st->locked;
+            plat_drain(p);
+            st->direct = !st->direct;
+            queued = plat_has_presenter(p) && !st->direct;
             printf("Present: frame %lu: %s\n", (unsigned long)g.frame,
-                   st->locked ? "locked to every second VBL" : "every VBL");
+                   queued ? "queued (presenter thread)" : "direct (present, then wait for the VBL)");
+            shown = plat_usec_now();
+            longs = p->long_presents;
         }
 
         if (game_frame(&g, sms_buttons(held), (pressed & ControlStart) != 0) != 0) {
+            plat_drain(p);
             plat_reset_clip(p);
             sprintf(buf, "RUN STOPPED AT PC %04lX", (unsigned long)g.stop_pc);
             show_message(p, buf);
@@ -257,15 +277,43 @@ static void run_game(platform *p, app_state *st)
         }
         draw_us = draw_picture(p, st);
         game_frame_done(&g, draw_us);
-        game_spare_time(&g, t0);
-        plat_present(p);
-        if (st->locked && plat_usec_now() - shown < LONG_VBL_US)
-            plat_wait_vbl(p);
-        now = plat_usec_now();
-        if (now - shown >= LONG_VBL_US)
-            game_note_long_vbl(&g, now - shown);
-        shown = now;
+        if (queued && p->errors != 0) {
+            /* The thread cannot show the screens: back to the direct mode. */
+            plat_drain(p);
+            queued = 0;
+            st->direct = 1;
+            printf("Present: frame %lu: the presenter thread fails, direct mode\n",
+                   (unsigned long)g.frame);
+        }
+        if (queued) {
+            uint32 deadline = t0 + p->frame_us;
+
+            /* The finished screen goes to the presenter at once. When
+             * no screen is free the main task would wait for the next
+             * VBL anyway: that time goes to translation. */
+            plat_queue(p);
+            if (!plat_free_screen(p)) {
+                uint32 vbl = plat_next_vbl_us(p);
+
+                if ((int32)(vbl - deadline) > 0)
+                    deadline = vbl;
+            }
+            game_spare_time(&g, t0, deadline);
+            plat_next_screen(p);
+            if (p->long_presents != longs) {
+                longs = p->long_presents;
+                game_note_long_vbl(&g, p->long_us);
+            }
+        } else {
+            game_spare_time(&g, t0, t0 + p->frame_us);
+            plat_present(p);
+            now = plat_usec_now();
+            if (now - shown >= PLAT_LONG_US)
+                game_note_long_vbl(&g, now - shown);
+            shown = now;
+        }
     }
+    plat_drain(p);
     plat_reset_clip(p);
     game_log_summary(&g);
 }
@@ -300,7 +348,7 @@ static void draw_core(const platform *p, int32 screen, int32 line,
         text_line(p, screen, line, COLOR_BAD, buf);
     } else {
         sprintf(buf, " %-12s %6lu us %3lu pct %s", name, (unsigned long)r->frame_us,
-                (unsigned long)percent_of(r->frame_us, PLAT_NTSC_FRAME_US),
+                (unsigned long)percent_of(r->frame_us, p->frame_us),
                 r->check ? "OK" : "BAD");
         text_line(p, screen, line, r->check ? COLOR_TEXT : COLOR_BAD, buf);
     }
@@ -314,7 +362,7 @@ static void draw_results(platform *p, const app_state *st)
     uint32 frames = g.frame ? g.frame : 1;
 
     plat_clear(p, s);
-    text_line(p, s, n++, COLOR_TITLE, "MASTERDO - STEP 3B RESULTS");
+    text_line(p, s, n++, COLOR_TITLE, "MASTERDO - STEP 3D RESULTS");
     if (st->rom.size <= 0)
         sprintf(buf, "ROM not loaded (0x%lx)", (unsigned long)st->rom.size);
     else
@@ -322,7 +370,8 @@ static void draw_results(platform *p, const app_state *st)
                 p->is_pal ? "PAL" : "NTSC", (unsigned long)(st->run_free / 1024));
     text_line(p, s, n++, st->rom.size > 0 ? COLOR_TEXT : COLOR_BAD, buf);
 
-    text_line(p, s, n++, COLOR_HEAD, "BENCHMARKS (Z80 PER NTSC FRAME)");
+    text_line(p, s, n++, COLOR_HEAD, p->is_pal ? "BENCHMARKS (Z80 PER PAL FRAME)"
+                                               : "BENCHMARKS (Z80 PER NTSC FRAME)");
     draw_core(p, s, n++, "interpreted", &st->cpu.interp);
     draw_core(p, s, n++, "translated", &st->cpu.jit);
     if (st->have_video) {
@@ -349,10 +398,10 @@ static void draw_results(platform *p, const app_state *st)
         text_line(p, s, n++, COLOR_TEXT, buf);
         sprintf(buf, " draw %lu, total %lu = %lu pct",
                 (unsigned long)(g.draw_total_us / frames), (unsigned long)all,
-                (unsigned long)percent_of(all, PLAT_NTSC_FRAME_US));
-        text_line(p, s, n++, all <= PLAT_NTSC_FRAME_US ? COLOR_GOOD : COLOR_BAD, buf);
-        sprintf(buf, " worst %lu us, %lu over %d us", (unsigned long)g.max_all_us,
-                (unsigned long)g.over, PLAT_NTSC_FRAME_US);
+                (unsigned long)percent_of(all, p->frame_us));
+        text_line(p, s, n++, all <= p->frame_us ? COLOR_GOOD : COLOR_BAD, buf);
+        sprintf(buf, " worst %lu us, %lu over %lu us", (unsigned long)g.max_all_us,
+                (unsigned long)g.over, (unsigned long)p->frame_us);
         text_line(p, s, n++, g.over == 0 ? COLOR_GOOD : COLOR_TEXT, buf);
     }
     text_line(p, s, n + 1, COLOR_HEAD, st->have_game ? "B: RUN AGAIN   X: QUIT" : "X: QUIT");
@@ -368,7 +417,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo step 3b: cartridge run with the picture drawn by the CEL engine, optimisation pass\n");
+    printf("masterdo step 3d: cartridge run with queued presentation, buffered log records and cells in assembly\n");
     if (plat_init(&plat) < 0)
         return 1;
     memset(&st, 0, sizeof(st));
@@ -390,6 +439,7 @@ int main(int argc, char **argv)
         uint32 vram;
 
         st.have_game = 1;
+        game_set_frame_us(&g, plat.frame_us);
         show_message(&plat, "Translating the cartridge code...");
         game_translate_rom(&g);
         plat_mem_free(&st.run_free, &vram);

@@ -34,55 +34,133 @@
  * drawing: the pad read, the presentation and the system. A translation
  * in spare time, or at once with the floor budget, must leave the frame
  * this margin on top of what the update and the drawing took in the
- * previous frame; a window log needs LOG_ROOM_US. */
+ * previous frame. */
 #define FRAME_MARGIN_US 800
-#define LOG_ROOM_US     3000
+
+#define FRAME_T         (VDP_LINES_NTSC * VDP_LINE_T)   /* T-states per frame */
+
+static uint32 percent(uint32 part, uint32 whole);
 
 uint32 game_hot_zones = JIT_HOT_ZONES;
 
-/* Log lines of the run go to a buffer: the line is formatted at the
- * address log_begin returns (at most GAME_LOG_LINE bytes) and log_end
- * keeps it. A full buffer is written out on the spot. */
-static char *log_begin(game *g)
+/* Records of the run's log: a record of n words of kind k is allocated
+ * in the arena (NULL, counted as dropped, when it is full) and formatted
+ * only by game_log_flush. */
+static uint32 *rec_alloc(game *g, uint32 kind, uint32 bytes)
 {
-    if (g->log_len + GAME_LOG_LINE > GAME_LOG_SIZE)
-        game_log_flush(g);
-    return g->log + g->log_len;
+    uint32 words = bytes / 4;
+    uint32 *r;
+
+    if (g->log_len + 1 + words > GAME_LOG_WORDS) {
+        g->log_dropped++;
+        return NULL;
+    }
+    r = g->log + g->log_len;
+    r[0] = (kind << 24) | words;
+    g->log_len += 1 + words;
+    return r + 1;
 }
 
-static void log_end(game *g)
+static void print_window(const game_window_rec *p)
 {
-    const char *s = g->log + g->log_len;
-    uint32 n = 0;
+    const game_window *w = &p->w;
+    const game_counters *d = &p->d;
+    uint32 frames = w->frames ? w->frames : 1;
+    uint32 idle_pct = percent(d->idle >> 8, w->frames * FRAME_T);
 
-    while (s[n] != 0)
-        n++;
-    g->log_len += n;
+    printf("Game: frames %lu-%lu: emulation %lu us average, %lu us worst (frame %lu), "
+           "update %lu us average, %lu us worst, draw %lu us average, %lu us worst, "
+           "total %lu us average, %lu us worst (frame %lu), real %lu us per frame, "
+           "%lu over budget, "
+           "%lu draw errors, %lu long presents, Z80 idle %lu%%, "
+           "%lu IRQ, %lu NMI, VDP %lu data writes, %lu data reads, %lu control writes, "
+           "%lu status reads, %lu counter reads, PSG %lu, pad %lu, other %lu, %lu leaves, "
+           "%lu bank switches, %lu blocks (%lu in spare time, %lu at once in %lu us, "
+           "%lu refused, %lu promoted, %lu us of spare time), %lu interpreted "
+           "instructions in %lu stretches, %lu evictions (%lu blocks), pad read %lu us\n",
+           (unsigned long)p->first, (unsigned long)p->last,
+           (unsigned long)(w->us / frames), (unsigned long)w->max_us,
+           (unsigned long)w->max_frame,
+           (unsigned long)(w->upd_us / frames), (unsigned long)w->max_upd_us,
+           (unsigned long)(w->draw_us / frames), (unsigned long)w->max_draw_us,
+           (unsigned long)(w->total_us / frames), (unsigned long)w->max_total_us,
+           (unsigned long)w->max_total_frame, (unsigned long)(w->real_us / frames),
+           (unsigned long)w->over,
+           (unsigned long)w->draw_err, (unsigned long)w->long_vbl,
+           (unsigned long)idle_pct,
+           (unsigned long)d->irqs, (unsigned long)d->nmis,
+           (unsigned long)d->vdp_data_w, (unsigned long)d->vdp_data_r,
+           (unsigned long)d->vdp_ctrl_w, (unsigned long)d->io.vdp_stat_r,
+           (unsigned long)d->io.counter_r, (unsigned long)d->io.psg_w,
+           (unsigned long)d->io.pad_r, (unsigned long)d->io.other,
+           (unsigned long)d->io.leaves, (unsigned long)d->banks, (unsigned long)d->blocks,
+           (unsigned long)d->prefetched, (unsigned long)d->sync, (unsigned long)d->sync_us,
+           (unsigned long)d->sync_refused, (unsigned long)d->promoted,
+           (unsigned long)w->spare_us, (unsigned long)d->interp_insns, (unsigned long)d->interp,
+           (unsigned long)d->evictions, (unsigned long)d->evicted,
+           (unsigned long)(w->pad_us / frames));
+    printf("Picture: frames %lu-%lu: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
+           "%lu cells for written tiles, %lu palettes, %lu backdrop changes, %lu sprite cels, "
+           "%lu pieces, %lu priority strips, %lu frames in scroll bands, %lu frames partly blanked, "
+           "%lu bands dropped\n",
+           (unsigned long)p->first, (unsigned long)p->last,
+           (unsigned long)d->rd.tiles, (unsigned long)d->rd.cells, (unsigned long)d->rd.rebuilds,
+           (unsigned long)d->rd.tile_cells, (unsigned long)d->rd.palettes,
+           (unsigned long)d->rd.backdrops,
+           (unsigned long)d->rd.sprites, (unsigned long)d->rd.pieces,
+           (unsigned long)d->rd.prio_strips, (unsigned long)d->rd.bands, (unsigned long)d->rd.dbands,
+           (unsigned long)d->rd.dropped);
+}
+
+static void print_slow(const game_slow_rec *p)
+{
+    printf("Game: frame %lu took %lu us (emulation %lu, update %lu, draw %lu): "
+           "Z80 idle %lu%%, %lu blocks translated%s (%lu us at once), "
+           "%lu interpreted instructions in %lu stretches, "
+           "%lu VDP data writes, %lu tiles converted, %lu cells drawn\n",
+           (unsigned long)p->frame, (unsigned long)p->total_us, (unsigned long)p->us,
+           (unsigned long)p->upd_us, (unsigned long)p->draw_us,
+           (unsigned long)p->idle_pct, (unsigned long)p->blocks,
+           p->evicted ? " after an eviction" : "", (unsigned long)p->sync_us,
+           (unsigned long)p->insns, (unsigned long)p->stretches,
+           (unsigned long)p->data_w, (unsigned long)p->tiles, (unsigned long)p->cells);
+}
+
+static void print_long(const game_long_rec *p)
+{
+    printf("Game: frame %lu shown after %lu us though under budget: emulation %lu, "
+           "update %lu, draw %lu, spare time %lu, pad %lu us, %lu us of translations "
+           "at once\n",
+           (unsigned long)p->frame, (unsigned long)p->period_us,
+           (unsigned long)p->us, (unsigned long)p->upd_us, (unsigned long)p->draw_us,
+           (unsigned long)p->spare_us, (unsigned long)p->pad_us, (unsigned long)p->sync_us);
 }
 
 void game_log_flush(game *g)
 {
-    char *s = g->log;
-    char *end = g->log + g->log_len;
+    uint32 k = 0;
 
-    if (g->log_len == 0)
+    if (g->log_len == 0 && g->log_dropped == 0)
         return;
-    printf("Log: %lu bytes buffered from frame %lu, written at frame %lu\n",
-           (unsigned long)g->log_len, (unsigned long)g->log_from, (unsigned long)g->frame);
-    while (s < end) {
-        char *nl = s;
+    printf("Log: %lu words of records from frame %lu, written at frame %lu, %lu records dropped\n",
+           (unsigned long)g->log_len, (unsigned long)g->log_from, (unsigned long)g->frame,
+           (unsigned long)g->log_dropped);
+    while (k < g->log_len) {
+        uint32 head = g->log[k];
+        const uint32 *body = g->log + k + 1;
 
-        while (nl < end && *nl != '\n')
-            nl++;
-        *nl = 0;
-        printf("%s\n", s);
-        s = nl + 1;
+        switch (head >> 24) {
+        case GAME_REC_WINDOW: print_window((const game_window_rec *)body); break;
+        case GAME_REC_SLOW:   print_slow((const game_slow_rec *)body); break;
+        case GAME_REC_LONG:   print_long((const game_long_rec *)body); break;
+        default: break;
+        }
+        k += 1 + (head & 0xFFFFFFu);
     }
     g->log_len = 0;
+    g->log_dropped = 0;
     g->log_from = g->frame;
 }
-
-#define FRAME_T         (VDP_LINES_NTSC * VDP_LINE_T)   /* T-states per frame */
 
 static void read_counters(const game *g, game_counters *c)
 {
@@ -133,7 +211,7 @@ static uint32 percent(uint32 part, uint32 whole)
 static void window_start(game *g)
 {
     memset(&g->win, 0, sizeof(g->win));
-    read_counters(g, &g->win.start);
+    read_counters(g, &g->win_start);
     g->win.start_us = plat_usec_now();
 }
 
@@ -147,7 +225,7 @@ void game_free(game *g)
     if (g->blocks != NULL) FreeMem(g->blocks, (int32)z80j_block_bytes(JIT_BLOCKS));
     if (g->links != NULL) FreeMem(g->links, (int32)z80j_link_bytes(JIT_LINKS));
     if (g->hot != NULL) FreeMem(g->hot, 0x10000);
-    if (g->log != NULL) FreeMem(g->log, GAME_LOG_SIZE);
+    if (g->log != NULL) FreeMem(g->log, GAME_LOG_WORDS * 4);
     if (g->code != NULL) FreeMem(g->code, JIT_CODE_BYTES);
     if (g->ctx != NULL) FreeMem(g->ctx, sizeof(z80j_ctx));
     g->rd = NULL;
@@ -172,7 +250,7 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
     g->blocks = AllocMem((int32)z80j_block_bytes(JIT_BLOCKS), MEMTYPE_DRAM);
     g->links = (uint32 *)AllocMem((int32)z80j_link_bytes(JIT_LINKS), MEMTYPE_DRAM);
     g->hot = (uint8 *)AllocMem(0x10000, MEMTYPE_DRAM);
-    g->log = (char *)AllocMem(GAME_LOG_SIZE, MEMTYPE_DRAM);
+    g->log = (uint32 *)AllocMem(GAME_LOG_WORDS * 4, MEMTYPE_DRAM);
     g->sms = (sms_machine *)AllocMem(sizeof(sms_machine), MEMTYPE_DRAM);
     g->rd = (renderer *)AllocMem(sizeof(renderer), MEMTYPE_DRAM | MEMTYPE_FILL);
     if (g->ctx == NULL || g->code == NULL || g->blocks == NULL || g->links == NULL ||
@@ -193,7 +271,7 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
               g->blocks, JIT_BLOCKS, g->links, JIT_LINKS, &glue);
     z80j_set_interp(&g->jit, g->hot, HOT_QUEUE_AT, HOT_SYNC_AT);
     z80j_set_force(&g->jit, HOT_FORCE_AT);
-    z80j_set_budget(&g->jit, plat_usec_now, HOT_SYNC_US, HOT_INT_COST, PLAT_NTSC_FRAME_US);
+    game_set_frame_us(g, PLAT_NTSC_FRAME_US);
     sms_init(g->sms, g->ctx, rom, rom_size, VDP_LINES_NTSC);
     game_reset(g);
     return 0;
@@ -284,9 +362,9 @@ void game_reset(game *g)
     g->last_spare_us = 0;
     g->last_pad_us = 0;
     g->long_logged = 0;
-    g->pend.valid = 0;
     g->log_len = 0;
     g->log_from = 0;
+    g->log_dropped = 0;
     g->total_us = 0;
     g->max_us = 0;
     g->max_frame = 0;
@@ -307,89 +385,29 @@ void game_reset(game *g)
     window_start(g);
 }
 
-/* Closes the window: its figures are kept for a log written later, in
- * the spare time of a frame with room for it (or before the next
- * window closes), and a new window starts. */
+/* Closes the window into a log record and starts a new one. */
 static void window_close(game *g)
 {
     game_window *w = &g->win;
-    game_pending_log *p = &g->pend;
-    game_counters d;
+    game_counters now;
+    game_window_rec *p;
 
-    read_counters(g, &p->now);
-    diff_counters(&d, &p->now, &w->start);
+    if (w->frames == 0)
+        return;
+    read_counters(g, &now);
     g->win_avg_us = w->us / w->frames;
     g->win_max_us = w->max_us;
     g->win_total_us = w->total_us / w->frames;
-    g->win_idle_pct = percent(d.idle >> 8, w->frames * FRAME_T);
-    p->first = g->frame - w->frames;
-    p->last = g->frame - 1;
     w->real_us = plat_usec_now() - w->start_us;
-    memcpy(&p->w, w, sizeof(p->w));
-    p->valid = 1;
+    p = (game_window_rec *)rec_alloc(g, GAME_REC_WINDOW, sizeof(*p));
+    if (p != NULL) {
+        p->first = g->frame - w->frames;
+        p->last = g->frame - 1;
+        memcpy(&p->w, w, sizeof(p->w));
+        diff_counters(&p->d, &now, &g->win_start);
+        g->win_idle_pct = percent(p->d.idle >> 8, w->frames * FRAME_T);
+    }
     window_start(g);
-}
-
-static void log_window(game *g)
-{
-    game_pending_log *p = &g->pend;
-    game_window *w = &p->w;
-    game_counters d;
-    uint32 first = p->first;
-    uint32 last = p->last;
-    uint32 idle_pct;
-
-    if (!p->valid)
-        return;
-    p->valid = 0;
-    diff_counters(&d, &p->now, &w->start);
-    idle_pct = percent(d.idle >> 8, w->frames * FRAME_T);
-    sprintf(log_begin(g),
-           "Game: frames %lu-%lu: emulation %lu us average, %lu us worst (frame %lu), "
-           "update %lu us average, %lu us worst, draw %lu us average, %lu us worst, "
-           "total %lu us average, %lu us worst (frame %lu), real %lu us per frame, "
-           "%lu over budget, "
-           "%lu draw errors, %lu long presents, Z80 idle %lu%%, "
-           "%lu IRQ, %lu NMI, VDP %lu data writes, %lu data reads, %lu control writes, "
-           "%lu status reads, %lu counter reads, PSG %lu, pad %lu, other %lu, %lu leaves, "
-           "%lu bank switches, %lu blocks (%lu in spare time, %lu at once in %lu us, "
-           "%lu refused, %lu promoted, %lu us of spare time), %lu interpreted "
-           "instructions in %lu stretches, %lu evictions (%lu blocks), pad read %lu us\n",
-           (unsigned long)first, (unsigned long)last,
-           (unsigned long)(w->us / w->frames), (unsigned long)w->max_us,
-           (unsigned long)w->max_frame,
-           (unsigned long)(w->upd_us / w->frames), (unsigned long)w->max_upd_us,
-           (unsigned long)(w->draw_us / w->frames), (unsigned long)w->max_draw_us,
-           (unsigned long)(w->total_us / w->frames), (unsigned long)w->max_total_us,
-           (unsigned long)w->max_total_frame, (unsigned long)(w->real_us / w->frames),
-           (unsigned long)w->over,
-           (unsigned long)w->draw_err, (unsigned long)w->long_vbl,
-           (unsigned long)idle_pct,
-           (unsigned long)d.irqs, (unsigned long)d.nmis,
-           (unsigned long)d.vdp_data_w, (unsigned long)d.vdp_data_r,
-           (unsigned long)d.vdp_ctrl_w, (unsigned long)d.io.vdp_stat_r,
-           (unsigned long)d.io.counter_r, (unsigned long)d.io.psg_w,
-           (unsigned long)d.io.pad_r, (unsigned long)d.io.other,
-           (unsigned long)d.io.leaves, (unsigned long)d.banks, (unsigned long)d.blocks,
-           (unsigned long)d.prefetched, (unsigned long)d.sync, (unsigned long)d.sync_us,
-           (unsigned long)d.sync_refused, (unsigned long)d.promoted,
-           (unsigned long)w->spare_us, (unsigned long)d.interp_insns, (unsigned long)d.interp,
-           (unsigned long)d.evictions, (unsigned long)d.evicted,
-           (unsigned long)(w->pad_us / w->frames));
-    log_end(g);
-    sprintf(log_begin(g),
-           "Picture: frames %lu-%lu: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
-           "%lu cells for written tiles, %lu palettes, %lu backdrop changes, %lu sprite cels, "
-           "%lu pieces, %lu priority strips, %lu frames in scroll bands, %lu frames partly blanked, "
-           "%lu bands dropped\n",
-           (unsigned long)first, (unsigned long)last,
-           (unsigned long)d.rd.tiles, (unsigned long)d.rd.cells, (unsigned long)d.rd.rebuilds,
-           (unsigned long)d.rd.tile_cells, (unsigned long)d.rd.palettes,
-           (unsigned long)d.rd.backdrops,
-           (unsigned long)d.rd.sprites, (unsigned long)d.rd.pieces,
-           (unsigned long)d.rd.prio_strips, (unsigned long)d.rd.bands, (unsigned long)d.rd.dbands,
-           (unsigned long)d.rd.dropped);
-    log_end(g);
 }
 
 int32 game_frame(game *g, uint32 pad, uint32 pause)
@@ -454,27 +472,28 @@ void game_frame_done(game *g, uint32 draw_us)
     }
     b = total / 1000;
     g->hist[b < GAME_HIST ? b : GAME_HIST - 1]++;
-    if (total > PLAT_NTSC_FRAME_US) {
+    if (total > g->frame_us) {
         g->over++;
         if (g->slow_logged < GAME_SLOW_LOGS) {
+            game_slow_rec *p = (game_slow_rec *)rec_alloc(g, GAME_REC_SLOW, sizeof(*p));
+
             g->slow_logged++;
-            sprintf(log_begin(g),
-                   "Game: frame %lu took %lu us (emulation %lu, update %lu, draw %lu): "
-                   "Z80 idle %lu%%, %lu blocks translated%s (%lu us at once), "
-                   "%lu interpreted instructions in %lu stretches, "
-                   "%lu VDP data writes, %lu tiles converted, %lu cells drawn\n",
-                   (unsigned long)g->frame, (unsigned long)total, (unsigned long)dt,
-                   (unsigned long)g->last_upd_us, (unsigned long)draw_us,
-                   (unsigned long)percent(g->f_idle, FRAME_T),
-                   (unsigned long)(g->jit.stats.translations - g->f_blocks),
-                   g->jit.stats.evictions != g->f_flush ? " after an eviction" : "",
-                   (unsigned long)(g->jit.stats.sync_us - g->f_sync_us),
-                   (unsigned long)(g->ctx->int_insns - g->f_interp_insns),
-                   (unsigned long)(g->ctx->int_runs - g->f_interp),
-                   (unsigned long)(g->sms->vdp.n_data_w - g->f_data),
-                   (unsigned long)(g->rd->st.tiles - g->f_tiles),
-                   (unsigned long)(g->rd->st.cells - g->f_cells));
-            log_end(g);
+            if (p != NULL) {
+                p->frame = g->frame;
+                p->total_us = total;
+                p->us = dt;
+                p->upd_us = g->last_upd_us;
+                p->draw_us = draw_us;
+                p->idle_pct = percent(g->f_idle, FRAME_T);
+                p->blocks = g->jit.stats.translations - g->f_blocks;
+                p->evicted = g->jit.stats.evictions != g->f_flush;
+                p->sync_us = g->jit.stats.sync_us - g->f_sync_us;
+                p->insns = g->ctx->int_insns - g->f_interp_insns;
+                p->stretches = g->ctx->int_runs - g->f_interp;
+                p->data_w = g->sms->vdp.n_data_w - g->f_data;
+                p->tiles = g->rd->st.tiles - g->f_tiles;
+                p->cells = g->rd->st.cells - g->f_cells;
+            }
         }
     }
 
@@ -495,13 +514,11 @@ void game_frame_done(game *g, uint32 draw_us)
         g->win.max_total_us = total;
         g->win.max_total_frame = g->frame;
     }
-    if (total > PLAT_NTSC_FRAME_US)
+    if (total > g->frame_us)
         g->win.over++;
     g->frame++;
-    if (g->win.frames == GAME_WINDOW) {
-        log_window(g);             /* the previous window, if still pending */
+    if (g->win.frames == GAME_WINDOW)
         window_close(g);
-    }
 }
 
 void game_pad_time(game *g, uint32 us)
@@ -510,18 +527,22 @@ void game_pad_time(game *g, uint32 us)
     g->last_pad_us = us;
 }
 
-uint32 game_spare_time(game *g, uint32 frame_start)
+void game_set_frame_us(game *g, uint32 us)
+{
+    g->frame_us = us;
+    z80j_set_budget(&g->jit, plat_usec_now, HOT_SYNC_US, HOT_INT_COST, us);
+}
+
+uint32 game_spare_time(game *g, uint32 frame_start, uint32 deadline_us)
 {
     uint32 t0 = plat_usec_now();
     uint32 now = t0;
+    uint32 origin = deadline_us - g->frame_us;  /* the frame the deadline ends */
 
-    while (z80j_spare_fits(&g->jit, now - frame_start, FRAME_MARGIN_US)) {
+    (void)frame_start;
+    while (z80j_spare_fits(&g->jit, now - origin, FRAME_MARGIN_US)) {
         if (!z80j_prefetch(&g->jit))
             break;
-        now = plat_usec_now();
-    }
-    if (g->pend.valid && now - frame_start + LOG_ROOM_US + FRAME_MARGIN_US <= PLAT_NTSC_FRAME_US) {
-        log_window(g);
         now = plat_usec_now();
     }
     g->win.spare_us += now - t0;
@@ -539,18 +560,20 @@ void game_note_long_vbl(game *g, uint32 period_us)
     uint32 total = g->last_us + g->last_upd_us + g->last_draw_us;
 
     g->win.long_vbl++;
-    if (total <= PLAT_NTSC_FRAME_US && g->long_logged < GAME_LONG_LOGS) {
+    if (total <= g->frame_us && g->long_logged < GAME_LONG_LOGS) {
+        game_long_rec *p = (game_long_rec *)rec_alloc(g, GAME_REC_LONG, sizeof(*p));
+
         g->long_logged++;
-        sprintf(log_begin(g),
-               "Game: frame %lu shown after %lu us though under budget: emulation %lu, "
-               "update %lu, draw %lu, spare time %lu, pad %lu us, %lu us of translations "
-               "at once\n",
-               (unsigned long)(g->frame - 1), (unsigned long)period_us,
-               (unsigned long)g->last_us, (unsigned long)g->last_upd_us,
-               (unsigned long)g->last_draw_us, (unsigned long)g->last_spare_us,
-               (unsigned long)g->last_pad_us,
-               (unsigned long)(g->jit.stats.sync_us - g->f_sync_us));
-        log_end(g);
+        if (p != NULL) {
+            p->frame = g->frame - 1;
+            p->period_us = period_us;
+            p->us = g->last_us;
+            p->upd_us = g->last_upd_us;
+            p->draw_us = g->last_draw_us;
+            p->spare_us = g->last_spare_us;
+            p->pad_us = g->last_pad_us;
+            p->sync_us = g->jit.stats.sync_us - g->f_sync_us;
+        }
     }
 }
 
@@ -563,7 +586,7 @@ void game_log_summary(game *g)
     uint32 all = n ? g->all_total_us / n : 0;
     uint32 k;
 
-    log_window(g);
+    window_close(g);
     game_log_flush(g);
     read_counters(g, &now);
     diff_counters(&d, &now, &g->run_start);
@@ -575,13 +598,13 @@ void game_log_summary(game *g)
            "instructions in %lu stretches, %lu evictions (%lu blocks), "
            "%lu busy-wait loops found, status %ld\n",
            (unsigned long)n, (unsigned long)avg,
-           (unsigned long)percent(avg, PLAT_NTSC_FRAME_US), PLAT_NTSC_FRAME_US,
+           (unsigned long)percent(avg, g->frame_us), (int)g->frame_us,
            (unsigned long)g->max_us, (unsigned long)g->max_frame,
            (unsigned long)(n ? g->upd_total_us / n : 0),
            (unsigned long)(n ? g->draw_total_us / n : 0),
-           (unsigned long)all, (unsigned long)percent(all, PLAT_NTSC_FRAME_US),
+           (unsigned long)all, (unsigned long)percent(all, g->frame_us),
            (unsigned long)g->max_all_us, (unsigned long)g->max_all_frame,
-           (unsigned long)g->over, PLAT_NTSC_FRAME_US,
+           (unsigned long)g->over, (int)g->frame_us,
            (unsigned long)percent(g->idle_t16, n * (FRAME_T / 16)),
            (unsigned long)d.irqs, (unsigned long)d.nmis, (unsigned long)d.banks,
            (unsigned long)d.blocks, (unsigned long)d.prefetched, (unsigned long)d.sync,
@@ -591,7 +614,7 @@ void game_log_summary(game *g)
            (unsigned long)g->jit.stats.busy_loops, (long)g->status);
     printf("Game summary: picture: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
            "%lu cells for written tiles, %lu palettes, %lu sprite cels, %lu pieces, %lu priority strips, "
-           "%lu frames in bands, %lu bands dropped\n",
+           "%lu frames in bands, %lu frames partly blanked, %lu bands dropped\n",
            (unsigned long)d.rd.tiles, (unsigned long)d.rd.cells, (unsigned long)d.rd.rebuilds,
            (unsigned long)d.rd.tile_cells, (unsigned long)d.rd.palettes,
            (unsigned long)d.rd.sprites, (unsigned long)d.rd.pieces,
