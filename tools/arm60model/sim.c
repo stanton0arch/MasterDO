@@ -39,7 +39,7 @@ static uint64_t cS, cN, cI;
 static uint64_t ninsn;
 static uint32_t heap = HEAP_BASE;
 static uint32_t rom_size;
-static uint32_t args[8] = { 0, 0, 0, 0xFFFFFFFFu };
+static uint32_t args[12] = { 0, 0, 0, 0xFFFFFFFFu };
 static int done;
 
 /* Profile: cycles (x100) per instruction word of the image. */
@@ -299,7 +299,7 @@ static void do_swi(uint32_t n)
     case 5: r[0] = ROM_ADDR; break;
     case 6: r[0] = rom_size; break;
     case 7: do_dump(r[0], r[1], r[2], r[3]); break;
-    case 8: r[0] = r[0] < 8 ? args[r[0]] : 0; break;
+    case 8: r[0] = r[0] < 12 ? args[r[0]] : 0; break;
     case 9: r[0] = pad_at(r[0]); break;
     case 10: {
         uint32_t id = r[0] & 15;
@@ -586,6 +586,17 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-dump") && i + 1 < argc) args[2] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-from") && i + 1 < argc) args[3] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-interp")) args[4] = 1;
+        else if (!strcmp(argv[i], "-seed")) args[11] = 1;
+        else if (!strcmp(argv[i], "-budget") && i + 1 < argc) {
+            unsigned f = 0, c = 0;
+            sscanf(argv[++i], "%u:%u", &f, &c);
+            args[5] = f; args[6] = c; args[7] = 1;
+        }
+        else if (!strcmp(argv[i], "-hot") && i + 1 < argc) {
+            unsigned q = 0, t = 0;
+            sscanf(argv[++i], "%u:%u", &q, &t);
+            args[8] = q; args[9] = t; args[10] = 1;
+        }
     }
     mem = calloc(1, MEM_SIZE);
     execmap = calloc(1, MEM_SIZE / 4);

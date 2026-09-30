@@ -116,7 +116,10 @@ typedef struct {
     uint32 ei_saved;        /* +0x4C0: interpreter: T-state counter saved by EI */
     uint32 int_leave;       /* +0x4C4: interpreter: a write asked to leave */
     uint32 int_runs;        /* +0x4C8: interpreter: stretches of interpretation */
-    uint32 pad0[13];
+    uint32 int_insns;       /* +0x4CC: interpreter: instructions interpreted */
+    uint32 hot_sync_gate;   /* +0x4D0: interpreter: int_insns from which an address */
+                            /* past hot_sync_at is handed to the C side again */
+    uint32 pad0[11];
     uint8  page_kind[256];  /* +0x500 */
     uint8  pzst[256];       /* +0x600: sign / zero / parity flags of a byte */
     uint8  fenc[256];       /* +0x700: internal flags -> Z80 F */
@@ -231,6 +234,8 @@ typedef struct {
     uint32 prefetched;      /* blocks translated ahead, in spare time */
     uint32 promoted;        /* blocks translated again after an eviction */
     uint32 sync;            /* blocks translated at once, hot without spare time */
+    uint32 sync_us;         /* time they took (microseconds, cumulative) */
+    uint32 sync_refused;    /* translations at once refused for lack of budget */
     uint32 queue_full;      /* hot addresses dropped for lack of room */
 } z80j_stats;
 
@@ -268,9 +273,13 @@ typedef struct {
  * times it runs: a table counts the entries of each Z80 address, an
  * address reaching queue_at is queued for translation in spare time
  * (z80j_prefetch, the hottest first) and one reaching sync_at is
- * translated at once, within the number the caller allows per frame
- * (sync_left). Code that runs once never enters the buffer, and
- * translation mostly leaves the frames of the game for their spare time.
+ * translated at once, within a time budget per frame (z80j_frame_start):
+ * a floor the caller sets, raised by the estimated cost of the
+ * instructions the frame has already interpreted, so that a frame that
+ * spends its time interpreting a hot working set translates it rather
+ * than paying the interpretation again in the next frame. Code that runs
+ * once never enters the buffer, and translation mostly leaves the frames
+ * of the game for their spare time.
  */
 typedef struct {
     z80j_ctx   *ctx;
@@ -299,9 +308,15 @@ typedef struct {
     uint8      *hot;        /* entry counts per Z80 address (0: no interpreter) */
     uint32      queue_at;
     uint32      sync_at;
-    uint32      sync_left;  /* translations at once still allowed (set per frame) */
+    uint32    (*clock)(void);   /* microsecond clock, for the budget */
+    uint32      sync_floor_us;  /* budget of translations at once per frame */
+    uint32      int_cost;       /* estimated cost of an interpreted instruction, */
+                                /* in 1/16 microsecond */
+    uint32      sync_spent_us;  /* spent in this frame */
+    uint32      int_insns0;     /* interpreted instructions when the frame began */
     uint32      queue[Z80J_QUEUE];  /* unordered; the hottest goes first */
     uint32      nqueue;
+    uint32      queued[2048];   /* bitmap of the addresses in the queue */
     z80j_stats  stats;
 } z80j_state;
 
@@ -329,6 +344,13 @@ void   z80j_flush(z80j_state *j);
  * here; an address is queued for translation when its count reaches
  * queue_at and translated at once when it reaches sync_at. */
 void   z80j_set_interp(z80j_state *j, uint8 *hot, uint32 queue_at, uint32 sync_at);
+
+/* Budget of the translations at once: floor_us per frame, raised by
+ * int_cost (1/16 us) per instruction interpreted in the frame, measured
+ * with clock. z80j_frame_start opens a new frame's budget. */
+void   z80j_set_budget(z80j_state *j, uint32 (*clock)(void), uint32 floor_us,
+                       uint32 int_cost);
+void   z80j_frame_start(z80j_state *j);
 
 /* Translates one queued hot address; returns 0 when the queue is empty.
  * Meant for the spare time at the end of a frame. */

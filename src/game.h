@@ -32,7 +32,10 @@ typedef struct {
     uint32 prefetched;      /* blocks translated in spare time */
     uint32 promoted;        /* blocks translated again into the hot area */
     uint32 interp;          /* stretches of interpretation */
+    uint32 interp_insns;    /* instructions interpreted */
     uint32 sync;            /* hot blocks translated at once */
+    uint32 sync_us;         /* time they took */
+    uint32 sync_refused;    /* translations at once refused, budget spent */
     uint32 vdp_data_w;
     uint32 vdp_data_r;
     uint32 vdp_ctrl_w;
@@ -71,6 +74,7 @@ typedef struct {
     z80j_state    jit;
     const uint8  *rom;
     uint32        rom_size;
+    uint32        seed_hot; /* translate the reachable code into the hot area */
     int32         status;   /* 0, or the translator exit reason */
     uint32        stop_pc;
     /* Translation of the reachable code before the run. */
@@ -109,6 +113,8 @@ typedef struct {
     uint32        f_tiles;
     uint32        f_cells;
     uint32        f_interp;
+    uint32        f_interp_insns;
+    uint32        f_sync_us;
 } game;
 
 /* Allocates the translator and the machine for a cartridge image. */

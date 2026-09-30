@@ -234,9 +234,20 @@ void hmain(void)
         return;
     if (sim_arg(4)) {
         /* -interp: nothing is translated, everything is interpreted. */
-        z80j_set_interp(&g.jit, g.hot, 255, 255);
+        z80j_set_interp(&g.jit, g.hot, 0, 0);
     } else {
+        g.seed_hot = sim_arg(11);   /* -seed: reachable code into the hot area */
         game_translate_rom(&g);
+    }
+    if (sim_arg(10)) {
+        /* -hot q:s: the entry counts at which an address is queued and
+         * translated at once. */
+        z80j_set_interp(&g.jit, g.hot, sim_arg(8), sim_arg(9));
+    }
+    if (sim_arg(7)) {
+        /* -budget floor:cost: the budget of translations at once (us per
+         * frame, 1/16 us per interpreted instruction). */
+        z80j_set_budget(&g.jit, plat_usec_now, sim_arg(5), sim_arg(6));
     }
     game_reset(&g);
     for (f = 0; f < frames; f++) {

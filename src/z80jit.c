@@ -42,6 +42,8 @@ CHECK_OFF(hot_sync_at, GOFF(hot_sync_at) == 0x4BC);
 CHECK_OFF(ei_saved, GOFF(ei_saved) == 0x4C0);
 CHECK_OFF(int_leave, GOFF(int_leave) == 0x4C4);
 CHECK_OFF(int_runs, GOFF(int_runs) == 0x4C8);
+CHECK_OFF(int_insns, GOFF(int_insns) == 0x4CC);
+CHECK_OFF(hot_sync_gate, GOFF(hot_sync_gate) == 0x4D0);
 CHECK_OFF(f2, GOFF(f2) == 0x428);
 CHECK_OFF(bc2, GOFF(bc2) == 0x430);
 CHECK_OFF(slot_bank, GOFF(slot_bank) == 0x47C);
@@ -1052,6 +1054,7 @@ void z80j_flush(z80j_state *j)
     j->cur = j->area[0].cur;
     j->zone_end = j->area[0].end;
     j->nqueue = 0;
+    memset(j->queued, 0, sizeof(j->queued));
     j->generation++;
     j->ctx->resume_host = 0;
     j->stats.flushes++;
@@ -1083,32 +1086,73 @@ void jit_link_stub(z80j_state *j, uint32 *d, uint32 host)
     j->links[j->nlinks++] = JIT_ADDR(d);
 }
 
-/* Queues a hot address for translation in spare time; when the queue is
- * full, the address replaces the coldest entry if it is hotter. */
+/* Queues a hot address for translation in spare time (a bitmap tells
+ * the addresses already queued); when the queue is full, the address
+ * replaces the first entry found colder than itself, if any. */
 static void queue_hot(z80j_state *j, uint32 pc)
 {
+    uint32 bit;
     uint32 k;
 
     pc &= 0xFFFFu;
-    for (k = 0; k < j->nqueue; k++) {
-        if (j->queue[k] == pc)
-            return;
-    }
+    bit = (uint32)1 << (pc & 31);
+    if (j->queued[pc >> 5] & bit)
+        return;
     if (j->nqueue < Z80J_QUEUE) {
         j->queue[j->nqueue++] = pc;
+        j->queued[pc >> 5] |= bit;
         return;
     }
-    j->stats.queue_full++;
-    {
-        uint32 low = 0;
+    for (k = 0; k < Z80J_QUEUE; k++) {
+        uint32 old = j->queue[k];
 
-        for (k = 1; k < Z80J_QUEUE; k++) {
-            if (j->hot[j->queue[k]] < j->hot[j->queue[low]])
-                low = k;
+        if (j->hot[old] < j->hot[pc]) {
+            j->queued[old >> 5] &= ~((uint32)1 << (old & 31));
+            j->queue[k] = pc;
+            j->queued[pc >> 5] |= bit;
+            return;
         }
-        if (j->hot[j->queue[low]] < j->hot[pc])
-            j->queue[low] = pc;
     }
+    j->stats.queue_full++;
+}
+
+static uint32 host_force(z80j_state *j, uint32 pc);
+
+/* Translations at once: allowed while their time in this frame is under
+ * the floor plus the estimated cost of what the frame has interpreted.
+ * When refused, the interpreter is told from how many more interpreted
+ * instructions on it may ask again (hot_sync_gate). */
+static uint32 sync_allowed(z80j_state *j)
+{
+    z80j_ctx *ctx = j->ctx;
+    uint32 interpreted = ctx->int_insns - j->int_insns0;
+    uint32 allowed = j->sync_floor_us + ((interpreted * j->int_cost) >> 4);
+
+    if (j->sync_at == 0) {
+        ctx->hot_sync_gate = 0xFFFFFFFFu;
+        return 0;
+    }
+    if (j->sync_spent_us < allowed)
+        return 1;
+    j->stats.sync_refused++;
+    if (j->int_cost != 0)
+        ctx->hot_sync_gate = ctx->int_insns +
+                             ((j->sync_spent_us - allowed) * 16) / j->int_cost + 1;
+    else
+        ctx->hot_sync_gate = 0xFFFFFFFFu;
+    return 0;
+}
+
+static uint32 sync_translate(z80j_state *j, uint32 pc)
+{
+    uint32 t0 = (j->clock != 0) ? j->clock() : 0;
+    uint32 host = host_force(j, pc);
+    uint32 dt = (j->clock != 0) ? j->clock() - t0 : 1500;  /* no clock: a usual block */
+
+    j->sync_spent_us += dt;
+    j->stats.sync_us += dt;
+    j->stats.sync++;
+    return host;
 }
 
 static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
@@ -1425,13 +1469,14 @@ static uint32 host_for(z80j_state *j, uint32 pc)
 
         if (n < 255)
             j->hot[pc] = (uint8)++n;
-        if (n < j->sync_at || j->sync_left == 0) {
+        if (j->queue_at == 0)
+            return j->glue.interp;      /* interpretation only */
+        if (n < j->sync_at || !sync_allowed(j)) {
             if (n >= j->queue_at)
                 queue_hot(j, pc);
             return j->glue.interp;
         }
-        j->sync_left--;
-        j->stats.sync++;
+        return sync_translate(j, pc);
     }
     return host_force(j, pc);
 }
@@ -1449,6 +1494,7 @@ uint32 z80j_prefetch(z80j_state *j)
         }
         pc = j->queue[best];
         j->queue[best] = j->queue[--j->nqueue];
+        j->queued[pc >> 5] &= ~((uint32)1 << (pc & 31));
         if (find_block(j, pc, jit_block_key(j->ctx, pc)) != 0)
             continue;
         if (translate_block(j, pc, 0, 0, 0) != 0)
@@ -1470,6 +1516,24 @@ void z80j_set_interp(z80j_state *j, uint8 *hot, uint32 queue_at, uint32 sync_at)
     j->ctx->hot_sync_at = sync_at;
     j->ctx->ei_saved = 0;
     j->ctx->int_leave = 0;
+    j->ctx->hot_sync_gate = 0;
+    j->nqueue = 0;
+    memset(j->queued, 0, sizeof(j->queued));
+}
+
+void z80j_set_budget(z80j_state *j, uint32 (*clock)(void), uint32 floor_us,
+                     uint32 int_cost)
+{
+    j->clock = clock;
+    j->sync_floor_us = floor_us;
+    j->int_cost = int_cost;
+}
+
+void z80j_frame_start(z80j_state *j)
+{
+    j->sync_spent_us = 0;
+    j->int_insns0 = j->ctx->int_insns;
+    j->ctx->hot_sync_gate = 0;
 }
 
 uint32 z80j_translate(z80j_state *j, uint32 pc)
@@ -1499,11 +1563,12 @@ uint32 z80j_hot(z80j_state *j)
 {
     uint32 pc = j->ctx->regs[6] & 0xFFFFu;
 
-    if (j->hot[pc] >= j->sync_at && j->sync_left != 0) {
-        j->sync_left--;
-        j->stats.sync++;
-        return host_force(j, pc);
+    if (j->queue_at == 0) {
+        j->ctx->hot_sync_gate = 0xFFFFFFFFu;    /* interpretation only */
+        return j->glue.interp;
     }
+    if (j->hot[pc] >= j->sync_at && sync_allowed(j))
+        return sync_translate(j, pc);
     queue_hot(j, pc);
     return j->glue.interp;
 }
@@ -1863,6 +1928,8 @@ void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
     ctx->ei_saved = 0;
     ctx->int_leave = 0;
     ctx->int_runs = 0;
+    ctx->int_insns = 0;
+    ctx->hot_sync_gate = 0;
 
     ctx->state = JIT_ADDR(j);
     ctx->exit_reason = Z80J_EXIT_LINES;

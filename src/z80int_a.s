@@ -22,8 +22,12 @@
 ; ends the stretch; the counter is restored on the way out (int_leave).
 ;
 ; Entries of each address reached by a transfer are counted in the hot
-; table (when there is one); reaching queue_at or sync_at hands the
-; address to the C side (z80j_hot), which translates it or queues it.
+; table (when there is one); reaching queue_at hands the address to the C
+; side (z80j_hot), which queues it, and so does every entry from sync_at
+; on while the frame's budget of translations at once is open: when the
+; C side refuses one, it sets the count of interpreted instructions from
+; which it may be asked again (hot_sync_gate). Instructions interpreted
+; are counted (int_insns) for the logs and for that budget.
 ;
 ; Context layout: CONTRACT with z80j_ctx (z80jit.h) - keep in sync
 ; (z80jit.c checks the offsets at compile time).
@@ -64,6 +68,8 @@ HOT_SYNC_AT     EQU     0x4BC
 EI_SAVED        EQU     0x4C0
 INT_LEAVE       EQU     0x4C4
 INT_RUNS        EQU     0x4C8
+INT_INSNS       EQU     0x4CC
+HOT_SYNC_GATE   EQU     0x4D0
 PZST            EQU     0x600
 FENC            EQU     0x700
 FDEC            EQU     0x800
@@ -574,6 +580,9 @@ z80i_loop
 next
         cmp     r8,#MIN_T
         blt     int_done
+        ldr     r0,[r10,#INT_INSNS]
+        add     r0,r0,#1
+        str     r0,[r10,#INT_INSNS]
         bic     r12,r12,#0x10000
         mvn     r0,r12,lsr#8
         ldr     r0,[r10,r0,lsl#2]
@@ -609,14 +618,19 @@ int_jump
         beq     next
         ldrb    r0,[r1,r12]
         cmp     r0,#255
-        beq     next
-        add     r0,r0,#1
-        strb    r0,[r1,r12]
+        addne   r0,r0,#1
+        strneb  r0,[r1,r12]
         ldr     r2,[r10,#HOT_QUEUE_AT]
         cmp     r0,r2
-        ldrne   r2,[r10,#HOT_SYNC_AT]
-        cmpne   r0,r2
-        bne     next
+        beq     int_hot
+        ldr     r2,[r10,#HOT_SYNC_AT]
+        cmp     r0,r2
+        blt     next
+        ldr     r2,[r10,#INT_INSNS]
+        ldr     r1,[r10,#HOT_SYNC_GATE]
+        cmp     r2,r1
+        bcc     next
+int_hot
         mov     r0,r12
         bl      jit_save
         callc   z80j_hot

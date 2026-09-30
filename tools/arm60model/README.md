@@ -40,7 +40,11 @@ $S/sim -img $S/sim.bin -sym $S/sim.sym -frames 3000 -dump 250 \
 Options: `-frames n` frames of the cartridge run (after the translation of
 the reachable code), `-bench` benchmarks first, `-dump n` debug view every n
 frames, `-from n` profile only from frame n, `-rom file`, `-interp` run
-everything through the interpreter (nothing translated).
+everything through the interpreter (nothing translated), `-budget f:c`
+override the budget of translations at once (f microseconds per frame
+plus c/16 microseconds per interpreted instruction), `-hot q:s` override
+the entry counts at which an address is queued (q) and translated at once
+(s).
 
 Environment variables:
 - `SIMPAD="1600:10,1606:0,2100:8"`: buttons held from each frame on
