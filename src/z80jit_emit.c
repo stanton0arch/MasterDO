@@ -936,7 +936,7 @@ static void emit_exit(jit_block_ctx *b, uint32 target)
     emit(j, target);
     emit(j, 0);
     emit(j, b->key);
-    host = jit_link_host(j, target, b->key);
+    host = jit_link_host(j, target, b->key, JIT_ADDR(d));
     if (host != 0)
         jit_link_stub(j, d, host);
 }
@@ -1969,6 +1969,11 @@ void emit_block_code(jit_block_ctx *b)
         }
     }
 
+    /* The run mark of the chunk holding the block (see z80j_state): the
+     * links of other blocks lead here, past the entry check. */
+    b->body = j->cur;
+    str_g(j, RG, (int32)b->mark_off);
+
     for (i = 0; i < n; i++) {
         jit_insn *in = &ins[i];
 
@@ -2026,7 +2031,7 @@ void emit_block_code(jit_block_ctx *b)
             emit(j, s->pc);
             emit(j, JIT_ADDR(s->site));
             emit(j, b->key);
-            host = jit_link_host(j, s->pc, b->key);
+            host = jit_link_host(j, s->pc, b->key, JIT_ADDR(d));
             if (host != 0)
                 jit_link_stub(j, d, host);
             break;

@@ -168,6 +168,8 @@ typedef struct {
     int32       nstubs;
     uint32      entry_check;/* 0 none, 1 bank check, 2 RAM check */
     uint32      has_dyn;    /* RAM block with dynamic targets: masked check */
+    uint32      mark_off;   /* context offset of the run mark of the block's chunk */
+    uint32     *body;       /* code after the entry check, where links lead */
     uint32      memo_pc[SCAN_MEMO];
     uint32      memo_val[SCAN_MEMO];
     int32       nmemo;
@@ -187,9 +189,10 @@ void   emit_block_code(jit_block_ctx *b);
 /* z80jit.c */
 uint32 jit_block_key(const z80j_ctx *ctx, uint32 pc);
 uint32 jit_byte(const z80j_ctx *ctx, uint32 addr);
-/* Generated code of an exit to target from a block of key from_key, or 0
- * when the target is not translated yet. */
-uint32 jit_link_host(z80j_state *j, uint32 target, uint32 from_key);
+/* Generated code of an exit to target from a block of key from_key,
+ * whose link stub data words are at from_site, or 0 when the target is
+ * not translated yet. */
+uint32 jit_link_host(z80j_state *j, uint32 target, uint32 from_key, uint32 from_site);
 /* Makes the link stub whose data words are at d (target, conditional
  * jump site or 0, key), preceded by its call to the linker, a direct
  * branch to host, and logs it; does nothing when the log is full. */

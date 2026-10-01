@@ -77,8 +77,8 @@ static void print_window(const game_window_rec *p)
            "%lu status reads, %lu counter reads, PSG %lu, pad %lu, other %lu, %lu leaves, "
            "%lu bank switches, %lu blocks (%lu in spare time, %lu at once in %lu us, "
            "%lu refused, %lu promoted, %lu us of spare time), %lu interpreted "
-           "instructions in %lu stretches, %lu evictions (%lu blocks), %lu returns resumed, "
-           "pad read %lu us\n",
+           "instructions in %lu stretches, %lu evictions (%lu blocks, %lu live chunks), "
+           "%lu returns resumed, pad read %lu us\n",
            (unsigned long)p->first, (unsigned long)p->last,
            (unsigned long)(w->us / frames), (unsigned long)w->max_us,
            (unsigned long)w->max_frame,
@@ -98,7 +98,8 @@ static void print_window(const game_window_rec *p)
            (unsigned long)d->prefetched, (unsigned long)d->sync, (unsigned long)d->sync_us,
            (unsigned long)d->sync_refused, (unsigned long)d->promoted,
            (unsigned long)w->spare_us, (unsigned long)d->interp_insns, (unsigned long)d->interp,
-           (unsigned long)d->evictions, (unsigned long)d->evicted, (unsigned long)d->resumed,
+           (unsigned long)d->evictions, (unsigned long)d->evicted,
+           (unsigned long)d->evicted_live, (unsigned long)d->resumed,
            (unsigned long)(w->pad_us / frames));
     printf("Picture: frames %lu-%lu: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
            "%lu cells for written tiles, %lu palettes, %lu backdrop changes, %lu sprite cels, "
@@ -173,6 +174,7 @@ static void read_counters(const game *g, game_counters *c)
     c->flushes = g->jit.stats.flushes;
     c->evictions = g->jit.stats.evictions;
     c->evicted = g->jit.stats.evicted;
+    c->evicted_live = g->jit.stats.evicted_live;
     c->prefetched = g->jit.stats.prefetched;
     c->promoted = g->jit.stats.promoted;
     c->interp = g->ctx->int_runs;
@@ -341,7 +343,8 @@ void game_translate_rom(game *g)
     printf("ROM translation: %lu blocks, %lu instructions, %lu bytes of ARM code, %lu us "
            "(%lu us per instruction), %lu busy-wait loops, %lu flag scans from the cache, "
            "%lu evictions; code buffer "
-           "%d zones of %d bytes (%d hot), %d block descriptors, %d link entries; "
+           "%d zones of %d bytes shared by the cold and hot areas, run marks per "
+           "%lu bytes, %d block descriptors, %d link entries; "
            "interpreter: translation queued at %d entries, at once from %d within "
            "%d us per frame when the frame has room, plus %d/16 us per interpreted "
            "instruction, whatever the budget from %d entries\n",
@@ -350,7 +353,7 @@ void game_translate_rom(game *g)
            (unsigned long)(g->rom_insns ? g->rom_us / g->rom_insns : 0),
            (unsigned long)g->rom_busy, (unsigned long)j->stats.scan_hits,
            (unsigned long)j->stats.evictions,
-           JIT_ZONES, JIT_ZONE_BYTES, (int)game_hot_zones, JIT_BLOCKS, JIT_LINKS,
+           JIT_ZONES, JIT_ZONE_BYTES, (unsigned long)(4u << j->chunk_shift), JIT_BLOCKS, JIT_LINKS,
            HOT_QUEUE_AT, HOT_SYNC_AT, HOT_SYNC_US, HOT_INT_COST, HOT_FORCE_AT);
 }
 
@@ -600,8 +603,8 @@ void game_log_summary(game *g)
            "(%lu%%), worst %lu us (frame %lu), %lu frames over %d us, Z80 idle %lu%%, %lu IRQ, "
            "%lu NMI, %lu bank switches, %lu blocks translated while running (%lu in spare "
            "time, %lu at once in %lu us, %lu refused, %lu promoted), %lu interpreted "
-           "instructions in %lu stretches, %lu evictions (%lu blocks), "
-           "%lu busy-wait loops found, status %ld\n",
+           "instructions in %lu stretches, %lu evictions (%lu blocks, %lu live chunks), "
+           "%lu busy-wait loops found, %lu RAM blocks cut at a seam, status %ld\n",
            (unsigned long)n, (unsigned long)avg,
            (unsigned long)percent(avg, g->frame_us), (int)g->frame_us,
            (unsigned long)g->max_us, (unsigned long)g->max_frame,
@@ -615,8 +618,9 @@ void game_log_summary(game *g)
            (unsigned long)d.blocks, (unsigned long)d.prefetched, (unsigned long)d.sync,
            (unsigned long)d.sync_us, (unsigned long)d.sync_refused,
            (unsigned long)d.promoted, (unsigned long)d.interp_insns, (unsigned long)d.interp,
-           (unsigned long)d.evictions, (unsigned long)d.evicted,
-           (unsigned long)g->jit.stats.busy_loops, (long)g->status);
+           (unsigned long)d.evictions, (unsigned long)d.evicted, (unsigned long)d.evicted_live,
+           (unsigned long)g->jit.stats.busy_loops, (unsigned long)g->jit.stats.seams,
+           (long)g->status);
     printf("Game summary: picture: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
            "%lu cells for written tiles, %lu palettes, %lu sprite cels, %lu pieces, %lu priority strips, "
            "%lu frames in bands, %lu frames partly blanked, %lu frames in name table bands, "

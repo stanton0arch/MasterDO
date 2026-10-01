@@ -60,6 +60,7 @@
 #define Z80J_FENC_OFF  0x0700
 #define Z80J_FDEC_OFF  0x0800
 #define Z80J_MRAM_OFF  0x1000
+#define Z80J_MARK_CHUNKS 256   /* run marks of the code buffer (z80j_state) */
 #define Z80J_TAB_OFF   0x4000
 
 typedef struct z80j_machine z80j_machine;
@@ -129,7 +130,9 @@ typedef struct {
     uint8  pzst[256];       /* +0x600: sign / zero / parity flags of a byte */
     uint8  fenc[256];       /* +0x700: internal flags -> Z80 F */
     uint8  fdec[256];       /* +0x800: Z80 F -> internal flags */
-    uint8  pad1[Z80J_MRAM_OFF - 0x900];
+    uint32 chunk_mark[Z80J_MARK_CHUNKS];  /* +0x900: set by the code of each chunk */
+                            /* of the code buffer when it runs (see z80j_state) */
+    uint8  pad1[Z80J_MRAM_OFF - 0x900 - 4 * Z80J_MARK_CHUNKS];
     uint8  mram[0x2000];    /* +0x1000: machine RAM near the global pointer */
     uint8  pad2[Z80J_TAB_OFF - Z80J_MRAM_OFF - 0x2000];
     uint32 lookup[0x10000]; /* +0x4000: code to run for each Z80 address */
@@ -234,6 +237,7 @@ typedef struct {
     uint32 flushes;         /* code buffer flushes (every zone emptied) */
     uint32 evictions;       /* zones emptied to make room */
     uint32 evicted;         /* blocks lost to evictions */
+    uint32 evicted_live;    /* chunks of the evicted zones run in the last frames */
     uint32 unlinked;        /* direct branches undone by evictions */
     uint32 link_full;       /* links not made for lack of room in the log */
     uint32 retranslations;  /* RAM blocks whose code had changed */
@@ -249,6 +253,7 @@ typedef struct {
     uint32 queue_full;      /* hot addresses dropped for lack of room */
     uint32 resumed;         /* interrupt returns resumed inside their block */
     uint32 dyn_blocks;      /* RAM blocks translated with dynamic targets */
+    uint32 seams;           /* RAM blocks cut, or refused, at a seam of the host memory */
 } z80j_stats;
 
 /* An interrupted segment: where its block resumes, for the return. */
@@ -269,13 +274,12 @@ typedef struct z80j_block z80j_block;
 #define JIT_MAX_ZONES   64
 #define JIT_SCAN_CACHE  512
 
-/* A range of zones filled in turn. */
+/* An area: the zone it fills and the zones it owns. */
 typedef struct {
     uint32     *cur;        /* next free word */
     uint32     *end;        /* end of the zone being filled */
     uint32      zone;       /* zone being filled */
-    uint32      first;      /* zones first to first + count - 1 */
-    uint32      count;
+    uint32      count;      /* zones owned (0: the area does not exist) */
 } z80j_area;
 
 /*
@@ -286,14 +290,22 @@ typedef struct {
  * made, become calls to the linker again. With a single zone an eviction
  * is a flush of the whole buffer.
  *
- * The zones make two areas. A block translated for the first time goes
- * to the cold area, whose zones are recycled quickly; a block translated
- * again after being evicted (a bitmap remembers the addresses translated
- * before) has proven useful and goes to the hot area, whose zones are
- * recycled only when the hot code outgrows them. Code that runs once
- * thus never pushes the code that runs all the time out of the buffer.
- * The code reachable from the entry points, translated before the run,
- * goes straight to the hot area (seed_hot).
+ * Two areas fill zones of their own: a block translated for the first
+ * time goes to the cold area, a block translated again after being
+ * evicted (a bitmap remembers the addresses translated before) has
+ * proven useful and goes to the hot area, so that code that runs once
+ * and code that runs all the time do not share zones. The zones are not
+ * split between the areas in advance: when an area needs a zone it takes
+ * the one whose code has run the least recently, whichever area owned
+ * it, so that each area is as large as its live code. What has run
+ * recently is known from the generated code itself: the code buffer is
+ * made of chunks (2 KiB in the usual layout) and every block starts by
+ * storing a mark for its chunk in the context (one store per block
+ * entry); each frame the marks of one zone are turned into ages. A zone
+ * is empty, or dead, or has as many live chunks as the eviction would
+ * lose, and the least live one goes first. The code reachable from the
+ * entry points, translated before the run, goes to the cold area (or to
+ * the hot one with seed_hot).
  *
  * With an interpreter (z80j_set_interp), code is interpreted the first
  * times it runs: a table counts the entries of each Z80 address, an
@@ -319,6 +331,12 @@ typedef struct {
     uint32      seen[2048]; /* Z80 addresses translated before */
     uint32      flaky[2048];/* RAM addresses whose code changed once already */
     uint32      zone_blocks[JIT_MAX_ZONES]; /* blocks held by each zone */
+    uint32      zone_fill[JIT_MAX_ZONES];   /* frame at which each zone was last taken */
+    uint8       zone_area[JIT_MAX_ZONES];   /* area owning each zone */
+    uint8       chunk_age[Z80J_MARK_CHUNKS];/* ageing rounds since each chunk of the */
+                                            /* code buffer ran (255: never) */
+    uint32      chunk_shift;                /* log2 of the words per chunk */
+    uint32      frame_no;                   /* frames begun (z80j_frame_start) */
     /* Flags read by the code at an address (the forward scan of the
      * liveness analysis), cached across blocks for ROM code: the scan
      * result only depends on the bytes at the address and on the key of
@@ -374,9 +392,10 @@ uint32 z80j_link_bytes(uint32 max_links);
 
 /* Prepares the translator and the context: lookup table, flag tables and
  * register reset. The code buffer of code_words words is split into
- * nzones zones (at least 1), of which the last nhot make the hot area
- * (nhot < nzones). The pages, page kinds, slot banks and machine are set
- * up by the caller before running. */
+ * nzones zones (at least 1); with nhot nonzero (and nzones at least 3)
+ * the blocks translated again after an eviction get an area of their
+ * own. The pages, page kinds, slot banks and machine are set up by the
+ * caller before running. */
 void   z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
                  uint32 nzones, uint32 nhot, void *block_mem, uint32 max_blocks,
                  uint32 *link_mem, uint32 max_links, const z80j_glue *glue);

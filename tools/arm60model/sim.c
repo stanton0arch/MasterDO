@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdarg.h>
+#include <signal.h>
 
 #define MEM_SIZE   0x01000000u
 #define LOAD_ADDR  0x8000u
@@ -49,6 +50,7 @@ static uint32_t *pcount;
 static double prof_jit;
 static uint8_t *execmap;   /* one byte per word of memory above the image: executed */
 static float *jitcyc;      /* cycles per word of memory outside the image */
+static uint32_t *jitcnt;   /* executions per word of memory outside the image */
 
 typedef struct { uint32_t addr; char name[64]; } sym_t;
 static sym_t *syms;
@@ -313,7 +315,7 @@ static void do_swi(uint32_t n)
     case 9: r[0] = pad_at(r[0]); break;
     case 10: {
         uint32_t id = r[0] & 15;
-        if (id == 15) { memset(jitcyc, 0, (MEM_SIZE / 4) * sizeof(float)); memset(prof, 0, ((img_end - LOAD_ADDR) / 4 + 1) * sizeof(double)); memset(pcount, 0, ((img_end - LOAD_ADDR) / 4 + 1) * sizeof(uint32_t)); prof_jit = 0; break; }
+        if (id == 15) { memset(jitcyc, 0, (MEM_SIZE / 4) * sizeof(float)); memset(jitcnt, 0, (MEM_SIZE / 4) * sizeof(uint32_t)); memset(prof, 0, ((img_end - LOAD_ADDR) / 4 + 1) * sizeof(double)); memset(pcount, 0, ((img_end - LOAD_ADDR) / 4 + 1) * sizeof(uint32_t)); prof_jit = 0; break; }
         if (id & 1) mark_t[id] = cycles();
         else { mark_sum[id] += cycles() - mark_t[id - 1]; mark_n[id]++; }
         break;
@@ -330,6 +332,11 @@ static void do_swi(uint32_t n)
             fwrite(jitcyc + (r[0] >> 2), 4, (r[1] - r[0]) >> 2, f);
             fclose(f);
         }
+        f = fopen("codecnt.bin", "wb");
+        if (f) {
+            fwrite(jitcnt + (r[0] >> 2), 4, (r[1] - r[0]) >> 2, f);
+            fclose(f);
+        }
         break;
     }
     default: fatal("unknown swi %x", n);
@@ -340,8 +347,33 @@ static void do_swi(uint32_t n)
  * Interpreter
  *------------------------------------------------------------------------*/
 
+/* SIGUSR1: where the simulated program is (pc, lr, sp, the symbols of
+ * pc and lr), to find a hang without a debugger. */
+static const char *sym_near(uint32_t a, uint32_t *off)
+{
+    int k;
+    const char *name = "?";
+    *off = a;
+    for (k = 0; k < nsyms; k++) {
+        if (syms[k].addr <= a) { name = syms[k].name; *off = a - syms[k].addr; }
+        else break;
+    }
+    return name;
+}
+
+static void on_usr1(int sig)
+{
+    uint32_t o1, o2;
+    const char *s1 = sym_near(r[15], &o1);
+    const char *s2 = sym_near(r[14], &o2);
+    (void)sig;
+    fprintf(stderr, "sim: at pc %08x (%s+%x) lr %08x (%s+%x) sp %08x r0 %08x r1 %08x, %llu insns, %.0f us\n",
+            r[15], s1, o1, r[14], s2, o2, r[13], r[0], r[1], (unsigned long long)ninsn, cycles() * 0.08);
+}
+
 static void run(void)
 {
+    signal(SIGUSR1, on_usr1);
     while (!done) {
         uint32_t pc = r[15];
         uint32_t op = rd32(pc);
@@ -521,7 +553,7 @@ static void run(void)
 account:
         c0 = (cS - s0) * weightS + (cN - n0) * weightN + (cI - i0) * weightI;
         if (pc < img_end && pc >= LOAD_ADDR) { prof[(pc - LOAD_ADDR) >> 2] += c0; pcount[(pc - LOAD_ADDR) >> 2]++; }
-        else { prof_jit += c0; execmap[pc >> 2] = 1; jitcyc[pc >> 2] += (float)c0; }
+        else { prof_jit += c0; execmap[pc >> 2] = 1; jitcyc[pc >> 2] += (float)c0; jitcnt[pc >> 2]++; }
     }
 }
 
@@ -597,6 +629,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-from") && i + 1 < argc) args[3] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-interp")) args[4] = 1;
         else if (!strcmp(argv[i], "-seed")) args[11] = 1;
+        else if (!strcmp(argv[i], "-check")) args[13] = 1;
+        else if (!strcmp(argv[i], "-hash")) args[14] = 1;
         else if (!strcmp(argv[i], "-hotzones") && i + 1 < argc) args[12] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-budget") && i + 1 < argc) {
             unsigned f = 0, c = 0;
@@ -612,6 +646,7 @@ int main(int argc, char **argv)
     mem = calloc(1, MEM_SIZE);
     execmap = calloc(1, MEM_SIZE / 4);
     jitcyc = calloc(MEM_SIZE / 4, sizeof(float));
+    jitcnt = calloc(MEM_SIZE / 4, sizeof(uint32_t));
     f = fopen(img, "rb");
     if (!f) { perror(img); return 1; }
     n = fread(mem + LOAD_ADDR, 1, MEM_SIZE - LOAD_ADDR, f);

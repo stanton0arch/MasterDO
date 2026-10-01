@@ -45,6 +45,7 @@ CHECK_OFF(int_runs, GOFF(int_runs) == 0x4C8);
 CHECK_OFF(int_insns, GOFF(int_insns) == 0x4CC);
 CHECK_OFF(hot_sync_gate, GOFF(hot_sync_gate) == 0x4D0);
 CHECK_OFF(hot_force_at, GOFF(hot_force_at) == 0x4D4);
+CHECK_OFF(chunk_mark, GOFF(chunk_mark) == 0x900);
 CHECK_OFF(resume_tab, GOFF(resume_tab) == 0x4D8);
 CHECK_OFF(event_a, GOFF(event_a) == 0x4DC);
 CHECK_OFF(irq_count, GOFF(irq_count) == 0x4E0);
@@ -945,6 +946,34 @@ static uint32 zone_of(const z80j_state *j, const uint32 *host)
     return (uint32)(host - j->code) / j->zone_words;
 }
 
+static uint32 chunk_of(const z80j_state *j, const uint32 *host)
+{
+    return (uint32)(host - j->code) >> j->chunk_shift;
+}
+
+/* Chunks of zone z run within the last ageing rounds, and in *freshest
+ * the age of the one run last. */
+#define LIVE_AGE 2
+static uint32 zone_live(const z80j_state *j, uint32 z, uint32 *freshest)
+{
+    uint32 c0 = (z * j->zone_words) >> j->chunk_shift;
+    uint32 c1 = ((z + 1) * j->zone_words) >> j->chunk_shift;
+    uint32 c;
+    uint32 live = 0;
+    uint32 fresh = 255;
+
+    for (c = c0; c < c1; c++) {
+        uint32 age = j->chunk_age[c];
+
+        if (age < LIVE_AGE)
+            live++;
+        if (age < fresh)
+            fresh = age;
+    }
+    *freshest = fresh;
+    return live;
+}
+
 static void free_block(z80j_state *j, z80j_block *blk)
 {
     j->zone_blocks[zone_of(j, blk->entry)]--;
@@ -999,6 +1028,11 @@ static void evict_zone(z80j_state *j, uint32 z)
     if (freed == 0)
         return;
     j->stats.evicted += freed;
+    {
+        uint32 fresh;
+
+        j->stats.evicted_live += zone_live(j, z, &fresh);
+    }
     for (k = 0; k < Z80J_RESUMES; k++) {
         if (j->resume[k].host >= lo && j->resume[k].host < hi)
             j->resume[k].host = 0;
@@ -1045,30 +1079,107 @@ static void evict_zone(z80j_state *j, uint32 z)
     j->stats.evictions++;
 }
 
-/* Moves an area on to its next zone, emptied first if it holds code. */
+/* The zone an area takes next: an empty one, else the one whose code
+ * has run the least recently (the fewest live chunks, then the oldest
+ * last run, then the oldest fill), whichever area owns it. The zones
+ * the areas are filling are not candidates; with a single zone the area
+ * takes it again (a flush). */
+static uint32 pick_zone(z80j_state *j, const z80j_area *a)
+{
+    uint32 best = a->zone;
+    uint32 best_score = 0xFFFFFFFFu;
+    uint32 best_fill = 0;
+    uint32 z;
+
+    for (z = 0; z < j->nzones; z++) {
+        uint32 score;
+        uint32 fresh;
+
+        if (z == j->area[0].zone || (j->area[1].count != 0 && z == j->area[1].zone))
+            continue;
+        if (j->zone_blocks[z] == 0)
+            score = 0;
+        else
+            score = 1 + (zone_live(j, z, &fresh) << 8) + (255 - fresh);
+        if (score < best_score || (score == best_score && j->zone_fill[z] < best_fill)) {
+            best = z;
+            best_score = score;
+            best_fill = j->zone_fill[z];
+        }
+    }
+    return best;
+}
+
+static void zone_forget(z80j_state *j, uint32 z);
+
+static void area_take(z80j_state *j, z80j_area *a, uint32 z)
+{
+    uint32 me = (uint32)(a - j->area);
+    uint32 owner = j->zone_area[z];
+
+    if (owner != me) {
+        if (owner < 2)
+            j->area[owner].count--;
+        a->count++;
+    }
+    j->zone_area[z] = (uint8)me;
+    j->zone_fill[z] = j->frame_no;
+    a->zone = z;
+    a->cur = j->code + z * j->zone_words;
+    a->end = a->cur + j->zone_words;
+    zone_forget(j, z);
+}
+
+/* Moves an area on to another zone, emptied first if it holds code. */
 static void next_zone(z80j_state *j, z80j_area *a)
 {
-    a->zone = (a->zone + 1 < a->first + a->count) ? a->zone + 1 : a->first;
-    a->cur = j->code + a->zone * j->zone_words;
-    a->end = a->cur + j->zone_words;
-    evict_zone(j, a->zone);
+    uint32 z = pick_zone(j, a);
+
+    area_take(j, a, z);
+    evict_zone(j, z);
     if (j->nzones == 1)
         j->stats.flushes++;
 }
 
-static void area_reset(z80j_state *j, z80j_area *a, uint32 first, uint32 count)
+/* Turns the run marks of the chunks of zone z into ages: a chunk whose
+ * mark was set since the last round is live (age 0), the others age by
+ * one round. */
+static void age_zone(z80j_state *j, uint32 z)
 {
-    a->first = first;
-    a->count = count;
-    a->zone = first;
-    a->cur = j->code + first * j->zone_words;
-    a->end = a->cur + j->zone_words;
+    z80j_ctx *ctx = j->ctx;
+    uint32 c0 = (z * j->zone_words) >> j->chunk_shift;
+    uint32 c1 = ((z + 1) * j->zone_words) >> j->chunk_shift;
+    uint32 c;
+
+    for (c = c0; c < c1; c++) {
+        if (ctx->chunk_mark[c] != 0) {
+            ctx->chunk_mark[c] = 0;
+            j->chunk_age[c] = 0;
+        } else if (j->chunk_age[c] < 255) {
+            j->chunk_age[c]++;
+        }
+    }
+}
+
+/* The marks of the chunks the zone holds are cleared with the zone: its
+ * new code starts with no run. */
+static void zone_forget(z80j_state *j, uint32 z)
+{
+    uint32 c0 = (z * j->zone_words) >> j->chunk_shift;
+    uint32 c1 = ((z + 1) * j->zone_words) >> j->chunk_shift;
+    uint32 c;
+
+    for (c = c0; c < c1; c++) {
+        j->ctx->chunk_mark[c] = 0;
+        j->chunk_age[c] = 255;
+    }
 }
 
 void z80j_flush(z80j_state *j)
 {
     uint32 k;
     uint32 nhot = j->area[1].count;
+    uint32 c;
 
     z80j_fill_words(j->ctx->lookup, 0x10000u, j->glue.miss);
     memset(j->hash, 0, sizeof(j->hash));
@@ -1085,8 +1196,19 @@ void z80j_flush(z80j_state *j)
     }
     j->nblocks = 0;
     j->nlinks = 0;
-    area_reset(j, &j->area[0], 0, j->nzones - nhot);
-    area_reset(j, &j->area[1], j->nzones - nhot, nhot);
+    /* The cold area starts at the first zone, the hot one at the last;
+     * the zones between are taken as code comes. */
+    memset(j->zone_area, 0xFF, sizeof(j->zone_area));
+    memset(j->zone_fill, 0, sizeof(j->zone_fill));
+    for (c = 0; c < Z80J_MARK_CHUNKS; c++) {
+        j->ctx->chunk_mark[c] = 0;
+        j->chunk_age[c] = 255;
+    }
+    j->area[0].count = 0;
+    j->area[1].count = 0;
+    area_take(j, &j->area[0], 0);
+    if (nhot != 0 && j->nzones >= 3)
+        area_take(j, &j->area[1], j->nzones - 1);
     j->cur = j->area[0].cur;
     j->zone_end = j->area[0].end;
     j->nqueue = 0;
@@ -1097,7 +1219,7 @@ void z80j_flush(z80j_state *j)
     j->stats.flushes++;
 }
 
-uint32 jit_link_host(z80j_state *j, uint32 target, uint32 from_key)
+uint32 jit_link_host(z80j_state *j, uint32 target, uint32 from_key, uint32 from_site)
 {
     uint32 key = jit_block_key(j->ctx, target);
     z80j_block *blk = find_block(j, target & 0xFFFFu, key);
@@ -1105,9 +1227,14 @@ uint32 jit_link_host(z80j_state *j, uint32 target, uint32 from_key)
     if (blk == 0)
         return 0;
     /* Fixed code, and code of the same bank of the same slot, cannot
-     * have changed since the source block was entered. */
-    if (key == KEY_FIXED || (key == from_key && KEY_IS_SLOT(key)))
+     * have changed since the source block was entered: the link skips
+     * the entry check, and, from the same zone, the run mark too (the
+     * zone is marked by whatever entered it from outside). */
+    if (key == KEY_FIXED || (key == from_key && KEY_IS_SLOT(key))) {
+        if (zone_of(j, (const uint32 *)JIT_PTR(from_site)) == zone_of(j, blk->body))
+            return JIT_ADDR(blk->body + 1);
         return JIT_ADDR(blk->body);
+    }
     return JIT_ADDR(blk->entry);
 }
 
@@ -1255,6 +1382,7 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
         j->cur = area->cur;
         j->zone_end = area->end;
     }
+    bc.mark_off = (uint32)GOFF(chunk_mark) + 4 * chunk_of(j, j->cur);
 
     bc.j = j;
     bc.ins = ins;
@@ -1286,6 +1414,24 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
         in->fused = 0;
         in->dyn = 0;
         addr = (addr + in->len) & 0xFFFFu;
+        /* The entry check of a RAM block reads the memory holding it as
+         * consecutive host words from the one holding its first byte
+         * (z80j_glue_verify): the block must not reach a page whose host
+         * memory does not follow (the mirror of the system RAM, the end
+         * of the address space). An instruction crossing such a seam
+         * ends the block before it; alone, it is left to the interpreter. */
+        if (bc.key == KEY_RAM &&
+            (ctx->rtab[255 - (((addr - 1) & 0xFFFFu) >> 8)] != ctx->rtab[255 - (pc >> 8)] ||
+             ((addr - 1) & 0xFFFFu) < (pc & 0xFFFFu))) {
+            j->stats.seams++;
+            if (n == 1) {
+                j->error = 5;
+                return 0;
+            }
+            n--;
+            addr = in->pc;
+            break;
+        }
         /* JP and CALL in RAM read their target when they run: a jump
          * vector whose operand the game rewrites (an interrupt
          * trampoline, typically) keeps its translation. */
@@ -1490,6 +1636,7 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
         blk->key = bc.key;
         blk->entry = j->cur = area->cur;
         j->zone_end = area->end;
+        bc.mark_off = (uint32)GOFF(chunk_mark) + 4 * chunk_of(j, j->cur);
         j->error = 0;
         emit_block_code(&bc);
     }
@@ -1503,7 +1650,7 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
     j->free_blocks = blk->next;
     j->nblocks++;
     j->zone_blocks[zone_of(j, blk->entry)]++;
-    blk->body = ins[0].host;
+    blk->body = bc.body;
     blk->next = j->hash[HASH(blk->pc)];
     j->hash[HASH(blk->pc)] = blk;
     ctx->lookup[blk->pc] = JIT_ADDR(blk->entry);
@@ -1533,10 +1680,19 @@ static uint32 host_force(z80j_state *j, uint32 pc)
 
     pc &= 0xFFFFu;
     blk = find_block(j, pc, jit_block_key(j->ctx, pc));
-    if (blk == 0)
+    if (blk == 0) {
+        j->error = 0;
         blk = translate_block(j, pc, 0, 0, 0);
-    if (blk == 0)
+    }
+    if (blk == 0) {
+        /* Not translatable (a RAM instruction across a seam): interpreted
+         * for good when there is an interpreter. */
+        if (j->error == 5 && j->hot != 0) {
+            j->hot[pc] = 255;
+            return j->glue.interp;
+        }
         return jit_abort(j, pc);
+    }
     j->ctx->lookup[pc] = JIT_ADDR(blk->entry);
     return JIT_ADDR(blk->entry);
 }
@@ -1612,8 +1768,11 @@ uint32 z80j_prefetch(z80j_state *j)
         {
             uint32 t0 = (j->clock != 0) ? j->clock() : 0;
 
+            j->error = 0;
             if (translate_block(j, pc, 0, 0, 0) != 0)
                 j->stats.prefetched++;
+            else if (j->error == 5)
+                j->hot[pc] = 255;       /* not translatable: interpreted for good */
             if (j->clock != 0)
                 j->est_us = (j->est_us * 3 + (j->clock() - t0)) >> 2;
         }
@@ -1658,6 +1817,8 @@ void z80j_set_budget(z80j_state *j, uint32 (*clock)(void), uint32 floor_us,
 
 void z80j_frame_start(z80j_state *j, uint32 start_us, uint32 reserve_us)
 {
+    j->frame_no++;
+    age_zone(j, j->frame_no % j->nzones);
     j->sync_spent_us = 0;
     j->int_insns0 = j->ctx->int_insns;
     j->frame_start_us = start_us;
@@ -1705,19 +1866,23 @@ uint32 z80j_hot(z80j_state *j)
 
 /* Does the RAM block still describe the code at its address? Its entry
  * check holds the address, the length and the bytes it was made from. */
+/* The entry check of a RAM block, as z80j_glue_verify makes it: the host
+ * words from the one holding the first byte of the block, against the
+ * bytes and the mask recorded after the call. */
 static uint32 block_bytes_match(const z80j_ctx *ctx, const z80j_block *blk)
 {
     const uint32 *h = blk->entry;
     uint32 pc = h[1];
     uint32 nwords = h[2];
-    const uint8 *bytes = (const uint8 *)(h + 3);
-    const uint8 *mask = bytes + nwords * 4;
+    const uint32 *mem = (const uint32 *)JIT_PTR((ctx->rtab[255 - (pc >> 8)] + pc) & ~3u);
+    const uint32 *bytes = h + 3;
+    const uint32 *mask = bytes + nwords;
     uint32 k;
 
     if ((h[0] & 0x0F000000u) != 0x0B000000u)    /* not a bl: a trampoline */
         return 0;
-    for (k = 0; k < nwords * 4; k++) {
-        if (mask[k] != 0 && ((jit_byte(ctx, (pc & ~3u) + k) ^ bytes[k]) & mask[k]) != 0)
+    for (k = 0; k < nwords; k++) {
+        if (((mem[k] ^ bytes[k]) & mask[k]) != 0)
             return 0;
     }
     return 1;
@@ -1781,7 +1946,7 @@ uint32 z80j_link(z80j_state *j, uint32 data)
     uint32 site = d[1];
     uint32 from_key = d[2];
     uint32 generation = j->generation;
-    uint32 host = jit_link_host(j, target, from_key);
+    uint32 host = jit_link_host(j, target, from_key, data);
 
     if (host == 0) {
         host = host_for(j, target);
@@ -1792,9 +1957,9 @@ uint32 z80j_link(z80j_state *j, uint32 data)
         if (host == j->glue.abort || j->generation != generation)
             return host;
         /* A return resumed inside a block is run, not linked. */
-        if (jit_link_host(j, target, from_key) == 0)
+        if (jit_link_host(j, target, from_key, data) == 0)
             return host;
-        host = jit_link_host(j, target, from_key);
+        host = jit_link_host(j, target, from_key, data);
     }
     /* The call to the linker becomes a plain branch, and so does the
      * conditional jump that led to it. */
@@ -2027,7 +2192,11 @@ void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
     j->code_end = code + code_words;
     j->nzones = (nzones != 0) ? nzones : 1;
     j->zone_words = code_words / j->nzones;
-    j->area[1].count = (nhot < j->nzones) ? nhot : j->nzones - 1;
+    j->area[1].count = (nhot != 0 && j->nzones >= 3) ? 1 : 0;
+    /* Chunks of at least 512 words, as many as the marks allow. */
+    j->chunk_shift = 9;
+    while ((code_words >> j->chunk_shift) > Z80J_MARK_CHUNKS)
+        j->chunk_shift++;
     j->blocks = (z80j_block *)block_mem;
     j->max_blocks = max_blocks;
     j->links = link_mem;

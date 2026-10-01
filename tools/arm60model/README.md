@@ -45,7 +45,15 @@ override the budget of translations at once (f microseconds per frame
 plus c/16 microseconds per interpreted instruction), `-hot q:s` override
 the entry counts at which an address is queued (q) and translated at once
 (s), `-seed` translate the reachable code into the hot area, `-hotzones n`
-give n of the 16 zones to the hot area.
+(kept for older scripts: the zones are no longer split between the areas,
+any nonzero value gives the hot area its own zone), `-check` verify the
+translator's block table after each frame (hashed blocks with their code,
+RAM entry headers, zone counts, lookup entries) and report the first
+inconsistencies; the check runs in the model and shifts its clock, so a
+timing-dependent run may not reproduce with it.
+
+A hang is located without a debugger: `kill -USR1 <pid of sim>` prints the
+simulated pc and lr with their symbols, the stack pointer, r0 and r1.
 
 Environment variables:
 - `SIMPAD="1600:10,1606:0,2100:8"`: buttons held from each frame on
@@ -53,12 +61,17 @@ Environment variables:
 - `SIMPROF=1`: cycles per function of the image, and of the generated code;
 - `SIMDIS=symbol`: executions of each instruction of a function.
 
-Scripts on `code.bin` (written at the end of a cartridge run):
+Scripts on `code.bin` (the whole code buffer and the block descriptors,
+written at the end of a cartridge run) and `codecnt.bin` (executions of
+each code word since the `-from` frame):
 - `hotblocks.py code.bin [rom] [count]`: generated code time per Z80 block;
 - `anacode.py code.bin [sim.sym]`: composition of the generated code;
 - `disblock.py code.bin pc [key]` or `disblock.py code.bin rank N`: the
   generated code of a block, disassembled, with the cycles spent on each
-  instruction.
+  instruction;
+- `entries.py code.bin codecnt.bin [frames] [count]`: block entries (the
+  executions of the first word of each block's body, where the links of
+  other blocks lead) in all and per frame, and the most entered blocks.
 
 Pictures are PPM files; any image tool converts them.
 

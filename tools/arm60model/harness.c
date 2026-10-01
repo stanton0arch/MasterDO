@@ -20,6 +20,7 @@
 #include "task.h"
 #include "mem.h"
 #include "game.h"
+#include "z80jit_int.h"
 #include "dbgview.h"
 #include "bench_cpu.h"
 #include "platform.h"
@@ -211,6 +212,80 @@ static uint32 compare(uint32 *outside)
     return n;
 }
 
+
+/* -check: consistency of the translator's block table after each frame
+ * (hashed blocks with their code, RAM entry headers, zone counts, lookup
+ * entries), to find a corruption at the frame it happens. */
+static uint32 check_printed;
+
+static void check_blocks(uint32 f)
+{
+    z80j_state *j = &g.jit;
+    uint32 cnt[JIT_MAX_ZONES];
+    uint32 k;
+
+    memset(cnt, 0, sizeof(cnt));
+    for (k = 0; k < 1024; k++) {
+        z80j_block *b;
+        uint32 n = 0;
+
+        for (b = j->hash[k]; b != 0 && check_printed < 40; b = b->next) {
+            const uint32 *h = b->entry;
+            uint32 z;
+            uint32 look;
+            z80j_block *b2;
+
+            if (++n > 64) {
+                printf("Check: frame %lu: hash chain %lu loops\n", (unsigned long)f, (unsigned long)k);
+                check_printed++;
+                break;
+            }
+            if (h == 0) {
+                printf("Check: frame %lu: block $%04lx key %06lx hashed without code\n",
+                       (unsigned long)f, (unsigned long)b->pc, (unsigned long)b->key);
+                check_printed++;
+                continue;
+            }
+            z = (uint32)(h - j->code) / j->zone_words;
+            if (z < JIT_MAX_ZONES)
+                cnt[z]++;
+            if (b->key == KEY_RAM &&
+                ((h[0] & 0x0F000000u) != 0x0B000000u || h[1] != b->pc || h[2] > 72)) {
+                printf("Check: frame %lu: RAM block $%04lx zone %lu entry %08lx: header %08lx %08lx %08lx\n",
+                       (unsigned long)f, (unsigned long)b->pc, (unsigned long)z,
+                       (unsigned long)JIT_ADDR(h), (unsigned long)h[0], (unsigned long)h[1],
+                       (unsigned long)h[2]);
+                check_printed++;
+            }
+            look = j->ctx->lookup[b->pc];
+            if (look != j->glue.miss && look != j->glue.interp && look != JIT_ADDR(h) &&
+                !KEY_IS_SLOT(b->key)) {
+                printf("Check: frame %lu: block $%04lx key %06lx entry %08lx but lookup %08lx\n",
+                       (unsigned long)f, (unsigned long)b->pc, (unsigned long)b->key,
+                       (unsigned long)JIT_ADDR(h), (unsigned long)look);
+                check_printed++;
+            }
+            for (b2 = b->next; b2 != 0; b2 = b2->next) {
+                if (b2->pc == b->pc && b2->key == b->key) {
+                    printf("Check: frame %lu: block $%04lx key %06lx hashed twice (%08lx, %08lx)\n",
+                           (unsigned long)f, (unsigned long)b->pc, (unsigned long)b->key,
+                           (unsigned long)JIT_ADDR(h), (unsigned long)JIT_ADDR(b2->entry));
+                    check_printed++;
+                    break;
+                }
+            }
+        }
+    }
+    for (k = 0; k < j->nzones && check_printed < 40; k++) {
+        if (cnt[k] != j->zone_blocks[k]) {
+            printf("Check: frame %lu: zone %lu holds %lu hashed blocks, counted %lu\n",
+                   (unsigned long)f, (unsigned long)k, (unsigned long)cnt[k],
+                   (unsigned long)j->zone_blocks[k]);
+            check_printed++;
+        }
+    }
+}
+
 void hmain(void)
 {
     const uint8 *rom = sim_rom();
@@ -268,6 +343,25 @@ void hmain(void)
             game_frame_done(&g, 3500);
             game_spare_time(&g, t0 - 3500, t0 - 3500 + PLAT_NTSC_FRAME_US);
         }
+        if (sim_arg(13))
+            check_blocks(f);
+        if (sim_arg(14) && (f + 1) % 100 == 0) {
+            /* -hash: a hash of the machine state every 100 frames, to
+             * compare runs made under different host timings. */
+            const z80j_ctx *c = g.ctx;
+            uint32 h = 0;
+            uint32 k;
+
+            for (k = 0; k < 0x2000; k++)
+                h = h * 31 + c->mram[k];
+            for (k = 0; k < 8; k++)
+                h = h * 31 + c->regs[k];
+            h = h * 31 + c->ix + c->iy * 7 + c->bc2 * 11 + c->de2 * 13 + c->hl2 * 17 +
+                c->iff1 * 19 + c->im * 23 + c->a2 * 29 + c->f2 * 31;
+            for (k = 0; k < 11; k++)
+                h = h * 31 + g.sms->vdp.reg[k];
+            printf("Hash: frame %lu: %08lx\n", (unsigned long)(f + 1), (unsigned long)h);
+        }
         {
             const vdp_state *v = &g.sms->vdp;
             uint32 k;
@@ -307,5 +401,5 @@ void hmain(void)
         }
     }
     game_log_summary(&g);
-    sim_codedump((uint32)g.jit.code, (uint32)g.jit.cur, (uint32)g.jit.blocks, g.jit.nblocks);
+    sim_codedump((uint32)g.jit.code, (uint32)g.jit.code_end, (uint32)g.jit.blocks, g.jit.nblocks);
 }
