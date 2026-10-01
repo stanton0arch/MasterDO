@@ -16,11 +16,16 @@
         EXPORT  sms_vdp_data_r
         EXPORT  sms_vdp_ctrl_w
         EXPORT  sms_vdp_data_wn
+        EXPORT  sms_vdp_stat_r
+        EXPORT  sms_vdp_event_a
 
         IMPORT  z80j_port_out_c
+        IMPORT  z80j_port_in_c
 
 ; Context fields, relative to the global pointer.
+IRQ_LINE        EQU     0x454
 LINE            EQU     0x460
+EVENT_LINE      EQU     0x464
 MDATA           EQU     0x4A8
 
 ; vdp_state fields.
@@ -34,12 +39,21 @@ V_NDATAR        EQU     0x18
 V_NCTRLW        EQU     0x1C
 V_CRAM          EQU     0x20
 V_REG           EQU     0x40
+V_STATUS        EQU     0x50
+V_LINEFLAG      EQU     0x54
+V_LINES         EQU     0x5C
 V_FRAMEBASE     EQU     0x68
+V_VBLDONE       EQU     0x6C
+V_LCK           EQU     0x70
+V_LCVAL         EQU     0x74
 V_DIRTY         EQU     0x200
 V_VRAM          EQU     0x400
-V_HSN           EQU     0x4400
-V_HSLOG         EQU     0x4404
+V_HSN           EQU     0x4400          ; the logs lie past the video RAM
+V_NTN           EQU     0x4804
+V_NSTATR        EQU     0x4870
 VDP_HS_LOG      EQU     256
+VDP_NT_LOG      EQU     16
+VDP_ACTIVE      EQU     192
 
 VDP_PENDING     EQU     0x100
 
@@ -107,6 +121,33 @@ sms_vdp_data_r
         mov     pc,lr
 
 ;----------------------------------------------------------------------------
+; IN from the status port. In: r1 = port, r2 = T-states left. Out: r0 =
+; status. Reading clears the flags and the interrupt line. With line
+; interrupts enabled every underflow of the line counter is an event, so
+; no line interrupt flag can be waiting in the lazy counter and the read
+; needs no counter update; with them disabled the C path brings the
+; counter up to date first (a flag may be waiting there).
+;----------------------------------------------------------------------------
+sms_vdp_stat_r
+        ldr     r12,[r10,#MDATA]
+        ldrb    r0,[r12,#V_REG]         ; register 0
+        tst     r0,#0x10
+        beq     z80j_port_in_c          ; line interrupts off (r1, r2 intact)
+        ldr     r0,[r12,#V_STATUS]
+        mov     r2,#0
+        str     r2,[r12,#V_STATUS]
+        str     r2,[r12,#V_LINEFLAG]
+        str     r2,[r10,#IRQ_LINE]
+        ldr     r2,[r12,#V_CTL]
+        bic     r2,r2,#VDP_PENDING
+        str     r2,[r12,#V_CTL]
+        add     r2,r12,#0x4800
+        ldr     r1,[r2,#V_NSTATR-0x4800]
+        add     r1,r1,#1
+        str     r1,[r2,#V_NSTATR-0x4800]
+        mov     pc,lr
+
+;----------------------------------------------------------------------------
 ; OUT to the control port. In: r0 = value, r1 = port, r2 = T-states left.
 ; The first byte of a control word sets bits 0-7 of the address; the second
 ; one sets the code and bits 8-13, and a read code loads the read buffer.
@@ -134,6 +175,10 @@ ctrl_second
         and     r1,r0,#0x0F
         cmp     r1,#8
         beq     ctrl_reg8
+        cmp     r1,#10
+        beq     ctrl_reg10
+        cmp     r1,#2
+        beq     ctrl_reg2
         mov     r1,#0xBF
         b       z80j_port_out_c         ; register write (r0, r2 unchanged)
 ctrl_data
@@ -157,46 +202,97 @@ ctrl_count
         mov     r0,#0
         mov     pc,lr
 
-; Horizontal scroll register (the one written on every line by raster
-; effects): recorded with the first line it affects, as vdp_reg_write
-; does, without leaving the assembly. A write that ends the previous
-; frame (negative time) takes the C path.
+; Registers written by raster effects on every line, handled here as
+; vdp_reg_write does: the horizontal scroll (8) and the name table base
+; (2) are recorded with the first line they affect, the line counter
+; reload (10) brings the lazy counter up to date first. A write that ends
+; the previous frame (negative time), or a counter update that crosses
+; an underflow, takes the C path.
+; r1 = register (2, 8 or 10), r2 = T-states left; r0 is free.
 ctrl_reg8
+ctrl_reg2
+ctrl_reg10
+        str     r1,[sp,#-4]!
         ldr     r1,[r10,#LINE]
         ldr     r0,[r12,#V_FRAMEBASE]
         sub     r1,r1,r0
         mov     r0,#228
         mul     r1,r0,r1                ; T-states of the frame at the stretch start
         subs    r1,r1,r2,asr#8          ; T-state of the access
-        bmi     ctrl_reg8_slow
+        bmi     ctrl_reg_slow
         mov     r1,r1,lsr#2             ; line = (t / 4) * 36793 >> 21
         mov     r0,#0x8F00
         orr     r0,r0,#0xB9
         mul     r1,r0,r1
-        mov     r1,r1,lsr#21
+        mov     r1,r1,lsr#21            ; lines done (the access is on this line)
+        ldr     r0,[sp]
+        cmp     r0,#10
+        beq     ctrl_lc
         add     r1,r1,#1                ; shows from the next line on
-        cmp     r1,#192
-        bhs     ctrl_reg8_store
-        add     r2,r12,#V_HSN           ; the log lies past the video RAM
+        cmp     r1,#VDP_ACTIVE
+        bhs     ctrl_reg_store
+        cmp     r0,#8
+        bne     ctrl_log2
+        add     r2,r12,#V_HSN
         ldr     r0,[r2]
         cmp     r0,#VDP_HS_LOG
-        bhs     ctrl_reg8_store
+        bhs     ctrl_reg_restore
+        b       ctrl_log
+ctrl_log2
+        add     r2,r12,#0x4800
+        add     r2,r2,#V_NTN-0x4800
+        ldr     r0,[r2]
+        cmp     r0,#VDP_NT_LOG
+        bhs     ctrl_reg_restore
+ctrl_log
         add     r0,r0,#1
         str     r0,[r2]
-        add     r2,r2,r0,lsl#2          ; entry r0 - 1 of hs_log (hs_n is just below it)
+        add     r2,r2,r0,lsl#2          ; entry r0 - 1 of the log (its count is just below it)
         ldr     r0,[r12,#V_LATCH]
         orr     r1,r0,r1,lsl#8
         str     r1,[r2]
-ctrl_reg8_store
+ctrl_reg_restore
+        ldr     r0,[sp]
+ctrl_reg_store
+        ; r0 = register: reg[r0] = latch, address = (r0 << 8) | latch, code 2
         ldr     r2,[r12,#V_LATCH]
-        strb    r2,[r12,#V_REG+8]
-        orr     r2,r2,#0x800            ; address = (8 << 8) | latch, code 2
+        add     r1,r12,#V_REG
+        strb    r2,[r1,r0]
+        orr     r2,r2,r0,lsl#8
         str     r2,[r12,#V_ADDR]
         mov     r1,#2
         str     r1,[r12,#V_CTL]
+        add     sp,sp,#4
         b       ctrl_count
-ctrl_reg8_slow
-        mov     r0,#0x88
+; Line counter: lc_sync(k) with k = lines done (r1), in its simple case.
+; lc_k in r0 afterwards; the register is free again once the fallback is
+; ruled out.
+ctrl_lc
+        ldr     r0,[r12,#V_LCK]
+        cmp     r1,r0
+        bls     ctrl_lc_store           ; k <= lc_k: nothing to do
+        cmp     r0,#VDP_ACTIVE
+        bhi     ctrl_lc_tail            ; lc_k > 192: no countdown
+        cmp     r1,#VDP_ACTIVE
+        movhi   r2,#VDP_ACTIVE+1
+        movls   r2,r1                   ; end = min(k, 193)
+        sub     r2,r2,r0                ; n = end - lc_k
+        ldr     r0,[r12,#V_LCVAL]
+        cmp     r2,r0
+        bhi     ctrl_reg_slow           ; underflow since the last update: C
+        sub     r0,r0,r2
+        str     r0,[r12,#V_LCVAL]
+ctrl_lc_tail
+        cmp     r1,#VDP_ACTIVE+1
+        ldrhib  r0,[r12,#V_REG+10]      ; past line 193 the counter reloads
+        strhi   r0,[r12,#V_LCVAL]
+        str     r1,[r12,#V_LCK]
+ctrl_lc_store
+        mov     r0,#10
+        b       ctrl_reg_store
+ctrl_reg_slow
+        ldr     r0,[sp],#4
+        orr     r0,r0,#0x80             ; the second byte: 0x80 | register
         mov     r1,#0xBF
         b       z80j_port_out_c
 
@@ -362,5 +458,105 @@ wn_slow_loop
         bne     wn_slow_loop
         mov     r0,#0
         ldmfd   sp!,{r3-r9,pc}
+
+
+;----------------------------------------------------------------------------
+; Machine event at the end of a stretch (ctx->event_a): vdp_event in
+; assembly. In: r10 = global pointer; r0-r2 and r12 free. Out: r0 = 0 when
+; handled, 1 when the C callback must run instead (the line counter
+; crossed an underflow with lines left over, which needs a division):
+; nothing is changed in that case.
+;----------------------------------------------------------------------------
+sms_vdp_event_a
+        ldr     r12,[r10,#MDATA]
+        stmfd   sp!,{r4,r5}
+        ldr     r0,[r10,#LINE]
+        ldr     r1,[r12,#V_FRAMEBASE]
+        sub     r0,r0,r1                ; k = line of the frame
+        ; lc_sync(k)
+        ldr     r1,[r12,#V_LCK]
+        cmp     r0,r1
+        bls     ev_synced               ; k <= lc_k
+        cmp     r1,#VDP_ACTIVE
+        bhi     ev_tail                 ; lc_k > 192: no countdown
+        cmp     r0,#VDP_ACTIVE
+        movhi   r2,#VDP_ACTIVE+1
+        movls   r2,r0                   ; end = min(k, 193)
+        sub     r2,r2,r1                ; n = end - lc_k
+        ldr     r4,[r12,#V_LCVAL]
+        cmp     r2,r4
+        bls     ev_count                ; no underflow
+        add     r5,r4,#1
+        cmp     r2,r5
+        bne     ev_fallback             ; underflow with lines left over
+        ldrb    r4,[r12,#V_REG+10]      ; underflow on the last line: reload
+        mov     r5,#1
+        str     r5,[r12,#V_LINEFLAG]
+        b       ev_store
+ev_count
+        sub     r4,r4,r2
+ev_store
+        str     r4,[r12,#V_LCVAL]
+ev_tail
+        cmp     r0,#VDP_ACTIVE+1
+        ldrhib  r4,[r12,#V_REG+10]      ; past line 193 the counter reloads
+        strhi   r4,[r12,#V_LCVAL]
+        str     r0,[r12,#V_LCK]
+ev_synced
+        ; VBlank flag at the start of line 192
+        cmp     r0,#VDP_ACTIVE
+        blo     ev_irq
+        ldr     r1,[r12,#V_VBLDONE]
+        teq     r1,#0
+        bne     ev_irq
+        mov     r1,#1
+        str     r1,[r12,#V_VBLDONE]
+        ldr     r1,[r12,#V_STATUS]
+        orr     r1,r1,#0x80
+        str     r1,[r12,#V_STATUS]
+ev_irq
+        ; interrupt line = (VBlank flag and R1 bit 5) or (line flag and R0 bit 4)
+        mov     r4,#0
+        ldr     r1,[r12,#V_STATUS]
+        tst     r1,#0x80
+        ldrneb  r2,[r12,#V_REG+1]
+        tstne   r2,#0x20
+        movne   r4,#1
+        ldr     r1,[r12,#V_LINEFLAG]
+        teq     r1,#0
+        ldrneb  r2,[r12,#V_REG]
+        tstne   r2,#0x10
+        movne   r4,#1
+        str     r4,[r10,#IRQ_LINE]
+        ; next event: VBlank, or the next counter underflow while line
+        ; interrupts are enabled, else the end of the frame
+        ldr     r1,[r12,#V_LINES]
+        ldr     r2,[r12,#V_VBLDONE]
+        teq     r2,#0
+        moveq   r1,#VDP_ACTIVE
+        ldrb    r2,[r12,#V_REG]
+        tst     r2,#0x10
+        beq     ev_sched
+        ldr     r2,[r12,#V_LCK]
+        cmp     r2,#VDP_ACTIVE
+        bhi     ev_sched
+        ldr     r4,[r12,#V_LCVAL]
+        add     r2,r2,r4
+        add     r2,r2,#1                ; underflow line
+        cmp     r2,#VDP_ACTIVE+1
+        bhi     ev_sched
+        cmp     r2,r1
+        movlo   r1,r2
+ev_sched
+        ldr     r2,[r12,#V_FRAMEBASE]
+        add     r1,r1,r2
+        str     r1,[r10,#EVENT_LINE]
+        mov     r0,#0
+        ldmfd   sp!,{r4,r5}
+        mov     pc,lr
+ev_fallback
+        mov     r0,#1
+        ldmfd   sp!,{r4,r5}
+        mov     pc,lr
 
         END

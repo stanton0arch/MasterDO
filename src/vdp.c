@@ -19,7 +19,13 @@ CHECK_OFF(n_data_r, offsetof(vdp_state, n_data_r) == 0x18);
 CHECK_OFF(n_ctrl_w, offsetof(vdp_state, n_ctrl_w) == 0x1C);
 CHECK_OFF(cram, offsetof(vdp_state, cram) == 0x20);
 CHECK_OFF(reg, offsetof(vdp_state, reg) == 0x40);
+CHECK_OFF(status, offsetof(vdp_state, status) == 0x50);
+CHECK_OFF(line_flag, offsetof(vdp_state, line_flag) == 0x54);
 CHECK_OFF(frame_base, offsetof(vdp_state, frame_base) == 0x68);
+CHECK_OFF(lc_k, offsetof(vdp_state, lc_k) == 0x70);
+CHECK_OFF(lc_val, offsetof(vdp_state, lc_val) == 0x74);
+CHECK_OFF(nt_n, offsetof(vdp_state, nt_n) == 0x4804);
+CHECK_OFF(n_stat_r, offsetof(vdp_state, n_stat_r) == 0x4870);
 CHECK_OFF(hc, offsetof(vdp_state, hc) == 0x7C);
 CHECK_OFF(dirty, offsetof(vdp_state, dirty) == 0x200);
 CHECK_OFF(vram, offsetof(vdp_state, vram) == 0x400);
@@ -149,6 +155,7 @@ void vdp_reset(vdp_state *v)
     v->n_data_w = 0;
     v->n_data_r = 0;
     v->n_ctrl_w = 0;
+    v->n_stat_r = 0;
 }
 
 void vdp_init(vdp_state *v, z80j_ctx *ctx, uint32 lines)

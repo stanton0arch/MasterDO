@@ -72,6 +72,8 @@ void sms_frame(sms_machine *s, uint32 pad, uint32 pause);
 /* Port handlers in assembly (sms_io.s). */
 void sms_vdp_data_w(void);
 void sms_vdp_data_r(void);
+void sms_vdp_stat_r(void);
+void sms_vdp_event_a(void);
 void sms_vdp_ctrl_w(void);
 void sms_vdp_data_wn(void);
 

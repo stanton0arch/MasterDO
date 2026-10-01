@@ -120,7 +120,11 @@ typedef struct {
     uint32 hot_sync_gate;   /* +0x4D0: interpreter: int_insns from which an address */
                             /* past hot_sync_at is handed to the C side again */
     uint32 hot_force_at;    /* +0x4D4: count at which it is handed over regardless */
-    uint32 pad0[10];
+    uint32 resume_tab;      /* +0x4D8: interrupted segments (z80j_resume[Z80J_RESUMES]) */
+    uint32 event_a;         /* +0x4DC: machine event handler in assembly, or 0 */
+    uint32 irq_count;       /* +0x4E0: maskable interrupts taken by the glue */
+    uint32 resumed_count;   /* +0x4E4: returns resumed by the glue */
+    uint32 pad0[6];
     uint8  page_kind[256];  /* +0x500 */
     uint8  pzst[256];       /* +0x600: sign / zero / parity flags of a byte */
     uint8  fenc[256];       /* +0x700: internal flags -> Z80 F */
@@ -132,7 +136,11 @@ typedef struct {
 } z80j_ctx;
 
 /*
- * Emulated machine: I/O ports, special writes and scanline events.
+ * Emulated machine: I/O ports, special writes and scanline events. The
+ * machine may also give the context an event handler in assembly
+ * (ctx->event_a, called by the glue at a stretch end with r10 = global
+ * pointer, r0-r2 and r12 free, returning r0 = 0 when it handled the
+ * event and nonzero, with nothing changed, when the C callback must).
  *
  * Time is counted in scanlines of 228 T-states. The Z80 runs in stretches
  * that end at the start of scanline ctx->line: the next event line or the
@@ -248,6 +256,7 @@ typedef struct {
     uint32 pc;              /* Z80 address of the segment */
     uint32 host;            /* its code (0: empty) */
     uint32 key;             /* key of the block */
+    uint32 pad;             /* 16-byte entries for the glue */
 } z80j_resume;
 
 #define Z80J_RESUMES 64     /* direct-mapped by address */

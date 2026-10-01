@@ -153,8 +153,9 @@ void sms_reset(sms_machine *s)
     vdp_reset(&s->vdp);
 }
 
-/* Port handlers: the C callbacks above, except for the VDP data and
- * control ports, handled in assembly. */
+/* Port handlers: the C callbacks above, except for the VDP data port,
+ * the status read and the control port, handled in assembly (the C
+ * callbacks remain their slow paths). */
 static void sms_ports(sms_machine *s)
 {
     z80j_ctx *ctx = s->ctx;
@@ -169,6 +170,7 @@ static void sms_ports(sms_machine *s)
             s->port_out[p] = JIT_ADDR(sms_vdp_data_w);
             s->port_outn[p] = JIT_ADDR(sms_vdp_data_wn);
         } else if (PORT_KIND(p) == 5) {
+            s->port_in[p] = JIT_ADDR(sms_vdp_stat_r);
             s->port_out[p] = JIT_ADDR(sms_vdp_ctrl_w);
         }
     }
@@ -176,6 +178,7 @@ static void sms_ports(sms_machine *s)
     ctx->port_out = JIT_ADDR(s->port_out);
     ctx->port_outn = JIT_ADDR(s->port_outn);
     ctx->mdata = JIT_ADDR(&s->vdp);
+    ctx->event_a = JIT_ADDR(sms_vdp_event_a);
 }
 
 void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,

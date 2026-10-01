@@ -45,6 +45,10 @@ CHECK_OFF(int_runs, GOFF(int_runs) == 0x4C8);
 CHECK_OFF(int_insns, GOFF(int_insns) == 0x4CC);
 CHECK_OFF(hot_sync_gate, GOFF(hot_sync_gate) == 0x4D0);
 CHECK_OFF(hot_force_at, GOFF(hot_force_at) == 0x4D4);
+CHECK_OFF(resume_tab, GOFF(resume_tab) == 0x4D8);
+CHECK_OFF(event_a, GOFF(event_a) == 0x4DC);
+CHECK_OFF(irq_count, GOFF(irq_count) == 0x4E0);
+CHECK_OFF(resumed_count, GOFF(resumed_count) == 0x4E4);
 CHECK_OFF(f2, GOFF(f2) == 0x428);
 CHECK_OFF(bc2, GOFF(bc2) == 0x430);
 CHECK_OFF(slot_bank, GOFF(slot_bank) == 0x47C);
@@ -2029,6 +2033,9 @@ void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
     j->links = link_mem;
     j->max_links = (link_mem != 0) ? max_links : 0;
     memcpy(&j->glue, glue, sizeof(j->glue));
+    ctx->resume_tab = JIT_ADDR(j->resume);
+    ctx->irq_count = 0;
+    ctx->resumed_count = 0;
 
     for (v = 0; v < 256; v++) {
         uint32 par = v;

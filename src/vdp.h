@@ -93,6 +93,7 @@ typedef struct {
     uint32  de_n;
     uint32  de_log[VDP_DE_LOG];
     uint32  de_start;       /* display enabled at the start of the frame */
+    uint32  n_stat_r;       /* status reads handled in assembly */
 } vdp_state;
 
 /* Power-on state; lines is VDP_LINES_NTSC or VDP_LINES_PAL. */

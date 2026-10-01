@@ -166,7 +166,7 @@ void game_log_flush(game *g)
 static void read_counters(const game *g, game_counters *c)
 {
     c->idle = g->ctx->idle;
-    c->irqs = g->jit.stats.interrupts;
+    c->irqs = g->jit.stats.interrupts + g->ctx->irq_count;
     c->nmis = g->jit.stats.nmis;
     c->banks = g->sms->mem.remaps;
     c->blocks = g->jit.stats.translations;
@@ -180,11 +180,12 @@ static void read_counters(const game *g, game_counters *c)
     c->sync = g->jit.stats.sync;
     c->sync_us = g->jit.stats.sync_us;
     c->sync_refused = g->jit.stats.sync_refused;
-    c->resumed = g->jit.stats.resumed;
+    c->resumed = g->jit.stats.resumed + g->ctx->resumed_count;
     c->vdp_data_w = g->sms->vdp.n_data_w;
     c->vdp_data_r = g->sms->vdp.n_data_r;
     c->vdp_ctrl_w = g->sms->vdp.n_ctrl_w;
     memcpy(&c->io, &g->sms->io, sizeof(c->io));
+    c->io.vdp_stat_r += g->sms->vdp.n_stat_r;   /* the assembly handler counts apart */
     memcpy(&c->rd, &g->rd->st, sizeof(c->rd));
 }
 
