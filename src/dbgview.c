@@ -107,10 +107,10 @@ static uint32 nt_entry(const uint8 *nt, uint32 ty, uint32 col)
 /* Background of lines y and y + 1 into the words of their pair; returns
  * nonzero when a priority tile filled prio_mask. */
 static uint32 draw_background(const vdp_state *v, const uint32 *pal, uint32 y, uint32 hs_y,
-                              uint32 *d)
+                              uint32 nt_reg, uint32 *d)
 {
     const uint8 *vram = v->vram;
-    const uint8 *nt = vram + ((v->reg[2] & 0x0E) << 10);
+    const uint8 *nt = vram + ((nt_reg & 0x0E) << 10);
     uint32 hs = (y < 16 && (v->reg[0] & 0x40)) ? 0 : hs_y;
     uint32 vsi = (uint32)v->reg[0] & 0x80;
     uint32 prio = 0;
@@ -209,13 +209,17 @@ static void draw_sprites(const vdp_state *v, const uint32 *pal, const sprite *li
 void dbgview_lines(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 y0,
                    uint32 first, uint32 count)
 {
+    /* Band tables kept off the task stack. */
+    static uint32 tops[VDP_HS_LOG + 1];
+    static uint32 hss[VDP_HS_LOG + 1];
+    static uint32 ntops[VDP_NT_LOG + 1];
+    static uint32 nvals[VDP_NT_LOG + 1];
+    static uint32 dtops[VDP_DE_LOG + 1];
+    static uint32 dons[VDP_DE_LOG + 1];
     uint32 pal[32];
     sprite list[MAX_SPRITES];
-    uint32 tops[VDP_HS_LOG + 1];
-    uint32 hss[VDP_HS_LOG + 1];
-    uint32 dtops[VDP_DE_LOG + 1];
-    uint32 dons[VDP_DE_LOG + 1];
     uint32 nb;
+    uint32 nnb;
     uint32 ndb;
     uint32 nspr;
     uint32 border;
@@ -232,15 +236,19 @@ void dbgview_lines(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 
     /* Same band model as the renderer (a pair of lines takes the values
      * of its even line). */
     nb = vdp_bands(v->hs_log, v->hs_n, v->reg[8], tops, hss);
+    nnb = vdp_bands(v->nt_log, v->nt_n, v->reg[2], ntops, nvals);
     ndb = vdp_bands(v->de_log, v->de_n, v->de_start, dtops, dons);
 
     for (y = first & ~1u; y < first + count && y < DBGVIEW_HEIGHT; y += 2) {
         uint32 *d = fb + ((uint32)(y0 + (int32)y) >> 1) * (uint32)width + (uint32)x0;
         uint32 hs = hss[0];
+        uint32 nt = nvals[0];
         uint32 on = dons[0];
 
         for (k = 1; k < nb && tops[k] <= y; k++)
             hs = hss[k];
+        for (k = 1; k < nnb && ntops[k] <= y; k++)
+            nt = nvals[k];
         for (k = 1; k < ndb && dtops[k] <= y; k++)
             on = dons[k];
         if (!on) {                              /* display off */
@@ -248,7 +256,7 @@ void dbgview_lines(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 
                 d[k] = border;
             continue;
         }
-        draw_sprites(v, pal, list, nspr, y, draw_background(v, pal, y, hs, d), d);
+        draw_sprites(v, pal, list, nspr, y, draw_background(v, pal, y, hs, nt, d), d);
         if (v->reg[0] & 0x20) {                 /* left column blanked */
             for (k = 0; k < 8; k++)
                 d[k] = border;

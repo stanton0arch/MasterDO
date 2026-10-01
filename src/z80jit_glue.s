@@ -341,29 +341,35 @@ z80j_glue_push_slow
 
 ;----------------------------------------------------------------------------
 ; Entry of a block translated from RAM: called by "bl", followed by its Z80
-; address, its length and its bytes (padded to a word). Returns after the
-; bytes when the code is unchanged, else runs a new translation.
+; address, a word count, that many words of bytes (the memory words holding
+; the block, from the one holding its first byte) and as many words of mask
+; (zero outside the block and on the operand bytes the code reads for
+; itself). Compared word by word with the host memory (RAM is contiguous);
+; returns after the mask when the code is unchanged, else runs a new
+; translation.
 ;----------------------------------------------------------------------------
 z80j_glue_verify
-        ldmia   lr!,{r0,r1}
-        stmfd   sp!,{r0}
-verify_loop
+        ldmia   lr!,{r0,r1}             ; r0 = Z80 address, r1 = words
+        stmfd   sp!,{r0,r4}
         mvn     r2,r0,lsr#8
-        ldr     r2,[r10,r2,lsl#2]
-        ldrb    r2,[r2,r0]
-        ldrb    r12,[lr],#1
-        cmp     r2,r12
+        ldr     r2,[r10,r2,lsl#2]       ; page entry
+        add     r12,r2,r0               ; host address of the first byte
+        bic     r12,r12,#3              ; the word holding it (RAM is contiguous)
+        add     r4,lr,r1,lsl#2          ; the mask follows the bytes
+verify_loop
+        ldr     r2,[r12],#4
+        ldr     r0,[lr],#4
+        eor     r2,r2,r0
+        ldr     r0,[r4],#4
+        tst     r2,r0
         bne     verify_fail
-        add     r0,r0,#1
-        bic     r0,r0,#0x10000
         subs    r1,r1,#1
         bne     verify_loop
-        add     sp,sp,#4
-        add     lr,lr,#3
-        bic     lr,lr,#3
+        mov     lr,r4                   ; the code follows the mask
+        ldmfd   sp!,{r0,r4}
         mov     pc,lr
 verify_fail
-        ldmfd   sp!,{r1}
+        ldmfd   sp!,{r1,r4}             ; r1 = Z80 address
         callc   z80j_retranslate
         teq     r0,#0
         movne   pc,r0

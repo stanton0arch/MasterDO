@@ -955,6 +955,34 @@ static void emit_dynamic(jit_block_ctx *b)
     mem_r(j, C_AL, 1, 0, RPC, R1, R0, SH_LSL, 2);
 }
 
+/* r0 = the 16-bit operand of a JP / CALL in RAM, read from memory
+ * (uses r0-r2 and r12). */
+static void emit_load_target(z80j_state *j, const jit_insn *in)
+{
+    uint32 a = (in->pc + in->len - 2) & 0xFFFFu;
+
+    emit_read_const(j, (a + 1) & 0xFFFFu);
+    mov_r(j, R2, R0, SH_LSL, 8);
+    emit_read_const(j, a);
+    dp_r(j, C_AL, OP_ORR, 0, R0, R0, R2, SH_LSL, 0);
+}
+
+/* RAD = the 16-bit address operand of an instruction in RAM, read from
+ * memory, in the "bits 16-31" form of the memory sequences (uses r0-r2
+ * and r12). */
+static void emit_dyn_addr(z80j_state *j, const jit_insn *in)
+{
+    emit_load_target(j, in);
+    mov_r(j, RAD, R0, SH_LSL, 16);
+}
+
+/* Transfer of a JP / CALL whose target is read when it runs. */
+static void emit_dyn_exit(jit_block_ctx *b, const jit_insn *in)
+{
+    emit_load_target(b->j, in);
+    emit_dynamic(b);
+}
+
 /* ARM condition that holds when the Z80 condition cc is true: from the
  * ARM flags of a fused producer, or after a TST emitted here. */
 static uint32 emit_cond(z80j_state *j, const jit_insn *prev, uint32 cc)
@@ -1004,6 +1032,12 @@ static void emit_jump_cond(jit_block_ctx *b, uint32 cond, const jit_insn *in,
     if (in->internal > index) {
         jit_stub *s = new_stub(b, STUB_FORWARD);
         s->index = in->internal;
+        emit(j, (cond << 28) | (5u << 25));
+        return;
+    }
+    if (in->dyn) {
+        jit_stub *s = new_stub(b, STUB_DYN);
+        s->index = index;
         emit(j, (cond << 28) | (5u << 25));
         return;
     }
@@ -1477,6 +1511,19 @@ static void emit_main(jit_block_ctx *b, jit_insn *in, int32 index)
                 mov_r(j, RA, R0, SH_LSL, 24);
                 break;
             case 4:                                 /* LD (nn),HL */
+                if (in->dyn) {
+                    /* Address read when the instruction runs: the
+                     * generic write sequence, twice (its stub may lose
+                     * r0-r2 and r12: the address is read again). */
+                    emit_dyn_addr(j, in);
+                    mov_r(j, R0, RHL, SH_LSR, 16);
+                    emit_write(b, in, RAD);
+                    emit_dyn_addr(j, in);
+                    dp_i(j, C_AL, OP_ADD, 0, RAD, RAD, 0x00010000u);
+                    mov_r(j, R0, RHL, SH_LSR, 24);
+                    emit_write(b, in, RAD);
+                    break;
+                }
                 rh = idx_reg(j, in, R2);
                 mov_r(j, R0, rh, SH_LSR, 16);
                 emit_write_const(b, in, in->n);
@@ -1485,6 +1532,15 @@ static void emit_main(jit_block_ctx *b, jit_insn *in, int32 index)
                 emit_write_const(b, in, in->n + 1);
                 break;
             case 5:                                 /* LD HL,(nn) */
+                if (in->dyn) {
+                    emit_dyn_addr(j, in);
+                    emit_read(j, RAD);
+                    mov_r(j, RHL, R0, SH_LSL, 16);
+                    dp_i(j, C_AL, OP_ADD, 0, RAD, RAD, 0x00010000u);
+                    emit_read(j, RAD);
+                    dp_r(j, C_AL, OP_ORR, 0, RHL, RHL, R0, SH_LSL, 24);
+                    break;
+                }
                 emit_read_const(j, in->n);
                 mov_r(j, R2, R0, SH_LSL, 0);
                 emit_read_const(j, in->n + 1);
@@ -1499,11 +1555,22 @@ static void emit_main(jit_block_ctx *b, jit_insn *in, int32 index)
                 }
                 break;
             case 6:                                 /* LD (nn),A */
+                if (in->dyn) {
+                    emit_dyn_addr(j, in);
+                    mov_r(j, R0, RA, SH_LSR, 24);
+                    emit_write(b, in, RAD);
+                    break;
+                }
                 mov_r(j, R0, RA, SH_LSR, 24);
                 emit_write_const(b, in, in->n);
                 break;
             default:                                /* LD A,(nn) */
-                emit_read_const(j, in->n);
+                if (in->dyn) {
+                    emit_dyn_addr(j, in);
+                    emit_read(j, RAD);
+                } else {
+                    emit_read_const(j, in->n);
+                }
                 mov_r(j, RA, R0, SH_LSL, 24);
                 break;
             }
@@ -1694,7 +1761,9 @@ static void emit_main(jit_block_ctx *b, jit_insn *in, int32 index)
         case 3:
             switch (y) {
             case 0:                                 /* JP nn */
-                if (in->internal >= 0) {
+                if (in->dyn) {
+                    emit_dyn_exit(b, in);
+                } else if (in->internal >= 0) {
                     if (in->busy)
                         emit_idle(j, C_AL);
                     emit_b(j, C_AL, 0, JIT_ADDR(b->ins[in->internal].host));
@@ -1774,7 +1843,10 @@ static void emit_main(jit_block_ctx *b, jit_insn *in, int32 index)
             } else {                                /* CALL nn */
                 emit_mov32(j, R0, (in->pc + in->len) & 0xFFFFu);
                 emit_push(j);
-                emit_exit(b, in->target);
+                if (in->dyn)
+                    emit_dyn_exit(b, in);
+                else
+                    emit_exit(b, in->target);
             }
             break;
         case 6:                                     /* ALU A,n */
@@ -1820,7 +1892,10 @@ static void emit_taken(jit_block_ctx *b, jit_insn *in)
         dp_i(j, C_AL, OP_SUB, 0, RCYC, RCYC, 7u * CYCLE);
         emit_mov32(j, R0, (in->pc + in->len) & 0xFFFFu);
         emit_push(j);
-        emit_exit(b, in->target);
+        if (in->dyn)
+            emit_dyn_exit(b, in);
+        else
+            emit_exit(b, in->target);
     } else {
         dp_i(j, C_AL, OP_SUB, 0, RCYC, RCYC, 6u * CYCLE);
         emit_pop(j);
@@ -1856,21 +1931,42 @@ void emit_block_code(jit_block_ctx *b)
         miss_site = j->cur;
         emit(j, (C_NE << 28) | (5u << 25));
     } else if (b->entry_check == 2) {
+        /* The memory words holding the block, from the one holding its
+         * first byte, then a mask: zero outside the block and, with
+         * dynamic operands, on the bytes the code reads for itself. */
         uint32 len = (b->next_pc - ins[0].pc) & 0xFFFFu;
+        uint32 lead = ins[0].pc & 3;
+        uint32 nwords = (lead + len + 3) >> 2;
         uint32 w = 0;
         uint32 k2;
+        uint32 pass;
         emit_b(j, C_AL, 1, j->glue.verify);
         emit(j, ins[0].pc);
-        emit(j, len);
-        for (k2 = 0; k2 < len; k2++) {
-            w = (w << 8) | jit_byte(j->ctx, ins[0].pc + k2);
-            if ((k2 & 3) == 3) {
-                emit(j, w);
-                w = 0;
+        emit(j, nwords);
+        for (pass = 0; pass < 2; pass++) {
+            for (k2 = 0; k2 < nwords * 4; k2++) {
+                uint32 v = 0;
+
+                if (k2 >= lead && k2 < lead + len) {
+                    uint32 a = (ins[0].pc + k2 - lead) & 0xFFFFu;
+
+                    if (pass == 0) {
+                        v = jit_byte(j->ctx, a);
+                    } else {
+                        v = 0xFFu;
+                        for (i = 0; i < n; i++) {
+                            if (ins[i].dyn && ((a - (ins[i].pc + ins[i].len - 2)) & 0xFFFFu) < 2)
+                                v = 0;
+                        }
+                    }
+                }
+                w = (w << 8) | v;
+                if ((k2 & 3) == 3) {
+                    emit(j, w);
+                    w = 0;
+                }
             }
         }
-        if (len & 3)
-            emit(j, w << (8 * (4 - (len & 3))));
     }
 
     for (i = 0; i < n; i++) {
@@ -1937,6 +2033,10 @@ void emit_block_code(jit_block_ctx *b)
         case STUB_TAKEN:
             patch_b(s->site, JIT_ADDR(j->cur));
             emit_taken(b, &ins[s->index]);
+            break;
+        case STUB_DYN:
+            patch_b(s->site, JIT_ADDR(j->cur));
+            emit_dyn_exit(b, &ins[s->index]);
             break;
         case STUB_WRITE:
             patch_b(s->site, JIT_ADDR(j->cur));

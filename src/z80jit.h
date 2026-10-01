@@ -239,7 +239,19 @@ typedef struct {
     uint32 sync_us;         /* time they took (microseconds, cumulative) */
     uint32 sync_refused;    /* translations at once refused for lack of budget */
     uint32 queue_full;      /* hot addresses dropped for lack of room */
+    uint32 resumed;         /* interrupt returns resumed inside their block */
+    uint32 dyn_blocks;      /* RAM blocks translated with dynamic targets */
 } z80j_stats;
+
+/* An interrupted segment: where its block resumes, for the return. */
+typedef struct {
+    uint32 pc;              /* Z80 address of the segment */
+    uint32 host;            /* its code (0: empty) */
+    uint32 key;             /* key of the block */
+} z80j_resume;
+
+#define Z80J_RESUMES 64     /* direct-mapped by address */
+#define Z80J_RESUME_SLOT(pc) (((pc) ^ ((pc) >> 6)) & (Z80J_RESUMES - 1))
 
 typedef struct z80j_block z80j_block;
 
@@ -296,6 +308,7 @@ typedef struct {
     uint32      nzones;
     z80j_area   area[2];    /* 0: cold, 1: hot (count 0: no hot area) */
     uint32      seen[2048]; /* Z80 addresses translated before */
+    uint32      flaky[2048];/* RAM addresses whose code changed once already */
     uint32      zone_blocks[JIT_MAX_ZONES]; /* blocks held by each zone */
     /* Flags read by the code at an address (the forward scan of the
      * liveness analysis), cached across blocks for ROM code: the scan
@@ -335,6 +348,13 @@ typedef struct {
     uint32      queue[Z80J_QUEUE];  /* unordered; the hottest goes first */
     uint32      nqueue;
     uint32      queued[2048];   /* bitmap of the addresses in the queue */
+    /* Segments interrupted at a stretch end: the interrupt's return
+     * lands inside a translated block, at a segment check, which is
+     * entered directly rather than translated as a block of its own
+     * (games taking a line interrupt every few lines would otherwise
+     * make a block of every return address). An entry goes with the
+     * eviction of the zone holding its code. */
+    z80j_resume resume[Z80J_RESUMES];
     z80j_stats  stats;
 } z80j_state;
 

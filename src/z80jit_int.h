@@ -116,6 +116,8 @@ typedef struct {
                             /* interrupt after it */
     uint32  run;            /* first of a run of OUTI / OUTD: its length; */
                             /* RUN_PART for the others */
+    uint32  dyn;            /* JP / CALL in RAM: the target is read from */
+                            /* memory when the instruction runs */
     uint32 *host;           /* generated code of the instruction */
 } jit_insn;
 
@@ -126,6 +128,7 @@ typedef struct {
 #define STUB_TAKEN   3      /* CALL cc / RET cc taken path */
 #define STUB_WRITE   4      /* special write */
 #define STUB_LEAVE   5      /* leave the block after a special write / OUT */
+#define STUB_DYN     6      /* conditional JP in RAM taken: dynamic target */
 
 typedef struct {
     uint32  kind;
@@ -164,6 +167,7 @@ typedef struct {
     jit_stub   *stubs;
     int32       nstubs;
     uint32      entry_check;/* 0 none, 1 bank check, 2 RAM check */
+    uint32      has_dyn;    /* RAM block with dynamic targets: masked check */
     uint32      memo_pc[SCAN_MEMO];
     uint32      memo_val[SCAN_MEMO];
     int32       nmemo;

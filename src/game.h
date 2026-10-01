@@ -19,7 +19,7 @@
 #define GAME_HIST       32      /* frame time histogram, 1 ms per bucket */
 #define GAME_SLOW_LOGS  120     /* frames over the budget logged alone */
 #define GAME_LONG_LOGS  60      /* frames shown late while under budget */
-#define GAME_LOG_WORDS  (40 * 1024 / 4) /* record arena of the run's log */
+#define GAME_LOG_WORDS  (24 * 1024 / 4) /* record arena of the run's log */
 
 /* Cumulative counters of the machine and the translator. */
 typedef struct {
@@ -38,6 +38,7 @@ typedef struct {
     uint32 sync;            /* hot blocks translated at once */
     uint32 sync_us;         /* time they took */
     uint32 sync_refused;    /* translations at once refused, budget spent */
+    uint32 resumed;         /* interrupt returns resumed inside their block */
     uint32 vdp_data_w;
     uint32 vdp_data_r;
     uint32 vdp_ctrl_w;

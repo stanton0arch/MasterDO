@@ -10,8 +10,8 @@
 #include "mem.h"
 
 #define JIT_ZONE_BYTES  (32 * 1024)
-#define JIT_ZONES       16
-#define JIT_HOT_ZONES   6       /* code translated again after an eviction goes there */
+#define JIT_ZONES       14
+#define JIT_HOT_ZONES   5       /* code translated again after an eviction goes there */
 #define JIT_CODE_BYTES  (JIT_ZONE_BYTES * JIT_ZONES)
 #define JIT_BLOCKS      3072
 #define JIT_LINKS       (2 * JIT_BLOCKS)
@@ -77,7 +77,8 @@ static void print_window(const game_window_rec *p)
            "%lu status reads, %lu counter reads, PSG %lu, pad %lu, other %lu, %lu leaves, "
            "%lu bank switches, %lu blocks (%lu in spare time, %lu at once in %lu us, "
            "%lu refused, %lu promoted, %lu us of spare time), %lu interpreted "
-           "instructions in %lu stretches, %lu evictions (%lu blocks), pad read %lu us\n",
+           "instructions in %lu stretches, %lu evictions (%lu blocks), %lu returns resumed, "
+           "pad read %lu us\n",
            (unsigned long)p->first, (unsigned long)p->last,
            (unsigned long)(w->us / frames), (unsigned long)w->max_us,
            (unsigned long)w->max_frame,
@@ -97,19 +98,19 @@ static void print_window(const game_window_rec *p)
            (unsigned long)d->prefetched, (unsigned long)d->sync, (unsigned long)d->sync_us,
            (unsigned long)d->sync_refused, (unsigned long)d->promoted,
            (unsigned long)w->spare_us, (unsigned long)d->interp_insns, (unsigned long)d->interp,
-           (unsigned long)d->evictions, (unsigned long)d->evicted,
+           (unsigned long)d->evictions, (unsigned long)d->evicted, (unsigned long)d->resumed,
            (unsigned long)(w->pad_us / frames));
     printf("Picture: frames %lu-%lu: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
            "%lu cells for written tiles, %lu palettes, %lu backdrop changes, %lu sprite cels, "
            "%lu pieces, %lu priority strips, %lu frames in scroll bands, %lu frames partly blanked, "
-           "%lu bands dropped\n",
+           "%lu frames in name table bands, %lu bands dropped, %lu frames short of layers\n",
            (unsigned long)p->first, (unsigned long)p->last,
            (unsigned long)d->rd.tiles, (unsigned long)d->rd.cells, (unsigned long)d->rd.rebuilds,
            (unsigned long)d->rd.tile_cells, (unsigned long)d->rd.palettes,
            (unsigned long)d->rd.backdrops,
            (unsigned long)d->rd.sprites, (unsigned long)d->rd.pieces,
            (unsigned long)d->rd.prio_strips, (unsigned long)d->rd.bands, (unsigned long)d->rd.dbands,
-           (unsigned long)d->rd.dropped);
+           (unsigned long)d->rd.ntbands, (unsigned long)d->rd.dropped, (unsigned long)d->rd.layers);
 }
 
 static void print_slow(const game_slow_rec *p)
@@ -179,6 +180,7 @@ static void read_counters(const game *g, game_counters *c)
     c->sync = g->jit.stats.sync;
     c->sync_us = g->jit.stats.sync_us;
     c->sync_refused = g->jit.stats.sync_refused;
+    c->resumed = g->jit.stats.resumed;
     c->vdp_data_w = g->sms->vdp.n_data_w;
     c->vdp_data_r = g->sms->vdp.n_data_r;
     c->vdp_ctrl_w = g->sms->vdp.n_ctrl_w;
@@ -616,12 +618,13 @@ void game_log_summary(game *g)
            (unsigned long)g->jit.stats.busy_loops, (long)g->status);
     printf("Game summary: picture: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
            "%lu cells for written tiles, %lu palettes, %lu sprite cels, %lu pieces, %lu priority strips, "
-           "%lu frames in bands, %lu frames partly blanked, %lu bands dropped\n",
+           "%lu frames in bands, %lu frames partly blanked, %lu frames in name table bands, "
+           "%lu bands dropped, %lu frames short of layers\n",
            (unsigned long)d.rd.tiles, (unsigned long)d.rd.cells, (unsigned long)d.rd.rebuilds,
            (unsigned long)d.rd.tile_cells, (unsigned long)d.rd.palettes,
            (unsigned long)d.rd.sprites, (unsigned long)d.rd.pieces,
            (unsigned long)d.rd.prio_strips, (unsigned long)d.rd.bands, (unsigned long)d.rd.dbands,
-           (unsigned long)d.rd.dropped);
+           (unsigned long)d.rd.ntbands, (unsigned long)d.rd.dropped, (unsigned long)d.rd.layers);
     printf("Game summary: VDP %lu data writes, %lu data reads, %lu control writes, "
            "%lu status reads, %lu counter reads, PSG %lu writes, pad %lu reads\n",
            (unsigned long)d.vdp_data_w, (unsigned long)d.vdp_data_r,

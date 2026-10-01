@@ -19,7 +19,8 @@
 
         IMPORT  z80j_port_out_c
 
-; Context field, relative to the global pointer.
+; Context fields, relative to the global pointer.
+LINE            EQU     0x460
 MDATA           EQU     0x4A8
 
 ; vdp_state fields.
@@ -32,8 +33,13 @@ V_NDATAW        EQU     0x14
 V_NDATAR        EQU     0x18
 V_NCTRLW        EQU     0x1C
 V_CRAM          EQU     0x20
+V_REG           EQU     0x40
+V_FRAMEBASE     EQU     0x68
 V_DIRTY         EQU     0x200
 V_VRAM          EQU     0x400
+V_HSN           EQU     0x4400
+V_HSLOG         EQU     0x4404
+VDP_HS_LOG      EQU     256
 
 VDP_PENDING     EQU     0x100
 
@@ -124,8 +130,13 @@ sms_vdp_ctrl_w
 ctrl_second
         mov     r1,r0,lsr#6             ; code
         cmp     r1,#2
-        moveq   r1,#0xBF
-        beq     z80j_port_out_c         ; register write (r0, r2 unchanged)
+        bne     ctrl_data
+        and     r1,r0,#0x0F
+        cmp     r1,#8
+        beq     ctrl_reg8
+        mov     r1,#0xBF
+        b       z80j_port_out_c         ; register write (r0, r2 unchanged)
+ctrl_data
         str     r1,[r12,#V_CTL]         ; pending cleared
         ldr     r2,[r12,#V_LATCH]
         and     r0,r0,#0x3F
@@ -145,6 +156,49 @@ ctrl_count
         str     r1,[r12,#V_NCTRLW]
         mov     r0,#0
         mov     pc,lr
+
+; Horizontal scroll register (the one written on every line by raster
+; effects): recorded with the first line it affects, as vdp_reg_write
+; does, without leaving the assembly. A write that ends the previous
+; frame (negative time) takes the C path.
+ctrl_reg8
+        ldr     r1,[r10,#LINE]
+        ldr     r0,[r12,#V_FRAMEBASE]
+        sub     r1,r1,r0
+        mov     r0,#228
+        mul     r1,r0,r1                ; T-states of the frame at the stretch start
+        subs    r1,r1,r2,asr#8          ; T-state of the access
+        bmi     ctrl_reg8_slow
+        mov     r1,r1,lsr#2             ; line = (t / 4) * 36793 >> 21
+        mov     r0,#0x8F00
+        orr     r0,r0,#0xB9
+        mul     r1,r0,r1
+        mov     r1,r1,lsr#21
+        add     r1,r1,#1                ; shows from the next line on
+        cmp     r1,#192
+        bhs     ctrl_reg8_store
+        add     r2,r12,#V_HSN           ; the log lies past the video RAM
+        ldr     r0,[r2]
+        cmp     r0,#VDP_HS_LOG
+        bhs     ctrl_reg8_store
+        add     r0,r0,#1
+        str     r0,[r2]
+        add     r2,r2,r0,lsl#2          ; entry r0 - 1 of hs_log (hs_n is just below it)
+        ldr     r0,[r12,#V_LATCH]
+        orr     r1,r0,r1,lsl#8
+        str     r1,[r2]
+ctrl_reg8_store
+        ldr     r2,[r12,#V_LATCH]
+        strb    r2,[r12,#V_REG+8]
+        orr     r2,r2,#0x800            ; address = (8 << 8) | latch, code 2
+        str     r2,[r12,#V_ADDR]
+        mov     r1,#2
+        str     r1,[r12,#V_CTL]
+        b       ctrl_count
+ctrl_reg8_slow
+        mov     r0,#0x88
+        mov     r1,#0xBF
+        b       z80j_port_out_c
 
 ;----------------------------------------------------------------------------
 ; Run of OUTI / OUTD to the data port. In: r0 = count (negative for OUTD),

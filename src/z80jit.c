@@ -995,6 +995,10 @@ static void evict_zone(z80j_state *j, uint32 z)
     if (freed == 0)
         return;
     j->stats.evicted += freed;
+    for (k = 0; k < Z80J_RESUMES; k++) {
+        if (j->resume[k].host >= lo && j->resume[k].host < hi)
+            j->resume[k].host = 0;
+    }
     n = 0;
     for (k = 0; k < j->nlinks; k++) {
         uint32 e = j->links[k];
@@ -1065,6 +1069,7 @@ void z80j_flush(z80j_state *j)
     z80j_fill_words(j->ctx->lookup, 0x10000u, j->glue.miss);
     memset(j->hash, 0, sizeof(j->hash));
     memset(j->seen, 0, sizeof(j->seen));
+    memset(j->flaky, 0, sizeof(j->flaky));
     memset(j->zone_blocks, 0, sizeof(j->zone_blocks));
     memset(j->scan_kind, 0xFF, sizeof(j->scan_kind));
     j->free_blocks = 0;
@@ -1082,6 +1087,7 @@ void z80j_flush(z80j_state *j)
     j->zone_end = j->area[0].end;
     j->nqueue = 0;
     memset(j->queued, 0, sizeof(j->queued));
+    memset(j->resume, 0, sizeof(j->resume));
     j->generation++;
     j->ctx->resume_host = 0;
     j->stats.flushes++;
@@ -1251,6 +1257,7 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
     bc.stubs = jit_stubs;
     bc.nstubs = 0;
     bc.end_leave = 0;
+    bc.has_dyn = 0;
     bc.nmemo = 0;
     bc.key = jit_block_key(ctx, addr);
     serial = (j->stats.translations + 1) << 8;
@@ -1273,13 +1280,34 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
         in->run = 0;
         in->seg_start = 0;
         in->fused = 0;
+        in->dyn = 0;
         addr = (addr + in->len) & 0xFFFFu;
+        /* JP and CALL in RAM read their target when they run: a jump
+         * vector whose operand the game rewrites (an interrupt
+         * trampoline, typically) keeps its translation. */
+        if (bc.key == KEY_RAM && (in->kind == K_JP || in->kind == K_JPCC ||
+                                  in->kind == K_CALL || in->kind == K_CALLCC)) {
+            in->dyn = 1;
+            bc.has_dyn = 1;
+        }
+        /* So do the absolute addresses of LD A,(nn), LD (nn),A,
+         * LD HL,(nn) and LD (nn),HL: a handler stepping through a table
+         * by patching its own operand keeps its translation too. */
+        if (bc.key == KEY_RAM && in->pre == PRE_NONE &&
+            (in->op == 0x3A || in->op == 0x32 || in->op == 0x2A || in->op == 0x22)) {
+            in->dyn = 1;
+            bc.has_dyn = 1;
+        }
         if (n >= 2 && in[-1].ei) {
-            if (in->kind != K_NORMAL) {
-                bc.end_leave = 1;
-                break;
-            }
-            in->irq_check = 1;
+            /* A pending interrupt is taken after the instruction that
+             * follows EI; when that instruction is a transfer or a
+             * conditional, the check comes right after EI instead (the
+             * interrupt is then taken one instruction early, before the
+             * transfer, as the hardware does for a HALT). */
+            if (in->kind != K_NORMAL)
+                in[-1].irq_check = 1;
+            else
+                in->irq_check = 1;
         }
         if (IS_END(in->kind) || n == MAX_INSNS)
             break;
@@ -1302,6 +1330,8 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
         uint32 m;
 
         if (!(IS_COND(kd) && kd != K_RETCC && kd != K_CALLCC) && kd != K_JR && kd != K_JP)
+            continue;
+        if (p->dyn)
             continue;
         off = (p->target - pc) & 0xFFFFu;
         if (off >= span)
@@ -1370,7 +1400,7 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
     /* Flag liveness, backwards from the block exit. */
     switch (end[-1].kind) {
     case K_JR: case K_JP: case K_CALL: case K_RST:
-        live = flags_needed(&bc, end[-1].target);
+        live = end[-1].dyn ? FL_ALL : flags_needed(&bc, end[-1].target);
         break;
     case K_RET: case K_RETN: case K_JPIND: case K_HALT:
         live = FL_ALL;
@@ -1383,7 +1413,7 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
         p->live_after = live;
         if (IS_COND(p->kind)) {
             uint32 taken;
-            if (p->kind == K_RETCC)
+            if (p->kind == K_RETCC || p->dyn)
                 taken = FL_ALL;
             else if (p->internal >= 0 && &ins[p->internal] > p)
                 taken = ins[p->internal].live_before;
@@ -1409,7 +1439,7 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
         fm = fuse_mask(p) & cc_fuse_need(c->cc);
         if (fm == 0)
             continue;
-        if (c->kind == K_RETCC)
+        if (c->kind == K_RETCC || c->dyn)
             after = FL_ALL;
         else if (c->internal >= 0 && &ins[c->internal] > c)
             after = ins[c->internal].live_before;
@@ -1427,6 +1457,8 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
         *ntargets = 0;
         for (i = 0; i < n && *ntargets < max_targets; i++) {
             uint32 kd = ins[i].kind;
+            if (ins[i].dyn)
+                continue;
             if ((IS_COND(kd) && kd != K_RETCC && ins[i].internal < 0) || IS_STATIC(kd))
                 targets[(*ntargets)++] = ins[i].target;
             /* The return address of a call ending the block. */
@@ -1473,6 +1505,8 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
     ctx->lookup[blk->pc] = JIT_ADDR(blk->entry);
 
     j->stats.translations++;
+    if (bc.has_dyn)
+        j->stats.dyn_blocks++;
     j->stats.insns += (uint32)n;
     j->stats.code_bytes += (uint32)(j->cur - blk->entry) * 4;
     return blk;
@@ -1509,18 +1543,40 @@ static uint32 host_force(z80j_state *j, uint32 pc)
 static uint32 host_for(z80j_state *j, uint32 pc)
 {
     z80j_block *blk;
+    uint32 host;
+    uint32 key;
 
     pc &= 0xFFFFu;
-    blk = find_block(j, pc, jit_block_key(j->ctx, pc));
+    /* Fixed and RAM code have one key: their lookup entry, when set,
+     * is the block wanted (a RAM block checks its bytes on entry). A
+     * paged slot may hold the entry of another bank, whose entry check
+     * would come straight back here: those go through the hash. */
+    key = jit_block_key(j->ctx, pc);
+    host = j->ctx->lookup[pc];
+    if (host != j->glue.miss && !KEY_IS_SLOT(key))
+        return host;
+    /* The return from an interrupt taken at a segment check: the block
+     * goes on from there, under the mapping it was interrupted with. */
+    {
+        const z80j_resume *e = &j->resume[Z80J_RESUME_SLOT(pc)];
+
+        if (e->host != 0 && e->pc == pc && e->key == key) {
+            j->stats.resumed++;
+            return e->host;
+        }
+    }
+    blk = find_block(j, pc, key);
     if (blk != 0) {
         j->ctx->lookup[pc] = JIT_ADDR(blk->entry);
         return JIT_ADDR(blk->entry);
     }
+
     if (j->hot != 0) {
         uint32 n = j->hot[pc];
 
-        if (n < 255)
-            j->hot[pc] = (uint8)++n;
+        if (n == 255)
+            return j->glue.interp;      /* parked: interpreted for good */
+        j->hot[pc] = (uint8)++n;
         if (j->queue_at == 0)
             return j->glue.interp;      /* interpretation only */
         if (n < j->sync_at || ((j->force_at == 0 || n < j->force_at) && !sync_allowed(j))) {
@@ -1632,8 +1688,8 @@ uint32 z80j_hot(z80j_state *j)
 {
     uint32 pc = j->ctx->regs[6] & 0xFFFFu;
 
-    if (j->queue_at == 0) {
-        j->ctx->hot_sync_gate = 0xFFFFFFFFu;    /* interpretation only */
+    if (j->queue_at == 0 || j->hot[pc] == 255) {
+        j->ctx->hot_sync_gate = 0xFFFFFFFFu;    /* interpretation only, or parked */
         return j->glue.interp;
     }
     if (j->hot[pc] >= j->sync_at &&
@@ -1648,14 +1704,16 @@ uint32 z80j_hot(z80j_state *j)
 static uint32 block_bytes_match(const z80j_ctx *ctx, const z80j_block *blk)
 {
     const uint32 *h = blk->entry;
-    uint32 len = h[2];
+    uint32 pc = h[1];
+    uint32 nwords = h[2];
     const uint8 *bytes = (const uint8 *)(h + 3);
+    const uint8 *mask = bytes + nwords * 4;
     uint32 k;
 
     if ((h[0] & 0x0F000000u) != 0x0B000000u)    /* not a bl: a trampoline */
         return 0;
-    for (k = 0; k < len; k++) {
-        if (jit_byte(ctx, h[1] + k) != bytes[k])
+    for (k = 0; k < nwords * 4; k++) {
+        if (mask[k] != 0 && ((jit_byte(ctx, (pc & ~3u) + k) ^ bytes[k]) & mask[k]) != 0)
             return 0;
     }
     return 1;
@@ -1675,14 +1733,25 @@ uint32 z80j_retranslate(z80j_state *j, uint32 pc)
         j->ctx->lookup[pc] = JIT_ADDR(old->entry);
         return JIT_ADDR(old->entry);
     }
-    if (old != 0)
+    if (old != 0) {
         unhash_block(j, old);
+        j->ctx->lookup[pc] = j->glue.miss;  /* host_for must not return the stale entry */
+    }
     j->stats.retranslations++;
-    /* Code rewritten since its translation starts again as cold: code
-     * that changes often is interpreted rather than translated again
-     * and again. */
-    if (j->hot != 0)
-        j->hot[pc] = 0;
+    /* Code rewritten since its translation starts again as cold; code
+     * found rewritten a second time (a handler patched on every line,
+     * for instance) is interpreted from then on: its counter is parked
+     * where the interpreter's thresholds never match. */
+    if (j->hot != 0) {
+        uint32 bit = (uint32)1 << (pc & 31);
+
+        if (j->flaky[pc >> 5] & bit) {
+            j->hot[pc] = 255;
+        } else {
+            j->flaky[pc >> 5] |= bit;
+            j->hot[pc] = 0;
+        }
+    }
     host = host_for(j, pc);
     if (host == j->glue.interp) {
         j->ctx->regs[6] = pc;
@@ -1718,9 +1787,10 @@ uint32 z80j_link(z80j_state *j, uint32 data)
         }
         if (host == j->glue.abort || j->generation != generation)
             return host;
+        /* A return resumed inside a block is run, not linked. */
+        if (jit_link_host(j, target, from_key) == 0)
+            return host;
         host = jit_link_host(j, target, from_key);
-        if (host == 0)
-            return j->ctx->lookup[target];
     }
     /* The call to the linker becomes a plain branch, and so does the
      * conditional jump that led to it. */
@@ -1764,10 +1834,18 @@ static void push16(z80j_state *j, uint32 v)
 {
     z80j_ctx *ctx = j->ctx;
     uint32 sp = ((ctx->regs[7] >> 16) - 2) & 0xFFFFu;
+    uint32 sp1 = (sp + 1) & 0xFFFFu;
+    uint32 e0 = ctx->wtab[sp >> 8];
+    uint32 e1 = ctx->wtab[sp1 >> 8];
 
     ctx->regs[7] = sp << 16;
-    mem_write8(j, sp, v & 0xFFu);
-    mem_write8(j, sp + 1, (v >> 8) & 0xFFu);
+    if (e0 != 0 && e1 != 0) {
+        *(uint8 *)JIT_PTR(e0 + sp) = (uint8)v;
+        *(uint8 *)JIT_PTR(e1 + sp1) = (uint8)(v >> 8);
+    } else {
+        mem_write8(j, sp, v & 0xFFu);
+        mem_write8(j, sp1, (v >> 8) & 0xFFu);
+    }
 }
 
 void z80j_push_slow(z80j_state *j, uint32 sp, uint32 value)
@@ -1814,6 +1892,19 @@ static uint32 take_interrupt(z80j_state *j)
         return 0;
     }
     ctx->halted = 0;
+    if (ctx->resume_host != 0 && ctx->resume_pc == (ctx->regs[6] & 0xFFFFu)) {
+        uint32 key = jit_block_key(ctx, ctx->resume_pc);
+
+        /* Not for code in RAM: the handler may rewrite it, and only the
+         * entry check of a block notices. */
+        if (key != KEY_RAM) {
+            z80j_resume *e = &j->resume[Z80J_RESUME_SLOT(ctx->resume_pc)];
+
+            e->pc = ctx->resume_pc;
+            e->host = ctx->resume_host;
+            e->key = key;
+        }
+    }
     ctx->resume_host = 0;
     push16(j, ctx->regs[6] & 0xFFFFu);
     ctx->regs[5] -= t * CYCLE;

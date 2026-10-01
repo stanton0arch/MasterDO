@@ -17,7 +17,7 @@ CCB_XPOS        EQU     16
 CCB_YPOS        EQU     20
 CCB_SIZE        EQU     68
 
-; renderer fields (render.h; offsets checked in render.c).
+; layer fields (render_layer, render.h; offsets checked in render.c).
 R_BITMAP        EQU     0
 R_PRIOBM        EQU     4
 R_TILES         EQU     8
@@ -32,9 +32,9 @@ R_STAMP         EQU     44
 R_STAMPNOW      EQU     48
 R_PRIOROWS      EQU     68
 R_PRIODIRTY     EQU     152
-R_NTBASE        EQU     180
-R_STCELLS       EQU     216
-R_STTILECELLS   EQU     224
+R_NTBASE        EQU     56
+R_STCELLS       EQU     180
+R_STTILECELLS   EQU     184
 
 ; render_sprite_args fields (render.h).
 SA_TILES        EQU     0
@@ -221,7 +221,7 @@ spr_done
         ldmfd   sp!,{r4-r11,pc}
 
 ;----------------------------------------------------------------------------
-; Cells. Common registers of the routines below: r9 = renderer, r10 = VRAM.
+; Cells. Common registers of the routines below: r9 = layer, r10 = VRAM.
 ;
 ; cell_draw: draws entry r1 into cell r0 of the bitmap (and of the priority
 ; bitmap when the entry has the priority bit): the tile is converted first

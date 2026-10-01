@@ -19,9 +19,12 @@ CHECK_OFF(n_data_r, offsetof(vdp_state, n_data_r) == 0x18);
 CHECK_OFF(n_ctrl_w, offsetof(vdp_state, n_ctrl_w) == 0x1C);
 CHECK_OFF(cram, offsetof(vdp_state, cram) == 0x20);
 CHECK_OFF(reg, offsetof(vdp_state, reg) == 0x40);
+CHECK_OFF(frame_base, offsetof(vdp_state, frame_base) == 0x68);
 CHECK_OFF(hc, offsetof(vdp_state, hc) == 0x7C);
 CHECK_OFF(dirty, offsetof(vdp_state, dirty) == 0x200);
 CHECK_OFF(vram, offsetof(vdp_state, vram) == 0x400);
+CHECK_OFF(hs_n, offsetof(vdp_state, hs_n) == 0x4400);
+CHECK_OFF(hs_log, offsetof(vdp_state, hs_log) == 0x4404);
 
 /* Register values left by the BIOS (SMS official documentation). */
 static const uint8 vdp_power_on[11] = {
@@ -135,6 +138,7 @@ void vdp_reset(vdp_state *v)
     v->frame_base = v->ctx->line;
     v->vbl_done = 0;
     v->hs_n = 0;
+    v->nt_n = 0;
     v->de_n = 0;
     v->de_start = ((uint32)v->reg[1] >> 6) & 1;
     v->lc_k = 0;
@@ -181,6 +185,7 @@ void vdp_frame_begin(vdp_state *v)
     v->lc_val = v->reg[10];
     v->vbl_done = 0;
     v->hs_n = 0;
+    v->nt_n = 0;
     v->de_n = 0;
     v->de_start = ((uint32)v->reg[1] >> 6) & 1;
     v->frames++;
@@ -262,14 +267,21 @@ static uint32 vdp_reg_write(vdp_state *v, uint32 r, uint32 d, uint32 left)
             v->de_log[v->de_n++] = (line << 8) | ((d >> 6) & 1);
     }
     v->reg[r] = (uint8)d;
-    if (r == 8) {
-        /* The scroll of a line is taken at its start: a write during
-         * the active display shows from the next line on. */
+    if (r == 8 || r == 2) {
+        /* The scroll and the name table of a line are taken at its
+         * start: a write during the active display shows from the next
+         * line on. */
         uint32 hpos;
         uint32 line = vdp_beam(v, left, &hpos) + 1;
 
-        if (line < VDP_ACTIVE && v->hs_n < VDP_HS_LOG)
-            v->hs_log[v->hs_n++] = (line << 8) | (d & 0xFF);
+        if (line < VDP_ACTIVE) {
+            if (r == 8) {
+                if (v->hs_n < VDP_HS_LOG)
+                    v->hs_log[v->hs_n++] = (line << 8) | (d & 0xFF);
+            } else if (v->nt_n < VDP_NT_LOG) {
+                v->nt_log[v->nt_n++] = (line << 8) | (d & 0xFF);
+            }
+        }
     }
     if (r > 1)
         return 0;

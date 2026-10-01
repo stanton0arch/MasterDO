@@ -15,8 +15,10 @@
  * kept lazily: it is brought up to date at events and at the port
  * accesses that depend on it, and line interrupt events are only
  * scheduled while line interrupts are enabled. Writes to the horizontal
- * scroll register during the active display are recorded with the first
- * line they affect, so that the picture can be drawn in bands.
+ * scroll register, to the name table base register and to the display
+ * enable bit during the active display are recorded with the first line
+ * they affect, so that the picture can be drawn in bands (games using
+ * line interrupts for raster effects write the scroll on every line).
  *
  * Line model (192-line mode): the line counter is decremented at the end
  * of lines 0 to 192 and reloaded from register 10 at the end of the other
@@ -33,7 +35,8 @@
 #define VDP_LINE_T      228         /* T-states per line */
 #define VDP_LINES_NTSC  262
 #define VDP_LINES_PAL   313
-#define VDP_HS_LOG      16          /* register 8 writes recorded per frame */
+#define VDP_HS_LOG      256         /* register 8 writes recorded per frame */
+#define VDP_NT_LOG      16          /* register 2 writes recorded per frame */
 #define VDP_DE_LOG      8           /* display enable changes recorded per frame */
 
 /* Status flags. */
@@ -74,19 +77,22 @@ typedef struct {
     uint32  lc_k;           /* line counter valid at the end of line lc_k - 1 */
     uint32  lc_val;
     uint32  frames;
-    uint8   hc[VDP_LINE_T]; /* H counter for each T-state of a line */
+    uint8   hc[VDP_LINE_T]; /* +0x7C: H counter for each T-state of a line */
+    uint8   pad[0x200 - 0x7C - VDP_LINE_T];
+    uint8   dirty[VDP_TILES];       /* +0x200: nonzero: tile written */
+    uint8   vram[VDP_VRAM_SIZE];    /* +0x400 */
     /* Writes to register 8 during the active display of the current
      * frame, for the renderer: (first line affected << 8) | value. */
-    uint32  hs_n;
-    uint32  hs_log[VDP_HS_LOG];
+    uint32  hs_n;                   /* +0x4400 */
+    uint32  hs_log[VDP_HS_LOG];     /* +0x4404 */
+    /* Writes to register 2 (name table base), the same way. */
+    uint32  nt_n;
+    uint32  nt_log[VDP_NT_LOG];
     /* Changes of the display enable bit (register 1 bit 6) during the
      * active display: (first line affected << 8) | new state (0 or 1). */
     uint32  de_n;
     uint32  de_log[VDP_DE_LOG];
     uint32  de_start;       /* display enabled at the start of the frame */
-    uint8   pad[0x200 - 0x7C - VDP_LINE_T - 4 * (VDP_HS_LOG + VDP_DE_LOG + 3)];
-    uint8   dirty[VDP_TILES];       /* +0x200: nonzero: tile written */
-    uint8   vram[VDP_VRAM_SIZE];    /* +0x400 */
 } vdp_state;
 
 /* Power-on state; lines is VDP_LINES_NTSC or VDP_LINES_PAL. */
@@ -109,7 +115,7 @@ uint32 vdp_control_write(vdp_state *v, uint32 value, uint32 left);
 uint32 vdp_vcounter(const vdp_state *v, uint32 left);
 
 /* Bands of the picture for a value written during the active display
- * (log = hs_log or de_log with its count): tops[k] is the first line of
+ * (log = hs_log, nt_log or de_log with its count): tops[k] is the first line of
  * band k and vals[k] its value; band 0 starts at line 0 with top_value.
  * For the scroll that is the value held at the end of the frame, written
  * for the picture that goes with the video RAM as it stands; for the
