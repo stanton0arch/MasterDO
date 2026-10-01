@@ -33,6 +33,13 @@ CHECK_OFF(prio_rows, offsetof(render_layer, prio_rows) == 68);
 CHECK_OFF(prio_dirty, offsetof(render_layer, prio_dirty) == 152);
 CHECK_OFF(st_cells, offsetof(render_layer, cells) == 180);
 CHECK_OFF(st_tile_cells, offsetof(render_layer, tile_cells) == 184);
+CHECK_OFF(ccb_pre0, offsetof(CCB, ccb_PRE0) == 52);
+CHECK_OFF(ccb_pre1, offsetof(CCB, ccb_PRE1) == 56);
+CHECK_OFF(st_tiles_conv, offsetof(render_layer, tiles_conv) == 188);
+CHECK_OFF(xtab, offsetof(render_layer, xtab) == 52);
+CHECK_OFF(stale, offsetof(render_layer, stale) == 308);
+CHECK_OFF(stale_rows, offsetof(render_layer, stale_rows) == 312);
+CHECK_OFF(shown_rows, offsetof(render_layer, shown_rows) == 316);
 
 #define BM_PITCH        RENDER_W            /* bytes per bitmap row */
 #define BM_WORDS        (RENDER_W / 4)      /* words per bitmap row */
@@ -128,6 +135,7 @@ static void init_cel(CCB *c, uint32 flags)
 
 static void layer_free(render_layer *l)
 {
+    if (l->stale != NULL) FreeMem(l->stale, RENDER_NT_CELLS);
     if (l->stamp != NULL) FreeMem(l->stamp, RENDER_NT_CELLS);
     if (l->prev != NULL) FreeMem(l->prev, RENDER_NT_CELLS * 4);
     if (l->next != NULL) FreeMem(l->next, RENDER_NT_CELLS * 4);
@@ -166,6 +174,7 @@ static int32 layer_init(renderer *r, render_layer *l)
     l->next = (uint32 *)AllocMem(RENDER_NT_CELLS * 4, PLAIN_MEM);
     l->prev = (uint32 *)AllocMem(RENDER_NT_CELLS * 4, PLAIN_MEM);
     l->stamp = (uint8 *)AllocMem(RENDER_NT_CELLS, PLAIN_MEM);
+    l->stale = (uint8 *)AllocMem(RENDER_NT_CELLS, PLAIN_MEM);
     l->tiles = r->tiles;
     l->tiles_f = r->tiles_f;
     l->t_ok = r->t_ok;
@@ -173,7 +182,7 @@ static int32 layer_init(renderer *r, render_layer *l)
     l->dlist = r->dlist;
     l->xtab = r->xtab;
     return (l->bitmap == NULL || l->prio_bm == NULL || l->shadow == NULL || l->head == NULL ||
-            l->next == NULL || l->prev == NULL || l->stamp == NULL) ? -1 : 0;
+            l->next == NULL || l->prev == NULL || l->stamp == NULL || l->stale == NULL) ? -1 : 0;
 }
 
 Err render_init(renderer *r)
@@ -268,6 +277,8 @@ void render_reset(renderer *r)
         l->nt_base = 0xFFFFFFFFu;
         l->last_used = 0;
         l->stamp_now = 0;
+        l->stale_rows = 0;
+        l->shown_rows = 0;
         memset(l->prio_rows, 0, sizeof(l->prio_rows));
     }
     r->update = 0;
@@ -285,31 +296,6 @@ void render_reset(renderer *r)
  * Tiles and cells
  *------------------------------------------------------------------------*/
 
-/* Converts tile t (flip: mirrored horizontally) from the VDP's four bit
- * planes to 8 bpp rows. */
-void render_tile_conv(render_layer *l, uint32 t, uint32 flip, const uint8 *vram)
-{
-    const uint8 *p = vram + t * 32;
-    const uint32 *hi = l->xtab + (flip ? XT_FHI : XT_HI);
-    const uint32 *lo = hi + 256;
-    uint32 *d = (flip ? l->tiles_f : l->tiles) + t * TILE_WORDS;
-    uint32 k;
-
-    for (k = 0; k < 8; k++) {
-        uint32 p0 = p[0];
-        uint32 p1 = p[1];
-        uint32 p2 = p[2];
-        uint32 p3 = p[3];
-
-        d[0] = hi[p0] | (hi[p1] << 1) | (hi[p2] << 2) | (hi[p3] << 3);
-        d[1] = lo[p0] | (lo[p1] << 1) | (lo[p2] << 2) | (lo[p3] << 3);
-        p += 4;
-        d += 2;
-    }
-    l->t_ok[t] |= (uint8)(1 << flip);
-    l->tiles_conv++;
-}
-
 /* Draws the whole name table of the layer into its bitmap. */
 static void rebuild(renderer *r, render_layer *l, const uint8 *vram)
 {
@@ -320,6 +306,8 @@ static void rebuild(renderer *r, render_layer *l, const uint8 *vram)
     memset(l->prio_bm, 0, BM_BYTES);
     memset(l->prio_rows, 0, sizeof(l->prio_rows));
     memset(l->prio_dirty, 1, sizeof(l->prio_dirty));
+    memset(l->stale, 0, RENDER_NT_CELLS);
+    l->stale_rows = 0;
     for (i = 0; i < VDP_TILES; i++)
         l->head[i] = NONE;
     render_rebuild_cells(l, vram);
@@ -460,159 +448,248 @@ static void update_palettes(renderer *r, vdp_state *v)
 }
 
 /*--------------------------------------------------------------------------
- * Background pieces
+ * Background pieces and priority strips
  *------------------------------------------------------------------------*/
 
 /* One piece: screen columns sa to sb - 1 of h lines from screen line sy,
- * showing rows from src_y of bitmap bm with horizontal scroll hs, in cel
- * c (unless c is end: the piece is dropped); returns the next cel. The
+ * showing rows from src_y of bitmap bm with horizontal scroll hs. The
  * source starts on a word boundary: the piece may begin up to 3 pixels
  * left of sa, where it is either clipped or covered by the piece drawn
- * after (or shows the right pixels of the transparent priority layer). */
-static CCB *piece(renderer *r, CCB *c, CCB *end, const uint8 *bm, uint32 sy, uint32 h,
-                  uint32 src_y, uint32 hs, uint32 sa, uint32 sb)
-{
-    uint32 c0 = (sa - hs) & 255;
-    uint32 ca = c0 & ~3u;
-    uint32 w = sb - sa + (c0 - ca);
-
-    if (c == end) {
-        r->st.dropped++;
-        return c;
-    }
-    c->ccb_SourcePtr = (CelData *)(bm + src_y * BM_PITCH + ca);
-    c->ccb_XPos = (Coord)((int32)(sa - (c0 - ca)) << 16);
-    c->ccb_YPos = (Coord)(sy << 16);
-    c->ccb_PRE0 = ((h - PRE0_VCNT_PREFETCH) << PRE0_VCNT_SHIFT) | PRE0_BPP_8;
-    c->ccb_PRE1 = ((BM_WORDS - PRE1_WOFFSET_PREFETCH) << PRE1_WOFFSET10_SHIFT) |
-                  ((w - PRE1_TLHPCNT_PREFETCH) << PRE1_TLHPCNT_SHIFT) | PRE1_TLLSB_PDC0;
-    return c + 1;
-}
-
-/* Background pieces: cels 0 to RENDER_MAX_PIECES - 1, from the bitmap of
- * layer l. */
-#define BG_PIECE(r, l, np, sy, h, src_y, hs, sa, sb) \
-    (*(np) = (uint32)(piece((r), &(r)->cels[*(np)], &(r)->cels[RENDER_MAX_PIECES], \
-                            (l)->bitmap, (sy), (h), (src_y), (hs), (sa), (sb)) - (r)->cels))
-
-/* Screen columns xa to xb - 1: split where the source wraps, the right
- * part first so that the left part covers its overdraw. */
-static void hparts(renderer *r, render_layer *l, uint32 *np, uint32 sy, uint32 h, uint32 src_y,
-                   uint32 hs, uint32 xa, uint32 xb)
-{
-    uint32 xw = hs & 255;
-
-    if (xw > xa && xw < xb) {
-        BG_PIECE(r, l, np, sy, h, src_y, hs, xw, xb);
-        BG_PIECE(r, l, np, sy, h, src_y, hs, xa, xw);
-    } else {
-        BG_PIECE(r, l, np, sy, h, src_y, hs, xa, xb);
-    }
-}
-
-/* Screen lines ya to yb - 1, columns xa to xb - 1, with vertical scroll
- * vs: split where the source wraps. */
-static void vparts(renderer *r, render_layer *l, uint32 *np, uint32 ya, uint32 yb, uint32 hs,
-                   uint32 xa, uint32 xb, uint32 vs)
-{
-    uint32 y0 = ya + vs;
-    uint32 n = yb - ya;
-    uint32 n1;
-
-    while (y0 >= RENDER_BM_H)
-        y0 -= RENDER_BM_H;
-    n1 = RENDER_BM_H - y0;
-    if (n1 > n)
-        n1 = n;
-    hparts(r, l, np, ya, n1, y0, hs, xa, xb);
-    if (n1 < n)
-        hparts(r, l, np, ya + n1, n - n1, 0, hs, xa, xb);
-}
-
-/* A band of lines with one horizontal scroll value. With the vertical
- * scroll inhibit, the right 64 columns come first (unscrolled) so that
- * the left part covers their overdraw. */
-static void band(renderer *r, render_layer *l, uint32 *np, const vdp_state *v, uint32 ya,
-                 uint32 yb, uint32 hs)
-{
-    uint32 vs = v->reg[9];
-
-    if (v->reg[0] & 0x80) {
-        vparts(r, l, np, ya, yb, hs, 192, RENDER_W, 0);
-        vparts(r, l, np, ya, yb, hs, 0, 192, vs);
-    } else {
-        vparts(r, l, np, ya, yb, hs, 0, RENDER_W, vs);
-    }
-}
+ * after (or shows the right pixels of the transparent priority layer).
+ * Beyond the capacity the piece is dropped and counted. */
+#define EMIT_PIECE(r, p, bm, sy, h, src_y, hs, sa, sb) do { \
+        uint32 c0_ = ((sa) - (hs)) & 255; \
+        uint32 ca_ = c0_ & ~3u; \
+        CCB *cc_ = (p)->c; \
+        if (cc_ == (p)->end) { \
+            (r)->st.dropped++; \
+        } else { \
+            (p)->c = cc_ + 1; \
+            cc_->ccb_SourcePtr = (CelData *)((bm) + (src_y) * BM_PITCH + ca_); \
+            cc_->ccb_XPos = (Coord)((int32)((sa) - (c0_ - ca_)) << 16); \
+            cc_->ccb_YPos = (Coord)((sy) << 16); \
+            cc_->ccb_PRE0 = (((h) - PRE0_VCNT_PREFETCH) << PRE0_VCNT_SHIFT) | PRE0_BPP_8; \
+            cc_->ccb_PRE1 = ((BM_WORDS - PRE1_WOFFSET_PREFETCH) << PRE1_WOFFSET10_SHIFT) | \
+                            (((sb) - (sa) + (c0_ - ca_) - PRE1_TLHPCNT_PREFETCH) \
+                             << PRE1_TLHPCNT_SHIFT) | PRE1_TLLSB_PDC0; \
+        } \
+    } while (0)
 
 /*
- * Priority strips of nrows consecutive name table rows from row0 inside
- * a band: the bitmap columns of their priority cells, bx0 to bx1 - 1,
- * mapped to the screen with the scroll of the region (columns xa to
- * xb - 1, vertical scroll vs) and cut at the wraps; returns the next cel.
+ * The rectangle of bitmap columns bx0 to bx1 - 1 and rows by0 to by1 - 1
+ * on the lines of line band lb (ya | yb << 8 | hs << 16), as pieces:
+ * bitmap column bx shows at screen column (bx + hs) & 255 and row by at
+ * screen line (by - vs) mod 224, a wrap of the rows or of the columns
+ * splits the rectangle, the right part going first so that the left
+ * part covers its overdraw. Register 0 bit 6 keeps rows 0-1 (the lines
+ * before 16) unscrolled horizontally, bit 7 keeps the right 64 columns
+ * unscrolled vertically: each makes a window of its own, the right
+ * columns first. Without those bits the callers use render_rect_pieces
+ * (render_a.s), which does the same with one window.
  */
-static CCB *prio_region(renderer *r, render_layer *l, CCB *c, uint32 row0, uint32 nrows,
-                        uint32 bx0, uint32 bx1, uint32 ya, uint32 yb, uint32 hs,
-                        uint32 xa, uint32 xb, uint32 vs)
+static void rect_pieces(renderer *r, piece_ctx *p, const uint8 *bm, uint32 bx0, uint32 bx1,
+                        uint32 by0, uint32 by1, uint32 lb, uint32 reg0, uint32 vs)
 {
-    CCB *end = &r->cels[CEL_DBLANK0];
-    int32 y0 = (int32)(row0 * 8) - (int32)vs;      /* screen line of the first row */
-    uint32 hgt = nrows * 8;
-    uint32 sx0 = (bx0 + hs) & 255;
-    uint32 w = bx1 - bx0;
-    uint32 vp;
+    uint32 lya;
+    uint32 lyb;
+    uint32 lhs;
+    uint32 h;
+    uint32 wd;
+    uint32 lp_ya[2];
+    uint32 lp_yb[2];
+    uint32 lp_hs[2];
+    uint32 cp_xa[2];
+    uint32 cp_xb[2];
+    uint32 cp_vs[2];
+    uint32 nlp = 1;
+    uint32 ncp = 1;
+    uint32 lpi;
+    uint32 cpi;
 
-    while (y0 < 0)
-        y0 += RENDER_BM_H;
-    for (vp = 0; vp < 2; vp++) {
-        uint32 iy0;
-        uint32 iy1;
-        uint32 src_y;
-        uint32 sy;
-        uint32 ey;
-        uint32 hp;
-
-        if (vp == 0) {
-            iy0 = (uint32)y0;
-            iy1 = ((uint32)y0 + hgt <= RENDER_BM_H) ? (uint32)y0 + hgt : RENDER_BM_H;
-            src_y = row0 * 8;
-        } else {
-            if ((uint32)y0 + hgt <= RENDER_BM_H)
-                break;
-            iy0 = 0;
-            iy1 = (uint32)y0 + hgt - RENDER_BM_H;
-            src_y = row0 * 8 + (RENDER_BM_H - (uint32)y0);
+    lya = lb & 0xFF;
+    lyb = (lb >> 8) & 0xFF;
+    lhs = (lb >> 16) & 0xFF;
+    h = by1 - by0;
+    wd = bx1 - bx0;
+    lp_ya[0] = lya;
+    lp_yb[0] = lyb;
+    lp_hs[0] = lhs;
+    if ((reg0 & 0x40) && lya < 16) {
+        lp_hs[0] = 0;
+        if (lyb > 16) {
+            lp_yb[0] = 16;
+            lp_ya[1] = 16;
+            lp_yb[1] = lyb;
+            lp_hs[1] = lhs;
+            nlp = 2;
         }
-        sy = (iy0 > ya) ? iy0 : ya;
-        ey = (iy1 < yb) ? iy1 : yb;
-        if (sy >= ey)
-            continue;
-        src_y += sy - iy0;
-        for (hp = 0; hp < 2; hp++) {
-            uint32 ix0;
-            uint32 ix1;
+    }
+    cp_xa[0] = 0;
+    cp_xb[0] = RENDER_W;
+    cp_vs[0] = vs;
+    if (reg0 & 0x80) {
+        cp_xa[0] = 192;
+        cp_vs[0] = 0;
+        cp_xa[1] = 0;
+        cp_xb[1] = 192;
+        cp_vs[1] = vs;
+        ncp = 2;
+    }
+    for (lpi = 0; lpi < nlp; lpi++)
+    for (cpi = 0; cpi < ncp; cpi++) {
+        uint32 ya = lp_ya[lpi];
+        uint32 yb = lp_yb[lpi];
+        uint32 hs = lp_hs[lpi];
+        uint32 xa = cp_xa[cpi];
+        uint32 xb = cp_xb[cpi];
+        uint32 wvs = cp_vs[cpi];
+        uint32 s0;
+        uint32 t0;
+        uint32 vp;
+
+        s0 = by0 + 2 * RENDER_BM_H - wvs;   /* screen line of row by0 */
+        while (s0 >= RENDER_BM_H)
+            s0 -= RENDER_BM_H;
+        t0 = (bx0 + hs) & 255;              /* screen column of column bx0 */
+        for (vp = 0; vp < 2; vp++) {
+            uint32 iy0;
+            uint32 iy1;
+            uint32 src_y;
+            uint32 sy;
+            uint32 ey;
             uint32 sa;
             uint32 sb;
 
-            if (hp == 0) {
-                ix0 = sx0;
-                ix1 = (sx0 + w <= 256) ? sx0 + w : 256;
+            if (vp == 0) {
+                iy0 = s0;
+                iy1 = (s0 + h <= RENDER_BM_H) ? s0 + h : RENDER_BM_H;
+                src_y = by0;
             } else {
-                if (sx0 + w <= 256)
+                if (s0 + h <= RENDER_BM_H)
                     break;
-                ix0 = 0;
-                ix1 = sx0 + w - 256;
+                iy0 = 0;
+                iy1 = s0 + h - RENDER_BM_H;
+                src_y = by0 + (RENDER_BM_H - s0);
             }
-            sa = (ix0 > xa) ? ix0 : xa;
-            sb = (ix1 < xb) ? ix1 : xb;
-            if (sa < sb) {
-                c = piece(r, c, end, l->prio_bm, sy, ey - sy, src_y, hs, sa, sb);
-                if (c != end)
-                    r->st.prio_strips++;
+            sy = (iy0 > ya) ? iy0 : ya;
+            ey = (iy1 < yb) ? iy1 : yb;
+            if (sy >= ey)
+                continue;
+            src_y += sy - iy0;
+            /* The part from screen column t0, then the part wrapped to
+             * the left edge. */
+            sa = (t0 > xa) ? t0 : xa;
+            sb = (t0 + wd < 256) ? t0 + wd : 256;
+            if (sb > xb)
+                sb = xb;
+            if (sa < sb)
+                EMIT_PIECE(r, p, bm, sy, ey - sy, src_y, hs, sa, sb);
+            if (t0 + wd > 256) {
+                sa = xa;
+                sb = (t0 + wd - 256 < xb) ? t0 + wd - 256 : xb;
+                if (sa < sb)
+                    EMIT_PIECE(r, p, bm, sy, ey - sy, src_y, hs, sa, sb);
             }
         }
     }
-    return c;
+}
+
+/* Name table rows shown by the lines ya to yb - 1 with vertical scroll
+ * vs, as a bit mask. */
+static uint32 rows_of(uint32 ya, uint32 yb, uint32 vs)
+{
+    uint32 r0 = ya + 2 * RENDER_BM_H + vs;
+    uint32 r1 = yb - 1 + 2 * RENDER_BM_H + vs;
+    uint32 m;
+
+    while (r0 >= RENDER_BM_H)
+        r0 -= RENDER_BM_H;
+    while (r1 >= RENDER_BM_H)
+        r1 -= RENDER_BM_H;
+    r0 >>= 3;
+    r1 >>= 3;
+    m = (r1 >= r0) ? (((uint32)2 << r1) - ((uint32)1 << r0))
+                   : ((((uint32)2 << r1) - 1) | ~(((uint32)1 << r0) - 1));
+    return m & (((uint32)1 << RENDER_NT_ROWS) - 1);
+}
+
+/*
+ * Line bands of the update: the scroll bands (register 8 writes recorded
+ * during the active display) crossed with the name table bands
+ * (register 2) and the display bands (register 1 bit 6). The lines with
+ * the display on make the line bands (r->lbands, with the scroll and the
+ * layer of their table); the other lines get a backdrop rectangle. Also
+ * notes the rows each layer shows. Returns the number of backdrop
+ * rectangles and, in *any_on, whether any line is displayed. The band
+ * tables were filled by the caller (r->tops... with nb, nnb and ndb
+ * bands).
+ */
+static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nb, uint32 nnb, uint32 ndb,
+                         uint32 *any_on)
+{
+    uint32 vs = v->reg[9];
+    uint32 vsi = (uint32)v->reg[0] & 0x80;
+    uint32 nbl = 0;
+    uint32 nl = 0;
+    uint32 on = 0;
+    uint32 j;
+    uint32 k;
+    uint32 m;
+
+    if (nb > 1)
+        r->st.bands++;
+    if (ndb > 1)
+        r->st.dbands++;
+    if (nnb > 1)
+        r->st.ntbands++;
+    for (m = 0; m < RENDER_LAYERS; m++)
+        r->layer[m].shown_rows = 0;
+    for (j = 0; j < ndb; j++) {
+        uint32 da = r->dtops[j];
+        uint32 db = (j + 1 < ndb) ? r->dtops[j + 1] : RENDER_H;
+
+        if (!r->dons[j]) {
+            CCB *c = &r->cels[CEL_DBLANK0 + nbl++];
+
+            c->ccb_YPos = (Coord)(da << 16);
+            c->ccb_VDY = (int32)((db - da) << 16);
+            continue;
+        }
+        on = 1;
+        for (m = 0; m < nnb; m++) {
+            uint32 na = r->ntops[m];
+            uint32 nb2 = (m + 1 < nnb) ? r->ntops[m + 1] : RENDER_H;
+            render_layer *l = r->nlayer[m];
+            uint32 li = (uint32)(l - r->layer);
+
+            if (na < da)
+                na = da;
+            if (nb2 > db)
+                nb2 = db;
+            if (na >= nb2)
+                continue;
+            for (k = 0; k < nb; k++) {
+                uint32 ya = r->tops[k];
+                uint32 yb = (k + 1 < nb) ? r->tops[k + 1] : RENDER_H;
+
+                if (ya < na)
+                    ya = na;
+                if (yb > nb2)
+                    yb = nb2;
+                if (ya >= yb)
+                    continue;
+                r->lbands[nl++] = ya | (yb << 8) | ((r->hss[k] & 0xFF) << 16) | (li << 24);
+                l->shown_rows |= rows_of(ya, yb, vs);
+                if (vsi)
+                    l->shown_rows |= rows_of(ya, yb, 0);
+            }
+        }
+    }
+    r->nlb = nl;
+    for (k = 1; k < nbl; k++)
+        r->cels[CEL_DBLANK0 + k - 1].ccb_NextPtr = &r->cels[CEL_DBLANK0 + k];
+    *any_on = on;
+    return nbl;
 }
 
 /* Priority strips of the layer for this update: consecutive rows holding
@@ -665,135 +742,126 @@ static void prio_groups(render_layer *l)
     l->pg_n = n;
 }
 
-/* Priority strips of the layer that reach the lines ya to yb - 1 of a
- * band. The vertical scroll inhibit (register 0 bit 7) keeps the right
- * 64 columns unscrolled: a strip is then cut in two regions. */
-static CCB *prio_band(renderer *r, render_layer *l, CCB *c, const vdp_state *v, uint32 ya,
-                      uint32 yb, uint32 hs)
+/* First line band (sorted by their first line, which is also the order
+ * of their last lines) ending after line y. */
+static uint32 lband_from(const renderer *r, uint32 y)
 {
-    uint32 vs = v->reg[9];
-    uint32 vsi = (uint32)v->reg[0] & 0x80;
-    uint32 g;
+    uint32 lo = 0;
+    uint32 hi = r->nlb;
 
-    for (g = 0; g < l->pg_n; g++) {
-        uint32 row0 = l->pg_row0[g];
-        uint32 nrows = l->pg_nrows[g];
-        uint32 bx0 = (uint32)l->pg_col0[g] * 8;
-        uint32 bx1 = (uint32)l->pg_col1[g] * 8;
-        uint32 y0 = row0 * 8 + RENDER_BM_H - vs;   /* scrolled first line, modulo 224 */
-        uint32 y1;
-        uint32 hit;
+    while (lo < hi) {
+        uint32 mid = (lo + hi) >> 1;
 
-        while (y0 >= RENDER_BM_H)
-            y0 -= RENDER_BM_H;
-        y1 = y0 + nrows * 8;
-        hit = (y0 < yb && y1 > ya) || (y1 > RENDER_BM_H && y1 - RENDER_BM_H > ya);
+        if (((r->lbands[mid] >> 8) & 0xFF) > y)
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+    return lo;
+}
 
-        if (vsi)
-            hit |= (row0 * 8 < yb && (row0 + nrows) * 8 > ya);
-        if (!hit)
-            continue;
-        if (vsi) {
-            c = prio_region(r, l, c, row0, nrows, bx0, bx1, ya, yb, hs, 192, RENDER_W, 0);
-            c = prio_region(r, l, c, row0, nrows, bx0, bx1, ya, yb, hs, 0, 192, vs);
+/* The strips of a group of priority rows of layer m, whose screen lines
+ * are y0 to y1 - 1 (y1 may run past the bitmap height: the rest wraps to
+ * the top), on the line bands of that layer which they reach. */
+static void group_strips(renderer *r, piece_ctx *p, uint32 m, const uint8 *bm, uint32 bx0,
+                         uint32 bx1, uint32 by0, uint32 by1, uint32 y0, uint32 y1,
+                         uint32 reg0, uint32 vs)
+{
+    uint32 pass;
+
+    for (pass = 0; pass < 2; pass++) {
+        uint32 ga;
+        uint32 gb;
+        uint32 k;
+
+        if (pass == 0) {
+            ga = y0;
+            gb = (y1 < RENDER_H) ? y1 : RENDER_H;
         } else {
-            c = prio_region(r, l, c, row0, nrows, bx0, bx1, ya, yb, hs, 0, RENDER_W, vs);
+            if (y1 <= RENDER_BM_H)
+                break;
+            ga = 0;
+            gb = y1 - RENDER_BM_H;
+        }
+        if (ga >= gb)
+            continue;
+        for (k = lband_from(r, ga); k < r->nlb; k++) {
+            uint32 lb = r->lbands[k];
+
+            if ((lb & 0xFF) >= gb)
+                break;
+            if ((lb >> 24) != m)
+                continue;
+            if (reg0 & 0xC0)
+                rect_pieces(r, p, bm, bx0, bx1, by0, by1, lb, reg0, vs);
+            else
+                r->st.dropped += render_rect_pieces(p, bm, bx0, bx1, by0, by1, lb, vs);
         }
     }
-    return c;
 }
 
-/* Background pieces and priority strips of the lines ya to yb - 1 with
- * horizontal scroll hs from layer l. Rows 0-1 are not scrolled
- * horizontally when register 0 bit 6 is set. */
-static CCB *lines_pieces(renderer *r, render_layer *l, uint32 *np, CCB *pc, const vdp_state *v,
-                         uint32 ya, uint32 yb, uint32 hs)
+/* Background pieces of the line bands, from the bitmap of their layer,
+ * then the priority strips: each strip group of a layer on the line
+ * bands of that layer which its lines reach. Returns the number of
+ * pieces and, in *nprio, the number of strips. */
+static uint32 update_pieces(renderer *r, const vdp_state *v, uint32 *nprio)
 {
-    if ((v->reg[0] & 0x40) && ya < 16) {
-        band(r, l, np, v, ya, yb < 16 ? yb : 16, 0);
-        pc = prio_band(r, l, pc, v, ya, yb < 16 ? yb : 16, 0);
-        if (yb > 16) {
-            band(r, l, np, v, 16, yb, hs);
-            pc = prio_band(r, l, pc, v, 16, yb, hs);
-        }
-    } else {
-        band(r, l, np, v, ya, yb, hs);
-        pc = prio_band(r, l, pc, v, ya, yb, hs);
-    }
-    return pc;
-}
-
-/* Scroll bands (register 8 writes recorded during the active display)
- * crossed with the name table bands (register 2) and the display bands
- * (register 1 bit 6): the background is drawn where the display is on,
- * from the layer of the band's table, the other lines get a backdrop
- * rectangle. Returns the number of background pieces and, in *nprio and
- * *nblank, the numbers of priority strips and of backdrop rectangles;
- * *any_on tells whether any line is displayed. The band tables were
- * filled by the caller (r->tops... with nb, nnb and ndb bands). */
-static uint32 update_pieces(renderer *r, const vdp_state *v, uint32 nb, uint32 nnb, uint32 ndb,
-                            uint32 *nprio, uint32 *nblank, uint32 *any_on)
-{
-    CCB *pc = &r->cels[CEL_PRIO0];
-    uint32 np = 0;
-    uint32 nbl = 0;
-    uint32 on = 0;
-    uint32 j;
+    piece_ctx pb;
+    piece_ctx pp;
+    uint32 reg0 = v->reg[0];
+    uint32 vs = v->reg[9];
+    uint32 np;
+    uint32 npr;
     uint32 k;
     uint32 m;
 
-    if (nb > 1)
-        r->st.bands++;
-    if (ndb > 1)
-        r->st.dbands++;
-    if (nnb > 1)
-        r->st.ntbands++;
-    for (j = 0; j < ndb; j++) {
-        uint32 da = r->dtops[j];
-        uint32 db = (j + 1 < ndb) ? r->dtops[j + 1] : RENDER_H;
+    pb.c = &r->cels[0];
+    pb.end = &r->cels[RENDER_MAX_PIECES];
+    for (k = 0; k < r->nlb; k++) {
+        uint32 lb = r->lbands[k];
 
-        if (!r->dons[j]) {
-            CCB *c = &r->cels[CEL_DBLANK0 + nbl++];
+        if (reg0 & 0xC0)
+            rect_pieces(r, &pb, r->layer[lb >> 24].bitmap, 0, RENDER_W, 0, RENDER_BM_H, lb,
+                        reg0, vs);
+        else
+            r->st.dropped += render_rect_pieces(&pb, r->layer[lb >> 24].bitmap, 0, RENDER_W, 0,
+                                                RENDER_BM_H, lb, vs);
+    }
+    np = (uint32)(pb.c - &r->cels[0]);
+    for (k = 1; k < np; k++)
+        r->cels[k - 1].ccb_NextPtr = &r->cels[k];
 
-            c->ccb_YPos = (Coord)(da << 16);
-            c->ccb_VDY = (int32)((db - da) << 16);
-            continue;
-        }
-        on = 1;
-        for (m = 0; m < nnb; m++) {
-            uint32 na = r->ntops[m];
-            uint32 nb2 = (m + 1 < nnb) ? r->ntops[m + 1] : RENDER_H;
-            render_layer *l = r->nlayer[m];
+    pp.c = &r->cels[CEL_PRIO0];
+    pp.end = &r->cels[CEL_DBLANK0];
+    for (m = 0; m < RENDER_LAYERS; m++) {
+        render_layer *l = &r->layer[m];
+        uint32 g;
 
-            if (na < da)
-                na = da;
-            if (nb2 > db)
-                nb2 = db;
-            if (na >= nb2)
-                continue;
-            for (k = 0; k < nb; k++) {
-                uint32 ya = r->tops[k];
-                uint32 yb = (k + 1 < nb) ? r->tops[k + 1] : RENDER_H;
+        for (g = 0; g < l->pg_n; g++) {
+            uint32 by0 = (uint32)l->pg_row0[g] * 8;
+            uint32 by1 = by0 + (uint32)l->pg_nrows[g] * 8;
+            uint32 bx0 = (uint32)l->pg_col0[g] * 8;
+            uint32 bx1 = (uint32)l->pg_col1[g] * 8;
+            uint32 y0 = by0 + 2 * RENDER_BM_H - vs;   /* screen lines of the group */
 
-                if (ya < na)
-                    ya = na;
-                if (yb > nb2)
-                    yb = nb2;
-                if (ya < yb)
-                    pc = lines_pieces(r, l, &np, pc, v, ya, yb, r->hss[k]);
+            while (y0 >= RENDER_BM_H)
+                y0 -= RENDER_BM_H;
+            if (reg0 & 0x80) {
+                /* With the vertical scroll inhibit the right columns show
+                 * the rows unscrolled as well: every band may be reached. */
+                group_strips(r, &pp, m, l->prio_bm, bx0, bx1, by0, by1, 0, RENDER_H, reg0, vs);
+            } else {
+                group_strips(r, &pp, m, l->prio_bm, bx0, bx1, by0, by1, y0, y0 + (by1 - by0),
+                             reg0, vs);
             }
         }
     }
-    for (k = 1; k < np; k++)
-        r->cels[k - 1].ccb_NextPtr = &r->cels[k];
-    *nprio = (uint32)(pc - &r->cels[CEL_PRIO0]);
-    for (k = 1; k < *nprio; k++)
+    npr = (uint32)(pp.c - &r->cels[CEL_PRIO0]);
+    for (k = 1; k < npr; k++)
         r->cels[CEL_PRIO0 + k - 1].ccb_NextPtr = &r->cels[CEL_PRIO0 + k];
-    for (k = 1; k < nbl; k++)
-        r->cels[CEL_DBLANK0 + k - 1].ccb_NextPtr = &r->cels[CEL_DBLANK0 + k];
-    *nblank = nbl;
-    *any_on = on;
     r->st.pieces += np;
+    r->st.prio_strips += npr;
+    *nprio = npr;
     return np;
 }
 
@@ -876,9 +944,17 @@ void render_update(renderer *r, vdp_state *v)
         return;
     r->update++;
 
-    /* The name tables of the frame and their layers. */
+    /* The name tables of the frame and their layers, then the line
+     * bands, which also say which rows each layer shows. */
     nnb = vdp_bands(v->nt_log, v->nt_n, v->reg[2], r->ntops, r->nvals);
     assign_layers(r, nnb);
+    nb = vdp_bands(v->hs_log, v->hs_n, v->reg[8], r->tops, r->hss);
+    ndb = vdp_bands(v->de_log, v->de_n, v->de_start, r->dtops, r->dons);
+    nbl = line_bands(r, v, nb, nnb, ndb, &any_on);
+    if (!any_on) {
+        r->display_on = 0;
+        return;
+    }
 
     /* Each cell is drawn at most once per update: the stamp of the
      * update marks the cells drawn (a wrap makes a cell drawn 256
@@ -910,8 +986,10 @@ void render_update(renderer *r, vdp_state *v)
 
     /* Every layer in use follows the VDP: a layer that took a new table
      * is drawn whole, the others draw their changed entries first (with
-     * the written tiles converted again), then the other cells of the
-     * written tiles. A layer with no table is left alone. */
+     * the written tiles converted again), then the stale cells of the
+     * rows shown, then the other cells of the written tiles in the rows
+     * shown (the rest is left stale). A layer with no table is left
+     * alone. */
     for (m = 0; m < RENDER_LAYERS; m++) {
         render_layer *l = &r->layer[m];
         uint32 used = 0;
@@ -928,6 +1006,8 @@ void render_update(renderer *r, vdp_state *v)
         }
         if ((nt_mask[m][0] | nt_mask[m][1]) != 0)
             update_entries(l, nt_mask[m], vram);
+        if ((l->stale_rows & l->shown_rows) != 0)
+            render_stale_cells(l, vram);
         for (k = 0; k < nd; k++) {
             uint32 j = r->dlist[k];
 
@@ -940,6 +1020,8 @@ void render_update(renderer *r, vdp_state *v)
 
         if (l->valid)
             prio_groups(l);
+        else
+            l->pg_n = 0;
         r->st.cells += l->cells;
         r->st.tile_cells += l->tile_cells;
         r->st.tiles += l->tiles_conv;
@@ -948,13 +1030,7 @@ void render_update(renderer *r, vdp_state *v)
         l->tiles_conv = 0;
     }
 
-    nb = vdp_bands(v->hs_log, v->hs_n, v->reg[8], r->tops, r->hss);
-    ndb = vdp_bands(v->de_log, v->de_n, v->de_start, r->dtops, r->dons);
-    np = update_pieces(r, v, nb, nnb, ndb, &npr, &nbl, &any_on);
-    if (!any_on) {
-        r->display_on = 0;
-        return;
-    }
+    np = update_pieces(r, v, &npr);
     ns = update_sprites(r, v);
     r->n_sprites = ns;
     r->st.tiles += r->layer[0].tiles_conv;

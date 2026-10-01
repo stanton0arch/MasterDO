@@ -131,6 +131,13 @@ typedef struct {
     uint8   pg_nrows[RENDER_NT_ROWS];
     uint8   pg_col0[RENDER_NT_ROWS];    /* first column */
     uint8   pg_col1[RENDER_NT_ROWS];    /* last column + 1 */
+    /* Cells of a written tile are only redrawn in the rows the picture
+     * shows (shown_rows, bit per name table row, from the bands of the
+     * update); the others are left stale and redrawn when their row is
+     * shown again. */
+    uint8  *stale;          /* RENDER_NT_CELLS: cell waiting for a redraw */
+    uint32  stale_rows;     /* rows holding stale cells */
+    uint32  shown_rows;     /* rows shown by the update */
 } render_layer;
 
 typedef struct {
@@ -159,6 +166,11 @@ typedef struct {
     render_layer *nlayer[VDP_NT_LOG + 1];   /* layer of each name table band */
     uint32  dtops[VDP_DE_LOG + 1];
     uint32  dons[VDP_DE_LOG + 1];
+    /* Line bands of the update: the scroll bands crossed with the name
+     * table bands and the lines with the display on, as
+     * ya | yb << 8 | hs << 16 | layer << 24. */
+    uint32  lbands[VDP_HS_LOG + VDP_NT_LOG + VDP_DE_LOG + 4];
+    uint32  nlb;
     render_stats st;
 } renderer;
 
@@ -200,13 +212,24 @@ uint32 render_sprites(const uint8 *sat, uint32 n, CCB *cel, const render_sprite_
  * render_entries: the n name table words listed in l->wlist, copied to
  * the shadow; each entry that differs is re-linked in the cell list of
  * its tile, its priority bookkeeping done, and drawn. render_tile_cells:
- * the cells of tile t not stamped in this update. render_rebuild_cells:
- * every cell from the shadow, linked into lists that must be empty. */
+ * the cells of tile t not stamped in this update, those of the rows
+ * not shown left stale. render_stale_cells: the stale cells of the rows
+ * shown. render_rebuild_cells: every cell from the shadow, linked into
+ * lists that must be empty. */
 void   render_entries(render_layer *l, const uint8 *vram, uint32 n);
 void   render_tile_cells(render_layer *l, const uint8 *vram, uint32 t);
+void   render_stale_cells(render_layer *l, const uint8 *vram);
 void   render_rebuild_cells(render_layer *l, const uint8 *vram);
+/* Pieces of a bitmap rectangle on a line band in the usual case (no
+ * scroll inhibit); see render.c, rect_pieces. */
+typedef struct {
+    CCB    *c;              /* next cel */
+    CCB    *end;            /* capacity */
+} piece_ctx;
+uint32 render_rect_pieces(piece_ctx *p, const uint8 *bm, uint32 bx0, uint32 bx1,
+                          uint32 by0, uint32 by1, uint32 lb, uint32 vs);
 /* Converts tile t (flip: mirrored horizontally) from the VDP's four bit
- * planes to 8 bpp rows (render.c, called by the assembly too). */
+ * planes to 8 bpp rows into the layer's stores (render_a.s). */
 void   render_tile_conv(render_layer *l, uint32 t, uint32 flip, const uint8 *vram);
 
 #define render_chain(r)     ((r)->chain)

@@ -8,13 +8,16 @@
         EXPORT  render_entries
         EXPORT  render_tile_cells
         EXPORT  render_rebuild_cells
-
-        IMPORT  render_tile_conv
+        EXPORT  render_stale_cells
+        EXPORT  render_tile_conv
+        EXPORT  render_rect_pieces
 
 ; CCB fields (graphics.h).
 CCB_SOURCE      EQU     8
 CCB_XPOS        EQU     16
 CCB_YPOS        EQU     20
+CCB_PRE0        EQU     52
+CCB_PRE1        EQU     56
 CCB_SIZE        EQU     68
 
 ; layer fields (render_layer, render.h; offsets checked in render.c).
@@ -30,11 +33,16 @@ R_PREV          EQU     32
 R_WLIST         EQU     36
 R_STAMP         EQU     44
 R_STAMPNOW      EQU     48
+R_XTAB          EQU     52
 R_PRIOROWS      EQU     68
 R_PRIODIRTY     EQU     152
 R_NTBASE        EQU     56
 R_STCELLS       EQU     180
 R_STTILECELLS   EQU     184
+R_STTILESCONV   EQU     188
+R_STALE         EQU     308
+R_STALEROWS     EQU     312
+R_SHOWNROWS     EQU     316
 
 ; render_sprite_args fields (render.h).
 SA_TILES        EQU     0
@@ -333,6 +341,9 @@ cd_stamp
 ;----------------------------------------------------------------------------
 cell_change
         stmfd   sp!,{r0,r1,lr}
+        ldr     r4,[r9,#R_STALE]        ; drawn below: no longer stale
+        mov     r5,#0
+        strb    r5,[r4,r0]
         eor     r3,r1,r2
         movs    r4,r3,lsl #23           ; tile bits 0-8 differ?
         beq     cc_prio
@@ -458,6 +469,8 @@ re_done
 ;
 ; Draws the cells of the list of tile t that are not stamped in this
 ; update, with their entry from the shadow; counts them in st.tile_cells.
+; A cell of a row the update does not show (shown_rows) is left stale
+; instead, for render_stale_cells.
 ;----------------------------------------------------------------------------
 render_tile_cells
         stmfd   sp!,{r4-r11,lr}
@@ -474,6 +487,19 @@ tc_loop
         and     r4,r4,#0xFF
         cmp     r3,r4
         beq     tc_next
+        ldr     r2,[r9,#R_SHOWNROWS]
+        mov     r3,r11,lsr #5           ; row shown?
+        mov     r2,r2,lsr r3
+        tst     r2,#1
+        bne     tc_draw
+        ldr     r2,[r9,#R_STALE]        ; no: stale until it is
+        mov     r4,#1
+        strb    r4,[r2,r11]
+        ldr     r2,[r9,#R_STALEROWS]
+        orr     r2,r2,r4,lsl r3
+        str     r2,[r9,#R_STALEROWS]
+        b       tc_next
+tc_draw
         ldr     r2,[r9,#R_SHADOW]
         add     r2,r2,r11,lsl #1
         ldrb    r1,[r2]
@@ -490,6 +516,241 @@ tc_next
         b       tc_loop
 tc_done
         ldmfd   sp!,{r4-r11,pc}
+
+;----------------------------------------------------------------------------
+; void render_stale_cells(renderer *r, const uint8 *vram)
+;
+; Draws the stale cells of the rows the update shows (those not stamped
+; yet), from the shadow; those rows hold no stale cell afterwards.
+;----------------------------------------------------------------------------
+render_stale_cells
+        stmfd   sp!,{r4-r11,lr}
+        mov     r9,r0
+        mov     r10,r1
+        ldr     r4,[r9,#R_STALEROWS]
+        ldr     r5,[r9,#R_SHOWNROWS]
+        and     r11,r4,r5               ; rows to visit
+        bic     r4,r4,r5
+        str     r4,[r9,#R_STALEROWS]
+        mov     r4,#0                   ; row
+sc_rows
+        movs    r11,r11,lsr #1
+        bcc     sc_next_row
+        mov     r5,r4,lsl #5            ; first cell of the row
+        add     r6,r5,#32
+sc_cells
+        ldr     r2,[r9,#R_STALE]
+        ldrb    r3,[r2,r5]
+        teq     r3,#0
+        beq     sc_next_cell
+        mov     r3,#0
+        strb    r3,[r2,r5]
+        ldr     r2,[r9,#R_STAMP]
+        ldrb    r3,[r2,r5]
+        ldr     r2,[r9,#R_STAMPNOW]
+        and     r2,r2,#0xFF
+        cmp     r3,r2
+        beq     sc_next_cell
+        ldr     r2,[r9,#R_SHADOW]
+        add     r2,r2,r5,lsl #1
+        ldrb    r1,[r2]
+        ldrb    r3,[r2,#1]
+        orr     r1,r1,r3,lsl #8
+        mov     r0,r5
+        stmfd   sp!,{r4-r6}             ; cell_draw clobbers r0-r8
+        bl      cell_draw
+        ldmfd   sp!,{r4-r6}
+        ldr     r2,[r9,#R_STTILECELLS]
+        add     r2,r2,#1
+        str     r2,[r9,#R_STTILECELLS]
+sc_next_cell
+        add     r5,r5,#1
+        cmp     r5,r6
+        bne     sc_cells
+sc_next_row
+        add     r4,r4,#1
+        teq     r11,#0
+        bne     sc_rows
+        ldmfd   sp!,{r4-r11,pc}
+
+;----------------------------------------------------------------------------
+; void render_tile_conv(render_layer *l, uint32 t, uint32 flip, const uint8 *vram)
+;
+; Converts tile t from the VDP's four bit planes (4 bytes per row) to 8
+; bpp rows of two words in the layer's tile store (the mirrored store
+; with flip), through the expansion tables: hi[p] spreads the high nibble
+; of plane byte p into the bytes of a word, lo[p] its low nibble, and the
+; planes are OR-ed in at bit 0 to 3 of each pixel. Marks the store of the
+; tile converted and counts the conversion.
+;----------------------------------------------------------------------------
+        MACRO
+        CONVROW
+        ldr     r5,[r0],#4              ; p0 p1 p2 p3 (p0 in the top byte)
+        mov     r6,r5,lsr #24
+        ldr     r7,[r2,r6,lsl #2]       ; hi[p0]
+        ldr     r8,[r3,r6,lsl #2]       ; lo[p0]
+        mov     r6,r5,lsl #8
+        mov     r6,r6,lsr #24
+        ldr     r12,[r2,r6,lsl #2]
+        orr     r7,r7,r12,lsl #1
+        ldr     r12,[r3,r6,lsl #2]
+        orr     r8,r8,r12,lsl #1
+        mov     r6,r5,lsl #16
+        mov     r6,r6,lsr #24
+        ldr     r12,[r2,r6,lsl #2]
+        orr     r7,r7,r12,lsl #2
+        ldr     r12,[r3,r6,lsl #2]
+        orr     r8,r8,r12,lsl #2
+        and     r6,r5,#0xFF
+        ldr     r12,[r2,r6,lsl #2]
+        orr     r7,r7,r12,lsl #3
+        ldr     r12,[r3,r6,lsl #2]
+        orr     r8,r8,r12,lsl #3
+        stmia   r4!,{r7,r8}
+        MEND
+
+render_tile_conv
+        stmfd   sp!,{r4-r8,lr}
+        ldr     r12,[r0,#R_STTILESCONV]
+        add     r12,r12,#1
+        str     r12,[r0,#R_STTILESCONV]
+        ldr     r12,[r0,#R_TOK]         ; t_ok[t] |= 1 << flip
+        ldrb    r5,[r12,r1]
+        mov     r6,#1
+        orr     r5,r5,r6,lsl r2
+        strb    r5,[r12,r1]
+        ldr     r12,[r0,#R_XTAB]
+        teq     r2,#0
+        ldreq   r4,[r0,#R_TILES]
+        ldrne   r4,[r0,#R_TILESF]
+        addne   r12,r12,#2048           ; the mirrored tables
+        add     r4,r4,r1,lsl #6         ; destination: store + t * 64
+        add     r0,r3,r1,lsl #5         ; source: vram + t * 32
+        mov     r2,r12                  ; hi
+        add     r3,r12,#1024            ; lo
+        CONVROW
+        CONVROW
+        CONVROW
+        CONVROW
+        CONVROW
+        CONVROW
+        CONVROW
+        CONVROW
+        ldmfd   sp!,{r4-r8,pc}
+
+;----------------------------------------------------------------------------
+; uint32 render_rect_pieces(piece_ctx *p, const uint8 *bm, uint32 bx0,
+;                           uint32 bx1, uint32 by0, uint32 by1, uint32 lb,
+;                           uint32 vs)
+;
+; The usual case of rect_pieces (render.c): no scroll inhibit, the whole
+; width for window. The rectangle of bitmap columns bx0 to bx1 - 1 and
+; rows by0 to by1 - 1 is shown on the lines of line band lb (ya | yb << 8
+; | hs << 16) as pieces appended to p (next cel at [p], capacity at
+; [p + 4]), split at the row and column wraps, the part from column
+; (bx0 + hs) & 255 before the part wrapped to the left edge. Returns the
+; number of pieces dropped for lack of cels.
+;----------------------------------------------------------------------------
+        MACRO
+        EMITP   $sa                     ; sy r3, height r4, src_y r2, sb r9
+        ldr     r12,[r0]
+        ldr     lr,[r0,#4]
+        cmp     r12,lr
+        addeq   r7,r7,#1
+        beq     %F7
+        add     lr,r12,#CCB_SIZE
+        str     lr,[r0]
+        sub     lr,$sa,r6
+        and     lr,lr,#255              ; bitmap column of sa
+        and     r5,lr,#3                ; pixels before the word boundary
+        sub     lr,lr,r5
+        ldr     r8,[sp,#20]             ; bitmap
+        add     r8,r8,r2,lsl #8
+        add     r8,r8,lr
+        str     r8,[r12,#CCB_SOURCE]
+        sub     r5,$sa,r5               ; x of the piece
+        sub     r8,r9,r5                ; its width
+        mov     r5,r5,lsl #16
+        str     r5,[r12,#CCB_XPOS]
+        mov     r5,r3,lsl #16
+        str     r5,[r12,#CCB_YPOS]
+        sub     r5,r4,#1
+        mov     r5,r5,lsl #6
+        orr     r5,r5,#5                ; PRE0: height - 1, 8 bpp
+        str     r5,[r12,#CCB_PRE0]
+        sub     r8,r8,#1
+        orr     r8,r8,#0x3E0000         ; PRE1: 64 - 2 words per row, width - 1
+        orr     r8,r8,#0x1000
+        str     r8,[r12,#CCB_PRE1]
+7
+        MEND
+
+        MACRO
+        PART                            ; iy0 r12, iy1 lr, src_y r2
+        stmfd   sp!,{r3,r4,r5,r8,r9}
+        mov     r3,r12
+        cmp     r3,r8
+        movlo   r3,r8                   ; sy = max(iy0, ya)
+        cmp     lr,r5
+        movhi   lr,r5                   ; ey = min(iy1, yb)
+        cmp     r3,lr
+        bhs     %F9
+        add     r2,r2,r3
+        sub     r2,r2,r12               ; rows from src_y + sy - iy0
+        sub     r4,lr,r3                ; height
+        add     r9,r10,r11
+        cmp     r9,#256
+        movhi   r9,#256                 ; end of the part from column t0
+        cmp     r10,r9
+        bhs     %F8
+        EMITP   r10
+8
+        add     r9,r10,r11
+        subs    r9,r9,#256              ; the part wrapped to the left edge
+        bls     %F9
+        mov     r1,#0
+        EMITP   r1
+9
+        ldmfd   sp!,{r3,r4,r5,r8,r9}
+        MEND
+
+render_rect_pieces
+        stmfd   sp!,{r1,r4-r11,lr}
+        add     r12,sp,#40
+        ldmia   r12,{r4,r5,r6,r7}       ; by0, by1, lb, vs
+        sub     r9,r5,r4                ; rows
+        sub     r11,r3,r2               ; columns
+        and     r8,r6,#0xFF             ; ya
+        mov     r5,r6,lsr #8
+        and     r5,r5,#0xFF             ; yb
+        mov     r6,r6,lsr #16
+        and     r6,r6,#0xFF             ; hs
+        add     r10,r2,r6
+        and     r10,r10,#0xFF           ; t0: screen column of bx0
+        add     r3,r4,#448
+        sub     r3,r3,r7                ; s0: screen line of by0, modulo 224
+rp_mod
+        cmp     r3,#224
+        subhs   r3,r3,#224
+        bhs     rp_mod
+        mov     r7,#0                   ; pieces dropped
+        mov     r12,r3                  ; lines s0 to min(s0 + rows, 224) - 1
+        add     lr,r3,r9
+        cmp     lr,#224
+        movhi   lr,#224
+        mov     r2,r4
+        PART
+        add     lr,r3,r9                ; the rest wraps to the top
+        cmp     lr,#224
+        bls     rp_done
+        sub     lr,lr,#224
+        mov     r12,#0
+        rsb     r2,r3,#224
+        add     r2,r2,r4
+        PART
+rp_done
+        mov     r0,r7
+        ldmfd   sp!,{r1,r4-r11,pc}
 
 ;----------------------------------------------------------------------------
 ; void render_rebuild_cells(renderer *r, const uint8 *vram)
