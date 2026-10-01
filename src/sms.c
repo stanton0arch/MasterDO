@@ -182,11 +182,11 @@ static void sms_ports(sms_machine *s)
 }
 
 void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
-              uint32 lines)
+              uint32 lines, uint8 *cart_ram, uint32 cart_ram_size)
 {
     memset(s, 0, sizeof(*s));
     s->ctx = ctx;
-    sms_mem_init(&s->mem, ctx, rom, rom_size, 0);
+    sms_mem_init(&s->mem, ctx, rom, rom_size, cart_ram, cart_ram_size);
     s->mem.m.in = sms_in;
     s->mem.m.out = sms_out;
     s->mem.m.event = sms_event;

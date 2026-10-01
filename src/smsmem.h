@@ -20,11 +20,12 @@ typedef struct {
     const uint8 *rom;
     uint32       rom_size;
     uint32       banks;     /* 16 KiB banks in the ROM */
-    uint8       *cart_ram;  /* 32 KiB, or 0 */
+    uint8       *cart_ram;  /* battery RAM shown in slot 2 by $FFFC bit 3, or 0 */
     uint32       reg[4];    /* $FFFC-$FFFF */
     uint32       slot_ram[3]; /* slot currently showing cartridge RAM */
     uint32       remaps;    /* paging changes (statistics) */
     uint32       bank_mask; /* banks - 1, or 0xFFFFFFFF when banks is not a power of two */
+    uint32       cart_ram_size; /* 16 KiB (one page) or 32 KiB (bit 2 selects the page) */
 } sms_mem;
 
 /* Special write handler in assembly (smsmem_a.s), installed by
@@ -32,9 +33,10 @@ typedef struct {
 void   sms_mem_write_a(void);
 
 /* Sets up the pages of ctx (system RAM in ctx->mram) for a ROM image and
- * the machine callbacks. */
+ * the machine callbacks; cart_ram (16 or 32 KiB, or 0 for none) is the
+ * cartridge RAM that register $FFFC can map into slot 2. */
 void   sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
-                    uint8 *cart_ram);
+                    uint8 *cart_ram, uint32 cart_ram_size);
 
 /* Applies the paging registers to the page tables. */
 void   sms_mem_map(sms_mem *s);

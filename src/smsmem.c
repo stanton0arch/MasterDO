@@ -40,7 +40,8 @@ static void map_slot(sms_mem *s, uint32 slot)
     if (slot == 0)
         first = 4;                      /* the first 1 KiB always shows bank 0 */
     if (ram) {
-        e = JIT_ADDR(s->cart_ram) + ((s->reg[0] & 0x04) ? 0x4000u : 0u) - base;
+        e = JIT_ADDR(s->cart_ram) +
+            (((s->reg[0] & 0x04) && s->cart_ram_size >= 0x8000u) ? 0x4000u : 0u) - base;
     } else {
         e = JIT_ADDR(s->rom) + bank * 0x4000u - base;
     }
@@ -123,7 +124,7 @@ static void sms_mem_event(z80j_machine *m)
 }
 
 void sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
-                  uint8 *cart_ram)
+                  uint8 *cart_ram, uint32 cart_ram_size)
 {
     uint32 p;
     uint32 ram = JIT_ADDR(ctx->mram);
@@ -137,6 +138,7 @@ void sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
         s->banks = 1;
     s->bank_mask = ((s->banks & (s->banks - 1)) == 0) ? s->banks - 1 : 0xFFFFFFFFu;
     s->cart_ram = cart_ram;
+    s->cart_ram_size = cart_ram_size;
 
     s->m.in = sms_mem_in;
     s->m.out = sms_mem_out;

@@ -233,6 +233,7 @@ void game_free(game *g)
     if (g->log != NULL) FreeMem(g->log, GAME_LOG_WORDS * 4);
     if (g->code != NULL) FreeMem(g->code, JIT_CODE_BYTES);
     if (g->ctx != NULL) FreeMem(g->ctx, sizeof(z80j_ctx));
+    if (g->cart_ram != NULL) FreeMem(g->cart_ram, (int32)g->cart_ram_size);
     g->rd = NULL;
     g->sms = NULL;
     g->blocks = NULL;
@@ -241,6 +242,7 @@ void game_free(game *g)
     g->log = NULL;
     g->code = NULL;
     g->ctx = NULL;
+    g->cart_ram = NULL;
 }
 
 Err game_init(game *g, const uint8 *rom, uint32 rom_size)
@@ -277,7 +279,24 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
     z80j_set_interp(&g->jit, g->hot, HOT_QUEUE_AT, HOT_SYNC_AT);
     z80j_set_force(&g->jit, HOT_FORCE_AT);
     game_set_frame_us(g, PLAT_NTSC_FRAME_US);
-    sms_init(g->sms, g->ctx, rom, rom_size, VDP_LINES_NTSC);
+    /* Cartridge RAM (the battery RAM of the Sega mapper, shown in slot 2
+     * by register $FFFC): 32 KiB in VRAM, which the CPU reads and writes
+     * like DRAM, when the renderer has left some, else the 16 KiB page
+     * most cartridges have, in DRAM; zero-filled, as a cartridge with no
+     * save would be. */
+    g->cart_ram_size = 0x8000;
+    g->cart_ram_vram = 1;
+    g->cart_ram = (uint8 *)AllocMem(0x8000, MEMTYPE_VRAM | MEMTYPE_FILL);
+    if (g->cart_ram == NULL) {
+        g->cart_ram_size = 0x4000;
+        g->cart_ram_vram = 0;
+        g->cart_ram = (uint8 *)AllocMem(0x4000, MEMTYPE_DRAM | MEMTYPE_FILL);
+    }
+    if (g->cart_ram == NULL)
+        g->cart_ram_size = 0;
+    sms_init(g->sms, g->ctx, rom, rom_size, VDP_LINES_NTSC, g->cart_ram, g->cart_ram_size);
+    printf("Cartridge RAM: %lu bytes in %s\n", (unsigned long)g->cart_ram_size,
+           g->cart_ram == NULL ? "no memory" : g->cart_ram_vram ? "VRAM" : "DRAM");
     game_reset(g);
     return 0;
 }

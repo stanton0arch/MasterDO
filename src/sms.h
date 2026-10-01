@@ -60,7 +60,7 @@ typedef struct {
 /* Sets up the machine on ctx for a cartridge image, then resets it;
  * lines is VDP_LINES_NTSC or VDP_LINES_PAL. */
 void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
-              uint32 lines);
+              uint32 lines, uint8 *cart_ram, uint32 cart_ram_size);
 
 /* Power-on state, as the BIOS leaves it for the cartridge. */
 void sms_reset(sms_machine *s);

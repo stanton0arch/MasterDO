@@ -148,7 +148,7 @@ static void bench_jit(bench_cpu_result *res, jit_env *e, uint8 *cart)
     int32 i;
 
     z80j_flush(&e->state);
-    sms_mem_init(&e->mem, ctx, cart, Z80PROG_CART_SIZE, 0);
+    sms_mem_init(&e->mem, ctx, cart, Z80PROG_CART_SIZE, 0, 0);
     z80j_reset(ctx);
     z80prog_init_ram(ctx->mram);
 

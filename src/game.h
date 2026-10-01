@@ -179,6 +179,9 @@ typedef struct {
     uint32        f_interp;
     uint32        f_interp_insns;
     uint32        f_sync_us;
+    uint8  *cart_ram;       /* cartridge RAM (battery RAM of the mapper), or NULL */
+    uint32  cart_ram_size;  /* 32 KiB in VRAM, else 16 KiB in DRAM */
+    uint32  cart_ram_vram;  /* allocated in VRAM */
 } game;
 
 /* Allocates the translator and the machine for a cartridge image. */
