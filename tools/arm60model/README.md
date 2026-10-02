@@ -52,9 +52,9 @@ RAM entry headers, zone counts, lookup entries) and report the first
 inconsistencies; the check runs in the model and shifts its clock, so a
 timing-dependent run may not reproduce with it.
 
-`-cels n` prints the cel chain of frame n (position, size, bits per
-pixel) and, when the priority layer was drawn under the sprites, the
-strips it replaced. The harness also checks the assembly sprite
+`-cels n` prints the sprites of frame n as the VDP evaluated them, the
+cel chain (position, size, bits per pixel) and, when the priority layer
+was drawn under the sprites, the strips it replaced. The harness also checks the assembly sprite
 evaluation of every frame against a C reference and reports the frames
 with differences (`Sprites:` lines).
 

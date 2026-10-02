@@ -13,7 +13,7 @@
 #define JIT_ZONES       14
 #define JIT_HOT_ZONES   5       /* code translated again after an eviction goes there */
 #define JIT_CODE_BYTES  (JIT_ZONE_BYTES * JIT_ZONES)
-#define JIT_BLOCKS      3072
+#define JIT_BLOCKS      2048
 #define JIT_LINKS       (2 * JIT_BLOCKS)
 #define ROM_QUEUE       1024
 #define ROM_MAX_BLOCKS  4000
@@ -318,14 +318,11 @@ void game_translate_rom(game *g)
     uint32 t0;
     uint32 k;
 
-    visited = (uint32 *)AllocMem(0x10000 / 8, MEMTYPE_DRAM | MEMTYPE_FILL);
-    queue = (uint32 *)AllocMem(ROM_QUEUE * 4, MEMTYPE_DRAM);
-    if (visited == NULL || queue == NULL) {
-        printf("ROM translation: out of memory\n");
-        if (visited != NULL) FreeMem(visited, 0x10000 / 8);
-        if (queue != NULL) FreeMem(queue, ROM_QUEUE * 4);
-        return;
-    }
+    /* The visited bitmap and the queue borrow the log arena, which holds
+     * nothing before the run. */
+    visited = g->log;
+    queue = g->log + 0x10000 / 32;
+    memset(visited, 0, 0x10000 / 8);
     queue[tail++] = 0x0000;
     queue[tail++] = 0x0038;
     queue[tail++] = 0x0066;
@@ -361,8 +358,7 @@ void game_translate_rom(game *g)
     g->rom_us = plat_usec_now() - t0;
     g->rom_busy = j->stats.busy_loops - busy0;
 
-    FreeMem(queue, ROM_QUEUE * 4);
-    FreeMem(visited, 0x10000 / 8);
+    g->log_len = 0;
 
     printf("ROM translation: %lu blocks, %lu instructions, %lu bytes of ARM code, %lu us "
            "(%lu us per instruction), %lu busy-wait loops, %lu flag scans from the cache, "

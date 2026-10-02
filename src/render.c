@@ -1056,6 +1056,7 @@ void render_update(renderer *r, vdp_state *v)
         uint32 j = r->dlist[k];
 
         r->t_ok[j] = 0;
+        v->spr_tile_ok[j] = 0;
         for (m = 0; m < RENDER_LAYERS; m++) {
             uint32 d = j - (r->layer[m].nt_base >> 5);
 

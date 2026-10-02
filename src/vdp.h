@@ -110,7 +110,12 @@ typedef struct {
     uint32  spr_zoom;       /* register 1 bit 0 */
     uint32  spr_partial;    /* some sprite is hidden on some of its lines */
     int32   spr_y[VDP_SPRITES];     /* screen line of the first row */
-    uint32  spr_vis[VDP_SPRITES];   /* bit k: line spr_y + k displayed */
+    uint32  spr_vis[VDP_SPRITES];   /* bit k: line spr_y + k displayed, lines
+                                       off the screen clear (only written
+                                       when some line overflows) */
+    uint32  spr_rows[VDP_SPRITES];  /* bit r: tile row r holds an opaque pixel */
+    uint8   spr_tile_rows[VDP_TILES];   /* the same per tile, cached */
+    uint8   spr_tile_ok[VDP_TILES];     /* the cache entry is valid */
 } vdp_state;
 
 /* Power-on state; lines is VDP_LINES_NTSC or VDP_LINES_PAL. */
@@ -147,7 +152,9 @@ uint32 vdp_hcounter(const vdp_state *v, uint32 left);
 
 /* Evaluates the sprite attribute table for the picture of the frame
  * (spr_* fields): the per-line limit, the overflow and collision flags,
- * which are set in the status and returned. */
+ * which are set in the status and returned. The opaque rows of the
+ * tiles are cached; a written tile is seen through the dirty bytes, and
+ * the caller clears spr_tile_ok for the tiles it clears them for. */
 uint32 vdp_sprites(vdp_state *v);
 
 #endif /* VDP_H */

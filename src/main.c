@@ -420,7 +420,7 @@ static void draw_results(platform *p, const app_state *st)
     uint32 frames = g.frame ? g.frame : 1;
 
     plat_clear(p, s);
-    text_line(p, s, n++, COLOR_TITLE, "MASTERDO - STEP 3D RESULTS");
+    text_line(p, s, n++, COLOR_TITLE, "MASTERDO - RESULTS");
     if (st->rom.size <= 0)
         sprintf(buf, "ROM not loaded (0x%lx)", (unsigned long)st->rom.size);
     else

@@ -29,6 +29,9 @@ CHECK_OFF(n_stat_r, offsetof(vdp_state, n_stat_r) == 0x4870);
 CHECK_OFF(spr_n, offsetof(vdp_state, spr_n) == 0x4874);
 CHECK_OFF(spr_y, offsetof(vdp_state, spr_y) == 0x4884);
 CHECK_OFF(spr_vis, offsetof(vdp_state, spr_vis) == 0x4984);
+CHECK_OFF(spr_rows, offsetof(vdp_state, spr_rows) == 0x4A84);
+CHECK_OFF(spr_tile_rows, offsetof(vdp_state, spr_tile_rows) == 0x4B84);
+CHECK_OFF(spr_tile_ok, offsetof(vdp_state, spr_tile_ok) == 0x4D84);
 CHECK_OFF(hc, offsetof(vdp_state, hc) == 0x7C);
 CHECK_OFF(dirty, offsetof(vdp_state, dirty) == 0x200);
 CHECK_OFF(vram, offsetof(vdp_state, vram) == 0x400);
@@ -136,6 +139,7 @@ void vdp_reset(vdp_state *v)
 {
     memset(v->vram, 0, sizeof(v->vram));
     memset(v->cram, 0, sizeof(v->cram));
+    memset(v->spr_tile_ok, 0, sizeof(v->spr_tile_ok));
     memset(v->reg, 0, sizeof(v->reg));
     memcpy(v->reg, vdp_power_on, sizeof(vdp_power_on));
     v->addr = 0;
@@ -168,6 +172,7 @@ void vdp_init(vdp_state *v, z80j_ctx *ctx, uint32 lines)
     v->ctx = ctx;
     v->spr_n = 0;
     v->spr_partial = 0;
+    memset(v->spr_tile_ok, 0, sizeof(v->spr_tile_ok));
     v->lines = lines;
     if (lines == VDP_LINES_PAL) {
         v->vc_jump = 0xF2;

@@ -821,6 +821,7 @@ S_H             EQU     4
 S_ZOOM          EQU     8
 S_Y             EQU     16
 S_VIS           EQU     272
+S_ROWS          EQU     528
 
 render_sprite_runs
         stmfd   sp!,{r4-r11,lr}
@@ -999,6 +1000,9 @@ pp_sprite
         ldr     r1,[r0,#S_VIS]
         cmp     r1,#0
         beq     pp_nexts                ; hidden on every line
+        ldr     r1,[r0,#S_ROWS]
+        cmp     r1,#0
+        beq     pp_nexts                ; no opaque pixel: nothing to cover
         ldr     r0,[r0,#S_Y]
         ldr     r1,[r9,#S_H]
         add     r6,r0,r1

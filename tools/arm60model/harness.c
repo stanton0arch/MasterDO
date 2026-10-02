@@ -242,7 +242,6 @@ static uint32 ref_sprites(const vdp_state *v, int32 *spr_y, uint32 *spr_vis, uin
     uint32 tbase = (v->reg[6] & 0x04) ? 256 : 0;
     uint32 tmask = (v->reg[1] & 0x02) ? 0xFE : 0xFF;
     int32 xoff = (v->reg[0] & 0x08) ? 8 : 0;
-    uint32 full = (h >= 32) ? 0xFFFFFFFFu : (((uint32)1 << h) - 1);
     int8 diff[VDP_ACTIVE + 1];
     uint8 ya[VDP_SPRITES];
     uint8 yb[VDP_SPRITES];
@@ -268,7 +267,6 @@ static uint32 ref_sprites(const vdp_state *v, int32 *spr_y, uint32 *spr_vis, uin
         if (y + (int32)h > 256)
             y -= 256;
         spr_y[k] = y;
-        spr_vis[k] = full;
         a = (y < 0) ? 0 : y;
         b = y + (int32)h;
         if (b > VDP_ACTIVE)
@@ -276,10 +274,12 @@ static uint32 ref_sprites(const vdp_state *v, int32 *spr_y, uint32 *spr_vis, uin
         if (a >= b) {
             ya[k] = 0;
             yb[k] = 0;
+            spr_vis[k] = 0;
             continue;
         }
         ya[k] = (uint8)a;
         yb[k] = (uint8)b;
+        spr_vis[k] = (((uint32)1 << (b - a)) - 1) << (a - y);
         diff[a]++;
         diff[b]--;
     }
@@ -413,10 +413,18 @@ static void check_sprites(vdp_state *v, uint32 f)
             bad = 1;
     }
     if (bad && sprite_errors++ < 20) {
+        const uint8 *sat = v->vram + ((v->reg[5] & 0x7E) << 7);
+
         printf("Sprites: frame %lu: assembly flags %lx n %lu partial %lu, reference flags %lx n %lu partial %lu\n",
                (unsigned long)f, (unsigned long)aflags, (unsigned long)v->spr_n,
                (unsigned long)v->spr_partial, (unsigned long)rflags, (unsigned long)rn,
                (unsigned long)rpartial);
+        if (sprite_errors <= 3) {
+            for (k = 0; k < rn; k++)
+                printf("Sprites:   sprite %lu: y %ld x %lu tile %lu rows %08lx\n", (unsigned long)k,
+                       (long)v->spr_y[k], (unsigned long)sat[0x80 + 2 * k],
+                       (unsigned long)sat[0x81 + 2 * k], (unsigned long)v->spr_rows[k]);
+        }
         for (k = 0; k < rn; k++) {
             if (ry[k] != v->spr_y[k] || rvis[k] != v->spr_vis[k])
                 printf("Sprites:   sprite %lu: y %ld vis %08lx, reference y %ld vis %08lx\n",
@@ -593,6 +601,15 @@ void hmain(void)
         }
         if (sim_arg(16) == f + 1 && render_display_on(g.rd)) {
             const CCB *c;
+            const vdp_state *v = &g.sms->vdp;
+            const uint8 *sat = v->vram + ((v->reg[5] & 0x7E) << 7);
+            uint32 k;
+
+            for (k = 0; k < v->spr_n; k++)
+                printf("Sprite: frame %lu: %lu: y %ld x %lu tile %lu rows %08lx vis %08lx\n",
+                       (unsigned long)(f + 1), (unsigned long)k, (long)v->spr_y[k],
+                       (unsigned long)sat[0x80 + 2 * k], (unsigned long)sat[0x81 + 2 * k],
+                       (unsigned long)v->spr_rows[k], (unsigned long)v->spr_vis[k]);
 
             for (c = render_chain(g.rd); c != NULL; c = c->ccb_NextPtr) {
                 printf("Cel: frame %lu: at %ld,%ld size %lu x %lu bpp %lu%s%s\n",
