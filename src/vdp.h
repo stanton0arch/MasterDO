@@ -24,6 +24,15 @@
  * of lines 0 to 192 and reloaded from register 10 at the end of the other
  * lines; an underflow reloads it and sets the line interrupt flag. The
  * VBlank flag is set at the start of line 192.
+ *
+ * Sprites: the sprite attribute table is evaluated once per frame by
+ * vdp_sprites(), as the hardware does line by line: the first eight
+ * sprites of the table covering a line are displayed, the ninth sets the
+ * overflow flag and is hidden on that line, and two displayed sprites
+ * with opaque pixels at the same position set the collision flag. Both
+ * flags stay set until the status register is read. Zoomed sprites
+ * (register 1 bit 0) are 16 x 16 or 16 x 32 pixels; every sprite of a
+ * line is zoomed, as on the later VDP revisions.
  */
 
 #include "types.h"
@@ -38,6 +47,7 @@
 #define VDP_HS_LOG      256         /* register 8 writes recorded per frame */
 #define VDP_NT_LOG      16          /* register 2 writes recorded per frame */
 #define VDP_DE_LOG      8           /* display enable changes recorded per frame */
+#define VDP_SPRITES     64
 
 /* Status flags. */
 #define VDP_ST_VBLANK   0x80
@@ -94,6 +104,13 @@ typedef struct {
     uint32  de_log[VDP_DE_LOG];
     uint32  de_start;       /* display enabled at the start of the frame */
     uint32  n_stat_r;       /* status reads handled in assembly */
+    /* Sprite evaluation of the frame (vdp_sprites). */
+    uint32  spr_n;          /* sprites before the terminator */
+    uint32  spr_h;          /* lines per sprite: 8, 16 or 32 */
+    uint32  spr_zoom;       /* register 1 bit 0 */
+    uint32  spr_partial;    /* some sprite is hidden on some of its lines */
+    int32   spr_y[VDP_SPRITES];     /* screen line of the first row */
+    uint32  spr_vis[VDP_SPRITES];   /* bit k: line spr_y + k displayed */
 } vdp_state;
 
 /* Power-on state; lines is VDP_LINES_NTSC or VDP_LINES_PAL. */
@@ -127,5 +144,10 @@ uint32 vdp_vcounter(const vdp_state *v, uint32 left);
  * merge. Returns the band count, at most n + 1. */
 uint32 vdp_bands(const uint32 *log, uint32 n, uint32 top_value, uint32 *tops, uint32 *vals);
 uint32 vdp_hcounter(const vdp_state *v, uint32 left);
+
+/* Evaluates the sprite attribute table for the picture of the frame
+ * (spr_* fields): the per-line limit, the overflow and collision flags,
+ * which are set in the status and returned. */
+uint32 vdp_sprites(vdp_state *v);
 
 #endif /* VDP_H */

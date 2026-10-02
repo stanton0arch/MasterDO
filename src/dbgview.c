@@ -5,7 +5,9 @@
  * of a pair use the same scroll values, so each of the 32 background
  * columns gives eight words, one per pixel column. Sprites are then drawn
  * over the pair, from the last to the first so that sprite 0 ends on top,
- * except over background pixels of tiles that have the priority bit.
+ * except over background pixels of tiles that have the priority bit. On
+ * each line only the first eight sprites of the table covering it are
+ * drawn, as on the hardware; zoomed sprites have their pixels doubled.
  */
 
 #include "dbgview.h"
@@ -172,35 +174,52 @@ static uint32 draw_background(const vdp_state *v, const uint32 *pal, uint32 y, u
     return prio;
 }
 
-/* Sprites over lines y and y + 1. */
+/* Sprites over lines y and y + 1: on each line the first eight of the
+ * table covering it (the list is in reverse table order). */
 static void draw_sprites(const vdp_state *v, const uint32 *pal, const sprite *list,
                          uint32 n, uint32 y, uint32 prio, uint32 *d)
 {
-    uint32 h = (v->reg[1] & 0x02) ? 16 : 8;
-    uint32 i;
+    uint32 zoom = (uint32)v->reg[1] & 1;
+    uint32 h = ((v->reg[1] & 0x02) ? 16 : 8) << zoom;
     uint32 half;
 
-    for (i = 0; i < n; i++) {
-        const sprite *s = &list[i];
+    for (half = 0; half < 2; half++) {
+        uint8 shown[MAX_SPRITES];
+        uint32 count = 0;
+        uint32 i;
 
-        for (half = 0; half < 2; half++) {
+        for (i = n; i-- > 0;) {
+            uint32 dy = (y + half - list[i].y) & 255;
+
+            shown[i] = 0;
+            if (dy < h && count < 8) {
+                shown[i] = 1;
+                count++;
+            }
+        }
+        for (i = 0; i < n; i++) {
+            const sprite *s = &list[i];
             uint32 dy = (y + half - s->y) & 255;
             uint32 pix;
             int32 x;
             uint32 k;
 
-            if (dy >= h)
+            if (!shown[i])
                 continue;
+            dy >>= zoom;
             pix = tile_row(v->vram, s->tile + (dy >> 3), dy & 7);
-            for (k = 0, x = s->x; k < 8; k++, x++, pix <<= 4) {
+            for (k = 0, x = s->x; k < 8; k++, pix <<= 4) {
                 uint32 c = pix >> 28;
+                uint32 t;
 
-                if (c == 0 || x < 0 || x >= DBGVIEW_WIDTH || (prio && prio_mask[half][x]))
-                    continue;
-                if (half == 0)
-                    d[x] = (d[x] & 0xFFFF) | (pal[16 + c] << 16);
-                else
-                    d[x] = (d[x] & 0xFFFF0000u) | pal[16 + c];
+                for (t = 0; t <= zoom; t++, x++) {
+                    if (c == 0 || x < 0 || x >= DBGVIEW_WIDTH || (prio && prio_mask[half][x]))
+                        continue;
+                    if (half == 0)
+                        d[x] = (d[x] & 0xFFFF) | (pal[16 + c] << 16);
+                    else
+                        d[x] = (d[x] & 0xFFFF0000u) | pal[16 + c];
+                }
             }
         }
     }

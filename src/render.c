@@ -40,6 +40,14 @@ CHECK_OFF(xtab, offsetof(render_layer, xtab) == 52);
 CHECK_OFF(stale, offsetof(render_layer, stale) == 308);
 CHECK_OFF(stale_rows, offsetof(render_layer, stale_rows) == 312);
 CHECK_OFF(shown_rows, offsetof(render_layer, shown_rows) == 316);
+CHECK_OFF(pg_n, offsetof(render_layer, pg_n) == 192);
+CHECK_OFF(pg_row0, offsetof(render_layer, pg_row0) == 196);
+CHECK_OFF(pg_nrows, offsetof(render_layer, pg_nrows) == 224);
+CHECK_OFF(pg_col0, offsetof(render_layer, pg_col0) == 252);
+CHECK_OFF(pg_col1, offsetof(render_layer, pg_col1) == 280);
+CHECK_OFF(sa_end, offsetof(render_sprite_args, end) == 32);
+CHECK_OFF(sa_needed, offsetof(render_sprite_args, needed) == 40);
+CHECK_OFF(pa_p, offsetof(render_patch_args, p) == 28);
 
 #define BM_PITCH        RENDER_W            /* bytes per bitmap row */
 #define BM_WORDS        (RENDER_W / 4)      /* words per bitmap row */
@@ -55,7 +63,7 @@ CHECK_OFF(shown_rows, offsetof(render_layer, shown_rows) == 316);
 #define CEL_BLANK       (CEL_DBLANK0 + RENDER_MAX_DBLANK)
 #define CEL_TERM        (CEL_BLANK + 1)
 #define CEL_SPRITE0     (CEL_BLANK + 2)
-#define N_CELS          (CEL_SPRITE0 + RENDER_SPRITES)
+#define N_CELS          (CEL_SPRITE0 + RENDER_SPRITE_CELS)
 
 #define CEL_MEM         (MEMTYPE_DRAM | MEMTYPE_CEL | MEMTYPE_FILL)
 #define VCEL_MEM        (MEMTYPE_VRAM | MEMTYPE_CEL | MEMTYPE_FILL)
@@ -253,7 +261,7 @@ Err render_init(renderer *r)
     c = &r->cels[CEL_TERM];
     init_cel(c, CCB_SKIP | CCB_LAST | CCB_NPABS | CCB_SPABS | CCB_PPABS);
     /* Sprites: colour 0 transparent, drawn from the last to the first. */
-    for (k = 0; k < RENDER_SPRITES; k++) {
+    for (k = 0; k < RENDER_SPRITE_CELS; k++) {
         c = &r->cels[CEL_SPRITE0 + k];
         init_cel(c, BASE_FLAGS | CCB_LDPLUT);
         c->ccb_PLUTPtr = r->pluts + 32;
@@ -282,7 +290,8 @@ void render_reset(renderer *r)
         memset(l->prio_rows, 0, sizeof(l->prio_rows));
     }
     r->update = 0;
-    r->spr_tall = 0xFFFFFFFFu;
+    r->spr_mode = 0xFFFFFFFFu;
+    r->spr_runs = 0;
     r->n_sprites = 0;
     r->backdrop = 0xFFFFFFFFu;
     r->display_on = 0;
@@ -693,7 +702,8 @@ static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nb, uint32 nnb,
 }
 
 /* Priority strips of the layer for this update: consecutive rows holding
- * priority cells in the same columns make one strip. */
+ * priority cells make one strip, over the columns any of them uses (a
+ * few transparent pixels cost less than a cel per row). */
 static void prio_groups(render_layer *l)
 {
     uint32 row = 0;
@@ -729,9 +739,12 @@ static void prio_groups(render_layer *l)
         c0 = l->prio_min[row];
         c1 = l->prio_max[row] + 1;
         for (row++; row < RENDER_NT_ROWS; row++) {
-            if (l->prio_rows[row] == 0 || l->prio_dirty[row] ||
-                l->prio_min[row] != c0 || l->prio_max[row] + 1 != c1)
+            if (l->prio_rows[row] == 0 || l->prio_dirty[row])
                 break;
+            if (l->prio_min[row] < c0)
+                c0 = l->prio_min[row];
+            if (l->prio_max[row] + 1u > c1)
+                c1 = l->prio_max[row] + 1u;
         }
         l->pg_row0[n] = (uint8)row0;
         l->pg_nrows[n] = (uint8)(row - row0);
@@ -762,7 +775,9 @@ static uint32 lband_from(const renderer *r, uint32 y)
 
 /* The strips of a group of priority rows of layer m, whose screen lines
  * are y0 to y1 - 1 (y1 may run past the bitmap height: the rest wraps to
- * the top), on the line bands of that layer which they reach. */
+ * the top), on the line bands of that layer which they reach, each band
+ * cut to the lines of the pass so that a group wrapping to the top is
+ * not drawn twice on a band holding both of its parts. */
 static void group_strips(renderer *r, piece_ctx *p, uint32 m, const uint8 *bm, uint32 bx0,
                          uint32 bx1, uint32 by0, uint32 by1, uint32 y0, uint32 y1,
                          uint32 reg0, uint32 vs)
@@ -787,11 +802,18 @@ static void group_strips(renderer *r, piece_ctx *p, uint32 m, const uint8 *bm, u
             continue;
         for (k = lband_from(r, ga); k < r->nlb; k++) {
             uint32 lb = r->lbands[k];
+            uint32 la = lb & 0xFF;
+            uint32 lz = (lb >> 8) & 0xFF;
 
-            if ((lb & 0xFF) >= gb)
+            if (la >= gb)
                 break;
             if ((lb >> 24) != m)
                 continue;
+            if (la < ga)
+                la = ga;
+            if (lz > gb)
+                lz = gb;
+            lb = (lb & 0xFFFF0000u) | la | (lz << 8);
             if (reg0 & 0xC0)
                 rect_pieces(r, p, bm, bx0, bx1, by0, by1, lb, reg0, vs);
             else
@@ -801,10 +823,12 @@ static void group_strips(renderer *r, piece_ctx *p, uint32 m, const uint8 *bm, u
 }
 
 /* Background pieces of the line bands, from the bitmap of their layer,
- * then the priority strips: each strip group of a layer on the line
- * bands of that layer which its lines reach. Returns the number of
- * pieces and, in *nprio, the number of strips. */
-static uint32 update_pieces(renderer *r, const vdp_state *v, uint32 *nprio)
+ * then the priority layer: each strip group of a layer on the line bands
+ * of that layer which its lines reach, replaced by the parts of those
+ * strips under the sprites when they cover fewer pixels (nothing at all
+ * without a sprite over a strip). Returns the number of pieces and, in
+ * *nprio, the number of priority cels, which start at *prio0. */
+static uint32 update_pieces(renderer *r, const vdp_state *v, uint32 *nprio, uint32 *prio0)
 {
     piece_ctx pb;
     piece_ctx pp;
@@ -812,6 +836,8 @@ static uint32 update_pieces(renderer *r, const vdp_state *v, uint32 *nprio)
     uint32 vs = v->reg[9];
     uint32 np;
     uint32 npr;
+    uint32 ns;
+    uint32 first = CEL_PRIO0;
     uint32 k;
     uint32 m;
 
@@ -856,12 +882,39 @@ static uint32 update_pieces(renderer *r, const vdp_state *v, uint32 *nprio)
             }
         }
     }
-    npr = (uint32)(pp.c - &r->cels[CEL_PRIO0]);
+    ns = (uint32)(pp.c - &r->cels[CEL_PRIO0]);
+    npr = ns;
+    if (ns != 0 && v->spr_n != 0) {
+        render_patch_args a;
+        uint32 pixels = 0;
+
+        for (k = 0; k < ns; k++) {
+            const CCB *c = &r->cels[CEL_PRIO0 + k];
+
+            pixels += (((c->ccb_PRE0 >> PRE0_VCNT_SHIFT) & 0x3FF) + 1) *
+                      ((c->ccb_PRE1 & 0x7FF) + 1);
+        }
+        a.strips = &r->cels[CEL_PRIO0];
+        a.nstrips = ns;
+        a.xoff = (reg0 & 0x08) ? 8 : 0;
+        a.v = v;
+        a.sat = v->vram + ((v->reg[5] & 0x7E) << 7);
+        a.limit = pixels;
+        a.area = 0;
+        a.p = &pp;
+        if (render_prio_patches(&a)) {
+            first = CEL_PRIO0 + ns;
+            npr = (uint32)(pp.c - &r->cels[first]);
+            r->st.prio_patches += npr;
+            ns = 0;
+        }
+    }
+    r->st.prio_strips += ns;
     for (k = 1; k < npr; k++)
-        r->cels[CEL_PRIO0 + k - 1].ccb_NextPtr = &r->cels[CEL_PRIO0 + k];
+        r->cels[first + k - 1].ccb_NextPtr = &r->cels[first + k];
     r->st.pieces += np;
-    r->st.prio_strips += npr;
     *nprio = npr;
+    *prio0 = first;
     return np;
 }
 
@@ -878,26 +931,31 @@ static void sprite_tiles(renderer *r, uint32 t, uint32 tall, const uint8 *vram)
 }
 
 /* Sets up the cels of the active sprites (before the $D0 terminator) and
- * converts the tiles they miss; returns the count. */
+ * converts the tiles they miss; returns the count. The usual case, every
+ * sprite shown whole, is one cel per sprite set up in assembly. */
 static uint32 update_sprites(renderer *r, const vdp_state *v)
 {
     const uint8 *vram = v->vram;
     const uint8 *sat = vram + ((v->reg[5] & 0x7E) << 7);
     uint32 tall = (v->reg[1] & 0x02) ? 1 : 0;
+    uint32 mode = tall | (v->spr_zoom << 1);
     render_sprite_args a;
-    uint32 n;
+    uint32 n = v->spr_n;
     uint32 nn;
     uint32 k;
 
-    for (n = 0; n < RENDER_SPRITES; n++) {
-        if (sat[n] == 0xD0)
-            break;
-    }
-    if (tall != r->spr_tall) {
-        r->spr_tall = tall;
-        for (k = 0; k < RENDER_SPRITES; k++) {
-            r->cels[CEL_SPRITE0 + k].ccb_PRE0 =
-                (((tall ? 16 : 8) - PRE0_VCNT_PREFETCH) << PRE0_VCNT_SHIFT) | PRE0_BPP_8;
+    if (mode != r->spr_mode || r->spr_runs) {
+        uint32 scale = 1 << v->spr_zoom;
+
+        r->spr_mode = mode;
+        r->spr_runs = 0;
+        for (k = 0; k < RENDER_SPRITE_CELS; k++) {
+            CCB *c = &r->cels[CEL_SPRITE0 + k];
+
+            c->ccb_PRE0 = (((tall ? 16 : 8) - PRE0_VCNT_PREFETCH) << PRE0_VCNT_SHIFT) |
+                          PRE0_BPP_8;
+            c->ccb_HDX = (int32)(scale << 20);
+            c->ccb_VDY = (int32)(scale << 16);
         }
     }
     a.tiles = r->tiles;
@@ -907,7 +965,21 @@ static uint32 update_sprites(renderer *r, const vdp_state *v)
     a.xoff = (v->reg[0] & 0x08) ? 8 : 0;
     a.need = r->wlist;
     a.tall = tall;
-    nn = render_sprites(sat, n, &r->cels[CEL_SPRITE0], &a);
+    a.ywrap = 256 - v->spr_h;
+    if (v->spr_partial) {
+        CCB *c;
+
+        r->spr_runs = 1;
+        r->st.spr_partial++;
+        a.end = &r->cels[CEL_SPRITE0 + RENDER_SPRITE_CELS];
+        a.dropped = 0;
+        c = render_sprite_runs(sat, v, &r->cels[CEL_SPRITE0], &a);
+        r->st.spr_dropped += a.dropped;
+        n = (uint32)(c - &r->cels[CEL_SPRITE0]);
+        nn = a.needed;
+    } else {
+        nn = render_sprites(sat, n, &r->cels[CEL_SPRITE0], &a);
+    }
     for (k = 0; k < nn; k++)
         sprite_tiles(r, r->wlist[k], tall, vram);
     r->st.sprites += n;
@@ -928,6 +1000,7 @@ void render_update(renderer *r, vdp_state *v)
     uint32 nd;
     uint32 np;
     uint32 npr;
+    uint32 npr0;
     uint32 nbl;
     uint32 any_on;
     uint32 ns;
@@ -955,6 +1028,13 @@ void render_update(renderer *r, vdp_state *v)
         r->display_on = 0;
         return;
     }
+    /* The sprites the hardware shows on each line, and the flags it sets
+     * while drawing them. */
+    k = vdp_sprites(v);
+    if (k & VDP_ST_OVERFLOW)
+        r->st.overflows++;
+    if (k & VDP_ST_COLLIDE)
+        r->st.collisions++;
 
     /* Each cell is drawn at most once per update: the stamp of the
      * update marks the cells drawn (a wrap makes a cell drawn 256
@@ -1030,7 +1110,7 @@ void render_update(renderer *r, vdp_state *v)
         l->tiles_conv = 0;
     }
 
-    np = update_pieces(r, v, &npr);
+    np = update_pieces(r, v, &npr, &npr0);
     ns = update_sprites(r, v);
     r->n_sprites = ns;
     r->st.tiles += r->layer[0].tiles_conv;
@@ -1045,8 +1125,8 @@ void render_update(renderer *r, vdp_state *v)
         last = &r->cels[CEL_SPRITE0];
     }
     if (npr) {
-        last->ccb_NextPtr = &r->cels[CEL_PRIO0];
-        last = &r->cels[CEL_PRIO0 + npr - 1];
+        last->ccb_NextPtr = &r->cels[npr0];
+        last = &r->cels[npr0 + npr - 1];
     }
     if (nbl) {
         last->ccb_NextPtr = &r->cels[CEL_DBLANK0];

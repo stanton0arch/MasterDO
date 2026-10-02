@@ -52,6 +52,12 @@ RAM entry headers, zone counts, lookup entries) and report the first
 inconsistencies; the check runs in the model and shifts its clock, so a
 timing-dependent run may not reproduce with it.
 
+`-cels n` prints the cel chain of frame n (position, size, bits per
+pixel) and, when the priority layer was drawn under the sprites, the
+strips it replaced. The harness also checks the assembly sprite
+evaluation of every frame against a C reference and reports the frames
+with differences (`Sprites:` lines).
+
 A hang is located without a debugger: `kill -USR1 <pid of sim>` prints the
 simulated pc and lr with their symbols, the stack pointer, r0 and r1.
 

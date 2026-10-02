@@ -11,6 +11,8 @@
         EXPORT  render_stale_cells
         EXPORT  render_tile_conv
         EXPORT  render_rect_pieces
+        EXPORT  render_sprite_runs
+        EXPORT  render_prio_patches
 
 ; CCB fields (graphics.h).
 CCB_SOURCE      EQU     8
@@ -52,6 +54,10 @@ SA_TMASK        EQU     12
 SA_XOFF         EQU     16
 SA_NEED         EQU     20
 SA_TALL         EQU     24
+SA_YWRAP        EQU     28
+SA_END          EQU     32
+SA_DROPPED      EQU     36
+SA_NEEDED       EQU     40
 
 ;----------------------------------------------------------------------------
 ; uint32 render_nt_scan(const uint32 *nt, const uint32 *shadow,
@@ -193,9 +199,10 @@ dscan_next
 render_sprites
         stmfd   sp!,{r4-r11,lr}
         ldmia   r3,{r4-r10}             ; tiles, t_ok, tbase, tmask, xoff, need, tall
+        ldr     r3,[r3,#SA_YWRAP]
         add     r10,r5,r10              ; t_ok + 1 for tall sprites, else t_ok
+        stmfd   sp!,{r3,r9}             ; Y wrap, start of the need list
         add     r3,r0,#0x80             ; x / tile pairs
-        str     r9,[sp,#-4]!            ; start of the need list
         movs    r1,r1
         beq     spr_done
 spr_loop
@@ -214,8 +221,9 @@ spr_loop
         mov     r11,r11,lsl #16
         str     r11,[r2,#CCB_XPOS]
         ldrb    r12,[r0],#1             ; y
+        ldr     lr,[sp]                 ; a sprite past the wrap shows at the top
         add     r12,r12,#1
-        cmp     r12,#240
+        cmp     r12,lr
         subgt   r12,r12,#256
         mov     r12,r12,lsl #16
         str     r12,[r2,#CCB_YPOS]
@@ -223,8 +231,8 @@ spr_loop
         subs    r1,r1,#1
         bne     spr_loop
 spr_done
-        ldr     r0,[sp],#4
-        sub     r0,r9,r0
+        ldmfd   sp!,{r0,r1}
+        sub     r0,r9,r1
         mov     r0,r0,lsr #2
         ldmfd   sp!,{r4-r11,pc}
 
@@ -794,6 +802,311 @@ rb_draw
         add     r11,r11,#1
         cmp     r11,#NONE
         bne     rb_loop
+        ldmfd   sp!,{r4-r11,pc}
+
+        ;----------------------------------------------------------------------------
+; CCB *render_sprite_runs(const uint8 *sat, const vdp_state *v, CCB *cel,
+;                         render_sprite_args *a)
+;
+; Cels of the sprites evaluated by the VDP (spr_* fields of v) when some
+; are hidden on some of their lines: one cel per run of shown lines of
+; each sprite, reading the rows of the run; a zoomed sprite's run is
+; rounded to whole doubled rows. Tiles whose conversion is missing are
+; appended to a->need as in render_sprites; a->dropped counts the runs
+; beyond a->end. Returns the cel after the last one set up.
+;----------------------------------------------------------------------------
+V_SPR           EQU     0x4874          ; vdp_state.spr_n, then:
+S_N             EQU     0
+S_H             EQU     4
+S_ZOOM          EQU     8
+S_Y             EQU     16
+S_VIS           EQU     272
+
+render_sprite_runs
+        stmfd   sp!,{r4-r11,lr}
+        sub     sp,sp,#24               ; need start, tile, x, y, end, k
+        ldr     r4,[r3,#SA_TILES]
+        ldr     r5,[r3,#SA_TOK]
+        ldr     r6,[r3,#SA_TALL]
+        add     r6,r5,r6                ; t_ok + 1 for tall sprites
+        ldr     r9,[r3,#SA_NEED]
+        str     r9,[sp,#0]
+        ldr     lr,[r3,#SA_END]
+        str     lr,[sp,#16]
+        add     r11,r1,#0x4800
+        add     r11,r11,#V_SPR-0x4800   ; &spr_n
+        ldr     r10,[r11,#S_ZOOM]
+        mov     r1,#0
+        str     r1,[sp,#20]
+rs_loop
+        ldr     r1,[sp,#20]
+        ldr     lr,[r11,#S_N]
+        cmp     r1,lr
+        bhs     rs_done
+        add     lr,r11,r1,lsl #2
+        ldr     r12,[lr,#S_VIS]
+        ldr     lr,[lr,#S_Y]
+        str     lr,[sp,#12]
+        movs    r12,r12
+        beq     rs_next
+        ldr     lr,[r3,#SA_XOFF]
+        add     r7,r0,r1,lsl #1
+        ldrb    r8,[r7,#0x80]
+        sub     r8,r8,lr
+        mov     r8,r8,lsl #16
+        str     r8,[sp,#8]
+        ldrb    r7,[r7,#0x81]
+        ldr     lr,[r3,#SA_TMASK]
+        and     r7,r7,lr
+        ldr     lr,[r3,#SA_TBASE]
+        add     r7,r7,lr                ; tile
+        str     r7,[sp,#4]
+        ldrb    lr,[r5,r7]
+        tst     lr,#1
+        ldrneb  lr,[r6,r7]
+        tstne   lr,#1
+        streq   r7,[r9],#4              ; conversion missing
+        ldr     lr,[r11,#S_H]
+        cmp     lr,#32
+        mvnhs   lr,#0
+        movlo   r7,#1
+        movlo   lr,r7,lsl lr
+        sublo   lr,lr,#1                ; every line
+        cmp     r12,lr
+        bne     rs_partial
+        ; The whole sprite: one cel.
+        ldr     lr,[sp,#16]
+        cmp     r2,lr
+        beq     rs_full
+        ldr     lr,[sp,#4]
+        add     lr,r4,lr,lsl #6
+        str     lr,[r2,#CCB_SOURCE]
+        ldr     lr,[sp,#8]
+        str     lr,[r2,#CCB_XPOS]
+        ldr     lr,[sp,#12]
+        mov     lr,lr,lsl #16
+        str     lr,[r2,#CCB_YPOS]
+        ldr     lr,[r11,#S_H]
+        mov     lr,lr,lsr r10
+        sub     lr,lr,#1
+        mov     lr,lr,lsl #6
+        orr     lr,lr,#5
+        str     lr,[r2,#CCB_PRE0]
+        add     r2,r2,#CCB_SIZE
+        b       rs_next
+rs_partial
+        mov     r7,#0                   ; first line of the run
+rs_run
+        tst     r12,#1
+        bne     rs_start
+        mov     r12,r12,lsr #1
+        add     r7,r7,#1
+        b       rs_run
+rs_start
+        mov     r8,r7                   ; its end
+rs_len
+        tst     r12,#1
+        beq     rs_end
+        mov     r12,r12,lsr #1
+        add     r8,r8,#1
+        b       rs_len
+rs_end
+        cmp     r10,#0
+        beq     rs_emit
+        bic     r7,r7,#1
+        tst     r8,#1
+        addne   r8,r8,#1
+        movne   r12,r12,lsr #1
+rs_emit
+        ldr     lr,[sp,#16]
+        cmp     r2,lr
+        beq     rs_full
+        ldr     lr,[sp,#4]
+        mov     lr,lr,lsl #6
+        add     lr,r4,lr                ; tile store
+        mov     r1,r7,lsr r10
+        add     lr,lr,r1,lsl #3         ; row of the run
+        str     lr,[r2,#CCB_SOURCE]
+        ldr     lr,[sp,#8]
+        str     lr,[r2,#CCB_XPOS]
+        ldr     lr,[sp,#12]
+        add     lr,lr,r7
+        mov     lr,lr,lsl #16
+        str     lr,[r2,#CCB_YPOS]
+        sub     r1,r8,r7
+        mov     r1,r1,lsr r10
+        sub     r1,r1,#1
+        mov     r1,r1,lsl #6
+        orr     r1,r1,#5                ; PRE0: rows - 1, 8 bpp
+        str     r1,[r2,#CCB_PRE0]
+        add     r2,r2,#CCB_SIZE
+        mov     r7,r8
+        movs    r12,r12
+        bne     rs_run
+rs_next
+        ldr     r1,[sp,#20]
+        add     r1,r1,#1
+        str     r1,[sp,#20]
+        b       rs_loop
+rs_full
+        ldr     lr,[r3,#SA_DROPPED]
+        add     lr,lr,#1
+        str     lr,[r3,#SA_DROPPED]
+rs_done
+        ldr     r1,[sp,#0]
+        sub     r1,r9,r1
+        mov     r1,r1,lsr #2
+        str     r1,[r3,#SA_NEEDED]
+        mov     r0,r2
+        add     sp,sp,#24
+        ldmfd   sp!,{r4-r11,pc}
+
+
+
+;----------------------------------------------------------------------------
+; uint32 render_prio_patches(render_patch_args *a)
+;
+; The priority layer under the sprites: the strips of the frame (cels
+; already set up, a->strips, a->nstrips) are screen rectangles each
+; showing a contiguous part of a priority bitmap; for each sprite on the
+; screen, the part of each strip under it becomes a cel of its own,
+; appended to a->p. Gives up with 0 when the pixels of the patches
+; exceed a->limit or the cels run out; else returns 1 with the pixels in
+; a->area.
+;----------------------------------------------------------------------------
+PA_STRIPS       EQU     0
+PA_NSTRIPS      EQU     4
+PA_XOFF         EQU     8
+PA_V            EQU     12
+PA_SAT          EQU     16
+PA_LIMIT        EQU     20
+PA_AREA         EQU     24
+PA_P            EQU     28
+
+render_prio_patches
+        stmfd   sp!,{r4-r11,lr}
+        mov     r11,r0                  ; args
+        mov     r10,#0                  ; area
+        ldr     r9,[r11,#PA_V]
+        add     r9,r9,#0x4800
+        add     r9,r9,#V_SPR-0x4800     ; &spr_n
+        mov     r8,#0                   ; sprite
+pp_sprite
+        ldr     r0,[r9,#S_N]
+        cmp     r8,r0
+        bhs     pp_ok
+        add     r0,r9,r8,lsl #2
+        ldr     r1,[r0,#S_VIS]
+        cmp     r1,#0
+        beq     pp_nexts                ; hidden on every line
+        ldr     r0,[r0,#S_Y]
+        ldr     r1,[r9,#S_H]
+        add     r6,r0,r1
+        cmp     r6,#192
+        movgt   r6,#192                 ; r6 = sy1
+        movs    r7,r0
+        movmi   r7,#0                   ; r7 = sy0
+        cmp     r7,r6
+        bge     pp_nexts
+        ldr     r0,[r11,#PA_SAT]
+        add     r0,r0,r8,lsl #1
+        ldrb    r0,[r0,#0x80]
+        ldr     r1,[r11,#PA_XOFF]
+        sub     r0,r0,r1                ; x
+        ldr     r1,[r9,#S_ZOOM]
+        mov     r2,#8
+        mov     r2,r2,lsl r1
+        add     r4,r0,r2
+        cmp     r4,#256
+        movgt   r4,#256                 ; r4 = sx1
+        movs    r5,r0
+        movmi   r5,#0                   ; r5 = sx0
+        cmp     r5,r4
+        bge     pp_nexts
+        ldr     r3,[r11,#PA_STRIPS]
+        ldr     r2,[r11,#PA_NSTRIPS]
+        mov     r12,#CCB_SIZE
+        mla     r2,r12,r2,r3            ; end of the strips
+pp_strip
+        cmp     r3,r2
+        bhs     pp_nexts
+        ldr     r0,[r3,#CCB_YPOS]
+        mov     r0,r0,asr #16           ; first line of the strip
+        ldr     r1,[r3,#CCB_PRE0]
+        mov     r1,r1,lsr #6
+        add     r1,r1,#1
+        add     r1,r0,r1                ; its end
+        cmp     r0,r7
+        movlt   r0,r7                   ; iy0
+        cmp     r1,r6
+        movgt   r1,r6                   ; iy1
+        cmp     r0,r1
+        bge     pp_nextst
+        ldr     r12,[r3,#CCB_XPOS]
+        mov     r12,r12,asr #16         ; first column of the strip
+        ldr     lr,[r3,#CCB_PRE1]
+        mov     lr,lr,lsl #21
+        mov     lr,lr,lsr #21
+        add     lr,lr,#1
+        add     lr,r12,lr               ; its end
+        cmp     r12,r5
+        movlt   r12,r5                  ; ix0
+        cmp     lr,r4
+        movgt   lr,r4                   ; ix1
+        cmp     r12,lr
+        bge     pp_nextst
+        ; A patch: lines r0 to r1 - 1, columns r12 to lr - 1 of the strip.
+        sub     r1,r1,r0                ; rows
+        sub     lr,lr,r12               ; columns
+        mla     r10,r1,lr,r10
+        stmfd   sp!,{r2,r3,r4,r5}
+        ldr     r2,[r11,#PA_LIMIT]
+        cmp     r10,r2
+        bhi     pp_fail
+        ldr     r2,[r11,#PA_P]
+        ldmia   r2,{r4,r5}              ; next cel, capacity
+        cmp     r4,r5
+        beq     pp_fail
+        add     r5,r4,#CCB_SIZE
+        str     r5,[r2]                 ; the cel after the patch
+        ldr     r5,[r3,#CCB_YPOS]
+        sub     r5,r0,r5,asr #16        ; rows into the strip
+        mov     r0,r0,lsl #16
+        str     r0,[r4,#CCB_YPOS]
+        ldr     r0,[r3,#CCB_XPOS]
+        sub     r0,r12,r0,asr #16       ; columns into the strip
+        and     r2,r0,#3                ; pixels before the word boundary
+        sub     r0,r0,r2
+        add     r0,r0,r5,lsl #8
+        ldr     r5,[r3,#CCB_SOURCE]
+        add     r0,r0,r5
+        str     r0,[r4,#CCB_SOURCE]
+        sub     r12,r12,r2
+        mov     r12,r12,lsl #16
+        str     r12,[r4,#CCB_XPOS]
+        add     lr,lr,r2
+        sub     lr,lr,#1
+        orr     lr,lr,#0x3E0000         ; PRE1: 64 - 2 words per row, width - 1
+        orr     lr,lr,#0x1000
+        str     lr,[r4,#CCB_PRE1]
+        sub     r1,r1,#1
+        mov     r1,r1,lsl #6
+        orr     r1,r1,#5                ; PRE0: rows - 1, 8 bpp
+        str     r1,[r4,#CCB_PRE0]
+        ldmfd   sp!,{r2,r3,r4,r5}
+pp_nextst
+        add     r3,r3,#CCB_SIZE
+        b       pp_strip
+pp_nexts
+        add     r8,r8,#1
+        b       pp_sprite
+pp_fail
+        add     sp,sp,#16
+        mov     r0,#0
+        ldmfd   sp!,{r4-r11,pc}
+pp_ok
+        str     r10,[r11,#PA_AREA]
+        mov     r0,#1
         ldmfd   sp!,{r4-r11,pc}
 
         END

@@ -26,6 +26,9 @@ CHECK_OFF(lc_k, offsetof(vdp_state, lc_k) == 0x70);
 CHECK_OFF(lc_val, offsetof(vdp_state, lc_val) == 0x74);
 CHECK_OFF(nt_n, offsetof(vdp_state, nt_n) == 0x4804);
 CHECK_OFF(n_stat_r, offsetof(vdp_state, n_stat_r) == 0x4870);
+CHECK_OFF(spr_n, offsetof(vdp_state, spr_n) == 0x4874);
+CHECK_OFF(spr_y, offsetof(vdp_state, spr_y) == 0x4884);
+CHECK_OFF(spr_vis, offsetof(vdp_state, spr_vis) == 0x4984);
 CHECK_OFF(hc, offsetof(vdp_state, hc) == 0x7C);
 CHECK_OFF(dirty, offsetof(vdp_state, dirty) == 0x200);
 CHECK_OFF(vram, offsetof(vdp_state, vram) == 0x400);
@@ -163,6 +166,8 @@ void vdp_init(vdp_state *v, z80j_ctx *ctx, uint32 lines)
     uint32 t;
 
     v->ctx = ctx;
+    v->spr_n = 0;
+    v->spr_partial = 0;
     v->lines = lines;
     if (lines == VDP_LINES_PAL) {
         v->vc_jump = 0xF2;
@@ -359,3 +364,4 @@ uint32 vdp_bands(const uint32 *log, uint32 n, uint32 top_value, uint32 *tops, ui
     }
     return nb;
 }
+

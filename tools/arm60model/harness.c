@@ -213,6 +213,219 @@ static uint32 compare(uint32 *outside)
 }
 
 
+
+/* Reference of the VDP's sprite evaluation (vdp_sprites, in assembly): the
+ * same decisions written plainly in C, compared with it every frame. */
+static uint32 ref_tile_mask(const uint8 *vram, uint32 t, uint32 r)
+{
+    const uint8 *p = vram + (t & 0x1FF) * 32 + r * 4;
+
+    return (uint32)p[0] | p[1] | p[2] | p[3];
+}
+
+static uint32 ref_zoom_mask(uint32 m)
+{
+    m = ((m & 0xF0) << 4) | (m & 0x0F);
+    m = ((m & 0x0C0C) << 2) | (m & 0x0303);
+    m = ((m & 0x2222) << 1) | (m & 0x1111);
+    return m | (m << 1);
+}
+
+static uint32 ref_sprites(const vdp_state *v, int32 *spr_y, uint32 *spr_vis, uint32 *pn,
+                          uint32 *partial)
+{
+    const uint8 *vram = v->vram;
+    const uint8 *sat = vram + ((v->reg[5] & 0x7E) << 7);
+    uint32 zoom = (uint32)v->reg[1] & 1;
+    uint32 h = ((v->reg[1] & 0x02) ? 16 : 8) << zoom;
+    int32 w = 8 << zoom;
+    uint32 tbase = (v->reg[6] & 0x04) ? 256 : 0;
+    uint32 tmask = (v->reg[1] & 0x02) ? 0xFE : 0xFF;
+    int32 xoff = (v->reg[0] & 0x08) ? 8 : 0;
+    uint32 full = (h >= 32) ? 0xFFFFFFFFu : (((uint32)1 << h) - 1);
+    int8 diff[VDP_ACTIVE + 1];
+    uint8 ya[VDP_SPRITES];
+    uint8 yb[VDP_SPRITES];
+    uint32 over[(VDP_ACTIVE + 31) / 32];
+    uint32 flags = 0;
+    uint32 n;
+    uint32 k;
+    uint32 maxrun = 0;
+    int32 run = 0;
+
+    for (n = 0; n < VDP_SPRITES; n++) {
+        if (sat[n] == 0xD0)
+            break;
+    }
+    *pn = n;
+    *partial = 0;
+    memset(diff, 0, sizeof(diff));
+    for (k = 0; k < n; k++) {
+        int32 y = (int32)sat[k] + 1;
+        int32 a;
+        int32 b;
+
+        if (y + (int32)h > 256)
+            y -= 256;
+        spr_y[k] = y;
+        spr_vis[k] = full;
+        a = (y < 0) ? 0 : y;
+        b = y + (int32)h;
+        if (b > VDP_ACTIVE)
+            b = VDP_ACTIVE;
+        if (a >= b) {
+            ya[k] = 0;
+            yb[k] = 0;
+            continue;
+        }
+        ya[k] = (uint8)a;
+        yb[k] = (uint8)b;
+        diff[a]++;
+        diff[b]--;
+    }
+    if (n < 2)
+        return 0;
+    memset(over, 0, sizeof(over));
+    for (k = 0; k < VDP_ACTIVE; k++) {
+        run += diff[k];
+        if ((uint32)run > maxrun)
+            maxrun = (uint32)run;
+        if (run > 8)
+            over[k >> 5] |= (uint32)1 << (k & 31);
+    }
+    if (maxrun > 8) {
+        uint8 cnt[VDP_ACTIVE];
+
+        flags |= VDP_ST_OVERFLOW;
+        memset(cnt, 0, sizeof(cnt));
+        for (k = 0; k < n; k++) {
+            uint32 line;
+
+            for (line = ya[k]; line < yb[k]; line++) {
+                if (!(over[line >> 5] & ((uint32)1 << (line & 31))))
+                    continue;
+                if (++cnt[line] > 8) {
+                    spr_vis[k] &= ~((uint32)1 << (line - (uint32)spr_y[k]));
+                    *partial = 1;
+                }
+            }
+        }
+    }
+    if (maxrun >= 2) {
+        uint8 head[VDP_ACTIVE];
+        uint8 next[VDP_SPRITES];
+        uint8 order[VDP_SPRITES];
+        uint32 m = 0;
+        uint32 i;
+
+        memset(head, 0xFF, sizeof(head));
+        for (k = n; k-- > 0;) {
+            if (ya[k] < yb[k]) {
+                next[k] = head[ya[k]];
+                head[ya[k]] = (uint8)k;
+            }
+        }
+        for (k = 0; k < VDP_ACTIVE; k++) {
+            uint32 s;
+
+            for (s = head[k]; s != 0xFF; s = next[s])
+                order[m++] = (uint8)s;
+        }
+        for (i = 0; i < m && !(flags & VDP_ST_COLLIDE); i++) {
+            uint32 a = order[i];
+            int32 xa = (int32)sat[0x80 + 2 * a] - xoff;
+            uint32 ta = tbase + ((uint32)sat[0x81 + 2 * a] & tmask);
+            uint32 j;
+
+            for (j = i + 1; j < m; j++) {
+                uint32 b = order[j];
+                int32 dx;
+                uint32 line;
+                uint32 end;
+
+                if (ya[b] >= yb[a])
+                    break;
+                dx = (int32)sat[0x80 + 2 * b] - xoff - xa;
+                if (dx >= w || dx <= -w)
+                    continue;
+                end = (yb[a] < yb[b]) ? yb[a] : yb[b];
+                for (line = ya[b]; line < end; line++) {
+                    uint32 ra = (line - (uint32)spr_y[a]);
+                    uint32 rb = (line - (uint32)spr_y[b]);
+                    uint32 tb;
+                    uint32 ma;
+                    uint32 mb;
+
+                    if (!((spr_vis[a] >> ra) & 1) || !((spr_vis[b] >> rb) & 1))
+                        continue;
+                    ra >>= zoom;
+                    rb >>= zoom;
+                    tb = tbase + ((uint32)sat[0x81 + 2 * b] & tmask);
+                    ma = ref_tile_mask(vram, ta + (ra >> 3), ra & 7);
+                    mb = ref_tile_mask(vram, tb + (rb >> 3), rb & 7);
+                    if (zoom) {
+                        ma = ref_zoom_mask(ma);
+                        mb = ref_zoom_mask(mb);
+                    }
+                    if (ma & ((dx >= 0) ? (mb >> dx) : (mb << -dx))) {
+                        flags |= VDP_ST_COLLIDE;
+                        break;
+                    }
+                }
+                if (flags & VDP_ST_COLLIDE)
+                    break;
+            }
+        }
+    }
+    return flags;
+}
+
+static uint32 sprite_checks;
+static uint32 sprite_errors;
+static uint32 sprite_flag_frames[2];
+
+/* Compares the assembly evaluation of the current frame with the
+ * reference (both pure functions of the VDP state apart from the status
+ * bits, which the assembly ORs in again here). */
+static void check_sprites(vdp_state *v, uint32 f)
+{
+    int32 ry[VDP_SPRITES];
+    uint32 rvis[VDP_SPRITES];
+    uint32 rn;
+    uint32 rpartial;
+    uint32 rflags;
+    uint32 aflags;
+    uint32 k;
+    uint32 bad = 0;
+
+    rflags = ref_sprites(v, ry, rvis, &rn, &rpartial);
+    aflags = vdp_sprites(v);
+    sprite_checks++;
+    if (aflags & VDP_ST_OVERFLOW)
+        sprite_flag_frames[0]++;
+    if (aflags & VDP_ST_COLLIDE)
+        sprite_flag_frames[1]++;
+    if (aflags != rflags || rn != v->spr_n || rpartial != v->spr_partial)
+        bad = 1;
+    /* The lines shown are only written when some line overflows. */
+    for (k = 0; k < rn && !bad; k++) {
+        if (ry[k] != v->spr_y[k] || ((rflags & VDP_ST_OVERFLOW) && rvis[k] != v->spr_vis[k]))
+            bad = 1;
+    }
+    if (bad && sprite_errors++ < 20) {
+        printf("Sprites: frame %lu: assembly flags %lx n %lu partial %lu, reference flags %lx n %lu partial %lu\n",
+               (unsigned long)f, (unsigned long)aflags, (unsigned long)v->spr_n,
+               (unsigned long)v->spr_partial, (unsigned long)rflags, (unsigned long)rn,
+               (unsigned long)rpartial);
+        for (k = 0; k < rn; k++) {
+            if (ry[k] != v->spr_y[k] || rvis[k] != v->spr_vis[k])
+                printf("Sprites:   sprite %lu: y %ld vis %08lx, reference y %ld vis %08lx\n",
+                       (unsigned long)k, (long)v->spr_y[k], (unsigned long)v->spr_vis[k],
+                       (long)ry[k], (unsigned long)rvis[k]);
+        }
+    }
+}
+
 /* -check: consistency of the translator's block table after each frame
  * (hashed blocks with their code, RAM entry headers, zone counts, lookup
  * entries), to find a corruption at the frame it happens. */
@@ -345,6 +558,8 @@ void hmain(void)
         }
         if (sim_arg(13))
             check_blocks(f);
+        if (render_display_on(g.rd))
+            check_sprites(&g.sms->vdp, f);
         if (sim_arg(14) && (f + 1) % 100 == 0) {
             /* -hash: a hash of the machine state every 100 frames, to
              * compare runs made under different host timings. */
@@ -376,6 +591,39 @@ void hmain(void)
                 printf("\n");
             }
         }
+        if (sim_arg(16) == f + 1 && render_display_on(g.rd)) {
+            const CCB *c;
+
+            for (c = render_chain(g.rd); c != NULL; c = c->ccb_NextPtr) {
+                printf("Cel: frame %lu: at %ld,%ld size %lu x %lu bpp %lu%s%s\n",
+                       (unsigned long)(f + 1), (long)(c->ccb_XPos >> 16),
+                       (long)(c->ccb_YPos >> 16), (unsigned long)((c->ccb_PRE1 & 0x7FF) + 1),
+                       (unsigned long)(((c->ccb_PRE0 >> PRE0_VCNT_SHIFT) & 0x3FF) + 1),
+                       (unsigned long)(c->ccb_PRE0 & 7), (c->ccb_Flags & CCB_BGND) ? " opaque" : "",
+                       (c->ccb_Flags & CCB_LAST) ? " last" : "");
+                if (c->ccb_Flags & CCB_LAST)
+                    break;
+            }
+            /* The strips the patches replaced, if any: the priority cels
+             * before the first one in the chain. */
+            for (c = render_chain(g.rd); c != NULL; c = c->ccb_NextPtr) {
+                if (c->ccb_PLUTPtr == (void *)(g.rd->pluts + 64))
+                    break;
+                if (c->ccb_Flags & CCB_LAST) {
+                    c = NULL;
+                    break;
+                }
+            }
+            if (c != NULL) {
+                const CCB *s;
+
+                for (s = &g.rd->cels[RENDER_MAX_PIECES]; s < c; s++)
+                    printf("Strip: frame %lu: at %ld,%ld size %lu x %lu\n",
+                           (unsigned long)(f + 1), (long)(s->ccb_XPos >> 16),
+                           (long)(s->ccb_YPos >> 16), (unsigned long)((s->ccb_PRE1 & 0x7FF) + 1),
+                           (unsigned long)(((s->ccb_PRE0 >> PRE0_VCNT_SHIFT) & 0x3FF) + 1));
+            }
+        }
         if (dump_every && ((f + 1) % dump_every == 0 || g.sms->vdp.de_n != 0 ||
                            g.sms->vdp.hs_n != 0 || !g.sms->vdp.de_start)) {
             const vdp_state *v = &g.sms->vdp;
@@ -401,5 +649,8 @@ void hmain(void)
         }
     }
     game_log_summary(&g);
+    printf("Sprites: %lu frames checked, %lu with differences, %lu with overflow, %lu with collision\n",
+           (unsigned long)sprite_checks, (unsigned long)sprite_errors,
+           (unsigned long)sprite_flag_frames[0], (unsigned long)sprite_flag_frames[1]);
     sim_codedump((uint32)g.jit.code, (uint32)g.jit.code_end, (uint32)g.jit.blocks, g.jit.nblocks);
 }

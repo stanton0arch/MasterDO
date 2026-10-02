@@ -476,7 +476,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo step 3e: cartridge chosen from the roms directory, run with queued presentation\n");
+    printf("masterdo step 4: sprites evaluated per line (eight at most, overflow and collision flags, zoom), priority layer drawn under the sprites only\n");
     if (plat_init(&plat) < 0)
         return 1;
     memset(&st, 0, sizeof(st));

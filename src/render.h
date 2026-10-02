@@ -24,10 +24,13 @@
  * while loses its layer; a table met with no free layer takes the least
  * recently used one, which is rebuilt.
  *
- * Sprites: one 8 bpp coded cel per active sprite (8x8 or 8x16), colour 0
- * transparent, drawn after the background in reverse order so that
- * sprite 0 ends on top. The 8 per line limit and zoom are left for a
- * later step.
+ * Sprites: one 8 bpp coded cel per active sprite (8x8 or 8x16, doubled
+ * by the cel engine when zoomed), colour 0 transparent, drawn after the
+ * background in reverse order so that sprite 0 ends on top. The VDP's
+ * sprite evaluation (vdp_sprites) says which lines of each sprite the
+ * hardware shows: a sprite hidden on some lines by the eight per line
+ * limit is drawn as one cel per run of shown lines (a zoomed sprite's
+ * runs are rounded to whole doubled rows).
  *
  * Display enable: changes of register 1 bit 6 recorded during the active
  * display split the picture like the scroll bands: the background and
@@ -41,7 +44,11 @@
  * sprites, the rows of cells that hold priority cells are drawn from it
  * as strips with a PLUT whose colour 0 of both palettes is 000,
  * transparent: their other pixels cover the sprites as on the hardware.
- * Rows without priority cells cost nothing.
+ * Rows without priority cells cost nothing. When the parts of the strips
+ * under the sprites cover fewer pixels than the strips themselves, those
+ * parts are drawn instead (patches): a picture made of priority tiles
+ * costs the sprites' area instead of a full-screen cel, and without a
+ * sprite nothing is drawn at all.
  *
  * Tiles are converted from the VDP's planar format into 8 bpp rows of 8
  * bytes (two words) the first time a cell or a sprite needs them after
@@ -71,6 +78,7 @@
 #define RENDER_MAX_PRIO   128       /* priority strips */
 #define RENDER_MAX_DBLANK (VDP_DE_LOG + 1)  /* blanked line ranges */
 #define RENDER_SPRITES  64
+#define RENDER_SPRITE_CELS 96       /* cels for the sprites, runs included */
 #define RENDER_LAYER_KEEP 16        /* frames a layer outlives its last use */
 
 /* Cumulative counters, logged as differences by the caller. */
@@ -84,6 +92,11 @@ typedef struct {
     uint32 sprites;         /* sprite cels set up */
     uint32 pieces;          /* background pieces */
     uint32 prio_strips;     /* priority strips */
+    uint32 prio_patches;    /* priority patches under sprites */
+    uint32 spr_partial;     /* frames with sprites hidden on some lines */
+    uint32 spr_dropped;     /* sprite runs beyond the cel capacity */
+    uint32 overflows;       /* frames setting the sprite overflow flag */
+    uint32 collisions;      /* frames setting the sprite collision flag */
     uint32 bands;           /* frames with more than one scroll band */
     uint32 dbands;          /* frames with the display off on some lines */
     uint32 ntbands;         /* frames with more than one name table band */
@@ -97,7 +110,7 @@ typedef struct {
  * stores, the work lists and the expansion tables are shared by the
  * layers: each layer holds the same pointers.
  */
-typedef struct {
+typedef struct render_layer_s {
     uint8  *bitmap;         /* RENDER_W x RENDER_BM_H, 8 bpp */
     uint8  *prio_bm;        /* same, priority cells only */
     uint32 *tiles;          /* VDP_TILES x 16 words (shared) */
@@ -154,8 +167,9 @@ typedef struct {
     uint32  update;         /* updates so far (layer ages) */
     uint32  backdrop;       /* RGB 5:5:5 */
     uint32  display_on;
-    uint32  n_sprites;
-    uint32  spr_tall;       /* sprite cels set up for 8x16 sprites */
+    uint32  n_sprites;      /* sprite cels in the chain */
+    uint32  spr_mode;       /* the sprite cels are set up for: bit 0 tall, bit 1 zoom */
+    uint32  spr_runs;       /* the last update made cels per run of lines */
     CCB    *chain;          /* first cel to draw */
     CCB    *last_cel;       /* the cel carrying CCB_LAST */
     /* Band tables of the update, kept off the task stack. */
@@ -194,6 +208,10 @@ typedef struct {
     uint32  xoff;           /* 0 or 8 */
     uint32 *need;           /* tiles whose conversion is missing */
     uint32  tall;           /* 0 or 1 */
+    uint32  ywrap;          /* 256 - lines per sprite: a Y past it wraps to the top */
+    CCB    *end;            /* render_sprite_runs: cel capacity */
+    uint32  dropped;        /* runs beyond it */
+    uint32  needed;         /* tiles appended to need */
 } render_sprite_args;
 
 /* Indices of the words of the dirty name table chunks that differ from
@@ -205,6 +223,25 @@ uint32 render_dirty_scan(uint8 *dirty, uint32 *out);
 /* Source and position of the cels of sprites 0 to n - 1; returns the
  * number of tiles appended to a->need. */
 uint32 render_sprites(const uint8 *sat, uint32 n, CCB *cel, const render_sprite_args *a);
+/* The same from the VDP's evaluation when sprites are hidden on some
+ * lines: one cel per run of shown lines; returns the cel after the last
+ * one, the tiles to convert in a->need (a->needed of them). */
+CCB   *render_sprite_runs(const uint8 *sat, const vdp_state *v, CCB *cel,
+                          render_sprite_args *a);
+/* The parts of the priority strips under the sprites, as cels of their
+ * own (render_a.s). CONTRACT: matches the PA_* equates. Returns 0 when
+ * the pixels exceed limit or the cels run out. */
+typedef struct {
+    const CCB *strips;      /* the strips of the frame: screen rectangles */
+    uint32  nstrips;
+    uint32  xoff;
+    const vdp_state *v;
+    const uint8 *sat;
+    uint32  limit;          /* pixels beyond which the patches are given up */
+    uint32  area;           /* out: pixels of the patches */
+    struct piece_ctx_s *p;
+} render_patch_args;
+uint32 render_prio_patches(render_patch_args *a);
 /* Cells of a layer (render_a.s). Each draws cells into the bitmap (and
  * the priority bitmap for entries with the priority bit), converting the
  * tiles found unconverted through render_tile_conv, stamping the cells
@@ -222,7 +259,7 @@ void   render_stale_cells(render_layer *l, const uint8 *vram);
 void   render_rebuild_cells(render_layer *l, const uint8 *vram);
 /* Pieces of a bitmap rectangle on a line band in the usual case (no
  * scroll inhibit); see render.c, rect_pieces. */
-typedef struct {
+typedef struct piece_ctx_s {
     CCB    *c;              /* next cel */
     CCB    *end;            /* capacity */
 } piece_ctx;
