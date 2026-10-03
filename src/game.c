@@ -330,6 +330,9 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
     sms_init(g->sms, g->ctx, rom, rom_size, VDP_LINES_NTSC, g->cart_ram, g->cart_ram_size);
     printf("Cartridge RAM: %lu bytes in %s\n", (unsigned long)g->cart_ram_size,
            g->cart_ram == NULL ? "no memory" : g->cart_ram_vram ? "VRAM" : "DRAM");
+    printf("Mapper: %s\n", g->sms->mem.mapper == SMS_MAPPER_CODEMASTERS ?
+           "Codemasters (header at $7FE0; slots paged by writes to $0000, $4000, $8000)" :
+           "Sega (paging registers at $FFFC-$FFFF)");
     game_reset(g);
     return 0;
 }

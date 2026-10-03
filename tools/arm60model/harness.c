@@ -615,6 +615,12 @@ void hmain(void)
                        (unsigned long)sat[0x80 + 2 * k], (unsigned long)sat[0x81 + 2 * k],
                        (unsigned long)v->spr_rows[k], (unsigned long)v->spr_vis[k]);
 
+            printf("Scroll: frame %lu: end %lu", (unsigned long)(f + 1),
+                   (unsigned long)v->reg[8]);
+            for (k = 0; k < v->hs_n; k++)
+                printf(" line %lu %lu", (unsigned long)(v->hs_log[k] >> 8),
+                       (unsigned long)(v->hs_log[k] & 0xFF));
+            printf("\n");
             for (c = render_chain(g.rd); c != NULL; c = c->ccb_NextPtr) {
                 printf("Cel: frame %lu: at %ld,%ld size %lu x %lu bpp %lu%s%s\n",
                        (unsigned long)(f + 1), (long)(c->ccb_XPos >> 16),

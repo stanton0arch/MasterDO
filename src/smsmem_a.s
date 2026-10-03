@@ -2,11 +2,13 @@
 ;
 ; Special write handler of the translator (ctx->write_a, conventions in
 ; z80jit.h) for the Master System memory map: writes to the ROM area are
-; ignored, writes to the last page ($FF00-$FFFF) go to the system RAM
-; mirror, and a write to a bank register ($FFFD-$FFFF) that changes the
-; bank fills the read table of its slot here. The rare cases (the RAM
-; mapping register $FFFC, cartridge RAM, a bank count that is not a power
-; of two) go through the C callback (sms_mem_write).
+; ignored under the Sega mapper (they select banks under the Codemasters
+; mapper: C callback), writes to the last page ($FF00-$FFFF) go to the
+; system RAM mirror, and a write to a bank register of the Sega mapper
+; ($FFFD-$FFFF) that changes the bank fills the read table of its slot
+; here. The rare cases (the RAM mapping register $FFFC, slot 2 while it
+; shows cartridge RAM, a bank count that is not a power of two) go
+; through the C callback (sms_mem_write).
 ;
 ; Layouts: CONTRACT with sms_mem (smsmem.h) and z80j_ctx (z80jit.h) - keep
 ; in sync (smsmem.c and z80jit.c check the offsets at compile time).
@@ -25,10 +27,10 @@ MRAM            EQU     0x1000
 
 ; sms_mem fields.
 SM_ROM          EQU     24
-SM_CARTRAM      EQU     36
 SM_REG          EQU     40
 SM_REMAPS       EQU     68
 SM_BANKMASK     EQU     72
+SM_MAPPER       EQU     80
 
 Z80J_WRITE_PAGING EQU   2
 
@@ -38,7 +40,13 @@ Z80J_WRITE_PAGING EQU   2
 ;----------------------------------------------------------------------------
 sms_mem_write_a
         cmp     r12,#0xC0000000
-        movlo   pc,r2                   ; ROM area: the write is ignored
+        bhs     write_a_ram
+        ldr     r1,[r10,#WDATA]         ; ROM area: ignored by the Sega
+        ldr     r1,[r1,#SM_MAPPER]      ; mapper, a bank register otherwise
+        teq     r1,#0
+        moveq   pc,r2
+        b       z80j_write_generic
+write_a_ram
         stmfd   sp!,{r2,r4-r9,r12,lr}
         mov     r12,r12,lsr#16          ; address, $FF00-$FFFF
         and     r0,r0,#0xFF
@@ -50,15 +58,21 @@ sms_mem_write_a
         subs    r12,r12,#0xFC           ; paging register 0-3
         blo     write_a_stay
         ldr     r1,[r10,#WDATA]         ; sms_mem
+        ldr     r5,[r1,#SM_MAPPER]
+        teq     r5,#0                   ; plain RAM under the other mappers
+        bne     write_a_stay
         add     r4,r1,r12,lsl#2
         ldr     r5,[r4,#SM_REG]
         cmp     r5,r0
         beq     write_a_stay            ; same value: the mapping stands
         teq     r12,#0                  ; $FFFC: RAM mapping control
         beq     write_a_c
-        ldr     r5,[r1,#SM_CARTRAM]
-        teq     r5,#0                   ; cartridge RAM present
+        teq     r12,#3
+        bne     write_a_bank
+        ldr     r5,[r1,#SM_REG]
+        tst     r5,#0x08                ; slot 2 showing cartridge RAM
         bne     write_a_c
+write_a_bank
         ldr     r5,[r1,#SM_BANKMASK]
         cmn     r5,#1                   ; bank count not a power of two
         beq     write_a_c

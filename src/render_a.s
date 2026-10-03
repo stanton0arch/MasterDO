@@ -820,6 +820,7 @@ S_N             EQU     0
 S_H             EQU     4
 S_ZOOM          EQU     8
 S_Y             EQU     16
+S_PARTIAL       EQU     12
 S_VIS           EQU     272
 S_ROWS          EQU     528
 
@@ -997,9 +998,13 @@ pp_sprite
         cmp     r8,r0
         bhs     pp_ok
         add     r0,r9,r8,lsl #2
+        ldr     r1,[r9,#S_PARTIAL]      ; spr_vis is only valid in a frame
+        cmp     r1,#0                   ; where some sprite loses lines
+        beq     pp_shown
         ldr     r1,[r0,#S_VIS]
         cmp     r1,#0
         beq     pp_nexts                ; hidden on every line
+pp_shown
         ldr     r1,[r0,#S_ROWS]
         cmp     r1,#0
         beq     pp_nexts                ; no opaque pixel: nothing to cover

@@ -119,6 +119,21 @@ static void log_vdp(const char *what)
         printf(" %02x", v->cram[k]);
     printf(", %lu sprites, backdrop $%04lx\n", (unsigned long)g.rd->n_sprites,
            (unsigned long)render_backdrop(g.rd));
+    /* The writes made during the active display of the frame (the bands
+     * of the picture): a raster effect's scroll per line, a name table
+     * switch, the display turned off or on, each with the first line it
+     * affects. */
+    printf("View: %lu scroll writes", (unsigned long)v->hs_n);
+    for (k = 0; k < v->hs_n; k++)
+        printf(" %lu:%lu", (unsigned long)(v->hs_log[k] >> 8), (unsigned long)(v->hs_log[k] & 0xFF));
+    printf(", %lu name table writes", (unsigned long)v->nt_n);
+    for (k = 0; k < v->nt_n; k++)
+        printf(" %lu:%02lx", (unsigned long)(v->nt_log[k] >> 8), (unsigned long)(v->nt_log[k] & 0xFF));
+    printf(", display %s at start, %lu changes", v->de_start ? "on" : "off",
+           (unsigned long)v->de_n);
+    for (k = 0; k < v->de_n; k++)
+        printf(" %lu:%s", (unsigned long)(v->de_log[k] >> 8), (v->de_log[k] & 1) ? "on" : "off");
+    printf("\n");
 }
 
 /* Fills the back screen with the backdrop colour when it does not hold it
