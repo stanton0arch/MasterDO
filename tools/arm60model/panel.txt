@@ -6,6 +6,12 @@
 # option; pad: button 1 tapped every 300 frames). Cartridges absent from
 # this file run with the defaults.
 #
+# A run on the console or on Phoenix writes its own entry at the pause or
+# the end of the run (the "Pad script:" line of the log, which the ISO's
+# pad recorder builds from the frames where the buttons changed); such a
+# replay may diverge in a timing-sensitive game, since translated and
+# interpreted code take interrupts at different boundaries.
+#
 # The scripts aim at reaching the game itself, then at simple inputs that
 # keep it busy (walking, jumping, firing), since the model's timings are
 # only meaningful in play. The cartridges are chosen by the hardware

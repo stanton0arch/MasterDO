@@ -143,10 +143,34 @@ static void print_long(const game_long_rec *p)
            (unsigned long)p->spare_us, (unsigned long)p->pad_us, (unsigned long)p->sync_us);
 }
 
+/* The pad script of the run so far, as a line of the panel file of the
+ * analysis harness: the cartridge name, the frames run, then the buttons
+ * held from each frame where they changed (hexadecimal, PAUSE as bit 8).
+ * The whole script is written each time, so that the last one in the
+ * log is complete; nothing is written when no change was recorded since
+ * the previous time. */
+static void print_pad_script(game *g)
+{
+    uint32 k;
+
+    if (g->pad_log_n == g->pad_log_printed)
+        return;
+    printf("Pad: %lu changes recorded, %lu dropped; the next line is the panel entry\n",
+           (unsigned long)g->pad_log_n, (unsigned long)g->pad_log_dropped);
+    printf("Pad script: %s %lu ", g->name != NULL ? g->name : "rom.sms",
+           (unsigned long)g->frame);
+    for (k = 0; k < g->pad_log_n; k++)
+        printf("%s%lu:%lx", k ? "," : "", (unsigned long)(g->pad_log[k] >> 9),
+               (unsigned long)(g->pad_log[k] & 0x1FF));
+    printf("\n");
+    g->pad_log_printed = g->pad_log_n;
+}
+
 void game_log_flush(game *g)
 {
     uint32 k = 0;
 
+    print_pad_script(g);
     if (g->log_len == 0 && g->log_dropped == 0)
         return;
     printf("Log: %lu words of records from frame %lu, written at frame %lu, %lu records dropped\n",
@@ -236,6 +260,7 @@ void game_free(game *g)
     if (g->links != NULL) FreeMem(g->links, (int32)z80j_link_bytes(JIT_LINKS));
     if (g->hot != NULL) FreeMem(g->hot, 0x10000);
     if (g->log != NULL) FreeMem(g->log, GAME_LOG_WORDS * 4);
+    if (g->pad_log != NULL) FreeMem(g->pad_log, GAME_PAD_LOGS * 4);
     if (g->code != NULL) FreeMem(g->code, JIT_CODE_BYTES);
     if (g->ctx != NULL) FreeMem(g->ctx, sizeof(z80j_ctx));
     if (g->cart_ram != NULL) FreeMem(g->cart_ram, (int32)g->cart_ram_size);
@@ -245,6 +270,7 @@ void game_free(game *g)
     g->links = NULL;
     g->hot = NULL;
     g->log = NULL;
+    g->pad_log = NULL;
     g->code = NULL;
     g->ctx = NULL;
     g->cart_ram = NULL;
@@ -265,6 +291,8 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
     g->log = (uint32 *)AllocMem(GAME_LOG_WORDS * 4, MEMTYPE_DRAM);
     g->sms = (sms_machine *)AllocMem(sizeof(sms_machine), MEMTYPE_DRAM);
     g->rd = (renderer *)AllocMem(sizeof(renderer), MEMTYPE_DRAM | MEMTYPE_FILL);
+    /* The pad recorder is optional: without memory nothing is recorded. */
+    g->pad_log = (uint32 *)AllocMem(GAME_PAD_LOGS * 4, MEMTYPE_DRAM);
     if (g->ctx == NULL || g->code == NULL || g->blocks == NULL || g->links == NULL ||
         g->hot == NULL || g->log == NULL || g->sms == NULL || g->rd == NULL) {
         printf("ERROR: out of memory for the machine (%lu + %lu + %lu + %lu + %lu bytes)\n",
@@ -393,6 +421,10 @@ void game_reset(game *g)
     g->log_len = 0;
     g->log_from = 0;
     g->log_dropped = 0;
+    g->pad_log_n = 0;
+    g->pad_log_printed = 0;
+    g->pad_log_dropped = 0;
+    g->pad_last = 0;
     g->total_us = 0;
     g->max_us = 0;
     g->max_frame = 0;
@@ -456,6 +488,19 @@ int32 game_frame(game *g, uint32 pad, uint32 pause)
     g->f_interp = g->ctx->int_runs;
     g->f_interp_insns = g->ctx->int_insns;
     g->f_sync_us = g->jit.stats.sync_us;
+
+    /* Pad recorder: a change of the buttons held is kept with its frame. */
+    {
+        uint32 bits = (pad & 0x3F) | (pause ? 0x100 : 0);
+
+        if (bits != g->pad_last) {
+            g->pad_last = bits;
+            if (g->pad_log != NULL && g->pad_log_n < GAME_PAD_LOGS)
+                g->pad_log[g->pad_log_n++] = (g->frame << 9) | bits;
+            else
+                g->pad_log_dropped++;
+        }
+    }
 
     t0 = plat_usec_now();
     z80j_frame_start(&g->jit, t0, g->last_upd_us + g->last_draw_us + FRAME_MARGIN_US);
@@ -553,6 +598,11 @@ void game_pad_time(game *g, uint32 us)
 {
     g->win.pad_us += us;
     g->last_pad_us = us;
+}
+
+void game_set_name(game *g, const char *name)
+{
+    g->name = name;
 }
 
 void game_set_frame_us(game *g, uint32 us)

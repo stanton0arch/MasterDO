@@ -20,6 +20,7 @@
 #define GAME_SLOW_LOGS  120     /* frames over the budget logged alone */
 #define GAME_LONG_LOGS  60      /* frames shown late while under budget */
 #define GAME_LOG_WORDS  (24 * 1024 / 4) /* record arena of the run's log */
+#define GAME_PAD_LOGS   1024    /* pad changes kept by the pad recorder */
 
 /* Cumulative counters of the machine and the translator. */
 typedef struct {
@@ -73,7 +74,13 @@ typedef struct {
  * about 9 ms on the console and printing them 45 ms, so neither happens
  * inside a frame): a closed window, a frame over budget, a frame shown
  * late while under budget. A record starts with a word holding its kind
- * (top byte) and its length in words; a full arena drops records. */
+ * (top byte) and its length in words; a full arena drops records.
+ *
+ * The pad recorder keeps, apart from the arena, the frames where the
+ * buttons held changed (PAUSE as bit 8) and writes them out with the log
+ * as a pad script in the format of the analysis harness ("frame:bits,..."
+ * preceded by the cartridge name and the frame count), so that a run on
+ * the console can be replayed in the cycle model. */
 #define GAME_REC_WINDOW 1
 #define GAME_REC_SLOW   2
 #define GAME_REC_LONG   3
@@ -127,6 +134,12 @@ typedef struct {
     uint32        log_len;  /* words used */
     uint32        log_from; /* first frame the records cover */
     uint32        log_dropped;
+    uint32       *pad_log;  /* pad changes: frame << 9 | buttons (PAUSE bit 8) */
+    uint32        pad_log_n;
+    uint32        pad_log_printed; /* entries already written out */
+    uint32        pad_log_dropped;
+    uint32        pad_last; /* buttons of the previous frame */
+    const char   *name;     /* cartridge file name, for the pad script line */
     uint32        frame_us; /* period of the display: the frame budget */
     sms_machine  *sms;
     renderer     *rd;
@@ -215,6 +228,10 @@ void  game_pad_time(game *g, uint32 us);
 /* Period of the display, in microseconds: the budget of a frame (NTSC
  * by default). */
 void  game_set_frame_us(game *g, uint32 us);
+
+/* Names the cartridge in the pad script line of the log (the string is
+ * kept, not copied). */
+void  game_set_name(game *g, const char *name);
 
 /* Spare time at the end of a frame that began at frame_start
  * (microsecond clock): translates queued code ahead while a translation

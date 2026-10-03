@@ -274,7 +274,7 @@ static void do_dump(uint32_t fb, uint32_t width, uint32_t height, uint32_t tag)
 
 /* Pad script: "frame:bits" pairs in the environment variable SIMPAD
  * give the buttons held from that frame on (bit 8: PAUSE). */
-static uint32_t pad_frames[256], pad_bits[256];
+static uint32_t pad_frames[1024], pad_bits[1024];
 static int npad;
 
 static uint32_t pad_at(uint32_t frame)
@@ -671,7 +671,7 @@ int main(int argc, char **argv)
     padenv = getenv("SIMPAD");
     if (padenv) {
         char *p = padenv;
-        while (*p && npad < 256) {
+        while (*p && npad < 1024) {
             unsigned fr, bits;
             if (sscanf(p, "%u:%x", &fr, &bits) != 2) break;
             pad_frames[npad] = fr; pad_bits[npad] = bits; npad++;

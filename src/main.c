@@ -10,7 +10,9 @@
  * picture update, DrawCels into a free screen, which is queued for the
  * presenter thread (platform.c) to show at a VBL; the emulation may thus
  * run a frame ahead of the display. game.c records the emulation, update
- * and drawing times, written out when the run pauses or ends. Pad during
+ * and drawing times, and the frames where the pad changed, written out
+ * when the run pauses or ends (the pad changes as a pad script that the
+ * cycle model replays). Pad during
  * the run: D-pad, A (button 1) and B (button 2) for the SMS pad, P for
  * PAUSE; L pauses the run and shows the reference picture drawn by the CPU
  * (debug view) to compare with the cels (A: reference, B: cels, L: resume);
@@ -515,6 +517,7 @@ int main(int argc, char **argv)
             uint32 vram;
 
             st.have_game = 1;
+            game_set_name(&g, st.rom.name);
             game_set_frame_us(&g, plat.frame_us);
             show_message(&plat, "Translating the cartridge code...");
             game_translate_rom(&g);

@@ -68,7 +68,11 @@ simulated pc and lr with their symbols, the stack pointer, r0 and r1.
 
 Environment variables:
 - `SIMPAD="1600:10,1606:0,2100:8"`: buttons held from each frame on
-  (`SMS_PAD_*` bits of `sms.h`, 0x100 for PAUSE);
+  (`SMS_PAD_*` bits of `sms.h`, 0x100 for PAUSE), up to 1 024 entries.
+  The ISO records the pad changes of a run and writes them at the pause
+  or the end of the run as a `Pad script:` line holding a `panel.txt`
+  entry (cartridge, frames, script), so that a run played on the console
+  or on Phoenix is replayed here;
 - `SIMPROF=1`: cycles per function of the image, and of the generated code;
 - `SIMDIS=symbol`: executions of each instruction of a function.
 
