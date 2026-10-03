@@ -42,6 +42,9 @@ Thumbs.db
 AGENTS.md
 project-context.MD
 
+# Work directories of the model's batch runner (logs and pictures of each run)
+/tools/arm60model/batch/
+
 # takeme/: CD root contents are versioned, except the converted movie
 # and the player binary (rebuilt by every make)
 /takeme/roms/*

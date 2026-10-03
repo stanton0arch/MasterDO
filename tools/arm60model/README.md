@@ -52,6 +52,11 @@ RAM entry headers, zone counts, lookup entries) and report the first
 inconsistencies; the check runs in the model and shifts its clock, so a
 timing-dependent run may not reproduce with it.
 
+`-dumpdiff n` with `-dump`: the frames compared because of a scroll or
+display band are only written when they differ, the first n of them; the
+pictures at multiples of the dump period are always written (a raster game
+compares thousands of frames per run).
+
 `-cels n` prints the sprites of frame n as the VDP evaluated them, the
 cel chain (position, size, bits per pixel) and, when the priority layer
 was drawn under the sprites, the strips it replaced. The harness also checks the assembly sprite
@@ -80,6 +85,38 @@ each code word since the `-from` frame):
   other blocks lead) in all and per frame, and the most entered blocks.
 
 Pictures are PPM files; any image tool converts them.
+
+## Batch runner
+
+`batch.py` runs every cartridge of `takeme/roms` in the model, in parallel,
+with the frame count and the pad script of `panel.txt` (cartridges absent
+from it get 3 000 frames and button 1 tapped every 300 frames), and writes a
+one-page report in `reports/` (`<date>-<commit>.txt`, with the data in a
+`.json` next to it): a table with one line per cartridge (status, emulation,
+update and total times per frame, frames over budget, worst frame, pictures
+identical to the reference view, sprite evaluation checks, the mechanisms the
+game uses), then per cartridge the ROM translation, the times over the run
+and across the 100-frame windows, the busiest window, the worst frames and
+what they did, the per-frame VDP and translator counters, the picture
+counters and the comparison with the reference view; and at the end the
+changes against the previous report of the directory (or `-against FILE`).
+Each run's log, pictures, a contact sheet of the reference pictures
+(`sheet.png`, to check that the pad script reaches the game) and the first
+differing frames side by side (`diff_NNNNNN.png`) are kept in
+`batch/<cartridge>/`.
+
+```
+tools/arm60model/batch.py                 # the whole panel, about 3 minutes
+tools/arm60model/batch.py -only sonic2,ys -frames 1800 -label "trial"
+```
+
+Options: `-roms DIR`, `-panel FILE`, `-frames N`, `-jobs N`, `-only a,b`,
+`-out DIR`, `-reports DIR`, `-against REPORT.json`, `-timeout SECONDS` (a
+hung run is interrupted with SIGUSR1 so that its location is logged),
+`-dump N`, `-nosheets`, `-label TEXT`. The model's wall time is dominated by
+the reference view, drawn for every frame compared: a raster game with a
+band on every line takes about two minutes, the others about ten seconds.
+Images with a 512-byte copier header are loaded past it, as on the console.
 
 Requirements: `gcc`, `python3`, and the compiler tools of the SDK in
 `bin/compiler/linux`.

@@ -632,6 +632,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-check")) args[13] = 1;
         else if (!strcmp(argv[i], "-hash")) args[14] = 1;
         else if (!strcmp(argv[i], "-cels") && i + 1 < argc) args[16] = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-dumpdiff") && i + 1 < argc) args[17] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-hotzones") && i + 1 < argc) args[12] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-budget") && i + 1 < argc) {
             unsigned f = 0, c = 0;
@@ -660,6 +661,12 @@ int main(int argc, char **argv)
         if (!f) { perror(romp); return 1; }
         rom_size = fread(mem + ROM_ADDR, 1, 0x100000, f);
         fclose(f);
+        /* Some dumps carry a 512-byte copier header before the image,
+         * skipped as the console's loader does. */
+        if (rom_size > 512 && (rom_size & 0x3FFF) == 512) {
+            memmove(mem + ROM_ADDR, mem + ROM_ADDR + 512, rom_size - 512);
+            rom_size -= 512;
+        }
     }
     padenv = getenv("SIMPAD");
     if (padenv) {

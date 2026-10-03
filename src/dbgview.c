@@ -1,9 +1,10 @@
 /*
  * Debug view of the VDP picture, drawn by the CPU. See dbgview.h.
  *
- * Lines are drawn in pairs, which is what an LRFORM word holds: both lines
- * of a pair use the same scroll values, so each of the 32 background
- * columns gives eight words, one per pixel column. Sprites are then drawn
+ * Lines are drawn in pairs, which is what an LRFORM word holds: when both
+ * lines of a pair use the same scroll values, each of the 32 background
+ * columns gives eight words, one per pixel column (a pair split by a band
+ * boundary is drawn line by line and merged). Sprites are then drawn
  * over the pair, from the last to the first so that sprite 0 ends on top,
  * except over background pixels of tiles that have the priority bit. On
  * each line only the first eight sprites of the table covering it are
@@ -174,10 +175,11 @@ static uint32 draw_background(const vdp_state *v, const uint32 *pal, uint32 y, u
     return prio;
 }
 
-/* Sprites over lines y and y + 1: on each line the first eight of the
- * table covering it (the list is in reverse table order). */
+/* Sprites over lines y and y + 1 (halves: bit 0 line y, bit 1 line
+ * y + 1): on each line the first eight of the table covering it (the list
+ * is in reverse table order). */
 static void draw_sprites(const vdp_state *v, const uint32 *pal, const sprite *list,
-                         uint32 n, uint32 y, uint32 prio, uint32 *d)
+                         uint32 n, uint32 y, uint32 prio, uint32 halves, uint32 *d)
 {
     uint32 zoom = (uint32)v->reg[1] & 1;
     uint32 h = ((v->reg[1] & 0x02) ? 16 : 8) << zoom;
@@ -188,6 +190,8 @@ static void draw_sprites(const vdp_state *v, const uint32 *pal, const sprite *li
         uint32 count = 0;
         uint32 i;
 
+        if (!(halves & (1u << half)))
+            continue;
         for (i = n; i-- > 0;) {
             uint32 dy = (y + half - list[i].y) & 255;
 
@@ -225,6 +229,38 @@ static void draw_sprites(const vdp_state *v, const uint32 *pal, const sprite *li
     }
 }
 
+/* A pair of lines whose two lines take different band values (a band
+ * starting on an odd line): each line is drawn with its own values into a
+ * scratch pair and the halves are merged, with the priority mask of each
+ * line kept from its own drawing. */
+static void draw_split_pair(const vdp_state *v, const uint32 *pal, const sprite *list,
+                            uint32 nspr, uint32 y, const uint32 *hs, const uint32 *nt,
+                            const uint32 *on, uint32 border, uint32 *d)
+{
+    static uint32 tmp[2][DBGVIEW_WIDTH];
+    static uint8 mask0[DBGVIEW_WIDTH];
+    uint32 prio[2];
+    uint32 half;
+    uint32 k;
+
+    for (half = 0; half < 2; half++) {
+        prio[half] = 0;
+        if (on[half])
+            prio[half] = draw_background(v, pal, y, hs[half], nt[half], tmp[half]);
+        if (half == 0 && prio[0])
+            memcpy(mask0, prio_mask[0], sizeof(mask0));
+    }
+    if (prio[0])
+        memcpy(prio_mask[0], mask0, sizeof(mask0));
+    else
+        memset(prio_mask[0], 0, sizeof(prio_mask[0]));
+    if (!prio[1])
+        memset(prio_mask[1], 0, sizeof(prio_mask[1]));
+    for (k = 0; k < DBGVIEW_WIDTH; k++)
+        d[k] = ((on[0] ? tmp[0][k] : border) & 0xFFFF0000u) | ((on[1] ? tmp[1][k] : border) & 0xFFFFu);
+    draw_sprites(v, pal, list, nspr, y, prio[0] | prio[1], (on[0] ? 1u : 0) | (on[1] ? 2u : 0), d);
+}
+
 void dbgview_lines(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 y0,
                    uint32 first, uint32 count)
 {
@@ -252,30 +288,39 @@ void dbgview_lines(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 
     border = pal[16 + (v->reg[7] & 15)];
     border |= border << 16;
     nspr = sprite_list(v, list);
-    /* Same band model as the renderer (a pair of lines takes the values
-     * of its even line). */
+    /* Same band model as the renderer; each line of a pair takes the
+     * values of its own band. */
     nb = vdp_bands(v->hs_log, v->hs_n, v->reg[8], tops, hss);
     nnb = vdp_bands(v->nt_log, v->nt_n, v->reg[2], ntops, nvals);
     ndb = vdp_bands(v->de_log, v->de_n, v->de_start, dtops, dons);
 
     for (y = first & ~1u; y < first + count && y < DBGVIEW_HEIGHT; y += 2) {
         uint32 *d = fb + ((uint32)(y0 + (int32)y) >> 1) * (uint32)width + (uint32)x0;
-        uint32 hs = hss[0];
-        uint32 nt = nvals[0];
-        uint32 on = dons[0];
+        uint32 hs[2];
+        uint32 nt[2];
+        uint32 on[2];
+        uint32 half;
 
-        for (k = 1; k < nb && tops[k] <= y; k++)
-            hs = hss[k];
-        for (k = 1; k < nnb && ntops[k] <= y; k++)
-            nt = nvals[k];
-        for (k = 1; k < ndb && dtops[k] <= y; k++)
-            on = dons[k];
-        if (!on) {                              /* display off */
+        for (half = 0; half < 2; half++) {
+            hs[half] = hss[0];
+            nt[half] = nvals[0];
+            on[half] = dons[0];
+            for (k = 1; k < nb && tops[k] <= y + half; k++)
+                hs[half] = hss[k];
+            for (k = 1; k < nnb && ntops[k] <= y + half; k++)
+                nt[half] = nvals[k];
+            for (k = 1; k < ndb && dtops[k] <= y + half; k++)
+                on[half] = dons[k];
+        }
+        if (hs[0] != hs[1] || nt[0] != nt[1] || on[0] != on[1]) {
+            draw_split_pair(v, pal, list, nspr, y, hs, nt, on, border, d);
+        } else if (!on[0]) {                    /* display off */
             for (k = 0; k < DBGVIEW_WIDTH; k++)
                 d[k] = border;
             continue;
+        } else {
+            draw_sprites(v, pal, list, nspr, y, draw_background(v, pal, y, hs[0], nt[0], d), 3, d);
         }
-        draw_sprites(v, pal, list, nspr, y, draw_background(v, pal, y, hs, nt, d), d);
         if (v->reg[0] & 0x20) {                 /* left column blanked */
             for (k = 0; k < 8; k++)
                 d[k] = border;

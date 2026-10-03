@@ -5,7 +5,9 @@
  *
  * Arguments from the command line of sim (sim_arg): 0 frames of the
  * cartridge run, 1 run the benchmarks of steps 0-1 first, 2 dump the
- * pictures every n frames, 3 frame from which the profile counts. The pad
+ * pictures every n frames, 3 frame from which the profile counts, 17 write
+ * only the pictures at multiples of n and the first 17 of the others that
+ * differ. The pad
  * is scripted by the host (sim_pad). At the end, the code buffer is dumped
  * for anacode.py and hotblocks.py.
  *
@@ -514,6 +516,8 @@ void hmain(void)
     uint32 frames = sim_arg(0);
     uint32 bench = sim_arg(1);
     uint32 dump_every = sim_arg(2);
+    uint32 dump_diff = sim_arg(17);
+    uint32 diff_written = 0;
     uint32 f;
     uint32 ndiff;
     uint32 outside;
@@ -641,21 +645,33 @@ void hmain(void)
                            (unsigned long)(((s->ccb_PRE0 >> PRE0_VCNT_SHIFT) & 0x3FF) + 1));
             }
         }
+        /* Compared: the frames at multiples of the dump period and those
+         * with a scroll or display band (a frame whose display was off
+         * from its start with no band is blank in both pictures). */
         if (dump_every && ((f + 1) % dump_every == 0 || g.sms->vdp.de_n != 0 ||
-                           g.sms->vdp.hs_n != 0 || !g.sms->vdp.de_start)) {
+                           g.sms->vdp.hs_n != 0)) {
             const vdp_state *v = &g.sms->vdp;
 
             sim_mark(1);
             dbgview_draw(v, fb, 256, 0, 0);
             sim_mark(2);
-            sim_dump(fb, 256, 192, f + 1);
             if (render_display_on(g.rd))
                 compose(render_chain(g.rd), render_backdrop(g.rd));
             else
                 compose(NULL, render_backdrop(g.rd));
-            sim_dump(fb2, 256, 192, 500000 + f + 1);
             prio_mask(v);
             ndiff = compare(&outside);
+            /* -dumpdiff n: the other frames compared (bands, display
+             * changes) are only written when they differ, the first n of
+             * them; the pictures at multiples of the dump period are
+             * always written. */
+            if (!dump_diff || (f + 1) % dump_every == 0 ||
+                (ndiff != 0 && diff_written < dump_diff)) {
+                if (dump_diff && (f + 1) % dump_every != 0)
+                    diff_written++;
+                sim_dump(fb, 256, 192, f + 1);
+                sim_dump(fb2, 256, 192, 500000 + f + 1);
+            }
             printf("Compare: frame %lu: %lu pixels differ, %lu outside priority tiles, "
                    "display %s, %lu sprites, "
                    "registers 0 %02x 1 %02x 2 %02x 5 %02x 6 %02x 8 %02x 9 %02x, %lu bands\n",
