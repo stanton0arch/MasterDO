@@ -23,7 +23,11 @@
  * - A loop that only reads memory and registers it does not modify (for
  *   instance LD A,(HL) / OR A / JR Z) cannot end before an interrupt,
  *   which only comes at the end of a stretch of execution: when its jump
- *   back is taken, the rest of the stretch goes by idle, as in HALT.
+ *   back is taken, the rest of the stretch goes by idle, as in HALT. A
+ *   loop that also reads a port whose value only changes at line
+ *   boundaries (a V counter, see z80j_set_line_port) computes the same
+ *   thing on every pass of a line: its time goes by idle up to the next
+ *   line boundary.
  *
  * The emulated machine is described by the context: 256-byte pages for
  * reads and writes, the kind of each page (fixed ROM, paged ROM slot, RAM)
@@ -250,6 +254,7 @@ typedef struct {
     uint32 link_full;       /* links not made for lack of room in the log */
     uint32 retranslations;  /* RAM blocks whose code had changed */
     uint32 busy_loops;      /* busy-wait loops found in translated code */
+    uint32 line_loops;      /* of which wait for a line (read a line port) */
     uint32 scan_hits;       /* flag scans answered by the cache */
     uint32 interrupts;      /* maskable interrupts taken */
     uint32 nmis;            /* non-maskable interrupts taken */
@@ -383,6 +388,7 @@ typedef struct {
     uint32      queue[Z80J_QUEUE];  /* unordered; the hottest goes first */
     uint32      nqueue;
     uint32      queued[2048];   /* bitmap of the addresses in the queue */
+    uint32      line_ports[8];  /* bitmap of the ports set by z80j_set_line_port */
     /* Segments interrupted at a stretch end: the interrupt's return
      * lands inside a translated block, at a segment check, which is
      * entered directly rather than translated as a block of its own
@@ -410,6 +416,11 @@ void   z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
 
 /* Z80 reset: PC 0, interrupts disabled, interrupt mode 0. */
 void   z80j_reset(z80j_ctx *ctx);
+
+/* Declares an input port whose value only changes at line boundaries and
+ * whose read has no side effect (a V counter): a busy-wait loop may read
+ * it with IN A,(n), and goes by idle up to the next line boundary. */
+void   z80j_set_line_port(z80j_state *j, uint32 port);
 
 /* Forgets every translation. */
 void   z80j_flush(z80j_state *j);

@@ -154,6 +154,7 @@ typedef struct {
     uint32        rom_insns;
     uint32        rom_bytes;
     uint32        rom_us;
+    uint32        rom_capped;     /* stopped at half of the code buffer */
     uint32        rom_busy;
     /* Run since the last reset. */
     uint32        frame;
@@ -195,6 +196,7 @@ typedef struct {
     uint8  *cart_ram;       /* cartridge RAM (battery RAM of the mapper), or NULL */
     uint32  cart_ram_size;  /* 32 KiB in VRAM, else 16 KiB in DRAM */
     uint32  cart_ram_vram;  /* allocated in VRAM */
+    uint32  hot_vram;       /* entry counters allocated in VRAM */
 } game;
 
 /* Allocates the translator and the machine for a cartridge image. */

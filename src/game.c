@@ -17,6 +17,11 @@
 #define JIT_LINKS       (2 * JIT_BLOCKS)
 #define ROM_QUEUE       1024
 #define ROM_MAX_BLOCKS  4000
+/* The code translated before the run stops at half of the code buffer:
+ * the rest is left to the code met while running (a large cartridge has
+ * more reachable code than the buffer holds, whose translation would
+ * evict itself). */
+#define ROM_MAX_CODE    (JIT_CODE_BYTES / 2)
 
 /* Interpreter: an address is interpreted the first time it is entered
  * and translated at once from its second entry, within a budget per
@@ -283,6 +288,7 @@ void game_free(game *g)
 Err game_init(game *g, const uint8 *rom, uint32 rom_size)
 {
     z80j_glue glue;
+    uint32 k;
 
     memset(g, 0, sizeof(*g));
     g->rom = rom;
@@ -291,7 +297,15 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
     g->code = (uint32 *)AllocMem(JIT_CODE_BYTES, MEMTYPE_DRAM);
     g->blocks = AllocMem((int32)z80j_block_bytes(JIT_BLOCKS), MEMTYPE_DRAM);
     g->links = (uint32 *)AllocMem((int32)z80j_link_bytes(JIT_LINKS), MEMTYPE_DRAM);
-    g->hot = (uint8 *)AllocMem(0x10000, MEMTYPE_DRAM);
+    /* The entry counters of the interpreter go to VRAM, which the CPU
+     * reads and writes like DRAM, when the cartridge image leaves room
+     * there (images up to 256 KiB): their 64 KiB stay free in DRAM. */
+    g->hot_vram = 1;
+    g->hot = (uint8 *)AllocMem(0x10000, MEMTYPE_VRAM);
+    if (g->hot == NULL) {
+        g->hot_vram = 0;
+        g->hot = (uint8 *)AllocMem(0x10000, MEMTYPE_DRAM);
+    }
     g->log = (uint32 *)AllocMem(GAME_LOG_WORDS * 4, MEMTYPE_DRAM);
     g->sms = (sms_machine *)AllocMem(sizeof(sms_machine), MEMTYPE_DRAM);
     g->rd = (renderer *)AllocMem(sizeof(renderer), MEMTYPE_DRAM | MEMTYPE_FILL);
@@ -332,8 +346,14 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
     if (g->cart_ram == NULL)
         g->cart_ram_size = 0;
     sms_init(g->sms, g->ctx, rom, rom_size, VDP_LINES_NTSC, g->cart_ram, g->cart_ram_size);
-    printf("Cartridge RAM: %lu bytes in %s\n", (unsigned long)g->cart_ram_size,
-           g->cart_ram == NULL ? "no memory" : g->cart_ram_vram ? "VRAM" : "DRAM");
+    for (k = 0; k < Z80J_PORTS; k++) {
+        if (SMS_PORT_VCOUNTER(k))
+            z80j_set_line_port(&g->jit, k);
+    }
+    printf("Cartridge RAM: %lu bytes in %s; entry counters in %s\n",
+           (unsigned long)g->cart_ram_size,
+           g->cart_ram == NULL ? "no memory" : g->cart_ram_vram ? "VRAM" : "DRAM",
+           g->hot_vram ? "VRAM" : "DRAM");
     printf("Mapper: %s\n", g->sms->mem.mapper == SMS_MAPPER_CODEMASTERS ?
            "Codemasters (header at $7FE0; slots paged by writes to $0000, $4000, $8000)" :
            "Sega (paging registers at $FFFC-$FFFF)");
@@ -364,6 +384,7 @@ void game_translate_rom(game *g)
 
     t0 = plat_usec_now();
     j->seed_hot = g->seed_hot;
+    g->rom_capped = 0;
     while (head != tail && g->rom_blocks < ROM_MAX_BLOCKS) {
         uint32 pc = queue[head];
         uint32 bytes = j->stats.code_bytes;
@@ -374,6 +395,10 @@ void game_translate_rom(game *g)
         if (visited[pc >> 5] & ((uint32)1 << (pc & 31)))
             continue;
         visited[pc >> 5] |= (uint32)1 << (pc & 31);
+        if (g->rom_bytes >= ROM_MAX_CODE) {
+            g->rom_capped = 1;
+            break;
+        }
         n = z80j_prepare(j, pc, targets, 8, &nt);
         if (n == 0)
             continue;
@@ -397,7 +422,7 @@ void game_translate_rom(game *g)
 
     printf("ROM translation: %lu blocks, %lu instructions, %lu bytes of ARM code, %lu us "
            "(%lu us per instruction), %lu busy-wait loops, %lu flag scans from the cache, "
-           "%lu evictions; code buffer "
+           "%lu evictions%s; code buffer "
            "%d zones of %d bytes shared by the cold and hot areas, run marks per "
            "%lu bytes, %d block descriptors, %d link entries; "
            "interpreter: translation queued at %d entries, at once from %d within "
@@ -408,6 +433,7 @@ void game_translate_rom(game *g)
            (unsigned long)(g->rom_insns ? g->rom_us / g->rom_insns : 0),
            (unsigned long)g->rom_busy, (unsigned long)j->stats.scan_hits,
            (unsigned long)j->stats.evictions,
+           g->rom_capped ? ", stopped at half of the code buffer" : "",
            JIT_ZONES, JIT_ZONE_BYTES, (unsigned long)(4u << j->chunk_shift), JIT_BLOCKS, JIT_LINKS,
            HOT_QUEUE_AT, HOT_SYNC_AT, HOT_SYNC_US, HOT_INT_COST, HOT_FORCE_AT);
 }
@@ -681,7 +707,8 @@ void game_log_summary(game *g)
            "%lu NMI, %lu bank switches, %lu blocks translated while running (%lu in spare "
            "time, %lu at once in %lu us, %lu refused, %lu promoted), %lu interpreted "
            "instructions in %lu stretches, %lu evictions (%lu blocks, %lu live chunks), "
-           "%lu busy-wait loops found, %lu RAM blocks cut at a seam, status %ld\n",
+           "%lu busy-wait loops found (%lu waiting for a line), %lu RAM blocks cut at a seam, "
+           "status %ld\n",
            (unsigned long)n, (unsigned long)avg,
            (unsigned long)percent(avg, g->frame_us), (int)g->frame_us,
            (unsigned long)g->max_us, (unsigned long)g->max_frame,
@@ -696,8 +723,8 @@ void game_log_summary(game *g)
            (unsigned long)d.sync_us, (unsigned long)d.sync_refused,
            (unsigned long)d.promoted, (unsigned long)d.interp_insns, (unsigned long)d.interp,
            (unsigned long)d.evictions, (unsigned long)d.evicted, (unsigned long)d.evicted_live,
-           (unsigned long)g->jit.stats.busy_loops, (unsigned long)g->jit.stats.seams,
-           (long)g->status);
+           (unsigned long)g->jit.stats.busy_loops, (unsigned long)g->jit.stats.line_loops,
+           (unsigned long)g->jit.stats.seams, (long)g->status);
     printf("Game summary: picture: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
            "%lu cells for written tiles, %lu palettes, %lu sprite cels, %lu pieces, %lu priority strips, "
            "%lu priority patches, %lu frames in bands, %lu frames partly blanked, "

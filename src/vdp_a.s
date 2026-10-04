@@ -32,6 +32,11 @@ F_DIFF          EQU     0               ; 256 bytes: sprites starting (+1) and
                                         ; count of sprites met on each line
 F_RANGE         EQU     256             ; 64 words: first line | last line + 1 << 8
                                         ; of each sprite on the screen (0: none)
+F_PLANES        EQU     0               ; pass C, over the line counts: 8 x 4
+                                        ; words of bit-sliced counts
+F_M1            EQU     128             ; pass C: a sprite's lines in its second word
+F_FIRST         EQU     132             ; its first line
+F_LOST          EQU     136             ; the lines it loses in its first word
 F_OVER          EQU     512             ; 9 words: lines with more than 8 sprites
                                         ; (the last one stays clear)
 F_HEAD          EQU     548             ; 240 bytes: first sprite starting on a line
@@ -270,67 +275,92 @@ pc_vstore
         add     r5,r5,#1
         cmp     r5,r7
         blo     pc_vis
+        ; The counts of the lines are bit-sliced: four planes of 32-line
+        ; words (bits 0-2 of the count, then "full": eight sprites met),
+        ; in the place of the line counts, which are done with. A sprite
+        ; counts on each of its lines a word at a time; on the lines
+        ; already full it loses the line. A count stops at eight.
+        MACRO
+        PCWORD                          ; lr = planes of a word, r4 = the
+        ldmia   lr,{r0,r2,r3,r12}       ; sprite's lines in it; out: r8 =
+        and     r8,r4,r12               ; the lines it loses there
+        bic     r4,r4,r12
+        and     r1,r0,r4
+        eor     r0,r0,r4
+        and     r4,r2,r1
+        eor     r2,r2,r1
+        and     r1,r3,r4
+        eor     r3,r3,r4
+        orr     r12,r12,r1
+        stmia   lr,{r0,r2,r3,r12}
+        MEND
+
         mov     r0,#0
         mov     r1,#0
         mov     r2,#0
         mov     r3,#0
-        mov     r12,sp
-        ldr     lr,[sp,#F_ACTIVE]
-        mov     lr,lr,lsr #4
-pc_clr
+        add     r12,sp,#F_PLANES
         stmia   r12!,{r0-r3}
-        subs    lr,lr,#1
-        bne     pc_clr
+        stmia   r12!,{r0-r3}
+        stmia   r12!,{r0-r3}
+        stmia   r12!,{r0-r3}
+        stmia   r12!,{r0-r3}
+        stmia   r12!,{r0-r3}
+        stmia   r12!,{r0-r3}
+        stmia   r12!,{r0-r3}
         mov     r5,#0                   ; sprite
 pc_loop
         cmp     r5,r7
-        beq     collide
+        beq     pc_end
         add     lr,sp,#F_RANGE
         ldr     r1,[lr,r5,lsl #2]
         movs    r2,r1,lsr #8            ; last line + 1
         beq     pc_next
         and     r1,r1,#0xFF             ; first line
-        sub     r2,r2,r1                ; lines
-        add     lr,sp,#F_OVER
-        mov     r12,r1,lsr #5
-        add     lr,lr,r12,lsl #2
-        ldmia   lr,{r0,r3}
+        sub     r2,r2,r1                ; lines (1 to 32)
+        mvn     r0,#0
+        rsb     r2,r2,#32
+        mov     r0,r0,lsr r2            ; one bit per line
         and     r12,r1,#31
-        mov     r0,r0,lsr r12
+        mov     r4,r0,lsl r12           ; the lines in the first word
         rsb     r12,r12,#32
-        orr     r0,r0,r3,lsl r12        ; over bits from the first line
-        cmp     r2,#32
-        movlo   r3,#1
-        movlo   r3,r3,lsl r2
-        sublo   r3,r3,#1
-        andlo   r0,r0,r3
-        movs    r0,r0                   ; r0 = the sprite's lines with too many
-        beq     pc_next
+        mov     r0,r0,lsr r12           ; in the next one (a shift by 32 gives 0)
+        str     r0,[sp,#F_M1]
+        str     r1,[sp,#F_FIRST]
+        add     lr,sp,#F_PLANES
+        mov     r1,r1,lsr #5
+        add     lr,lr,r1,lsl #4
+        PCWORD
+        str     r8,[sp,#F_LOST]
+        ldr     r4,[sp,#F_M1]
+        movs    r4,r4
+        moveq   r8,#0
+        beq     pc_lost
+        add     lr,lr,#16
+        PCWORD
+pc_lost                                 ; lost: [F_LOST] in the first word, r8 in the next
+        ldr     r0,[sp,#F_LOST]
+        orrs    r1,r0,r8
+        beq     pc_next                 ; the sprite keeps all its lines
+        ldr     r1,[sp,#F_FIRST]
+        and     r2,r1,#31
+        mov     r0,r0,lsr r2
+        rsb     r2,r2,#32
+        orr     r0,r0,r8,lsl r2         ; lines lost, from the first line on
         add     r3,r6,r5,lsl #2
-        ldr     r12,[r3,#S_Y]
-        sub     r12,r1,r12              ; line - first row of the sprite
-pc_line
-        tst     r0,#1
-        beq     pc_skip
-        ldrb    lr,[sp,r1]
-        add     lr,lr,#1
-        strb    lr,[sp,r1]
-        cmp     lr,#8
-        bls     pc_skip
-        ldr     lr,[r3,#S_VIS]
-        mov     r2,#1
-        bic     lr,lr,r2,lsl r12
-        str     lr,[r3,#S_VIS]
-        mov     lr,#1
-        str     lr,[r6,#S_PARTIAL]
-pc_skip
-        add     r1,r1,#1
-        add     r12,r12,#1
-        movs    r0,r0,lsr #1
-        bne     pc_line
+        ldr     r2,[r3,#S_Y]
+        sub     r2,r1,r2                ; first row on the screen
+        mov     r0,r0,lsl r2            ; rows lost
+        ldr     r1,[r3,#S_VIS]
+        bic     r1,r1,r0
+        str     r1,[r3,#S_VIS]
+        mov     r1,#1
+        str     r1,[r6,#S_PARTIAL]
 pc_next
         add     r5,r5,#1
         b       pc_loop
+pc_end
+        mov     r4,#ST_OVERFLOW         ; the flags, which r4 held
 
         ; Collisions: the sprites on the screen by first line, from the
         ; chains of pass A (each line's chain is in reverse table order,

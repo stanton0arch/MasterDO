@@ -193,7 +193,8 @@ def parse_log(path, err_path):
                 line, r"(\d+) interpreted instructions in (\d+) stretches, (\d+) evictions "
                 r"\((\d+) blocks", (0, 0, 0, 0))
             s["busy_loops"], s["seams"], s["status"] = grab(
-                line, r"(\d+) busy-wait loops found, (\d+) RAM blocks cut at a seam, status (-?\d+)",
+                line, r"(\d+) busy-wait loops found(?: \(\d+ waiting for a line\))?, (\d+) RAM blocks "
+                r"cut at a seam, status (-?\d+)",
                 (0, 0, 0))
             r["summary"] = s
         elif line.startswith("ROM translation:"):

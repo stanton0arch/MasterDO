@@ -20,6 +20,10 @@
 #include "smsmem.h"
 #include "vdp.h"
 
+/* Ports reading the V counter, whose value only changes at line
+ * boundaries (for the translator's line-wait loops). */
+#define SMS_PORT_VCOUNTER(p) (((p) & 0xC1u) == 0x40u)
+
 /* Buttons of pad 1 (sms_frame argument). */
 #define SMS_PAD_UP     0x01
 #define SMS_PAD_DOWN   0x02

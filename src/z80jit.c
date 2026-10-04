@@ -765,7 +765,7 @@ static uint32 br_pair(uint32 p, uint32 idx)
  * RET cc, which only leaves the loop), or changes the interrupt state
  * returns 0.
  */
-static int32 busy_insn(const jit_insn *in, uint32 *rd, uint32 *wr)
+static int32 busy_insn(const jit_insn *in, const uint32 *line_ports, uint32 *rd, uint32 *wr)
 {
     uint32 op = in->op;
     uint32 x = op >> 6;
@@ -871,6 +871,11 @@ static int32 busy_insn(const jit_insn *in, uint32 *rd, uint32 *wr)
             case 2:                                 /* JP cc */
                 break;
             case 3:
+                if (y == 3 && (line_ports[(in->n & 0xFFu) >> 5] >> (in->n & 31u)) & 1u) {
+                    *rd = 0;                        /* IN A,(n) from a line port */
+                    *wr = BR_A;
+                    return 2;
+                }
                 if (y != 0)
                     return 0;
                 break;                              /* JP */
@@ -896,14 +901,18 @@ static int32 busy_insn(const jit_insn *in, uint32 *rd, uint32 *wr)
  * each pass computes the same thing: every instruction is allowed by
  * busy_insn, nothing it writes is read before being written in the same
  * pass, and no other jump enters it past its head. Memory can then only
- * change through an interrupt, so the loop runs until the next one.
+ * change through an interrupt, so the loop runs until the next one
+ * (returns 1). A loop that reads a line port computes the same thing on
+ * every pass of a line, and waits for the next line (returns 2).
  */
-static int32 busy_loop(const jit_insn *ins, int32 n, int32 h, int32 e)
+static int32 busy_loop(const z80j_state *j, const jit_insn *ins, int32 n, int32 h, int32 e)
 {
     uint32 written = 0;
     uint32 exposed = 0;
     uint32 rd;
     uint32 wr;
+    int32 kind = 1;
+    int32 r;
     int32 k;
 
     for (k = 0; k < n; k++) {
@@ -911,12 +920,15 @@ static int32 busy_loop(const jit_insn *ins, int32 n, int32 h, int32 e)
             return 0;
     }
     for (k = h; k <= e; k++) {
-        if (!busy_insn(&ins[k], &rd, &wr))
+        r = busy_insn(&ins[k], j->line_ports, &rd, &wr);
+        if (r == 0)
             return 0;
+        if (r == 2)
+            kind = 2;
         exposed |= rd & ~written;
         written |= wr;
     }
-    return (exposed & written) == 0;
+    return (exposed & written) == 0 ? kind : 0;
 }
 
 /*--------------------------------------------------------------------------
@@ -1516,9 +1528,10 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
 
         if (p->internal >= 0 && p->internal <= k &&
             (kd == K_JRCC || kd == K_JPCC || kd == K_JR || kd == K_JP) &&
-            busy_loop(ins, n, p->internal, k)) {
-            p->busy = 1;
+            (p->busy = (uint32)busy_loop(j, ins, n, p->internal, k)) != 0) {
             j->stats.busy_loops++;
+            if (p->busy == 2)
+                j->stats.line_loops++;
         }
     }
 
@@ -1842,6 +1855,11 @@ void z80j_set_interp(z80j_state *j, uint8 *hot, uint32 queue_at, uint32 sync_at)
     j->ctx->hot_sync_gate = 0;
     j->nqueue = 0;
     memset(j->queued, 0, sizeof(j->queued));
+}
+
+void z80j_set_line_port(z80j_state *j, uint32 port)
+{
+    j->line_ports[(port & 0xFFu) >> 5] |= (uint32)1 << (port & 31u);
 }
 
 void z80j_set_force(z80j_state *j, uint32 force_at)

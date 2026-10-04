@@ -564,8 +564,10 @@ int main(int argc, char **argv)
             show_message(&plat, "Translating the cartridge code...");
             game_translate_rom(&g);
             plat_mem_free(&st.run_free, &vram);
-            printf("Memory: %lu bytes of DRAM free during the run; picture at (%ld,%ld)\n",
-                   (unsigned long)st.run_free, (long)st.pic_x, (long)st.pic_y);
+            printf("Memory: %lu bytes of DRAM and %lu bytes of VRAM free during the run; "
+                   "picture at (%ld,%ld)\n",
+                   (unsigned long)st.run_free, (unsigned long)vram, (long)st.pic_x,
+                   (long)st.pic_y);
         }
 
         for (;;) {

@@ -31,6 +31,7 @@
 #define C_PL 0x5u
 #define C_VS 0x6u
 #define C_VC 0x7u
+#define C_HI 0x8u
 #define C_AL 0xEu
 
 /* ARM data-processing opcodes. */
@@ -1012,12 +1013,53 @@ static void emit_idle(z80j_state *j, uint32 cond)
     dp_i(j, cond, OP_MOV, 0, RCYC, 0, 0);
 }
 
+/*
+ * Jump back of a loop waiting for a line (busy == 2): the stretches end at
+ * line boundaries, so the next boundary is the remainder of the T-states
+ * left by the line length (a whole line when it falls on one, the rest of
+ * the stretch at most); that time goes by idle. The remainder is taken
+ * with the multiplication of T_LINE (vdp.c), exact below 171196 T-states.
+ */
+static void emit_line_idle(z80j_state *j)
+{
+    dp_r(j, C_AL, OP_MOV, 0, R0, 0, RCYC, SH_ASR, 8);          /* t */
+    mov_r(j, R1, R0, SH_LSR, 2);
+    dp_i(j, C_AL, OP_MOV, 0, R2, 0, 0x8F00);
+    dp_i(j, C_AL, OP_ORR, 0, R2, R2, 0xB9);
+    emit(j, (C_AL << 28) | (R1 << 16) | (R1 << 8) | 0x90u | R2);   /* mul r1,r2,r1 */
+    mov_r(j, R1, R1, SH_LSR, 21);                               /* lines left */
+    dp_i(j, C_AL, OP_MOV, 0, R2, 0, 228);
+    emit(j, (C_AL << 28) | (R2 << 16) | (R2 << 8) | 0x90u | R1);   /* mul r2,r1,r2 */
+    dp_r(j, C_AL, OP_SUB, 1, R0, R0, R2, SH_LSL, 0);
+    dp_i(j, C_EQ, OP_MOV, 0, R0, 0, 228);
+    cmp_r(j, C_AL, OP_CMP, R0, RCYC, SH_ASR, 8);
+    dp_r(j, C_HI, OP_MOV, 0, R0, 0, RCYC, SH_ASR, 8);
+    mov_r(j, R0, R0, SH_LSL, 8);
+    dp_r(j, C_AL, OP_SUB, 0, RCYC, RCYC, R0, SH_LSL, 0);
+    mem_i(j, C_AL, 1, 0, R1, RG, GOFF(idle));
+    dp_r(j, C_AL, OP_ADD, 0, R1, R1, R0, SH_LSL, 0);
+    mem_i(j, C_AL, 0, 0, R1, RG, GOFF(idle));
+}
+
 /* Conditional jump taken path: extra T-states, then the branch. */
 static void emit_jump_cond(jit_block_ctx *b, uint32 cond, const jit_insn *in,
                            int32 index, uint32 extra)
 {
     z80j_state *j = b->j;
 
+    if (in->busy == 2) {
+        uint32 *skip = 0;
+
+        if (cond != C_AL) {
+            skip = j->cur;
+            emit(j, ((cond ^ 1u) << 28) | (5u << 25));
+        }
+        emit_line_idle(j);
+        emit_b(j, C_AL, 0, JIT_ADDR(b->ins[in->internal].host));
+        if (skip != 0)
+            patch_b(skip, JIT_ADDR(j->cur));
+        return;
+    }
     if (in->busy) {
         emit_idle(j, cond);
         emit_b(j, cond, 0, JIT_ADDR(b->ins[in->internal].host));
