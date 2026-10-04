@@ -74,8 +74,8 @@ static void vdp_catch_up(unsigned long long t)
             counter = vreg[10];
         }
         lines_done++;
-        if (lines_done == ACTIVE)
-            vstatus |= 0x80;
+        if (lines_done == ACTIVE + 1)
+            vstatus |= 0x80;        /* end of the line after the active display */
     }
 }
 

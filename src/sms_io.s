@@ -553,9 +553,9 @@ ev_tail
         strhi   r4,[r12,#V_LCVAL]
         str     r0,[r12,#V_LCK]
 ev_synced
-        ; VBlank flag at the start of the line after the active display
+        ; VBlank flag at the end of the line after the active display
         cmp     r0,r3
-        blo     ev_irq
+        bls     ev_irq
         ldr     r1,[r12,#V_VBLDONE]
         teq     r1,#0
         bne     ev_irq
@@ -583,7 +583,7 @@ ev_irq
         ldr     r1,[r12,#V_LINES]
         ldr     r2,[r12,#V_VBLDONE]
         teq     r2,#0
-        moveq   r1,r3
+        addeq   r1,r3,#1
         ldrb    r2,[r12,#V_REG]
         tst     r2,#0x10
         beq     ev_sched

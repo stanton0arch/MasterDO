@@ -30,8 +30,11 @@
  * Line model: the line counter is decremented at the end of lines 0 to
  * the last active line + 1 and reloaded from register 10 at the end of
  * the other lines; an underflow reloads it and sets the line interrupt
- * flag. The VBlank flag is set at the start of the line after the active
- * display (192, 224 or 240).
+ * flag. The VBlank flag is set at the end of the line after the active
+ * display (192, 224 or 240), when the V counter leaves $C0 ($E0, $F0):
+ * the same moment as the last decrement of the line counter, so that the
+ * status read of a VBlank handler also clears a line interrupt raised by
+ * that decrement.
  *
  * Colour RAM writes during the active display are recorded with the line
  * they affect, like the register writes, so that the picture can change

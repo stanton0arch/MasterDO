@@ -162,7 +162,7 @@ static void vdp_schedule(vdp_state *v)
     uint32 u;
 
     if (!v->vbl_done)
-        next = v->active;
+        next = v->active + 1;
     if ((v->reg[0] & 0x10) && v->lc_k <= v->active) {
         u = v->lc_k + v->lc_val + 1;
         if (u <= v->active + 1 && u < next)
@@ -246,7 +246,7 @@ void vdp_event(vdp_state *v)
     uint32 k = v->ctx->line - v->frame_base;
 
     lc_sync(v, k);
-    if (k >= v->active && !v->vbl_done) {
+    if (k > v->active && !v->vbl_done) {
         v->vbl_done = 1;
         v->status |= VDP_ST_VBLANK;
     }
