@@ -33,6 +33,10 @@ CHECK_OFF(spr_rows, offsetof(vdp_state, spr_rows) == 0x4A84);
 CHECK_OFF(spr_tile_rows, offsetof(vdp_state, spr_tile_rows) == 0x4B84);
 CHECK_OFF(spr_tile_ok, offsetof(vdp_state, spr_tile_ok) == 0x4D84);
 CHECK_OFF(hc, offsetof(vdp_state, hc) == 0x7C);
+CHECK_OFF(active, offsetof(vdp_state, active) == 0x160);
+CHECK_OFF(nt_rows, offsetof(vdp_state, nt_rows) == 0x164);
+CHECK_OFF(cr_n, offsetof(vdp_state, cr_n) == 0x4F84);
+CHECK_OFF(cr_log, offsetof(vdp_state, cr_log) == 0x4F88);
 CHECK_OFF(dirty, offsetof(vdp_state, dirty) == 0x200);
 CHECK_OFF(vram, offsetof(vdp_state, vram) == 0x400);
 CHECK_OFF(hs_n, offsetof(vdp_state, hs_n) == 0x4400);
@@ -78,19 +82,51 @@ static uint32 vdp_beam(const vdp_state *v, uint32 left, uint32 *hpos)
 }
 
 /*
+ * Display mode from registers 0 and 1: the active lines, the name table
+ * rows and the jump of the V counter. Mode 4 (register 0 bit 2) with M2
+ * (register 0 bit 1) selects the extended heights: M1 (register 1 bit 4)
+ * alone gives 224 lines, M3 (register 1 bit 3) alone 240.
+ */
+static void vdp_mode(vdp_state *v)
+{
+    uint32 m2 = ((uint32)v->reg[0] >> 1) & 1;
+    uint32 m4 = ((uint32)v->reg[0] >> 2) & 1;
+    uint32 m1 = ((uint32)v->reg[1] >> 4) & 1;
+    uint32 m3 = ((uint32)v->reg[1] >> 3) & 1;
+
+    v->active = VDP_ACTIVE_STD;
+    if (m4 && m2 && (m1 ^ m3))
+        v->active = m1 ? 224 : 240;
+    v->nt_rows = (v->active > VDP_ACTIVE_STD) ? 32 : 28;
+    /* V counter: the lines up to vc_jump count from 0 (modulo 256), the
+     * later ones jump back by vc_back. NTSC: $00-$DA then $D5-$FF (192
+     * lines), $00-$EA then $E5-$FF (224), $00-$FF then $00-$05 (240);
+     * PAL: $00-$F2 then $BA-$FF, $00-$FF and $00-$02 then $CA-$FF,
+     * $00-$FF and $00-$0A then $D2-$FF. */
+    if (v->lines == VDP_LINES_PAL) {
+        v->vc_back = 0x39;
+        v->vc_jump = (v->active == 224) ? 0x102 : (v->active == 240) ? 0x10A : 0xF2;
+    } else {
+        v->vc_back = 0x06;
+        v->vc_jump = (v->active == 224) ? 0xEA : (v->active == 240) ? 0xFFFF : 0xDA;
+    }
+}
+
+/*
  * Brings the line counter to the end of line k - 1 of the current frame.
- * Lines 0 to VDP_ACTIVE decrement it, the others reload it; an underflow
- * reloads it and sets the line interrupt flag.
+ * Lines 0 to the last active line + 1 decrement it, the others reload
+ * it; an underflow reloads it and sets the line interrupt flag.
  */
 static void lc_sync(vdp_state *v, uint32 k)
 {
+    uint32 a = v->active;
     uint32 end;
     uint32 n;
 
     if (k <= v->lc_k)
         return;
-    if (v->lc_k <= VDP_ACTIVE) {
-        end = (k <= VDP_ACTIVE) ? k : VDP_ACTIVE + 1;
+    if (v->lc_k <= a) {
+        end = (k <= a) ? k : a + 1;
         n = end - v->lc_k;
         if (n > v->lc_val) {
             /* Underflow at line lc_k + lc_val; later lines count down from
@@ -102,7 +138,7 @@ static void lc_sync(vdp_state *v, uint32 k)
             v->lc_val -= n;
         }
     }
-    if (k > VDP_ACTIVE + 1)
+    if (k > a + 1)
         v->lc_val = v->reg[10];
     v->lc_k = k;
 }
@@ -126,10 +162,10 @@ static void vdp_schedule(vdp_state *v)
     uint32 u;
 
     if (!v->vbl_done)
-        next = VDP_ACTIVE;
-    if ((v->reg[0] & 0x10) && v->lc_k <= VDP_ACTIVE) {
+        next = v->active;
+    if ((v->reg[0] & 0x10) && v->lc_k <= v->active) {
         u = v->lc_k + v->lc_val + 1;
-        if (u <= VDP_ACTIVE + 1 && u < next)
+        if (u <= v->active + 1 && u < next)
             next = u;
     }
     v->ctx->event_line = v->frame_base + next;
@@ -153,10 +189,12 @@ void vdp_reset(vdp_state *v)
     v->hs_n = 0;
     v->nt_n = 0;
     v->de_n = 0;
+    v->cr_n = 0;
     v->de_start = ((uint32)v->reg[1] >> 6) & 1;
     v->lc_k = 0;
     v->lc_val = v->reg[10];
     v->frames = 0;
+    vdp_mode(v);
     memset(v->dirty, 1, sizeof(v->dirty));
     v->cram_dirty = 1;
     v->n_data_w = 0;
@@ -174,13 +212,6 @@ void vdp_init(vdp_state *v, z80j_ctx *ctx, uint32 lines)
     v->spr_partial = 0;
     memset(v->spr_tile_ok, 0, sizeof(v->spr_tile_ok));
     v->lines = lines;
-    if (lines == VDP_LINES_PAL) {
-        v->vc_jump = 0xF2;
-        v->vc_back = 0x39;
-    } else {
-        v->vc_jump = 0xDA;
-        v->vc_back = 0x06;
-    }
     /* A line is 342 pixels long: the 9-bit H counter runs from $000 to
      * $127, then from $1D2 to $1FF, and the port returns its bits 8-1.
      * Line boundaries are taken at H = $F4, when line interrupts occur. */
@@ -204,6 +235,7 @@ void vdp_frame_begin(vdp_state *v)
     v->hs_n = 0;
     v->nt_n = 0;
     v->de_n = 0;
+    v->cr_n = 0;
     v->de_start = ((uint32)v->reg[1] >> 6) & 1;
     v->frames++;
     vdp_schedule(v);
@@ -214,7 +246,7 @@ void vdp_event(vdp_state *v)
     uint32 k = v->ctx->line - v->frame_base;
 
     lc_sync(v, k);
-    if (k >= VDP_ACTIVE && !v->vbl_done) {
+    if (k >= v->active && !v->vbl_done) {
         v->vbl_done = 1;
         v->status |= VDP_ST_VBLANK;
     }
@@ -233,7 +265,7 @@ uint32 vdp_data_read(vdp_state *v)
     return r;
 }
 
-void vdp_data_write(vdp_state *v, uint32 value)
+void vdp_data_write(vdp_state *v, uint32 value, uint32 left)
 {
     uint32 a = v->addr;
 
@@ -241,8 +273,15 @@ void vdp_data_write(vdp_state *v, uint32 value)
     v->ctl &= ~VDP_PENDING;
     v->buffer = value;
     if (v->ctl == 3) {
+        /* A colour written during the active display shows from the next
+         * line on (most of the current one is drawn). */
+        uint32 hpos;
+        uint32 line = vdp_beam(v, left, &hpos) + 1;
+
         v->cram[a & 31] = (uint8)(value & 0x3F);
         v->cram_dirty = 1;
+        if (line < v->active && v->cr_n < VDP_CR_LOG)
+            v->cr_log[v->cr_n++] = (line << 16) | ((a & 31) << 8) | (value & 0x3F);
     } else {
         v->vram[a] = (uint8)value;
         v->dirty[a >> 5] = 1;
@@ -267,12 +306,15 @@ uint32 vdp_status_read(vdp_state *v, uint32 left)
 static uint32 vdp_reg_write(vdp_state *v, uint32 r, uint32 d, uint32 left)
 {
     uint32 ev = v->ctx->event_line;
+    uint32 mode = (r == 0) ? (((uint32)v->reg[0] ^ d) & 0x06) :     /* M2, M4 */
+                  (r == 1) ? (((uint32)v->reg[1] ^ d) & 0x18) : 0;  /* M1, M3 */
     uint32 raised;
 
     if (r > 10)
         return 0;
-    /* The counter runs up to now with the old values. */
-    if (r == 0 || r == 10)
+    /* The counter runs up to now with the old values (the mode bits of
+     * registers 0 and 1 move the end of the active display). */
+    if (r == 0 || r == 10 || mode)
         lc_sync(v, vdp_lines_done(v, left));
     if (r == 1 && ((v->reg[1] ^ d) & 0x40)) {
         /* Display enable: a change during the active display shows from
@@ -280,10 +322,12 @@ static uint32 vdp_reg_write(vdp_state *v, uint32 r, uint32 d, uint32 left)
         uint32 hpos;
         uint32 line = vdp_beam(v, left, &hpos) + 1;
 
-        if (line < VDP_ACTIVE && v->de_n < VDP_DE_LOG)
+        if (line < v->active && v->de_n < VDP_DE_LOG)
             v->de_log[v->de_n++] = (line << 8) | ((d >> 6) & 1);
     }
     v->reg[r] = (uint8)d;
+    if (mode)
+        vdp_mode(v);
     if (r == 8 || r == 2) {
         /* The scroll and the name table of a line are taken at its
          * start: a write during the active display shows from the next
@@ -291,7 +335,7 @@ static uint32 vdp_reg_write(vdp_state *v, uint32 r, uint32 d, uint32 left)
         uint32 hpos;
         uint32 line = vdp_beam(v, left, &hpos) + 1;
 
-        if (line < VDP_ACTIVE) {
+        if (line < v->active) {
             if (r == 8) {
                 if (v->hs_n < VDP_HS_LOG)
                     v->hs_log[v->hs_n++] = (line << 8) | (d & 0xFF);
@@ -303,7 +347,7 @@ static uint32 vdp_reg_write(vdp_state *v, uint32 r, uint32 d, uint32 left)
     if (r > 1)
         return 0;
     raised = vdp_irq(v);
-    if (r == 0)
+    if (r == 0 || mode)
         vdp_schedule(v);
     return raised || v->ctx->event_line != ev;
 }
@@ -370,3 +414,48 @@ uint32 vdp_bands(const uint32 *log, uint32 n, uint32 top_value, uint32 *tops, ui
     return nb;
 }
 
+
+/* Colours of a palette band: 32 bytes as 8 words. */
+static void cram_copy(uint32 *d, const uint32 *s)
+{
+    d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
+    d[4] = s[4]; d[5] = s[5]; d[6] = s[6]; d[7] = s[7];
+}
+
+static uint32 cram_same(const uint32 *a, const uint32 *b)
+{
+    return ((a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2]) | (a[3] ^ b[3]) |
+            (a[4] ^ b[4]) | (a[5] ^ b[5]) | (a[6] ^ b[6]) | (a[7] ^ b[7])) == 0;
+}
+
+uint32 vdp_palette_bands(const vdp_state *v, uint32 *tops, uint32 *cram, uint32 *merged)
+{
+    uint32 nb = 1;
+    uint32 k;
+
+    *merged = 0;
+    tops[0] = 0;
+    cram_copy(cram, (const uint32 *)v->cram);
+    for (k = 0; k < v->cr_n; k++) {
+        uint32 e = v->cr_log[k];
+        uint32 line = e >> 16;
+
+        if (line > tops[nb - 1]) {
+            /* The band so far merges with the one before when it ended
+             * with the same colours. */
+            if (nb > 1 && cram_same(cram + 8 * (nb - 1), cram + 8 * (nb - 2)))
+                nb--;
+            if (nb < VDP_PAL_BANDS) {
+                cram_copy(cram + 8 * nb, cram + 8 * (nb - 1));
+                tops[nb] = line;
+                nb++;
+            } else {
+                (*merged)++;
+            }
+        }
+        ((uint8 *)(cram + 8 * (nb - 1)))[(e >> 8) & 31] = (uint8)(e & 0x3F);
+    }
+    if (nb > 1 && cram_same(cram + 8 * (nb - 1), cram + 8 * (nb - 2)))
+        nb--;
+    return nb;
+}

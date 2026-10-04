@@ -121,6 +121,9 @@ def parse_picture(line):
         r"table bands, (\d+) bands dropped, (\d+) frames short of layers, (\d+) frames with "
         r"sprites past the line limit, (\d+) sprite runs dropped, (\d+) frames with sprite "
         r"overflow, (\d+) with sprite collision", (0,) * 13)
+    p["pbands"], p["pmerged"], p["tall"] = grab(
+        line, r"(\d+) frames in palette bands, (\d+) colour writes merged, (\d+) frames of more "
+        r"than 192 lines", (0, 0, 0))
     return p
 
 
@@ -327,13 +330,14 @@ def make_sheets(workdir, dump_every, differing):
     regular = [v for v in views if int(os.path.basename(v)[5:11]) % dump_every == 0]
     if regular:
         per_row = 8
-        tw, th = 128, 96
+        tw, th = 128, 120               # half size of the tallest picture (240 lines)
         rows = (len(regular) + per_row - 1) // per_row
         sheet = Image.new("RGB", (per_row * tw, rows * (th + 12)), (32, 32, 32))
         draw = ImageDraw.Draw(sheet)
         for i, v in enumerate(regular):
             try:
-                im = Image.open(v).resize((tw, th))
+                im = Image.open(v)
+                im = im.resize((tw, im.height // 2))
             except OSError:
                 continue
             x = (i % per_row) * tw
@@ -351,7 +355,7 @@ def make_sheets(workdir, dump_every, differing):
         except OSError:
             continue
         d = ImageChops.difference(a, b)
-        out = Image.new("RGB", (256 * 3 + 8, 192), (32, 32, 32))
+        out = Image.new("RGB", (256 * 3 + 8, a.height), (32, 32, 32))
         out.paste(a, (0, 0))
         out.paste(b, (260, 0))
         out.paste(d.point(lambda x: 255 if x else 0), (520, 0))
@@ -475,6 +479,8 @@ def game_lines(g):
             pf["sprites"], pf["pieces"], pf["strips"], pf["patches"], pf["tiles"], pf["cells"],
             p["bands"], p["ntbands"], p["dbands"], p["dropped"], p["layers"], p["spr_partial"],
             p["spr_dropped"], p["overflow"], p["collision"], g["display_changes"]))
+        out.append("  display: %d frames of more than 192 lines, %d frames in palette bands (%d colour writes merged)" % (
+            p.get("tall", 0), p.get("pbands", 0), p.get("pmerged", 0)))
     line = "  pictures: %d compared (%d with the display on), %d identical, %d differing" % (
         g["pics"], g["pics_on"], g["pics"] - g["pics_diff"], g["pics_diff"])
     if g["pics_diff"]:
@@ -505,6 +511,10 @@ def table(games):
                 notes.append("nt bands")
             if p.get("spr_partial"):
                 notes.append("spr>8")
+            if p.get("pbands"):
+                notes.append("palette bands")
+            if p.get("tall"):
+                notes.append("224/240 lines")
             if (g["vdp"] or {}).get("data_r"):
                 notes.append("VRAM reads")
             if (g["vdp"] or {}).get("counter_r", 0) >= 100:

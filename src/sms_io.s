@@ -46,30 +46,34 @@ V_FRAMEBASE     EQU     0x68
 V_VBLDONE       EQU     0x6C
 V_LCK           EQU     0x70
 V_LCVAL         EQU     0x74
+V_ACTIVE        EQU     0x160
 V_DIRTY         EQU     0x200
 V_VRAM          EQU     0x400
 V_HSN           EQU     0x4400          ; the logs lie past the video RAM
 V_NTN           EQU     0x4804
 V_NSTATR        EQU     0x4870
+V_CRN           EQU     0x4F84          ; the colour RAM log follows its count
 VDP_HS_LOG      EQU     256
 VDP_NT_LOG      EQU     16
-VDP_ACTIVE      EQU     192
+VDP_CR_LOG      EQU     64
 
 VDP_PENDING     EQU     0x100
 
 ;----------------------------------------------------------------------------
-; OUT to the data port. In: r0 = value. Out: r0 = 0 (stay in the block).
-; Codes 0 to 2 write video RAM (and mark the tile dirty), code 3 colour RAM;
-; the write also loads the read buffer and ends a pending control word.
+; OUT to the data port. In: r0 = value, r2 = T-states left. Out: r0 = 0
+; (stay in the block). Codes 0 to 2 write video RAM (and mark the tile
+; dirty), code 3 colour RAM; the write also loads the read buffer and ends
+; a pending control word. A colour written during the active display is
+; recorded with the line it shows from (the next one), for the picture.
 ;----------------------------------------------------------------------------
 sms_vdp_data_w
         ldr     r12,[r10,#MDATA]
-        ldr     r2,[r12,#V_CTL]
+        ldr     r1,[r12,#V_CTL]
         and     r0,r0,#0xFF
-        ldr     r1,[r12,#V_ADDR]
         str     r0,[r12,#V_BUFFER]
-        cmp     r2,#3
+        cmp     r1,#3
         bhs     data_w_slow
+        ldr     r1,[r12,#V_ADDR]
 data_w_vram
         add     r2,r12,#V_VRAM
         strb    r0,[r2,r1]
@@ -85,17 +89,52 @@ data_w_next
         str     r2,[r12,#V_NDATAW]
         mov     r0,#0
         mov     pc,lr
-data_w_slow                             ; code 3, or a control word pending
-        bic     r2,r2,#VDP_PENDING
-        str     r2,[r12,#V_CTL]
-        cmp     r2,#3
+data_w_slow                             ; r1 = code 3, or a control word pending
+        bic     r1,r1,#VDP_PENDING
+        str     r1,[r12,#V_CTL]
+        cmp     r1,#3
+        ldr     r1,[r12,#V_ADDR]
         bne     data_w_vram
-        and     r2,r1,#31
-        add     r2,r2,r12
         and     r0,r0,#0x3F
-        strb    r0,[r2,#V_CRAM]
-        mov     r0,#1
-        str     r0,[r12,#V_CRAMDIRTY]
+        and     r1,r1,#31
+        add     r1,r1,r12
+        strb    r0,[r1,#V_CRAM]         ; colour RAM
+        mov     r1,#1
+        str     r1,[r12,#V_CRAMDIRTY]
+        ldr     r1,[r12,#V_VBLDONE]     ; past the active display: not recorded
+        teq     r1,#0
+        ldr     r1,[r12,#V_ADDR]
+        bne     data_w_next
+        stmfd   sp!,{r1,r3,r4}
+        and     r3,r1,#31               ; colour index
+        ldr     r4,[r10,#LINE]
+        ldr     r1,[r12,#V_FRAMEBASE]
+        sub     r4,r4,r1
+        mov     r1,#228
+        mul     r4,r1,r4                ; T-states of the frame at the stretch end
+        subs    r4,r4,r2,asr#8          ; T-state of the access
+        bmi     cram_done               ; it ends the previous frame
+        mov     r4,r4,lsr#2             ; line = (t / 4) * 36793 >> 21
+        mov     r1,#0x8F00
+        orr     r1,r1,#0xB9
+        mul     r4,r1,r4
+        mov     r4,r4,lsr#21
+        add     r4,r4,#1                ; shows from the next line on
+        ldr     r1,[r12,#V_ACTIVE]
+        cmp     r4,r1
+        bhs     cram_done
+        add     r2,r12,#0x4F00
+        ldr     r1,[r2,#V_CRN-0x4F00]
+        cmp     r1,#VDP_CR_LOG
+        bhs     cram_done
+        add     r1,r1,#1
+        str     r1,[r2,#V_CRN-0x4F00]
+        add     r2,r2,r1,lsl#2          ; entry r1 - 1 of the log
+        orr     r0,r0,r3,lsl#8
+        orr     r0,r0,r4,lsl#16
+        str     r0,[r2,#V_CRN-0x4F00]
+cram_done
+        ldmfd   sp!,{r1,r3,r4}
         b       data_w_next
 
 ;----------------------------------------------------------------------------
@@ -217,7 +256,7 @@ ctrl_reg10
         ldr     r0,[r12,#V_FRAMEBASE]
         sub     r1,r1,r0
         mov     r0,#228
-        mul     r1,r0,r1                ; T-states of the frame at the stretch start
+        mul     r1,r0,r1                ; T-states of the frame at the stretch end
         subs    r1,r1,r2,asr#8          ; T-state of the access
         bmi     ctrl_reg_slow
         mov     r1,r1,lsr#2             ; line = (t / 4) * 36793 >> 21
@@ -229,7 +268,8 @@ ctrl_reg10
         cmp     r0,#10
         beq     ctrl_lc
         add     r1,r1,#1                ; shows from the next line on
-        cmp     r1,#VDP_ACTIVE
+        ldr     r2,[r12,#V_ACTIVE]
+        cmp     r1,r2
         bhs     ctrl_reg_store
         cmp     r0,#8
         bne     ctrl_log2
@@ -271,11 +311,12 @@ ctrl_lc
         ldr     r0,[r12,#V_LCK]
         cmp     r1,r0
         bls     ctrl_lc_store           ; k <= lc_k: nothing to do
-        cmp     r0,#VDP_ACTIVE
-        bhi     ctrl_lc_tail            ; lc_k > 192: no countdown
-        cmp     r1,#VDP_ACTIVE
-        movhi   r2,#VDP_ACTIVE+1
-        movls   r2,r1                   ; end = min(k, 193)
+        ldr     r2,[r12,#V_ACTIVE]      ; a = active lines
+        cmp     r0,r2
+        bhi     ctrl_lc_tail            ; lc_k > a: no countdown
+        cmp     r1,r2
+        addhi   r2,r2,#1
+        movls   r2,r1                   ; end = min(k, a + 1)
         sub     r2,r2,r0                ; n = end - lc_k
         ldr     r0,[r12,#V_LCVAL]
         cmp     r2,r0
@@ -283,8 +324,10 @@ ctrl_lc
         sub     r0,r0,r2
         str     r0,[r12,#V_LCVAL]
 ctrl_lc_tail
-        cmp     r1,#VDP_ACTIVE+1
-        ldrhib  r0,[r12,#V_REG+10]      ; past line 193 the counter reloads
+        ldr     r2,[r12,#V_ACTIVE]
+        add     r2,r2,#1
+        cmp     r1,r2
+        ldrhib  r0,[r12,#V_REG+10]      ; past line a + 1 the counter reloads
         strhi   r0,[r12,#V_LCVAL]
         str     r1,[r12,#V_LCK]
 ctrl_lc_store
@@ -304,9 +347,9 @@ ctrl_reg_slow
 ;----------------------------------------------------------------------------
 sms_vdp_data_wn
         ldr     r12,[r10,#MDATA]
-        ldr     r2,[r12,#V_CTL]
-        cmp     r2,#3
-        bhs     wn_slow_entry
+        ldr     r1,[r12,#V_CTL]
+        cmp     r1,#3
+        bhs     wn_slow_entry           ; r2 = T-states left at the end
         cmp     r0,#1
         blo     wn_general              ; OUTD
         cmp     r0,#4
@@ -446,14 +489,19 @@ wn_loop
         mov     r0,#0
         ldmfd   sp!,{r3-r9,pc}
 wn_slow
+        ; Byte by byte, each with its own time (16 T-states per OUTI).
         mov     r4,r0
         mov     r5,r12
+        sub     r8,r0,#1
+        add     r8,r2,r8,lsl#12         ; T-states left at the first byte
 wn_slow_loop
         mvn     r2,r3,lsr#24
         ldr     r2,[r10,r2,lsl#2]
         ldrb    r0,[r2,r3,lsr#16]
         add     r3,r3,r5
+        mov     r2,r8
         bl      sms_vdp_data_w
+        sub     r8,r8,#0x1000
         subs    r4,r4,#1
         bne     wn_slow_loop
         mov     r0,#0
@@ -469,7 +517,8 @@ wn_slow_loop
 ;----------------------------------------------------------------------------
 sms_vdp_event_a
         ldr     r12,[r10,#MDATA]
-        stmfd   sp!,{r4,r5}
+        stmfd   sp!,{r3,r4,r5}
+        ldr     r3,[r12,#V_ACTIVE]      ; r3 = a, active lines
         ldr     r0,[r10,#LINE]
         ldr     r1,[r12,#V_FRAMEBASE]
         sub     r0,r0,r1                ; k = line of the frame
@@ -477,11 +526,11 @@ sms_vdp_event_a
         ldr     r1,[r12,#V_LCK]
         cmp     r0,r1
         bls     ev_synced               ; k <= lc_k
-        cmp     r1,#VDP_ACTIVE
-        bhi     ev_tail                 ; lc_k > 192: no countdown
-        cmp     r0,#VDP_ACTIVE
-        movhi   r2,#VDP_ACTIVE+1
-        movls   r2,r0                   ; end = min(k, 193)
+        cmp     r1,r3
+        bhi     ev_tail                 ; lc_k > a: no countdown
+        cmp     r0,r3
+        addhi   r2,r3,#1
+        movls   r2,r0                   ; end = min(k, a + 1)
         sub     r2,r2,r1                ; n = end - lc_k
         ldr     r4,[r12,#V_LCVAL]
         cmp     r2,r4
@@ -498,13 +547,14 @@ ev_count
 ev_store
         str     r4,[r12,#V_LCVAL]
 ev_tail
-        cmp     r0,#VDP_ACTIVE+1
-        ldrhib  r4,[r12,#V_REG+10]      ; past line 193 the counter reloads
+        add     r2,r3,#1
+        cmp     r0,r2
+        ldrhib  r4,[r12,#V_REG+10]      ; past line a + 1 the counter reloads
         strhi   r4,[r12,#V_LCVAL]
         str     r0,[r12,#V_LCK]
 ev_synced
-        ; VBlank flag at the start of line 192
-        cmp     r0,#VDP_ACTIVE
+        ; VBlank flag at the start of the line after the active display
+        cmp     r0,r3
         blo     ev_irq
         ldr     r1,[r12,#V_VBLDONE]
         teq     r1,#0
@@ -533,17 +583,18 @@ ev_irq
         ldr     r1,[r12,#V_LINES]
         ldr     r2,[r12,#V_VBLDONE]
         teq     r2,#0
-        moveq   r1,#VDP_ACTIVE
+        moveq   r1,r3
         ldrb    r2,[r12,#V_REG]
         tst     r2,#0x10
         beq     ev_sched
         ldr     r2,[r12,#V_LCK]
-        cmp     r2,#VDP_ACTIVE
+        cmp     r2,r3
         bhi     ev_sched
         ldr     r4,[r12,#V_LCVAL]
         add     r2,r2,r4
         add     r2,r2,#1                ; underflow line
-        cmp     r2,#VDP_ACTIVE+1
+        add     r4,r3,#1
+        cmp     r2,r4
         bhi     ev_sched
         cmp     r2,r1
         movlo   r1,r2
@@ -552,11 +603,11 @@ ev_sched
         add     r1,r1,r2
         str     r1,[r10,#EVENT_LINE]
         mov     r0,#0
-        ldmfd   sp!,{r4,r5}
+        ldmfd   sp!,{r3,r4,r5}
         mov     pc,lr
 ev_fallback
         mov     r0,#1
-        ldmfd   sp!,{r4,r5}
+        ldmfd   sp!,{r3,r4,r5}
         mov     pc,lr
 
         END

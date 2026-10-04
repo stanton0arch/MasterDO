@@ -633,6 +633,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-hash")) args[14] = 1;
         else if (!strcmp(argv[i], "-cels") && i + 1 < argc) args[16] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-dumpdiff") && i + 1 < argc) args[17] = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-rasterlog")) args[18] = 1;
         else if (!strcmp(argv[i], "-hotzones") && i + 1 < argc) args[12] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-budget") && i + 1 < argc) {
             unsigned f = 0, c = 0;

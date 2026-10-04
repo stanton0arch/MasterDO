@@ -16,9 +16,10 @@
 #include "vdp.h"
 
 #define DBGVIEW_WIDTH  256
-#define DBGVIEW_HEIGHT 192
+#define DBGVIEW_HEIGHT_MAX VDP_ACTIVE_MAX   /* the picture has v->active lines */
 
-/* The 256x192 picture at (x0, y0) of a frame buffer width pixels wide. */
+/* The 256 x v->active picture at (x0, y0) of a frame buffer width pixels
+ * wide. */
 void dbgview_draw(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 y0);
 
 /* Lines first to first + count - 1 of the picture only (first even). */

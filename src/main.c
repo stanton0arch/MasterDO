@@ -60,6 +60,7 @@ typedef struct {
     uint32             run_free;    /* DRAM free during the run */
     int32              pic_x;       /* picture position on screen (y even) */
     int32              pic_y;
+    uint32             pic_h;       /* picture height: 192, 224 or 240 lines */
     uint32             border[PLAT_NUM_SCREENS];  /* colour each screen is filled with */
     uint32             direct;      /* presentation without the queue */
     uint32             draw_errors;
@@ -117,8 +118,8 @@ static void log_vdp(const char *what)
            (unsigned long)(v->ctl & 3), (unsigned long)v->status);
     for (k = 0; k < 32; k++)
         printf(" %02x", v->cram[k]);
-    printf(", %lu sprites, backdrop $%04lx\n", (unsigned long)g.rd->n_sprites,
-           (unsigned long)render_backdrop(g.rd));
+    printf(", %lu sprites, backdrop $%04lx, %lu lines\n", (unsigned long)g.rd->n_sprites,
+           (unsigned long)render_backdrop(g.rd), (unsigned long)v->active);
     /* The writes made during the active display of the frame (the bands
      * of the picture): a raster effect's scroll per line, a name table
      * switch, the display turned off or on, each with the first line it
@@ -133,7 +134,24 @@ static void log_vdp(const char *what)
            (unsigned long)v->de_n);
     for (k = 0; k < v->de_n; k++)
         printf(" %lu:%s", (unsigned long)(v->de_log[k] >> 8), (v->de_log[k] & 1) ? "on" : "off");
+    printf(", %lu colour writes", (unsigned long)v->cr_n);
+    for (k = 0; k < v->cr_n; k++)
+        printf(" %lu:%02lx=%02lx", (unsigned long)(v->cr_log[k] >> 16),
+               (unsigned long)((v->cr_log[k] >> 8) & 31), (unsigned long)(v->cr_log[k] & 0x3F));
     printf("\n");
+}
+
+/* The picture on the screens: centred, with the height of the display
+ * mode (192, 224 or 240 lines), the clip window of every screen set to
+ * it (the cels are positioned in it). */
+static void set_picture(platform *p, app_state *st, uint32 h)
+{
+    st->pic_h = h;
+    st->pic_y = ((p->height - (int32)h) / 2) & ~1;
+    if (st->pic_y < 0)
+        st->pic_y = 0;
+    plat_reset_clip(p);
+    plat_set_clip(p, st->pic_x, st->pic_y, RENDER_W, (int32)h);
 }
 
 /* Fills the back screen with the backdrop colour when it does not hold it
@@ -200,14 +218,16 @@ static uint32 show_snapshot(platform *p, app_state *st, uint32 prev)
                 dbgview_draw(v, plat_pixels(p, p->back), p->width, st->pic_x, st->pic_y);
                 dt = plat_usec_now() - t0;
             } else {
-                plat_set_clip(p, st->pic_x, st->pic_y, RENDER_W, RENDER_H);
+                set_picture(p, st, st->pic_h);
                 if (render_display_on(g.rd))
                     DrawCels(plat_bitmap(p, p->back), render_chain(g.rd));
                 dt = plat_usec_now() - t0;
                 plat_reset_clip(p);
             }
-            dbgview_palette(v, plat_pixels(p, p->back), p->width, st->pic_x,
-                            st->pic_y + RENDER_H + 4);
+            /* The colour RAM under the picture, when there is room. */
+            if (st->pic_y + (int32)st->pic_h + 4 + 16 <= p->height)
+                dbgview_palette(v, plat_pixels(p, p->back), p->width, st->pic_x,
+                                st->pic_y + (int32)st->pic_h + 4);
             sprintf(buf, "PAUSED FRAME %lu: %s   A/B: VIEW  L: RESUME  X: END",
                     (unsigned long)g.frame, which == 0 ? "CPU REFERENCE" : "CELS");
             text_line(p, p->back, 0, COLOR_TITLE, buf);
@@ -252,7 +272,7 @@ static void run_game(platform *p, app_state *st)
 
     reset_borders(st);
     st->draw_errors = 0;
-    plat_set_clip(p, st->pic_x, st->pic_y, RENDER_W, RENDER_H);
+    set_picture(p, st, render_height(g.rd));
     for (;;) {
         uint32 t0 = plat_usec_now();
         uint32 held = plat_pad_state();
@@ -271,7 +291,7 @@ static void run_game(platform *p, app_state *st)
             if (prev & ControlX)
                 break;
             reset_borders(st);
-            plat_set_clip(p, st->pic_x, st->pic_y, RENDER_W, RENDER_H);
+            set_picture(p, st, st->pic_h);
             shown = plat_usec_now();
             longs = p->long_presents;
             continue;
@@ -292,6 +312,12 @@ static void run_game(platform *p, app_state *st)
             sprintf(buf, "RUN STOPPED AT PC %04lX", (unsigned long)g.stop_pc);
             show_message(p, buf);
             break;
+        }
+        if (render_height(g.rd) != st->pic_h) {
+            /* The display mode changed height: the picture moves, and the
+             * screens get their border again. */
+            set_picture(p, st, render_height(g.rd));
+            reset_borders(st);
         }
         draw_us = draw_picture(p, st);
         game_frame_done(&g, draw_us);
@@ -493,12 +519,13 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo step 4: sprites evaluated per line (eight at most, overflow and collision flags, zoom), priority layer drawn under the sprites only\n");
+    printf("masterdo: VDP display modes of 192, 224 and 240 lines, colour RAM writes during the active display drawn as palette bands\n");
     if (plat_init(&plat) < 0)
         return 1;
     memset(&st, 0, sizeof(st));
     st.pic_x = (plat.width - RENDER_W) / 2;
     st.pic_y = ((plat.height - RENDER_H) / 2) & ~1;
+    st.pic_h = RENDER_H;
 
     show_message(&plat, "Benchmarks of steps 0 and 1...");
     run_benchmarks(&plat, &st);

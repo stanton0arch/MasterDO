@@ -7,7 +7,8 @@
  * cartridge run, 1 run the benchmarks of steps 0-1 first, 2 dump the
  * pictures every n frames, 3 frame from which the profile counts, 17 write
  * only the pictures at multiples of n and the first 17 of the others that
- * differ. The pad
+ * differ, 18 log the writes made during the active display of every
+ * frame. The pad
  * is scripted by the host (sim_pad). At the end, the code buffer is dumped
  * for anacode.py and hotblocks.py.
  *
@@ -43,8 +44,9 @@ struct KernelBase *KernelBase;
 
 static game g;
 static bench_cpu_result bres;
-static uint32 fb[256 * 96];
-static uint32 fb2[256 * 96];
+static uint32 fb[256 * (VDP_ACTIVE_MAX / 2)];
+static uint32 fb2[256 * (VDP_ACTIVE_MAX / 2)];
+static uint32 pic_h;            /* lines of the pictures compared */
 
 /* LRFORM pixel access. */
 static void put_pixel(uint32 *f, int32 x, int32 y, uint32 c)
@@ -67,13 +69,13 @@ static uint32 get_pixel(const uint32 *f, int32 x, int32 y)
 /* Software model of the CEL engine for the cels the renderer builds:
  * 8 bpp coded and 16 bpp uncoded sources, unit steps (VDY may stretch
  * rows), absolute pointers, transparency of 000 without CCB_BGND, clip to
- * the 256 x 192 window. */
+ * the 256 x pic_h window. */
 static void compose(const CCB *c, uint32 backdrop)
 {
     int32 x;
     int32 y;
 
-    for (y = 0; y < 192; y++)
+    for (y = 0; y < (int32)pic_h; y++)
         for (x = 0; x < 256; x++)
             put_pixel(fb2, x, y, backdrop);
 
@@ -132,7 +134,7 @@ static void compose(const CCB *c, uint32 backdrop)
                     for (t = 0; t < xstretch; t++) {
                         int32 px = x0 + (int32)k * xstretch + t;
 
-                        if (px >= 0 && px < 256 && py >= 0 && py < 192)
+                        if (px >= 0 && px < 256 && py >= 0 && py < (int32)pic_h)
                             put_pixel(fb2, px, py, v);
                     }
                 }
@@ -144,17 +146,19 @@ static void compose(const CCB *c, uint32 backdrop)
 }
 
 /* Pixels covered by a nonzero pixel of a priority tile, where the
- * reference hides sprites and the cels do not yet. */
-static uint8 prio[192][256];
+ * reference hides sprites (the differences found there are counted
+ * apart). */
+static uint8 prio[VDP_ACTIVE_MAX][256];
 
 static void prio_mask(const vdp_state *v)
 {
     const uint8 *vram = v->vram;
-    const uint8 *nt = vram + ((v->reg[2] & 0x0E) << 10);
+    const uint8 *nt = vram + vdp_nt_base(v, v->reg[2]);
+    uint32 bh = v->nt_rows * 8;
     uint32 y;
 
     memset(prio, 0, sizeof(prio));
-    for (y = 0; y < 192; y++) {
+    for (y = 0; y < pic_h; y++) {
         uint32 hs = (y < 16 && (v->reg[0] & 0x40)) ? 0 : v->reg[8];
         uint32 col;
 
@@ -167,8 +171,8 @@ static void prio_mask(const vdp_state *v)
             const uint8 *p;
             uint32 k;
 
-            if (ya >= 224)
-                ya -= 224;
+            while (ya >= bh)
+                ya -= bh;
             e = nt + ((ya >> 3) * 32 + col) * 2;
             entry = e[0] | ((uint32)e[1] << 8);
             if (!(entry & 0x1000))
@@ -199,7 +203,7 @@ static uint32 compare(uint32 *outside)
     int32 y;
 
     *outside = 0;
-    for (y = 0; y < 192; y++) {
+    for (y = 0; y < (int32)pic_h; y++) {
         for (x = 0; x < 256; x++) {
             uint32 a = get_pixel(fb, x, y);
             uint32 b = get_pixel(fb2, x, y);
@@ -244,10 +248,11 @@ static uint32 ref_sprites(const vdp_state *v, int32 *spr_y, uint32 *spr_vis, uin
     uint32 tbase = (v->reg[6] & 0x04) ? 256 : 0;
     uint32 tmask = (v->reg[1] & 0x02) ? 0xFE : 0xFF;
     int32 xoff = (v->reg[0] & 0x08) ? 8 : 0;
-    int8 diff[VDP_ACTIVE + 1];
+    int32 act = (int32)v->active;
+    int8 diff[VDP_ACTIVE_MAX + 1];
     uint8 ya[VDP_SPRITES];
     uint8 yb[VDP_SPRITES];
-    uint32 over[(VDP_ACTIVE + 31) / 32];
+    uint32 over[(VDP_ACTIVE_MAX + 31) / 32];
     uint32 flags = 0;
     uint32 n;
     uint32 k;
@@ -255,7 +260,7 @@ static uint32 ref_sprites(const vdp_state *v, int32 *spr_y, uint32 *spr_vis, uin
     int32 run = 0;
 
     for (n = 0; n < VDP_SPRITES; n++) {
-        if (sat[n] == 0xD0)
+        if (sat[n] == 0xD0 && act == VDP_ACTIVE_STD)
             break;
     }
     *pn = n;
@@ -271,8 +276,8 @@ static uint32 ref_sprites(const vdp_state *v, int32 *spr_y, uint32 *spr_vis, uin
         spr_y[k] = y;
         a = (y < 0) ? 0 : y;
         b = y + (int32)h;
-        if (b > VDP_ACTIVE)
-            b = VDP_ACTIVE;
+        if (b > act)
+            b = act;
         if (a >= b) {
             ya[k] = 0;
             yb[k] = 0;
@@ -288,7 +293,7 @@ static uint32 ref_sprites(const vdp_state *v, int32 *spr_y, uint32 *spr_vis, uin
     if (n < 2)
         return 0;
     memset(over, 0, sizeof(over));
-    for (k = 0; k < VDP_ACTIVE; k++) {
+    for (k = 0; k < (uint32)act; k++) {
         run += diff[k];
         if ((uint32)run > maxrun)
             maxrun = (uint32)run;
@@ -296,7 +301,7 @@ static uint32 ref_sprites(const vdp_state *v, int32 *spr_y, uint32 *spr_vis, uin
             over[k >> 5] |= (uint32)1 << (k & 31);
     }
     if (maxrun > 8) {
-        uint8 cnt[VDP_ACTIVE];
+        uint8 cnt[VDP_ACTIVE_MAX];
 
         flags |= VDP_ST_OVERFLOW;
         memset(cnt, 0, sizeof(cnt));
@@ -314,7 +319,7 @@ static uint32 ref_sprites(const vdp_state *v, int32 *spr_y, uint32 *spr_vis, uin
         }
     }
     if (maxrun >= 2) {
-        uint8 head[VDP_ACTIVE];
+        uint8 head[VDP_ACTIVE_MAX];
         uint8 next[VDP_SPRITES];
         uint8 order[VDP_SPRITES];
         uint32 m = 0;
@@ -327,7 +332,7 @@ static uint32 ref_sprites(const vdp_state *v, int32 *spr_y, uint32 *spr_vis, uin
                 head[ya[k]] = (uint8)k;
             }
         }
-        for (k = 0; k < VDP_ACTIVE; k++) {
+        for (k = 0; k < (uint32)act; k++) {
             uint32 s;
 
             for (s = head[k]; s != 0xFF; s = next[s])
@@ -603,6 +608,33 @@ void hmain(void)
                 printf("\n");
             }
         }
+        if (sim_arg(18)) {
+            /* -rasterlog: the writes made during the active display of
+             * every frame that has some, with the first line they affect. */
+            const vdp_state *v = &g.sms->vdp;
+            uint32 k;
+
+            if (v->hs_n != 0 || v->nt_n != 0 || v->de_n != 0 || v->cr_n != 0) {
+                printf("Raster: frame %lu: scroll end %lu:", (unsigned long)(f + 1),
+                       (unsigned long)v->reg[8]);
+                for (k = 0; k < v->hs_n; k++)
+                    printf(" %lu@%lu", (unsigned long)(v->hs_log[k] & 0xFF),
+                           (unsigned long)(v->hs_log[k] >> 8));
+                printf(", name table end %02lx:", (unsigned long)v->reg[2]);
+                for (k = 0; k < v->nt_n; k++)
+                    printf(" %02lx@%lu", (unsigned long)(v->nt_log[k] & 0xFF),
+                           (unsigned long)(v->nt_log[k] >> 8));
+                printf(", display start %lu:", (unsigned long)v->de_start);
+                for (k = 0; k < v->de_n; k++)
+                    printf(" %lu@%lu", (unsigned long)(v->de_log[k] & 1),
+                           (unsigned long)(v->de_log[k] >> 8));
+                printf(", colours:");
+                for (k = 0; k < v->cr_n; k++)
+                    printf(" %02lx=%02lx@%lu", (unsigned long)((v->cr_log[k] >> 8) & 31),
+                           (unsigned long)(v->cr_log[k] & 0x3F), (unsigned long)(v->cr_log[k] >> 16));
+                printf("\n");
+            }
+        }
         if (sim_arg(16) == f + 1 && render_display_on(g.rd)) {
             const CCB *c;
             const vdp_state *v = &g.sms->vdp;
@@ -621,6 +653,12 @@ void hmain(void)
                 printf(" line %lu %lu", (unsigned long)(v->hs_log[k] >> 8),
                        (unsigned long)(v->hs_log[k] & 0xFF));
             printf("\n");
+            printf("Palette: frame %lu: %lu lines, %lu colour writes", (unsigned long)(f + 1),
+                   (unsigned long)v->active, (unsigned long)v->cr_n);
+            for (k = 0; k < v->cr_n; k++)
+                printf(" line %lu %02lx=%02lx", (unsigned long)(v->cr_log[k] >> 16),
+                       (unsigned long)((v->cr_log[k] >> 8) & 31), (unsigned long)(v->cr_log[k] & 0x3F));
+            printf("\n");
             for (c = render_chain(g.rd); c != NULL; c = c->ccb_NextPtr) {
                 printf("Cel: frame %lu: at %ld,%ld size %lu x %lu bpp %lu%s%s\n",
                        (unsigned long)(f + 1), (long)(c->ccb_XPos >> 16),
@@ -634,7 +672,8 @@ void hmain(void)
             /* The strips the patches replaced, if any: the priority cels
              * before the first one in the chain. */
             for (c = render_chain(g.rd); c != NULL; c = c->ccb_NextPtr) {
-                if (c->ccb_PLUTPtr == (void *)(g.rd->pluts + 64))
+                if (c >= &g.rd->cels[RENDER_MAX_PIECES] &&
+                    c < &g.rd->cels[RENDER_MAX_PIECES + RENDER_MAX_PRIO])
                     break;
                 if (c->ccb_Flags & CCB_LAST) {
                     c = NULL;
@@ -655,9 +694,10 @@ void hmain(void)
          * with a scroll or display band (a frame whose display was off
          * from its start with no band is blank in both pictures). */
         if (dump_every && ((f + 1) % dump_every == 0 || g.sms->vdp.de_n != 0 ||
-                           g.sms->vdp.hs_n != 0)) {
+                           g.sms->vdp.hs_n != 0 || g.sms->vdp.cr_n != 0)) {
             const vdp_state *v = &g.sms->vdp;
 
+            pic_h = v->active;
             sim_mark(1);
             dbgview_draw(v, fb, 256, 0, 0);
             sim_mark(2);
@@ -675,8 +715,8 @@ void hmain(void)
                 (ndiff != 0 && diff_written < dump_diff)) {
                 if (dump_diff && (f + 1) % dump_every != 0)
                     diff_written++;
-                sim_dump(fb, 256, 192, f + 1);
-                sim_dump(fb2, 256, 192, 500000 + f + 1);
+                sim_dump(fb, 256, pic_h, f + 1);
+                sim_dump(fb2, 256, pic_h, 500000 + f + 1);
             }
             printf("Compare: frame %lu: %lu pixels differ, %lu outside priority tiles, "
                    "display %s, %lu sprites, "

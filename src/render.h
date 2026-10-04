@@ -4,16 +4,24 @@
 /*
  * Picture of the SMS VDP with the CEL engine.
  *
- * Background: a whole name table (32 x 28 cells) is kept as a 256 x 224
- * bitmap in the 8 bpp coded cel format (pixel = colour index 0-31, the two
- * halves of the colour RAM as one 32-entry PLUT). A cell is redrawn into
- * it only when its name table entry changes or when its tile is written,
- * flips being applied by the copy. The visible 256 x 192 window is then a
- * few rectangular pieces of that bitmap, one cel each: the horizontal and
- * vertical scroll wraps, the scroll inhibit bits of register 0 and the
+ * Background: a whole name table (32 x 28 cells, 32 x 32 in the 224 and
+ * 240-line modes) is kept as a 256 x 224 (256 x 256) bitmap in the 8 bpp
+ * coded cel format (pixel = colour index 0-31, the two halves of the
+ * colour RAM as one 32-entry PLUT). A cell is redrawn into it only when
+ * its name table entry changes or when its tile is written, flips being
+ * applied by the copy. The visible window (256 x 192, 224 or 240) is then
+ * a few rectangular pieces of that bitmap, one cel each: the horizontal
+ * and vertical scroll wraps, the scroll inhibit bits of register 0 and the
  * horizontal scroll changes recorded during the active display (bands)
  * only add pieces. Pieces are positioned in the clip window of the
- * bitmap they are drawn into, which the caller sets to the picture.
+ * bitmap they are drawn into, which the caller sets to the picture
+ * (render_height() lines).
+ *
+ * Palettes: colour RAM writes recorded during the active display split
+ * the picture into palette bands (vdp_palette_bands); every cel takes the
+ * PLUTs of the band it is drawn on, and a sprite those of the band of its
+ * first line. The backdrop (border, blanked column, lines with the
+ * display off) keeps the colour of the first band.
  *
  * Layers: a game may switch the name table base (register 2) during the
  * active display, so that different parts of the picture come from
@@ -22,7 +30,9 @@
  * shadow and cell lists), kept up to date every frame; the bands of the
  * picture are drawn from the layer of their table. A table unused for a
  * while loses its layer; a table met with no free layer takes the least
- * recently used one, which is rebuilt.
+ * recently used one, which is rebuilt. The bitmaps of the two layers
+ * share two memory blocks, which hold the taller bitmaps of a single
+ * layer in the 224 and 240-line modes.
  *
  * Sprites: one 8 bpp coded cel per active sprite (8x8 or 8x16, doubled
  * by the cel engine when zoomed), colour 0 transparent, drawn after the
@@ -57,9 +67,9 @@
  *
  * The caller: render_update() after each emulated frame, then, if the
  * display is on, DrawCels(bitmap, render_chain()) into a bitmap whose clip
- * window is the 256 x 192 picture; the border around the picture and the
- * whole picture while the display is off take the backdrop colour
- * (render_backdrop()).
+ * window is the 256 x render_height() picture; the border around the
+ * picture and the whole picture while the display is off take the
+ * backdrop colour (render_backdrop()).
  */
 
 #include "types.h"
@@ -67,12 +77,14 @@
 #include "vdp.h"
 
 #define RENDER_W        256
-#define RENDER_H        192
+#define RENDER_H        192         /* picture height of the usual mode */
+#define RENDER_H_MAX    VDP_ACTIVE_MAX
 #define RENDER_NT_COLS  32
-#define RENDER_NT_ROWS  28
+#define RENDER_NT_ROWS  28          /* name table rows of the usual mode */
+#define RENDER_NT_ROWS_MAX 32       /* of the 224 and 240-line modes */
 #define RENDER_NT_CELLS (RENDER_NT_COLS * RENDER_NT_ROWS)
-#define RENDER_NT_BYTES 0x700
-#define RENDER_BM_H     (RENDER_NT_ROWS * 8)        /* 224 */
+#define RENDER_NT_CELLS_MAX (RENDER_NT_COLS * RENDER_NT_ROWS_MAX)
+#define RENDER_BM_BYTES (RENDER_W * RENDER_NT_ROWS * 8)  /* a bitmap, usual mode */
 #define RENDER_LAYERS   2           /* name tables kept as bitmaps */
 #define RENDER_MAX_PIECES 256       /* background pieces (a band per line, wraps) */
 #define RENDER_MAX_PRIO   128       /* priority strips */
@@ -80,6 +92,8 @@
 #define RENDER_SPRITES  64
 #define RENDER_SPRITE_CELS 96       /* cels for the sprites, runs included */
 #define RENDER_LAYER_KEEP 16        /* frames a layer outlives its last use */
+#define RENDER_PLUT_SET 96          /* PLUT entries of a palette band: background,
+                                       sprites, priority (32 each) */
 
 /* Cumulative counters, logged as differences by the caller. */
 typedef struct {
@@ -102,6 +116,9 @@ typedef struct {
     uint32 ntbands;         /* frames with more than one name table band */
     uint32 dropped;         /* bands beyond the piece capacity */
     uint32 layers;          /* frames needing more layers than there are */
+    uint32 pbands;          /* frames with more than one palette band */
+    uint32 pmerged;         /* colour writes beyond the palette bands */
+    uint32 tall;            /* frames of more than 192 lines */
 } render_stats;
 
 /*
@@ -111,16 +128,16 @@ typedef struct {
  * layers: each layer holds the same pointers.
  */
 typedef struct render_layer_s {
-    uint8  *bitmap;         /* RENDER_W x RENDER_BM_H, 8 bpp */
+    uint8  *bitmap;         /* RENDER_W x 8 * nrows, 8 bpp */
     uint8  *prio_bm;        /* same, priority cells only */
     uint32 *tiles;          /* VDP_TILES x 16 words (shared) */
     uint32 *tiles_f;        /* horizontally flipped copies (shared) */
-    uint8  *shadow;         /* name table bytes as drawn (RENDER_NT_BYTES) */
+    uint8  *shadow;         /* name table bytes as drawn (64 per row) */
     uint8  *t_ok;           /* tile converted (bit 0: tiles, bit 1: tiles_f) (shared) */
-    /* Cells using each tile, as doubly linked lists (RENDER_NT_CELLS
+    /* Cells using each tile, as doubly linked lists (RENDER_NT_CELLS_MAX
      * means none), so that a written tile only redraws its cells. */
     uint32 *head;           /* VDP_TILES */
-    uint32 *next;           /* RENDER_NT_CELLS */
+    uint32 *next;           /* ncells */
     uint32 *prev;
     uint32 *wlist;          /* work list: changed words, tiles to convert (shared) */
     uint32 *dlist;          /* dirty tiles of the update (shared) */
@@ -130,31 +147,40 @@ typedef struct render_layer_s {
     uint32  nt_base;        /* VRAM address of the name table drawn */
     uint32  valid;          /* shadow and lists describe the bitmap */
     uint32  last_used;      /* update in which the layer was last drawn */
-    uint8   prio_rows[RENDER_NT_ROWS];  /* priority cells per row */
-    uint8   prio_min[RENDER_NT_ROWS];   /* their column range */
-    uint8   prio_max[RENDER_NT_ROWS];
-    uint8   prio_dirty[RENDER_NT_ROWS]; /* range to recompute */
+    uint8   prio_rows[RENDER_NT_ROWS_MAX];  /* priority cells per row */
+    uint8   prio_min[RENDER_NT_ROWS_MAX];   /* their column range */
+    uint8   prio_max[RENDER_NT_ROWS_MAX];
+    uint8   prio_dirty[RENDER_NT_ROWS_MAX]; /* range to recompute */
     uint32  cells;          /* counters of the update, added to the stats */
     uint32  tile_cells;
     uint32  tiles_conv;
     /* Priority strips of the table, built once per update: runs of
      * consecutive rows holding priority cells in the same columns. */
     uint32  pg_n;
-    uint8   pg_row0[RENDER_NT_ROWS];
-    uint8   pg_nrows[RENDER_NT_ROWS];
-    uint8   pg_col0[RENDER_NT_ROWS];    /* first column */
-    uint8   pg_col1[RENDER_NT_ROWS];    /* last column + 1 */
+    uint8   pg_row0[RENDER_NT_ROWS_MAX];
+    uint8   pg_nrows[RENDER_NT_ROWS_MAX];
+    uint8   pg_col0[RENDER_NT_ROWS_MAX];    /* first column */
+    uint8   pg_col1[RENDER_NT_ROWS_MAX];    /* last column + 1 */
     /* Cells of a written tile are only redrawn in the rows the picture
      * shows (shown_rows, bit per name table row, from the bands of the
      * update); the others are left stale and redrawn when their row is
      * shown again. */
-    uint8  *stale;          /* RENDER_NT_CELLS: cell waiting for a redraw */
+    uint8  *stale;          /* ncells: cell waiting for a redraw */
     uint32  stale_rows;     /* rows holding stale cells */
     uint32  shown_rows;     /* rows shown by the update */
+    /* Size of the table drawn: 28 or 32 rows. */
+    uint32  nrows;
+    uint32  ncells;         /* nrows * 32 */
+    uint32  cap_cells;      /* cells the lists and the shadow can hold */
 } render_layer;
 
 typedef struct {
     render_layer layer[RENDER_LAYERS];
+    uint8  *bm_pool[2];     /* bitmaps, priority bitmaps: two RENDER_BM_BYTES each */
+    uint32  nrows;          /* name table rows of the current mode: 28 or 32 */
+    uint32  bm_h;           /* bitmap lines: nrows * 8 */
+    uint32  height;         /* picture lines: 192, 224 or 240 */
+    uint32  nlayers;        /* layers usable in the current mode: 2, or 1 */
     uint32 *tiles;          /* the shared stores and tables (see render_layer) */
     uint32 *tiles_f;
     uint8  *t_ok;
@@ -162,7 +188,8 @@ typedef struct {
     uint32 *dlist;
     uint32 *xtab;
     CCB    *cels;           /* pieces, strips, blank rectangles, sprites, terminator */
-    uint16 *pluts;          /* background (32), sprites (32), priority (32) */
+    uint16 *pluts;          /* per palette band: background (32), sprites (32),
+                               priority (32) */
     uint32 *blank;          /* 8 x 1 uncoded 16 bpp source of the blank column */
     uint32  update;         /* updates so far (layer ages) */
     uint32  backdrop;       /* RGB 5:5:5 */
@@ -180,10 +207,15 @@ typedef struct {
     render_layer *nlayer[VDP_NT_LOG + 1];   /* layer of each name table band */
     uint32  dtops[VDP_DE_LOG + 1];
     uint32  dons[VDP_DE_LOG + 1];
+    /* Palette bands of the update (vdp_palette_bands). */
+    uint32  ptops[VDP_PAL_BANDS];
+    uint32  pcram[VDP_PAL_BANDS * 8];   /* 32 colour bytes per band */
+    uint32  npb;
+    uint32  spr_bands;      /* the sprite cels take the PLUTs of their band */
     /* Line bands of the update: the scroll bands crossed with the name
-     * table bands and the lines with the display on, as
-     * ya | yb << 8 | hs << 16 | layer << 24. */
-    uint32  lbands[VDP_HS_LOG + VDP_NT_LOG + VDP_DE_LOG + 4];
+     * table bands, the palette bands and the lines with the display on,
+     * as ya | yb << 8 | hs << 16 | layer << 24 | palette band << 25. */
+    uint32  lbands[VDP_HS_LOG + VDP_NT_LOG + VDP_DE_LOG + VDP_PAL_BANDS + 4];
     uint32  nlb;
     render_stats st;
 } renderer;
@@ -214,10 +246,11 @@ typedef struct {
     uint32  needed;         /* tiles appended to need */
 } render_sprite_args;
 
-/* Indices of the words of the dirty name table chunks that differ from
- * the shadow; returns their count. */
+/* Indices of the words of the dirty name table chunks (32 bytes each,
+ * chunks of them, 64 at most) that differ from the shadow; returns their
+ * count. */
 uint32 render_nt_scan(const uint32 *nt, const uint32 *shadow, const uint32 *mask,
-                      uint32 *out);
+                      uint32 *out, uint32 chunks);
 /* Indices of the dirty tiles, which are cleared; returns their count. */
 uint32 render_dirty_scan(uint8 *dirty, uint32 *out);
 /* Source and position of the cels of sprites 0 to n - 1; returns the
@@ -240,6 +273,7 @@ typedef struct {
     uint32  limit;          /* pixels beyond which the patches are given up */
     uint32  area;           /* out: pixels of the patches */
     struct piece_ctx_s *p;
+    uint32  height;         /* picture lines */
 } render_patch_args;
 uint32 render_prio_patches(render_patch_args *a);
 /* Cells of a layer (render_a.s). Each draws cells into the bitmap (and
@@ -258,10 +292,13 @@ void   render_tile_cells(render_layer *l, const uint8 *vram, uint32 t);
 void   render_stale_cells(render_layer *l, const uint8 *vram);
 void   render_rebuild_cells(render_layer *l, const uint8 *vram);
 /* Pieces of a bitmap rectangle on a line band in the usual case (no
- * scroll inhibit); see render.c, rect_pieces. */
+ * scroll inhibit); see render.c, rect_pieces. CONTRACT: the PC_*
+ * equates of render_a.s. */
 typedef struct piece_ctx_s {
     CCB    *c;              /* next cel */
     CCB    *end;            /* capacity */
+    uint32  bm_h;           /* bitmap lines: the vertical wrap */
+    uint16 *plut;           /* PLUT of the cels made */
 } piece_ctx;
 uint32 render_rect_pieces(piece_ctx *p, const uint8 *bm, uint32 bx0, uint32 bx1,
                           uint32 by0, uint32 by1, uint32 lb, uint32 vs);
@@ -272,5 +309,6 @@ void   render_tile_conv(render_layer *l, uint32 t, uint32 flip, const uint8 *vra
 #define render_chain(r)     ((r)->chain)
 #define render_backdrop(r)  ((r)->backdrop)
 #define render_display_on(r) ((r)->display_on)
+#define render_height(r)    ((r)->height)
 
 #endif /* RENDER_H_INCLUDED */

@@ -58,8 +58,12 @@ pictures at multiples of the dump period are always written (a raster game
 compares thousands of frames per run).
 
 `-cels n` prints the sprites of frame n as the VDP evaluated them, the
+register 8 and colour RAM writes of the frame with their lines, the
 cel chain (position, size, bits per pixel) and, when the priority layer
-was drawn under the sprites, the strips it replaced. The harness also checks the assembly sprite
+was drawn under the sprites, the strips it replaced. `-rasterlog`
+prints, for every frame that has some, the writes made during the
+active display (scroll, name table, display enable, colours) with the
+first line they affect (`Raster:` lines). The harness also checks the assembly sprite
 evaluation of every frame against a C reference and reports the frames
 with differences (`Sprites:` lines).
 
@@ -127,4 +131,11 @@ Requirements: `gcc`, `python3`, and the compiler tools of the SDK in
 
 `../z80int_test/` holds the reference Z80 interpreter in C (the assembly
 one of `src/z80int_a.s` follows it) with a native ZEXDOC harness; see the
-comment at the top of `zex.c` for building and running it.
+comment at the top of `zex.c` for building and running it. `smsref.c`
+there runs a cartridge on it one instruction at a time, the maskable
+interrupt taken at the exact instruction boundary, with the VDP's
+ports, flags, line counter and V counter modelled as in `src/vdp.c`, and
+prints the register 8 writes of each frame in the `Raster:` format of
+`-rasterlog`: a game whose raster timing differs between the two runs
+depends on the interrupts the translated code takes at segment
+boundaries.

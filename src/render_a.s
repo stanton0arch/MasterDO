@@ -16,6 +16,7 @@
 
 ; CCB fields (graphics.h).
 CCB_SOURCE      EQU     8
+CCB_PLUT        EQU     12
 CCB_XPOS        EQU     16
 CCB_YPOS        EQU     20
 CCB_PRE0        EQU     52
@@ -37,14 +38,21 @@ R_STAMP         EQU     44
 R_STAMPNOW      EQU     48
 R_XTAB          EQU     52
 R_PRIOROWS      EQU     68
-R_PRIODIRTY     EQU     152
+R_PRIODIRTY     EQU     164
 R_NTBASE        EQU     56
-R_STCELLS       EQU     180
-R_STTILECELLS   EQU     184
-R_STTILESCONV   EQU     188
-R_STALE         EQU     308
-R_STALEROWS     EQU     312
-R_SHOWNROWS     EQU     316
+R_STCELLS       EQU     196
+R_STTILECELLS   EQU     200
+R_STTILESCONV   EQU     204
+R_STALE         EQU     340
+R_STALEROWS     EQU     344
+R_SHOWNROWS     EQU     348
+R_NCELLS        EQU     356
+
+; piece_ctx fields (render.h).
+PC_C            EQU     0
+PC_END          EQU     4
+PC_BMH          EQU     8
+PC_PLUT         EQU     12
 
 ; render_sprite_args fields (render.h).
 SA_TILES        EQU     0
@@ -61,24 +69,25 @@ SA_NEEDED       EQU     40
 
 ;----------------------------------------------------------------------------
 ; uint32 render_nt_scan(const uint32 *nt, const uint32 *shadow,
-;                       const uint32 *mask, uint32 *out)
+;                       const uint32 *mask, uint32 *out, uint32 chunks)
 ;
-; Compares the 56 chunks of 8 words of the name table with the shadow copy,
-; for the chunks whose bit is set in mask (two words, chunk 0 = bit 0 of
-; the first); appends the index (0-447) of each differing word to out and
-; returns their count. Nothing is written to the shadow.
+; Compares the chunks of 8 words of the name table (56, or 64 for a table
+; of 32 rows) with the shadow copy, for the chunks whose bit is set in
+; mask (two words, chunk 0 = bit 0 of the first); appends the index of
+; each differing word to out and returns their count. Nothing is written
+; to the shadow.
 ;----------------------------------------------------------------------------
 render_nt_scan
         stmfd   sp!,{r4-r11,lr}
+        ldr     r10,[sp,#36]            ; chunks
         ldr     r12,[r2]                ; chunks 0-31
-        ldr     r4,[r2,#4]              ; chunks 32-55
-        stmfd   sp!,{r3,r4}
+        ldr     r4,[r2,#4]              ; chunks 32-63
+        sub     r5,r10,#32              ; chunks of the second mask word
+        stmfd   sp!,{r3,r4,r5}
         mov     r2,r3                   ; output pointer
         mov     r3,#0                   ; word index
-        mov     r10,#56                 ; chunks left
+        mov     r10,#32                 ; chunks left with the first word
 scan_next
-        cmp     r10,#24
-        ldreq   r12,[sp,#4]
         movs    r12,r12,lsr #1
         bcc     scan_clean
         ldmia   r0!,{r4-r7}
@@ -111,15 +120,23 @@ scan_next
         add     r3,r3,#1
         subs    r10,r10,#1
         bne     scan_next
-        b       scan_done
+        b       scan_second
 scan_clean
         add     r0,r0,#32
         add     r1,r1,#32
         add     r3,r3,#8
         subs    r10,r10,#1
         bne     scan_next
+scan_second
+        ldr     r10,[sp,#8]             ; then the chunks of the second word
+        cmp     r10,#0
+        beq     scan_done
+        ldr     r12,[sp,#4]
+        mov     r4,#0
+        str     r4,[sp,#8]
+        b       scan_next
 scan_done
-        ldmfd   sp!,{r0,r1}
+        ldmfd   sp!,{r0,r1,r12}
         sub     r0,r2,r0
         mov     r0,r0,lsr #2
         ldmfd   sp!,{r4-r11,pc}
@@ -246,7 +263,7 @@ spr_done
 ; store, the row order). The cell is stamped and counted. Preserves
 ; r9-r11, clobbers r0-r8 and r12.
 ;----------------------------------------------------------------------------
-NONE            EQU     896             ; end of a cell list
+NONE            EQU     1024            ; end of a cell list
 CELL_ROW        EQU     256             ; bytes per bitmap row
 
         MACRO
@@ -654,10 +671,10 @@ render_tile_conv
 ; The usual case of rect_pieces (render.c): no scroll inhibit, the whole
 ; width for window. The rectangle of bitmap columns bx0 to bx1 - 1 and
 ; rows by0 to by1 - 1 is shown on the lines of line band lb (ya | yb << 8
-; | hs << 16) as pieces appended to p (next cel at [p], capacity at
-; [p + 4]), split at the row and column wraps, the part from column
-; (bx0 + hs) & 255 before the part wrapped to the left edge. Returns the
-; number of pieces dropped for lack of cels.
+; | hs << 16) as pieces appended to p (next cel, capacity, bitmap lines
+; for the vertical wrap, PLUT of the pieces), split at the row and column
+; wraps, the part from column (bx0 + hs) & 255 before the part wrapped to
+; the left edge. Returns the number of pieces dropped for lack of cels.
 ;----------------------------------------------------------------------------
         MACRO
         EMITP   $sa                     ; sy r3, height r4, src_y r2, sb r9
@@ -668,6 +685,8 @@ render_tile_conv
         beq     %F7
         add     lr,r12,#CCB_SIZE
         str     lr,[r0]
+        ldr     lr,[r0,#PC_PLUT]
+        str     lr,[r12,#CCB_PLUT]
         sub     lr,$sa,r6
         and     lr,lr,#255              ; bitmap column of sa
         and     r5,lr,#3                ; pixels before the word boundary
@@ -735,25 +754,27 @@ render_rect_pieces
         and     r6,r6,#0xFF             ; hs
         add     r10,r2,r6
         and     r10,r10,#0xFF           ; t0: screen column of bx0
-        add     r3,r4,#448
-        sub     r3,r3,r7                ; s0: screen line of by0, modulo 224
+        ldr     r1,[r0,#PC_BMH]         ; bitmap lines (r1 is free: bm is on the stack)
+        add     r3,r4,r1,lsl #1
+        sub     r3,r3,r7                ; s0: screen line of by0, modulo bm_h
 rp_mod
-        cmp     r3,#224
-        subhs   r3,r3,#224
+        cmp     r3,r1
+        subhs   r3,r3,r1
         bhs     rp_mod
         mov     r7,#0                   ; pieces dropped
-        mov     r12,r3                  ; lines s0 to min(s0 + rows, 224) - 1
+        mov     r12,r3                  ; lines s0 to min(s0 + rows, bm_h) - 1
         add     lr,r3,r9
-        cmp     lr,#224
-        movhi   lr,#224
+        cmp     lr,r1
+        movhi   lr,r1
         mov     r2,r4
         PART
+        ldr     r1,[r0,#PC_BMH]
         add     lr,r3,r9                ; the rest wraps to the top
-        cmp     lr,#224
+        cmp     lr,r1
         bls     rp_done
-        sub     lr,lr,#224
+        sub     lr,lr,r1
         mov     r12,#0
-        rsb     r2,r3,#224
+        sub     r2,r1,r3
         add     r2,r2,r4
         PART
 rp_done
@@ -763,9 +784,9 @@ rp_done
 ;----------------------------------------------------------------------------
 ; void render_rebuild_cells(renderer *r, const uint8 *vram)
 ;
-; Links every cell into the list of its tile (the heads must hold NONE),
-; counts the priority cells of each row and draws every cell, from the
-; entries of the shadow.
+; Links every cell of the table (ncells) into the list of its tile (the
+; heads must hold NONE), counts the priority cells of each row and draws
+; every cell, from the entries of the shadow.
 ;----------------------------------------------------------------------------
 render_rebuild_cells
         stmfd   sp!,{r4-r11,lr}
@@ -800,7 +821,8 @@ rb_draw
         mov     r0,r11
         bl      cell_draw
         add     r11,r11,#1
-        cmp     r11,#NONE
+        ldr     r0,[r9,#R_NCELLS]
+        cmp     r11,r0
         bne     rb_loop
         ldmfd   sp!,{r4-r11,pc}
 
@@ -971,8 +993,8 @@ rs_done
 ; The priority layer under the sprites: the strips of the frame (cels
 ; already set up, a->strips, a->nstrips) are screen rectangles each
 ; showing a contiguous part of a priority bitmap; for each sprite on the
-; screen, the part of each strip under it becomes a cel of its own,
-; appended to a->p. Gives up with 0 when the pixels of the patches
+; screen (a->height lines), the part of each strip under it becomes a cel
+; of its own, with the PLUT of the strip, appended to a->p. Gives up with 0 when the pixels of the patches
 ; exceed a->limit or the cels run out; else returns 1 with the pixels in
 ; a->area.
 ;----------------------------------------------------------------------------
@@ -984,6 +1006,7 @@ PA_SAT          EQU     16
 PA_LIMIT        EQU     20
 PA_AREA         EQU     24
 PA_P            EQU     28
+PA_HEIGHT       EQU     32
 
 render_prio_patches
         stmfd   sp!,{r4-r11,lr}
@@ -1011,8 +1034,9 @@ pp_shown
         ldr     r0,[r0,#S_Y]
         ldr     r1,[r9,#S_H]
         add     r6,r0,r1
-        cmp     r6,#192
-        movgt   r6,#192                 ; r6 = sy1
+        ldr     r1,[r11,#PA_HEIGHT]
+        cmp     r6,r1
+        movgt   r6,r1                   ; r6 = sy1
         movs    r7,r0
         movmi   r7,#0                   ; r7 = sy0
         cmp     r7,r6
@@ -1078,6 +1102,8 @@ pp_strip
         beq     pp_fail
         add     r5,r4,#CCB_SIZE
         str     r5,[r2]                 ; the cel after the patch
+        ldr     r5,[r3,#CCB_PLUT]       ; the PLUT of its strip
+        str     r5,[r4,#CCB_PLUT]
         ldr     r5,[r3,#CCB_YPOS]
         sub     r5,r0,r5,asr #16        ; rows into the strip
         mov     r0,r0,lsl #16

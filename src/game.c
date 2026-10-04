@@ -106,7 +106,9 @@ static void print_window(const game_window_rec *p)
            "%lu pieces, %lu priority strips, %lu priority patches, %lu frames in scroll bands, "
            "%lu frames partly blanked, %lu frames in name table bands, %lu bands dropped, "
            "%lu frames short of layers, %lu frames with sprites past the line limit, "
-           "%lu sprite runs dropped, %lu frames with sprite overflow, %lu with sprite collision\n",
+           "%lu sprite runs dropped, %lu frames with sprite overflow, %lu with sprite collision, "
+           "%lu frames in palette bands, %lu colour writes merged, %lu frames of more than "
+           "192 lines\n",
            (unsigned long)p->first, (unsigned long)p->last,
            (unsigned long)d->rd.tiles, (unsigned long)d->rd.cells, (unsigned long)d->rd.rebuilds,
            (unsigned long)d->rd.tile_cells, (unsigned long)d->rd.palettes,
@@ -116,7 +118,8 @@ static void print_window(const game_window_rec *p)
            (unsigned long)d->rd.bands, (unsigned long)d->rd.dbands,
            (unsigned long)d->rd.ntbands, (unsigned long)d->rd.dropped, (unsigned long)d->rd.layers,
            (unsigned long)d->rd.spr_partial, (unsigned long)d->rd.spr_dropped,
-           (unsigned long)d->rd.overflows, (unsigned long)d->rd.collisions);
+           (unsigned long)d->rd.overflows, (unsigned long)d->rd.collisions,
+           (unsigned long)d->rd.pbands, (unsigned long)d->rd.pmerged, (unsigned long)d->rd.tall);
 }
 
 static void print_slow(const game_slow_rec *p)
@@ -699,7 +702,9 @@ void game_log_summary(game *g)
            "%lu priority patches, %lu frames in bands, %lu frames partly blanked, "
            "%lu frames in name table bands, %lu bands dropped, %lu frames short of layers, "
            "%lu frames with sprites past the line limit, %lu sprite runs dropped, "
-           "%lu frames with sprite overflow, %lu with sprite collision\n",
+           "%lu frames with sprite overflow, %lu with sprite collision, "
+           "%lu frames in palette bands, %lu colour writes merged, %lu frames of more than "
+           "192 lines\n",
            (unsigned long)d.rd.tiles, (unsigned long)d.rd.cells, (unsigned long)d.rd.rebuilds,
            (unsigned long)d.rd.tile_cells, (unsigned long)d.rd.palettes,
            (unsigned long)d.rd.sprites, (unsigned long)d.rd.pieces,
@@ -707,7 +712,8 @@ void game_log_summary(game *g)
            (unsigned long)d.rd.bands, (unsigned long)d.rd.dbands,
            (unsigned long)d.rd.ntbands, (unsigned long)d.rd.dropped, (unsigned long)d.rd.layers,
            (unsigned long)d.rd.spr_partial, (unsigned long)d.rd.spr_dropped,
-           (unsigned long)d.rd.overflows, (unsigned long)d.rd.collisions);
+           (unsigned long)d.rd.overflows, (unsigned long)d.rd.collisions,
+           (unsigned long)d.rd.pbands, (unsigned long)d.rd.pmerged, (unsigned long)d.rd.tall);
     printf("Game summary: VDP %lu data writes, %lu data reads, %lu control writes, "
            "%lu status reads, %lu counter reads, PSG %lu writes, pad %lu reads\n",
            (unsigned long)d.vdp_data_w, (unsigned long)d.vdp_data_r,

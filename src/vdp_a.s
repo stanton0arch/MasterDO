@@ -9,6 +9,7 @@
 ; vdp_state fields (vdp.h; offsets checked in vdp.c).
 V_REG           EQU     0x40
 V_STATUS        EQU     0x50
+V_ACTIVE        EQU     0x160           ; active lines: 192, 224 or 240
 V_DIRTY         EQU     0x200
 V_VRAM          EQU     0x400
 V_SPR           EQU     0x4874          ; spr_n, then the fields below
@@ -22,30 +23,32 @@ S_ROWS          EQU     528             ; 64 words: bit r: row r has an opaque p
 S_TROWS         EQU     784             ; 512 bytes: the same per tile
 S_TOK           EQU     1296            ; 512 bytes: cache entry valid
 
-ACTIVE          EQU     192
 ST_OVERFLOW     EQU     0x40
 ST_COLLIDE      EQU     0x20
 
-; Stack frame.
-F_DIFF          EQU     0               ; 196 bytes: sprites starting (+1) and
+; Stack frame (lines: up to 240).
+F_DIFF          EQU     0               ; 256 bytes: sprites starting (+1) and
                                         ; ending (-1) on each line, then the
                                         ; count of sprites met on each line
-F_RANGE         EQU     200             ; 64 words: first line | last line + 1 << 8
+F_RANGE         EQU     256             ; 64 words: first line | last line + 1 << 8
                                         ; of each sprite on the screen (0: none)
-F_OVER          EQU     456             ; 8 words: lines with more than 8 sprites
-F_HEAD          EQU     488             ; 192 bytes: first sprite starting on a line
-F_NEXT          EQU     680             ; 64 bytes: next sprite starting on the line
-F_ORDER         EQU     744             ; 64 words: sprites by first line, as
+F_OVER          EQU     512             ; 9 words: lines with more than 8 sprites
+                                        ; (the last one stays clear)
+F_HEAD          EQU     548             ; 240 bytes: first sprite starting on a line
+F_NEXT          EQU     788             ; 64 bytes: next sprite starting on the line
+F_ORDER         EQU     852             ; 64 words: sprites by first line, as
                                         ; sprite | x << 8 | first << 16 | last + 1 << 24
-F_TILE          EQU     1000            ; tile base | 0x10000 for tall sprites
-F_NCHAIN        EQU     1004            ; sprites chained (with an opaque pixel)
-F_SIZE          EQU     1008
+F_TILE          EQU     1108            ; tile base | 0x10000 for tall sprites
+F_NCHAIN        EQU     1112            ; sprites chained (with an opaque pixel)
+F_ACTIVE        EQU     1116            ; active lines
+F_SIZE          EQU     1120
 
 ;----------------------------------------------------------------------------
 ; uint32 vdp_sprites(vdp_state *v)
 ;
 ; Fills spr_n, spr_h, spr_zoom, spr_partial, spr_y and spr_vis, ORs the
-; sprite flags into the status and returns them. A pass over the sprites
+; sprite flags into the status and returns them. The list ends at the
+; $D0 terminator in the 192-line mode only. A pass over the sprites
 ; counts, per line, those that start and end there; the running sum gives
 ; the number of sprites on each line. When some line has more than eight,
 ; a second pass in table order, over those lines only, marks the lines
@@ -78,8 +81,10 @@ vdp_sprites
         mov     r1,#0
         mov     r2,#0
         mov     r3,#0
-        mov     r12,sp                  ; diff, over: 0
-        mov     lr,#13
+        mov     r12,sp                  ; diff (active + 1 lines), over: 0
+        ldr     lr,[r11,#V_ACTIVE]
+        add     lr,lr,#4+15
+        mov     lr,lr,lsr #4
 clr_loop
         stmia   r12!,{r0-r3}
         subs    lr,lr,#1
@@ -87,12 +92,16 @@ clr_loop
         add     r12,sp,#F_OVER
         stmia   r12!,{r0-r3}
         stmia   r12!,{r0-r3}
+        str     r0,[r12]
+        ldr     r0,[r11,#V_ACTIVE]
+        str     r0,[sp,#F_ACTIVE]
         mvn     r0,#0
         mvn     r1,#0
         mvn     r2,#0
         mvn     r3,#0
         add     r12,sp,#F_HEAD          ; no sprite starts on any line yet
-        mov     lr,#12
+        ldr     lr,[sp,#F_ACTIVE]
+        mov     lr,lr,lsr #4
 hd_clr
         stmia   r12!,{r0-r3}
         subs    lr,lr,#1
@@ -113,11 +122,15 @@ hd_clr
         mov     r4,#0
         mov     r5,#0                   ; r5 = sprites chained
         rsb     r12,r8,#256             ; a Y past 256 - h wraps to the top
+        ldr     r7,[sp,#F_ACTIVE]
+        cmp     r7,#192
+        orreq   r7,r7,#0xD000           ; r7 = active | terminator << 8
+        orrne   r7,r7,#0x10000          ; (no terminator: 0x100)
 pa_loop
         cmp     r4,#64
         beq     pa_done
         ldrb    r0,[r10,r4]
-        cmp     r0,#0xD0
+        cmp     r0,r7,lsr #8
         beq     pa_done
         add     r0,r0,#1
         cmp     r0,r12
@@ -127,8 +140,9 @@ pa_loop
         movs    r2,r0
         movmi   r2,#0                   ; first line on the screen
         add     r3,r0,r8
-        cmp     r3,#ACTIVE
-        movgt   r3,#ACTIVE              ; last line + 1
+        and     lr,r7,#0xFF
+        cmp     r3,lr
+        movgt   r3,lr                   ; last line + 1
         cmp     r2,r3
         movge   r1,#0
         bge     pa_store
@@ -199,7 +213,8 @@ pa_done
 
         mov     r0,#0                   ; sprites on the line
         mov     r3,sp
-        add     r2,sp,#ACTIVE           ; end of the counts
+        ldr     r2,[sp,#F_ACTIVE]
+        add     r2,sp,r2                ; end of the counts
         mov     r5,#1
         mov     r6,#0
         add     r8,sp,#F_OVER
@@ -211,16 +226,21 @@ pb_loop
         PBLINE  24
         cmp     r3,r2
         bne     pb_loop
+        str     r6,[r8]                 ; a last word of fewer than 32 lines
         add     r6,r11,#0x4800
         add     r6,r6,#V_SPR-0x4800     ; r6 = &spr_n again
         add     r12,sp,#F_OVER
         ldmia   r12,{r0-r3}
         orr     r0,r0,r1
         orr     r2,r2,r3
-        ldr     r1,[r12,#16]
-        ldr     r3,[r12,#20]
         orr     r0,r0,r2
+        ldr     r1,[r12,#16]
+        ldr     r2,[r12,#20]
+        ldr     r3,[r12,#24]
+        orr     r1,r1,r2
+        ldr     r2,[r12,#28]
         orr     r1,r1,r3
+        orr     r1,r1,r2
         orrs    r0,r0,r1
         beq     collide                 ; no line holds more than eight
         ; Pass C: on the lines with more than eight sprites, in table
@@ -255,7 +275,8 @@ pc_vstore
         mov     r2,#0
         mov     r3,#0
         mov     r12,sp
-        mov     lr,#12
+        ldr     lr,[sp,#F_ACTIVE]
+        mov     lr,lr,lsr #4
 pc_clr
         stmia   r12!,{r0-r3}
         subs    lr,lr,#1
@@ -319,6 +340,7 @@ collide
         cmp     r5,#2
         blo     done                    ; one sprite with opaque pixels at most
 co_order
+        ldr     r7,[sp,#F_ACTIVE]       ; r7 = active lines
         mov     r5,#0                   ; r5 = sprites ordered
         mov     r1,#0                   ; line
         add     r2,sp,#F_HEAD
@@ -358,7 +380,7 @@ co_oword
         CHAIN   8
         CHAIN   0
 co_onext
-        cmp     r1,#ACTIVE
+        cmp     r1,r7
         bne     co_oword
         ; Pairs: i against the j after it whose first line is before the
         ; last line of i.

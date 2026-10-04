@@ -20,10 +20,22 @@
  * they affect, so that the picture can be drawn in bands (games using
  * line interrupts for raster effects write the scroll on every line).
  *
- * Line model (192-line mode): the line counter is decremented at the end
- * of lines 0 to 192 and reloaded from register 10 at the end of the other
- * lines; an underflow reloads it and sets the line interrupt flag. The
- * VBlank flag is set at the start of line 192.
+ * Display height: mode 4 shows 192 lines, or 224 / 240 lines when
+ * register 0 bit 1 (M2) is set with register 1 bit 4 (M1) / bit 3 (M3)
+ * (the extended modes of the later VDP revisions). The extended modes
+ * take a name table of 32 rows (at (register 2 & $0C) << 10 | $0700, the
+ * vertical scroll wrapping at 256 instead of 224) and have no sprite list
+ * terminator.
+ *
+ * Line model: the line counter is decremented at the end of lines 0 to
+ * the last active line + 1 and reloaded from register 10 at the end of
+ * the other lines; an underflow reloads it and sets the line interrupt
+ * flag. The VBlank flag is set at the start of the line after the active
+ * display (192, 224 or 240).
+ *
+ * Colour RAM writes during the active display are recorded with the line
+ * they affect, like the register writes, so that the picture can change
+ * its palette from that line on (a horizon drawn in another colour).
  *
  * Sprites: the sprite attribute table is evaluated once per frame by
  * vdp_sprites(), as the hardware does line by line: the first eight
@@ -40,13 +52,16 @@
 
 #define VDP_VRAM_SIZE   0x4000
 #define VDP_TILES       512         /* 32-byte tiles in video RAM */
-#define VDP_ACTIVE      192         /* active lines (mode 4, 192-line mode) */
+#define VDP_ACTIVE_STD  192         /* active lines of the usual mode */
+#define VDP_ACTIVE_MAX  240         /* active lines of the tallest mode */
 #define VDP_LINE_T      228         /* T-states per line */
 #define VDP_LINES_NTSC  262
 #define VDP_LINES_PAL   313
 #define VDP_HS_LOG      256         /* register 8 writes recorded per frame */
 #define VDP_NT_LOG      16          /* register 2 writes recorded per frame */
 #define VDP_DE_LOG      8           /* display enable changes recorded per frame */
+#define VDP_CR_LOG      64          /* colour RAM writes recorded per frame */
+#define VDP_PAL_BANDS   8           /* palettes of a picture (vdp_palette_bands) */
 #define VDP_SPRITES     64
 
 /* Status flags. */
@@ -88,7 +103,9 @@ typedef struct {
     uint32  lc_val;
     uint32  frames;
     uint8   hc[VDP_LINE_T]; /* +0x7C: H counter for each T-state of a line */
-    uint8   pad[0x200 - 0x7C - VDP_LINE_T];
+    uint32  active;         /* +0x160: active lines: 192, 224 or 240 */
+    uint32  nt_rows;        /* +0x164: name table rows: 28, or 32 in the extended modes */
+    uint8   pad[0x200 - 0x7C - VDP_LINE_T - 8];
     uint8   dirty[VDP_TILES];       /* +0x200: nonzero: tile written */
     uint8   vram[VDP_VRAM_SIZE];    /* +0x400 */
     /* Writes to register 8 during the active display of the current
@@ -116,6 +133,10 @@ typedef struct {
     uint32  spr_rows[VDP_SPRITES];  /* bit r: tile row r holds an opaque pixel */
     uint8   spr_tile_rows[VDP_TILES];   /* the same per tile, cached */
     uint8   spr_tile_ok[VDP_TILES];     /* the cache entry is valid */
+    /* Colour RAM writes during the active display of the current frame:
+     * (first line affected << 16) | (index << 8) | value. */
+    uint32  cr_n;                   /* +0x4F84 */
+    uint32  cr_log[VDP_CR_LOG];     /* +0x4F88 */
 } vdp_state;
 
 /* Power-on state; lines is VDP_LINES_NTSC or VDP_LINES_PAL. */
@@ -132,7 +153,7 @@ void   vdp_event(vdp_state *v);
  * control port write returns nonzero when the translated block must be
  * left (interrupt line raised or event moved). */
 uint32 vdp_data_read(vdp_state *v);
-void   vdp_data_write(vdp_state *v, uint32 value);
+void   vdp_data_write(vdp_state *v, uint32 value, uint32 left);
 uint32 vdp_status_read(vdp_state *v, uint32 left);
 uint32 vdp_control_write(vdp_state *v, uint32 value, uint32 left);
 uint32 vdp_vcounter(const vdp_state *v, uint32 left);
@@ -149,6 +170,22 @@ uint32 vdp_vcounter(const vdp_state *v, uint32 left);
  * merge. Returns the band count, at most n + 1. */
 uint32 vdp_bands(const uint32 *log, uint32 n, uint32 top_value, uint32 *tops, uint32 *vals);
 uint32 vdp_hcounter(const vdp_state *v, uint32 left);
+
+/* Video RAM address of the name table selected by a register 2 value in
+ * the current display mode. */
+#define vdp_nt_base(v, reg2) \
+    (((v)->nt_rows > 28) ? ((((uint32)(reg2) & 0x0C) << 10) | 0x0700) \
+                         : (((uint32)(reg2) & 0x0E) << 10))
+
+/* Palettes of the picture: band 0 starts at line 0 with the colour RAM
+ * held at the end of the frame (written for the picture that goes with
+ * the video RAM as it stands, as for the scroll), and each later band
+ * applies the colour RAM writes recorded during the active display from
+ * the line they affect. Bands whose colours do not change merge; writes
+ * beyond VDP_PAL_BANDS bands go to the last one. tops[k] is the first
+ * line of band k and the bytes of cram + 8 * k its 32 colours. Returns
+ * the band count; *merged counts the writes moved to an earlier line. */
+uint32 vdp_palette_bands(const vdp_state *v, uint32 *tops, uint32 *cram, uint32 *merged);
 
 /* Evaluates the sprite attribute table for the picture of the frame
  * (spr_* fields): the per-line limit, the overflow and collision flags,

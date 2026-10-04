@@ -114,7 +114,7 @@ static uint32 sms_out(z80j_machine *m, uint32 port, uint32 value, uint32 left)
         psg_write(s, value);
         return 0;
     case 4:
-        vdp_data_write(&s->vdp, value);
+        vdp_data_write(&s->vdp, value, left);
         return 0;
     case 5:
         r = vdp_control_write(&s->vdp, value, left);
