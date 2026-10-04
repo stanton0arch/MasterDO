@@ -74,6 +74,8 @@ void sms_vdp_data_w(void);
 void sms_vdp_data_r(void);
 void sms_vdp_stat_r(void);
 void sms_vdp_event_a(void);
+void sms_vdp_vc_r(void);
+void sms_vdp_hc_r(void);
 void sms_vdp_ctrl_w(void);
 void sms_vdp_data_wn(void);
 

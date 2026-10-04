@@ -651,6 +651,22 @@ static uint32 flags_needed(jit_block_ctx *b, uint32 pc)
 }
 
 /* Z80 flags a producer can leave in the ARM flags (FU_*). */
+/* Element of a port output run started by the ED opcode first: 1 for an
+ * OUTI (an OUTD in a run of OUTD), 2 for an OUT (C),r on the run's
+ * register *outc (set by the first one met), 0 when op ends the run. */
+static uint32 run_elem(uint32 first, uint32 op, uint32 *outc)
+{
+    if (first == 0xAB)
+        return op == 0xAB;
+    if (op == 0xA3)
+        return 1;
+    if ((op == 0x79 || op == 0x51 || op == 0x59) && (*outc == 0 || *outc == op)) {
+        *outc = op;
+        return 2;
+    }
+    return 0;
+}
+
 static uint32 fuse_mask(const jit_insn *in)
 {
     uint32 x = in->op >> 6;
@@ -1531,20 +1547,50 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
         p->t_after = run;
     }
 
-    /* Runs of OUTI (or of OUTD) inside a segment become one transfer. */
+    /* Runs of port outputs inside a segment become one transfer: OUTD
+     * alone, or OUTI mixed with OUT (C),r for one register r among A, D
+     * and E, which the run does not change (a byte written between the
+     * bytes read from memory, as in an upload of three bit planes and a
+     * constant fourth one). A run stops after the instruction that
+     * follows EI, whose interrupt check comes after the run. */
     for (p = ins; p < end; p++) {
         jit_insn *q;
-        uint32 len = 1;
+        uint32 len = 0;
+        uint32 mask = 0;
+        uint32 outc = 0;
+        uint32 e;
 
-        if (p->run != 0 || p->pre != PRE_ED || (p->op != 0xA3 && p->op != 0xAB))
+        if (p->run != 0 || p->pre != PRE_ED)
             continue;
-        for (q = p + 1; q < end && !q->seg_start && q->pre == PRE_ED && q->op == p->op; q++)
+        e = run_elem(p->op, p->op, &outc);
+        for (q = p; e != 0; ) {
+            if (e == 2)
+                mask |= (uint32)1 << len;
             len++;
+            if (q->irq_check || len == Z80J_RUN_MAX)
+                break;
+            q++;
+            if (q >= end || q->seg_start || q->pre != PRE_ED)
+                break;
+            e = run_elem(p->op, q->op, &outc);
+        }
         if (len >= 2) {
-            p->run = len;
-            for (q = p + 1; len > 1; q++, len--)
+            p->run = len | (mask << 8) | (outc << 24);
+            for (q = p + 1; q < p + len; q++)
                 q->run = RUN_PART;
         }
+    }
+
+    /* An OUTI (OUTD) closed by JR NZ or JP NZ back to it sends B bytes,
+     * as OTIR (OTDR) does: the passes go out in one run when the stretch
+     * has room for all of them (emit_out_loop). */
+    for (p = ins, k = 0; p + 1 < end; p++, k++) {
+        jit_insn *c = p + 1;
+
+        if (p->run == 0 && p->pre == PRE_ED && (p->op == 0xA3 || p->op == 0xAB) &&
+            !p->irq_check && (c->kind == K_JRCC || c->kind == K_JPCC) && c->cc == 0 &&
+            c->internal == k && !c->dyn && !c->busy && !c->irq_check)
+            p->run = RUN_LOOP;
     }
 
     /* Flag liveness, backwards from the block exit. */

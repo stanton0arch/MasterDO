@@ -35,6 +35,10 @@ CHECK_OFF(spr_tile_ok, offsetof(vdp_state, spr_tile_ok) == 0x4D84);
 CHECK_OFF(hc, offsetof(vdp_state, hc) == 0x7C);
 CHECK_OFF(active, offsetof(vdp_state, active) == 0x160);
 CHECK_OFF(nt_rows, offsetof(vdp_state, nt_rows) == 0x164);
+CHECK_OFF(n_count_r, offsetof(vdp_state, n_count_r) == 0x168);
+CHECK_OFF(lines, offsetof(vdp_state, lines) == 0x5C);
+CHECK_OFF(vc_jump, offsetof(vdp_state, vc_jump) == 0x60);
+CHECK_OFF(vc_back, offsetof(vdp_state, vc_back) == 0x64);
 CHECK_OFF(cr_n, offsetof(vdp_state, cr_n) == 0x4F84);
 CHECK_OFF(cr_log, offsetof(vdp_state, cr_log) == 0x4F88);
 CHECK_OFF(dirty, offsetof(vdp_state, dirty) == 0x200);
@@ -201,6 +205,7 @@ void vdp_reset(vdp_state *v)
     v->n_data_r = 0;
     v->n_ctrl_w = 0;
     v->n_stat_r = 0;
+    v->n_count_r = 0;
 }
 
 void vdp_init(vdp_state *v, z80j_ctx *ctx, uint32 lines)

@@ -169,13 +169,21 @@ typedef struct {
  *        nonzero to leave the block (see z80j_machine.out)
  *   run: r0 = count (negative for OUTD), r1 = port, r2 = T-states left at
  *        the end of the run, r7 = HL (bits 16-31); sends count bytes read
- *        from HL upwards (downwards for OUTD) and leaves HL unchanged
+ *        from HL upwards (downwards for OUTD) and leaves HL unchanged;
+ *        returns r0 as the output handler does
+ *   mixed run (OUTI and OUT (C),r): r0 = Z80J_RUN_MIXED | mask << 13 |
+ *        count << 8 | byte, with count at most Z80J_RUN_MAX and r2 = the
+ *        T-states left at the end of the first element; element k is the
+ *        byte when bit k of the mask is set (an OUT (C),r, 12 T-states),
+ *        else the next byte read from HL upwards (an OUTI, 16 T-states)
  * r10 is the global pointer; r3-r11 must be preserved, r0-r2, r12 and lr
  * may be lost. The tables start with the generic handlers of the glue,
  * which call the machine's C callbacks below; a machine may put its own
  * handlers in them (and its data in ctx->mdata) before translating code.
  */
 #define Z80J_PORTS 256
+#define Z80J_RUN_MIXED  0x40000000u
+#define Z80J_RUN_MAX    16
 
 /*
  * Special write handler (ctx->write_a): entered from the generated code

@@ -219,7 +219,8 @@ static void read_counters(const game *g, game_counters *c)
     c->vdp_data_r = g->sms->vdp.n_data_r;
     c->vdp_ctrl_w = g->sms->vdp.n_ctrl_w;
     memcpy(&c->io, &g->sms->io, sizeof(c->io));
-    c->io.vdp_stat_r += g->sms->vdp.n_stat_r;   /* the assembly handler counts apart */
+    c->io.vdp_stat_r += g->sms->vdp.n_stat_r;   /* the assembly handlers count apart */
+    c->io.counter_r += g->sms->vdp.n_count_r;
     memcpy(&c->rd, &g->rd->st, sizeof(c->rd));
 }
 

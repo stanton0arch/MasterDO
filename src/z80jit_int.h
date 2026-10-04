@@ -114,8 +114,10 @@ typedef struct {
     uint32  busy;           /* jump back of a busy-wait loop */
     uint32  irq_check;      /* instruction after EI: check for a pending */
                             /* interrupt after it */
-    uint32  run;            /* first of a run of OUTI / OUTD: its length; */
-                            /* RUN_PART for the others */
+    uint32  run;            /* first of a run of port outputs: its length, */
+                            /* the mask of its OUT (C),r elements << 8 and */
+                            /* the opcode of OUT (C),r << 24; RUN_PART for */
+                            /* the others */
     uint32  dyn;            /* JP / CALL in RAM: the target is read from */
                             /* memory when the instruction runs */
     uint32 *host;           /* generated code of the instruction */
@@ -141,6 +143,7 @@ typedef struct {
 } jit_stub;
 
 #define RUN_PART   0xFFFFFFFFu
+#define RUN_LOOP   0xFFFFFFFEu  /* OUTI / OUTD closed by JR NZ or JP NZ back to it */
 
 #define MAX_INSNS  64
 #define MAX_STUBS  (4 * MAX_INSNS)
@@ -170,6 +173,8 @@ typedef struct {
     uint32      has_dyn;    /* RAM block with dynamic targets: masked check */
     uint32      mark_off;   /* context offset of the run mark of the block's chunk */
     uint32     *body;       /* code after the entry check, where links lead */
+    uint32     *skip_site;  /* branch past a port output loop, patched at */
+    int32       skip_to;    /* the code of instruction skip_to */
     uint32      memo_pc[SCAN_MEMO];
     uint32      memo_val[SCAN_MEMO];
     int32       nmemo;

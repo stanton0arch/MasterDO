@@ -108,7 +108,8 @@ typedef struct {
     uint8   hc[VDP_LINE_T]; /* +0x7C: H counter for each T-state of a line */
     uint32  active;         /* +0x160: active lines: 192, 224 or 240 */
     uint32  nt_rows;        /* +0x164: name table rows: 28, or 32 in the extended modes */
-    uint8   pad[0x200 - 0x7C - VDP_LINE_T - 8];
+    uint32  n_count_r;      /* +0x168: V and H counter reads (handled in assembly) */
+    uint8   pad[0x200 - 0x7C - VDP_LINE_T - 12];
     uint8   dirty[VDP_TILES];       /* +0x200: nonzero: tile written */
     uint8   vram[VDP_VRAM_SIZE];    /* +0x400 */
     /* Writes to register 8 during the active display of the current

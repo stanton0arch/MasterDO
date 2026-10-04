@@ -427,16 +427,22 @@ z80j_port_out_c
 ; Run of OUTI / OUTD: one call of the port's output handler per byte.
 ; In: r0 = count (negative for OUTD), r1 = port, r2 = T-states left at the
 ; end of the run, r7 = HL. The n-th byte from the end goes out 16 (n - 1)
-; T-states earlier.
+; T-states earlier. A mixed run (r0 = Z80J_RUN_MIXED | mask << 13 | count
+; << 8 | byte, see z80jit.h) has r2 = T-states left at the end of its first
+; element; each element takes 16 (OUTI) or 12 (OUT (C),r) T-states. The
+; handlers' results are OR-ed: nonzero leaves the block after the run.
 z80j_port_outn_loop
-        stmfd   sp!,{r3-r8,lr}
+        stmfd   sp!,{r3-r9,lr}
         mov     r3,r7                   ; source address (bits 16-31)
+        mov     r9,#0                   ; results
+        mov     r6,r1                   ; port
+        mov     r8,r2
+        cmp     r0,#0x40000000          ; OUTD runs are negative
+        bge     outm_entry
         mov     r5,#0x10000             ; step
         movs    r4,r0                   ; bytes left
         rsbmi   r4,r4,#0
         rsbmi   r5,r5,#0
-        mov     r6,r1                   ; port
-        mov     r8,r2
 outn_loop
         mvn     r2,r3,lsr#24
         ldr     r2,[r10,r2,lsl#2]
@@ -448,10 +454,39 @@ outn_loop
         ldr     r12,[r10,#PORT_OUT]
         mov     lr,pc
         ldr     pc,[r12,r6,lsl#2]
+        orr     r9,r9,r0
         subs    r4,r4,#1
         bne     outn_loop
-        mov     r0,#0
-        ldmfd   sp!,{r3-r8,pc}
+        mov     r0,r9
+        ldmfd   sp!,{r3-r9,pc}
+outm_entry
+        mov     r4,r0,lsr#8
+        and     r4,r4,#0x1F             ; elements
+        mov     r5,r0,lsr#13
+        bic     r5,r5,#0x20000          ; mask, bit 0 = the next element
+        and     r7,r0,#0xFF             ; byte of OUT (C),r
+outm_loop
+        movs    r5,r5,lsr#1             ; C: OUT (C),r
+        movcs   r0,r7
+        bcs     outm_out
+        mvn     r2,r3,lsr#24
+        ldr     r2,[r10,r2,lsl#2]
+        ldrb    r0,[r2,r3,lsr#16]
+        add     r3,r3,#0x10000
+outm_out
+        mov     r1,r6
+        mov     r2,r8
+        ldr     r12,[r10,#PORT_OUT]
+        mov     lr,pc
+        ldr     pc,[r12,r6,lsl#2]
+        orr     r9,r9,r0
+        tst     r5,#1                   ; time of the next element
+        subne   r8,r8,#0xC00
+        subeq   r8,r8,#0x1000
+        subs    r4,r4,#1
+        bne     outm_loop
+        mov     r0,r9
+        ldmfd   sp!,{r3-r9,pc}
 
 ;----------------------------------------------------------------------------
 ; Write to a special page. In: r0 = value, r12 = Z80 address (bits 16-31),

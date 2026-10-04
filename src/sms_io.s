@@ -1,6 +1,7 @@
 ; sms_io.s - port handlers of the Master System in assembly, for the hot
-; paths: VDP data port writes and reads, VDP control port writes, and runs
-; of OUTI / OUTD to the data port (the usual way to upload tiles).
+; paths: VDP data port writes and reads, VDP control port writes, status
+; and counter reads, and runs of OUTI / OUTD to the data port (the usual
+; way to upload tiles).
 ;
 ; The handlers follow the port handler conventions of z80jit.h: called by
 ; the generated code with r10 = global pointer, arguments in r0-r2, r7 =
@@ -18,6 +19,8 @@
         EXPORT  sms_vdp_data_wn
         EXPORT  sms_vdp_stat_r
         EXPORT  sms_vdp_event_a
+        EXPORT  sms_vdp_vc_r
+        EXPORT  sms_vdp_hc_r
 
         IMPORT  z80j_port_out_c
         IMPORT  z80j_port_in_c
@@ -42,11 +45,15 @@ V_REG           EQU     0x40
 V_STATUS        EQU     0x50
 V_LINEFLAG      EQU     0x54
 V_LINES         EQU     0x5C
+V_VCJUMP        EQU     0x60
+V_VCBACK        EQU     0x64
 V_FRAMEBASE     EQU     0x68
 V_VBLDONE       EQU     0x6C
 V_LCK           EQU     0x70
 V_LCVAL         EQU     0x74
+V_HC            EQU     0x7C
 V_ACTIVE        EQU     0x160
+V_NCOUNTR       EQU     0x168
 V_DIRTY         EQU     0x200
 V_VRAM          EQU     0x400
 V_HSN           EQU     0x4400          ; the logs lie past the video RAM
@@ -164,14 +171,17 @@ sms_vdp_data_r
 ; status. Reading clears the flags and the interrupt line. With line
 ; interrupts enabled every underflow of the line counter is an event, so
 ; no line interrupt flag can be waiting in the lazy counter and the read
-; needs no counter update; with them disabled the C path brings the
-; counter up to date first (a flag may be waiting there).
+; needs no counter update. With them disabled an underflow since the last
+; update may have set the flag, which the read clears: the lazy counter is
+; first brought to the lines done (lc_sync of vdp.c) in its simple case,
+; and through the C path when it crossed an underflow.
 ;----------------------------------------------------------------------------
 sms_vdp_stat_r
         ldr     r12,[r10,#MDATA]
         ldrb    r0,[r12,#V_REG]         ; register 0
         tst     r0,#0x10
-        beq     z80j_port_in_c          ; line interrupts off (r1, r2 intact)
+        beq     stat_lc
+stat_clear
         ldr     r0,[r12,#V_STATUS]
         mov     r2,#0
         str     r2,[r12,#V_STATUS]
@@ -184,6 +194,103 @@ sms_vdp_stat_r
         ldr     r1,[r2,#V_NSTATR-0x4800]
         add     r1,r1,#1
         str     r1,[r2,#V_NSTATR-0x4800]
+        mov     pc,lr
+stat_lc
+        ldr     r0,[r10,#LINE]
+        ldr     r1,[r12,#V_FRAMEBASE]
+        sub     r0,r0,r1
+        mov     r1,#228
+        mul     r0,r1,r0                ; T-states of the frame at the stretch end
+        subs    r0,r0,r2,asr#8          ; T-state of the access
+        ble     stat_clear              ; no line done yet: k = 0
+        mov     r0,r0,lsr#2             ; k = (t / 4) * 36793 >> 21
+        mov     r1,#0x8F00
+        orr     r1,r1,#0xB9
+        mul     r0,r1,r0
+        mov     r0,r0,lsr#21
+        ldr     r1,[r12,#V_LCK]
+        cmp     r0,r1
+        bls     stat_clear              ; k <= lc_k: nothing to do
+        str     r3,[sp,#-4]!
+        ldr     r3,[r12,#V_ACTIVE]      ; a = active lines
+        cmp     r1,r3
+        bhi     stat_lc_tail            ; lc_k > a: no countdown
+        cmp     r0,r3
+        addhi   r3,r3,#1
+        movls   r3,r0                   ; end = min(k, a + 1)
+        sub     r3,r3,r1                ; n = end - lc_k
+        ldr     r1,[r12,#V_LCVAL]
+        cmp     r3,r1
+        bhi     stat_lc_slow            ; underflow since the last update: C
+        sub     r1,r1,r3
+        str     r1,[r12,#V_LCVAL]
+stat_lc_tail
+        ldr     r3,[r12,#V_ACTIVE]
+        add     r3,r3,#1
+        cmp     r0,r3
+        ldrhib  r1,[r12,#V_REG+10]      ; past line a + 1 the counter reloads
+        strhi   r1,[r12,#V_LCVAL]
+        str     r0,[r12,#V_LCK]
+        ldr     r3,[sp],#4
+        b       stat_clear
+stat_lc_slow
+        ldr     r3,[sp],#4
+        mov     r1,#0xBF
+        b       z80j_port_in_c          ; r2 unchanged
+
+;----------------------------------------------------------------------------
+; IN from the V counter (even ports $40-$7F) and the H counter (odd ports).
+; In: r2 = T-states left. The beam position comes from the access time as
+; in vdp_beam (vdp.c): the line of the frame (an access that ends the
+; previous frame counts from its start) and the T-state in the line; the V
+; counter then jumps back as the display mode says, the H counter comes
+; from the table of a line.
+;----------------------------------------------------------------------------
+        MACRO
+        BEAM                            ; out: r2 = line, r1 = T-state in it
+        ldr     r0,[r10,#LINE]
+        ldr     r1,[r12,#V_FRAMEBASE]
+        sub     r0,r0,r1
+        mov     r1,#228
+        mul     r0,r1,r0                ; T-states of the frame at the stretch end
+        subs    r0,r0,r2,asr#8          ; t: T-state of the access
+        ldrmi   r1,[r12,#V_LINES]
+        movmi   r2,#228
+        mlami   r0,r1,r2,r0             ; t + lines * 228
+        mov     r2,r0,lsr#2             ; line = (t / 4) * 36793 >> 21
+        mov     r1,#0x8F00
+        orr     r1,r1,#0xB9
+        mul     r2,r1,r2
+        mov     r2,r2,lsr#21
+        mov     r1,#228
+        mul     r1,r2,r1
+        sub     r1,r0,r1                ; T-state in the line
+        ldr     r0,[r12,#V_LINES]
+        cmp     r2,r0
+        subhs   r2,r2,r0
+        MEND
+
+sms_vdp_vc_r
+        ldr     r12,[r10,#MDATA]
+        BEAM
+        ldr     r1,[r12,#V_VCJUMP]
+        cmp     r2,r1
+        ldrhi   r1,[r12,#V_VCBACK]
+        subhi   r2,r2,r1
+        and     r0,r2,#0xFF
+        ldr     r1,[r12,#V_NCOUNTR]
+        add     r1,r1,#1
+        str     r1,[r12,#V_NCOUNTR]
+        mov     pc,lr
+
+sms_vdp_hc_r
+        ldr     r12,[r10,#MDATA]
+        BEAM
+        add     r1,r1,r12
+        ldrb    r0,[r1,#V_HC]
+        ldr     r1,[r12,#V_NCOUNTR]
+        add     r1,r1,#1
+        str     r1,[r12,#V_NCOUNTR]
         mov     pc,lr
 
 ;----------------------------------------------------------------------------
@@ -344,8 +451,11 @@ ctrl_reg_slow
 ; r7 = HL (bits 16-31), the source of the first byte. Video RAM runs are
 ; copied in one loop, by words when the alignment allows it; colour RAM
 ; or a pending control word goes byte by byte through sms_vdp_data_w.
+; Mixed runs (OUTI and OUT (C),r) are handled at data_wm.
 ;----------------------------------------------------------------------------
 sms_vdp_data_wn
+        cmp     r0,#0x40000000          ; OUTD runs are negative
+        bge     data_wm                 ; mixed run (OUTI and OUT (C),r)
         ldr     r12,[r10,#MDATA]
         ldr     r1,[r12,#V_CTL]
         cmp     r1,#3
@@ -504,6 +614,106 @@ wn_slow_loop
         sub     r8,r8,#0x1000
         subs    r4,r4,#1
         bne     wn_slow_loop
+        mov     r0,#0
+        ldmfd   sp!,{r3-r9,pc}
+
+; Mixed run: r0 = Z80J_RUN_MIXED | mask << 13 | count << 8 | byte (see
+; z80jit.h), r2 = T-states left at the end of the first element. Element k
+; is the byte when bit k of the mask is set, else the next byte from HL.
+; A video RAM run whose source stays in one page and whose destination
+; does not wrap takes the page entry and the dirty marks once.
+data_wm
+        stmfd   sp!,{r3-r9,lr}
+        ldr     r6,[r10,#MDATA]
+        mov     r4,r0,lsr#8
+        and     r4,r4,#0x1F             ; elements
+        mov     r5,r0,lsr#13
+        bic     r5,r5,#0x20000          ; mask, bit 0 = the next element
+        and     r9,r0,#0xFF             ; byte of OUT (C),r
+        ldr     r1,[r6,#V_CTL]
+        cmp     r1,#3
+        bhs     wm_slow                 ; colour RAM, or a control word pending
+        ldr     r1,[r6,#V_NDATAW]
+        add     r1,r1,r4
+        str     r1,[r6,#V_NDATAW]
+        ldr     r1,[r6,#V_ADDR]
+        add     r8,r1,r4                ; destination end
+        cmp     r8,#0x4000
+        bhi     wm_bytes
+        mov     r2,r7,lsr#16
+        and     r2,r2,#0xFF
+        add     r2,r2,r4                ; source end, at worst
+        cmp     r2,#0x100
+        bhi     wm_bytes
+        str     r8,[r6,#V_ADDR]
+        mov     r2,r1,lsr#5             ; tiles written: first to last
+        sub     r8,r8,#1
+        mov     r8,r8,lsr#5
+        add     r12,r6,#V_DIRTY
+        mov     r0,#1
+wm_dirty
+        strb    r0,[r12,r2]
+        add     r2,r2,#1
+        cmp     r2,r8
+        bls     wm_dirty
+        mvn     r2,r7,lsr#24
+        ldr     r2,[r10,r2,lsl#2]
+        add     r2,r2,r7,lsr#16         ; host source
+        add     r12,r6,#V_VRAM
+        add     r12,r12,r1              ; host destination
+wm_fast
+        movs    r5,r5,lsr#1             ; C: the byte of OUT (C),r
+        ldrccb  r0,[r2],#1
+        movcs   r0,r9
+        strb    r0,[r12],#1
+        subs    r4,r4,#1
+        bne     wm_fast
+        str     r0,[r6,#V_BUFFER]       ; the last byte written: read buffer
+        mov     r0,#0
+        ldmfd   sp!,{r3-r9,pc}
+wm_bytes                                ; byte by byte: r1 = address
+        mov     r3,r7
+        add     r8,r6,#V_DIRTY
+        add     r12,r6,#V_VRAM
+        mov     lr,#1
+wm_byte
+        movs    r5,r5,lsr#1
+        movcs   r0,r9
+        bcs     wm_put
+        mvn     r2,r3,lsr#24
+        ldr     r2,[r10,r2,lsl#2]
+        ldrb    r0,[r2,r3,lsr#16]
+        add     r3,r3,#0x10000
+wm_put
+        strb    r0,[r12,r1]
+        strb    lr,[r8,r1,lsr#5]
+        add     r1,r1,#1
+        bic     r1,r1,#0x4000
+        subs    r4,r4,#1
+        bne     wm_byte
+        str     r1,[r6,#V_ADDR]
+        str     r0,[r6,#V_BUFFER]
+        mov     r0,#0
+        ldmfd   sp!,{r3-r9,pc}
+wm_slow                                 ; each byte through sms_vdp_data_w, with its time
+        mov     r3,r7
+        mov     r8,r2
+wm_slow_loop
+        movs    r5,r5,lsr#1
+        movcs   r0,r9
+        bcs     wm_slow_put
+        mvn     r2,r3,lsr#24
+        ldr     r2,[r10,r2,lsl#2]
+        ldrb    r0,[r2,r3,lsr#16]
+        add     r3,r3,#0x10000
+wm_slow_put
+        mov     r2,r8
+        bl      sms_vdp_data_w
+        tst     r5,#1                   ; time of the next element
+        subne   r8,r8,#0xC00
+        subeq   r8,r8,#0x1000
+        subs    r4,r4,#1
+        bne     wm_slow_loop
         mov     r0,#0
         ldmfd   sp!,{r3-r9,pc}
 

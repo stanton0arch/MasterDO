@@ -1098,6 +1098,53 @@ static void time_left(z80j_state *j, const jit_insn *in)
         mov_r(j, R2, RCYC, SH_LSL, 0);
 }
 
+/*
+ * Fast path of a port output loop (OTIR, OTDR, or OUTI / OUTD closed by
+ * JR NZ or JP NZ back to it, the last instruction of the loop being tail),
+ * at its head, after the segment check: when the stretch has room for
+ * the B - 1 further passes of t_pass T-states each, the B bytes go out
+ * in one run (B = 0: 256) and B, HL, the flags and the T-states end as
+ * after the last pass; the bytes are spaced as in a run of OUTI, which
+ * only matters for colour RAM writes during the active display. Returns
+ * the site of the branch past the loop, to be patched; the regular code
+ * of one pass follows (the stretch is about to end).
+ */
+static uint32 *emit_out_loop_fast(jit_block_ctx *b, const jit_insn *in,
+                                  const jit_insn *tail, uint32 t_pass)
+{
+    z80j_state *j = b->j;
+    uint32 dec = (in->op & 0x08u) != 0;
+    uint32 *slow;
+    uint32 *skip;
+
+    dp_r(j, C_AL, OP_MOV, 1, R0, 0, RBC, SH_LSR, 24);
+    dp_i(j, C_EQ, OP_MOV, 0, R0, 0, 256);
+    dp_i(j, C_AL, OP_SUB, 0, RAD, R0, 1);
+    dp_i(j, C_AL, OP_MOV, 0, R1, 0, t_pass * CYCLE);
+    emit(j, (C_AL << 28) | (R2 << 16) | (RAD << 8) | 0x90u | R1);     /* mul r2,r1,r12 */
+    cmp_r(j, C_AL, OP_CMP, RCYC, R2, SH_LSL, 0);
+    slow = j->cur;
+    emit(j, (C_CC << 28) | (5u << 25));
+    dp_r(j, C_AL, OP_SUB, 0, RCYC, RCYC, R2, SH_LSL, 0);
+    if (dec)
+        dp_i(j, C_AL, OP_RSB, 0, R0, R0, 0);
+    port_c(j);
+    time_left(j, in);
+    emit_b(j, C_AL, 1, j->glue.io_outn);
+    mov_r(j, RAD, R0, SH_LSL, 0);
+    dp_r(j, C_AL, OP_MOV, 1, R0, 0, RBC, SH_LSR, 24);
+    dp_i(j, C_EQ, OP_MOV, 0, R0, 0, 256);
+    dp_r(j, C_AL, dec ? OP_SUB : OP_ADD, 0, RHL, RHL, R0, SH_LSL, 16);
+    dp_i(j, C_AL, OP_BIC, 0, RBC, RBC, 0xFF000000u);
+    dp_i(j, C_AL, OP_ORR, 0, RF, RF, PSR_Z | PSR_n);
+    cmp_i(j, C_AL, OP_TEQ, RAD, 0);
+    emit_stub_branch(b, C_NE, 0, STUB_LEAVE, (tail->pc + tail->len) & 0xFFFFu, tail->t_after, 0);
+    skip = j->cur;
+    emit(j, (C_AL << 28) | (5u << 25));
+    patch_b(slow, JIT_ADDR(j->cur));
+    return skip;
+}
+
 static void emit_block_insn(jit_block_ctx *b, jit_insn *in, int32 index)
 {
     z80j_state *j = b->j;
@@ -1107,6 +1154,7 @@ static void emit_block_insn(jit_block_ctx *b, jit_insn *in, int32 index)
     uint32 rep = y >= 6;
     uint32 step = 0x00010000u;
     uint32 live = flags_live(in);
+    uint32 *skip = 0;
 
     switch (z) {
     case 0:                                         /* LDI LDD LDIR LDDR */
@@ -1164,6 +1212,8 @@ static void emit_block_insn(jit_block_ctx *b, jit_insn *in, int32 index)
             emit_jump_cond(b, C_NE, in, index, 5);
         break;
     default:                                        /* OUTI OUTD OTIR OTDR */
+        if (rep)
+            skip = emit_out_loop_fast(b, in, in, in->seg_t + 5);
         emit_read(j, RHL);
         dp_i(j, C_AL, OP_SUB, 0, RBC, RBC, 0x01000000u);
         port_c(j);
@@ -1176,36 +1226,66 @@ static void emit_block_insn(jit_block_ctx *b, jit_insn *in, int32 index)
             cmp_i(j, C_AL, OP_TST, RBC, 0xFF000000u);
             dp_i(j, C_EQ, OP_ORR, 0, RF, RF, PSR_Z);
         }
-        if (rep)
+        if (rep) {
             emit_jump_cond(b, C_NE, in, index, 5);
+            patch_b(skip, JIT_ADDR(j->cur));
+        }
         break;
     }
 }
 
-/* A run of OUTI (OUTD): B decreases by the run length, the bytes go to
- * port C in one call, then HL moves; flags are those of the last one. */
+/* A run of port outputs to port C in one call. A run of OUTI (OUTD):
+ * B decreases by the run length, the bytes go out, then HL moves. A mixed
+ * run (OUTI and OUT (C),r) passes its description and the byte of r in
+ * r0 (Z80J_RUN_MIXED); B and HL move by its OUTI only. The flags are
+ * those of the last OUTI (OUT (C),r leaves them), and the block is left
+ * after the run when a handler asked for it. */
 static void emit_out_run(jit_block_ctx *b, jit_insn *in)
 {
     z80j_state *j = b->j;
-    jit_insn *last = in + (in->run - 1);
-    uint32 n = in->run;
-    uint32 dec = (in->op >> 3) & 1;
+    uint32 n = in->run & 0xFFu;
+    uint32 mask = (in->run >> 8) & 0xFFFFu;
+    uint32 outc = in->run >> 24;
+    jit_insn *last = in + (n - 1);
+    uint32 dec = (in->op == 0xAB);
+    uint32 nmem = n;
+    uint32 k;
 
-    dp_i(j, C_AL, OP_SUB, 0, RBC, RBC, n << 24);
-    port_c(j);
-    if (dec)
-        dp_i(j, C_AL, OP_MVN, 0, R0, 0, n - 1);     /* -n */
-    else
-        dp_i(j, C_AL, OP_MOV, 0, R0, 0, n);
-    time_left(j, last);
-    emit_b(j, C_AL, 1, j->glue.io_outn);
-    dp_i(j, C_AL, dec ? OP_SUB : OP_ADD, 0, RHL, RHL, n << 16);
-    if (flags_live(last)) {
-        dp_i(j, C_AL, OP_BIC, 0, RF, RF, PSR_Z);
-        dp_i(j, C_AL, OP_ORR, 0, RF, RF, PSR_n);
-        cmp_i(j, C_AL, OP_TST, RBC, 0xFF000000u);
-        dp_i(j, C_EQ, OP_ORR, 0, RF, RF, PSR_Z);
+    for (k = 0; k < n; k++)
+        nmem -= (mask >> k) & 1u;
+    if (nmem != 0)
+        dp_i(j, C_AL, OP_SUB, 0, RBC, RBC, nmem << 24);
+    if (mask == 0) {
+        port_c(j);
+        if (dec)
+            dp_i(j, C_AL, OP_MVN, 0, R0, 0, n - 1);     /* -n */
+        else
+            dp_i(j, C_AL, OP_MOV, 0, R0, 0, n);
+        time_left(j, last);
+    } else {
+        emit_mov32(j, R0, Z80J_RUN_MIXED | (mask << 13) | (n << 8));
+        if (outc == 0x79) {                             /* A */
+            dp_r(j, C_AL, OP_ORR, 0, R0, R0, RA, SH_LSR, 24);
+        } else if (outc == 0x51) {                      /* D */
+            dp_r(j, C_AL, OP_ORR, 0, R0, R0, RDE, SH_LSR, 24);
+        } else {                                        /* E */
+            mov_r(j, R2, RDE, SH_LSL, 8);
+            dp_r(j, C_AL, OP_ORR, 0, R0, R0, R2, SH_LSR, 24);
+        }
+        port_c(j);
+        time_left(j, in);
     }
+    emit_b(j, C_AL, 1, j->glue.io_outn);
+    if (nmem != 0) {
+        dp_i(j, C_AL, dec ? OP_SUB : OP_ADD, 0, RHL, RHL, nmem << 16);
+        if (flags_live(last)) {
+            dp_i(j, C_AL, OP_BIC, 0, RF, RF, PSR_Z);
+            dp_i(j, C_AL, OP_ORR, 0, RF, RF, PSR_n);
+            cmp_i(j, C_AL, OP_TST, RBC, 0xFF000000u);
+            dp_i(j, C_EQ, OP_ORR, 0, RF, RF, PSR_Z);
+        }
+    }
+    emit_leave_check(b, last);
 }
 
 static void emit_ed(jit_block_ctx *b, jit_insn *in, int32 index)
@@ -1219,6 +1299,16 @@ static void emit_ed(jit_block_ctx *b, jit_insn *in, int32 index)
     uint32 live = flags_live(in);
     uint32 rr;
 
+    if (in->run == RUN_LOOP) {
+        /* The JR NZ / JP NZ that follows closes the loop: the fast path
+         * goes past it (patched by emit_block_code). */
+        const jit_insn *c = in + 1;
+
+        b->skip_site = emit_out_loop_fast(b, in, c, in->seg_t + (c->kind == K_JRCC ? 5u : 0u));
+        b->skip_to = index + 2;
+        emit_block_insn(b, in, index);
+        return;
+    }
     if (in->run != 0) {
         if (in->run != RUN_PART)
             emit_out_run(b, in);
@@ -1974,9 +2064,14 @@ void emit_block_code(jit_block_ctx *b)
     b->body = j->cur;
     str_g(j, RG, (int32)b->mark_off);
 
+    b->skip_site = 0;
     for (i = 0; i < n; i++) {
         jit_insn *in = &ins[i];
 
+        if (b->skip_site != 0 && i == b->skip_to) {
+            patch_b(b->skip_site, JIT_ADDR(j->cur));
+            b->skip_site = 0;
+        }
         in->host = j->cur;
         if (in->seg_start) {
             jit_stub *s;
@@ -2000,6 +2095,10 @@ void emit_block_code(jit_block_ctx *b)
         }
     }
 
+    if (b->skip_site != 0) {
+        patch_b(b->skip_site, JIT_ADDR(j->cur));
+        b->skip_site = 0;
+    }
     /* Fall-through exit when the block did not end with a transfer. */
     if (!IS_END(ins[n - 1].kind))
         emit_exit(b, b->next_pc);

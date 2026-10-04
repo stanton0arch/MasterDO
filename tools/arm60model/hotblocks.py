@@ -19,6 +19,8 @@ d = open(sys.argv[1], 'rb').read()
 rom_path = sys.argv[2] if len(sys.argv) > 2 else os.path.join(here, '..', '..', 'takeme', 'roms', 'rom.sms')
 count = int(sys.argv[3]) if len(sys.argv) > 3 else 25
 rom = open(rom_path, 'rb').read()
+if len(rom) > 512 and len(rom) % 0x4000 == 512:
+    rom = rom[512:]                     # copier header, skipped as the ISO does
 
 code, cur, blocks, nb = struct.unpack('<4I', d[:16])
 n = (cur - code) // 4

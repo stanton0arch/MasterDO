@@ -577,9 +577,11 @@ void hmain(void)
             check_blocks(f);
         if (render_display_on(g.rd))
             check_sprites(&g.sms->vdp, f);
-        if (sim_arg(14) && (f + 1) % 100 == 0) {
-            /* -hash: a hash of the machine state every 100 frames, to
-             * compare runs made under different host timings. */
+        if (sim_arg(14) && (f + 1) % sim_arg(14) == 0) {
+            /* -hash: a hash of the machine state (Z80 RAM and registers,
+             * VDP registers, video and colour RAM) every 100 frames
+             * (-hashevery n: every n frames), to compare runs made under
+             * different host timings or by two builds. */
             const z80j_ctx *c = g.ctx;
             uint32 h = 0;
             uint32 k;
@@ -592,6 +594,10 @@ void hmain(void)
                 c->iff1 * 19 + c->im * 23 + c->a2 * 29 + c->f2 * 31;
             for (k = 0; k < 11; k++)
                 h = h * 31 + g.sms->vdp.reg[k];
+            for (k = 0; k < VDP_VRAM_SIZE; k++)
+                h = h * 31 + g.sms->vdp.vram[k];
+            for (k = 0; k < 32; k++)
+                h = h * 31 + g.sms->vdp.cram[k];
             printf("Hash: frame %lu: %08lx\n", (unsigned long)(f + 1), (unsigned long)h);
         }
         {
