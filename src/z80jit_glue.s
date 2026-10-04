@@ -38,6 +38,8 @@
         EXPORT  z80j_glue_verify
         EXPORT  z80j_glue_daa
         EXPORT  z80j_glue_push_slow
+        EXPORT  z80j_glue_ldir
+        EXPORT  z80j_glue_lddr
 
         IMPORT  z80j_translate
         IMPORT  z80j_retranslate
@@ -597,6 +599,109 @@ fill_4
         tst     r1,#4
         stmneia r0!,{r2-r5}
         ldmfd   sp!,{r4-r9,pc}
+
+;----------------------------------------------------------------------------
+; Block copies of LDIR (z80j_glue_ldir, upwards) and LDDR (z80j_glue_lddr,
+; downwards), called by the generated code when the stretch has room for
+; every pass. In: r0 = bytes (BC, 65536 for 0), r5 = BC, r6 = DE, r7 = HL
+; (bits 16-31). The bytes are copied page by page through the read and
+; write tables, one at a time and in order as the instruction does (a
+; copy onto the next byte fills memory), until the count is done or the
+; destination page has no write entry (paging registers, ROM: a special
+; write, which the regular code then makes). Out: r0 = bytes copied, BC,
+; DE and HL moved by them. r3, r4 and r8-r11 are preserved.
+;----------------------------------------------------------------------------
+z80j_glue_ldir
+        stmfd   sp!,{r3,r4,r8,lr}
+        mov     r4,r0                   ; bytes left
+        mov     r8,r0                   ; bytes asked
+ldir_page
+        mov     r1,r6,lsr#24
+        ldr     r1,[r10,r1,lsl#2]       ; write entry of the destination page
+        teq     r1,#0
+        beq     ldir_end
+        add     r1,r1,r6,lsr#16         ; host destination
+        mvn     r2,r7,lsr#24
+        ldr     r2,[r10,r2,lsl#2]
+        add     r2,r2,r7,lsr#16         ; host source
+        mov     r3,r7,lsr#16
+        and     r3,r3,#0xFF
+        rsb     r3,r3,#0x100            ; bytes to the end of the source page
+        mov     r12,r6,lsr#16
+        and     r12,r12,#0xFF
+        rsb     r12,r12,#0x100          ; and of the destination page
+        cmp     r3,r12
+        movhi   r3,r12
+        cmp     r3,r4
+        movhi   r3,r4                   ; bytes of this step
+        sub     r4,r4,r3
+        add     r7,r7,r3,lsl#16
+        add     r6,r6,r3,lsl#16
+        sub     r5,r5,r3,lsl#16
+        tst     r3,#1
+        ldrneb  r12,[r2],#1
+        strneb  r12,[r1],#1
+        movs    r3,r3,lsr#1
+        beq     ldir_next
+ldir_copy
+        ldrb    r12,[r2],#1
+        strb    r12,[r1],#1
+        ldrb    r12,[r2],#1
+        strb    r12,[r1],#1
+        subs    r3,r3,#1
+        bne     ldir_copy
+ldir_next
+        teq     r4,#0
+        bne     ldir_page
+ldir_end
+        sub     r0,r8,r4
+        ldmfd   sp!,{r3,r4,r8,pc}
+
+z80j_glue_lddr
+        stmfd   sp!,{r3,r4,r8,lr}
+        mov     r4,r0                   ; bytes left
+        mov     r8,r0                   ; bytes asked
+lddr_page
+        mov     r1,r6,lsr#24
+        ldr     r1,[r10,r1,lsl#2]       ; write entry of the destination page
+        teq     r1,#0
+        beq     lddr_end
+        add     r1,r1,r6,lsr#16         ; host destination
+        mvn     r2,r7,lsr#24
+        ldr     r2,[r10,r2,lsl#2]
+        add     r2,r2,r7,lsr#16         ; host source
+        mov     r3,r7,lsr#16
+        and     r3,r3,#0xFF
+        add     r3,r3,#1                ; bytes to the start of the source page
+        mov     r12,r6,lsr#16
+        and     r12,r12,#0xFF
+        add     r12,r12,#1              ; and of the destination page
+        cmp     r3,r12
+        movhi   r3,r12
+        cmp     r3,r4
+        movhi   r3,r4                   ; bytes of this step
+        sub     r4,r4,r3
+        sub     r7,r7,r3,lsl#16
+        sub     r6,r6,r3,lsl#16
+        sub     r5,r5,r3,lsl#16
+        tst     r3,#1
+        ldrneb  r12,[r2],#-1
+        strneb  r12,[r1],#-1
+        movs    r3,r3,lsr#1
+        beq     lddr_next
+lddr_copy
+        ldrb    r12,[r2],#-1
+        strb    r12,[r1],#-1
+        ldrb    r12,[r2],#-1
+        strb    r12,[r1],#-1
+        subs    r3,r3,#1
+        bne     lddr_copy
+lddr_next
+        teq     r4,#0
+        bne     lddr_page
+lddr_end
+        sub     r0,r8,r4
+        ldmfd   sp!,{r3,r4,r8,pc}
 
 ;----------------------------------------------------------------------------
 ; DAA on r4 (A in bits 24-31) and r3 (flags). Uses r0-r2, r12.

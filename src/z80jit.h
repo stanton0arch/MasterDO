@@ -238,6 +238,8 @@ typedef struct {
     uint32 daa;             /* DAA on r3 / r4 */
     uint32 push_slow;       /* push to a special page: r0 = value */
     uint32 interp;          /* interpreter entry (registers in the context) */
+    uint32 ldir;            /* block copy of LDIR: r0 = bytes; returns those copied */
+    uint32 lddr;            /* the same downwards, for LDDR */
 } z80j_glue;
 
 typedef struct {
@@ -505,6 +507,8 @@ void   z80j_write_result(void);
 void   z80j_glue_verify(void);
 void   z80j_glue_daa(void);
 void   z80j_glue_push_slow(void);
+void   z80j_glue_ldir(void);
+void   z80j_glue_lddr(void);
 
 /* Fills a glue table with the routines of z80jit_glue.s. */
 void   z80j_default_glue(z80j_glue *glue);

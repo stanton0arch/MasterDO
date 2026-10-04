@@ -2358,4 +2358,6 @@ void z80j_default_glue(z80j_glue *glue)
     glue->daa = JIT_ADDR(z80j_glue_daa);
     glue->push_slow = JIT_ADDR(z80j_glue_push_slow);
     glue->interp = JIT_ADDR(z80j_glue_interp);
+    glue->ldir = JIT_ADDR(z80j_glue_ldir);
+    glue->lddr = JIT_ADDR(z80j_glue_lddr);
 }

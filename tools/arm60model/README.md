@@ -50,7 +50,14 @@ any nonzero value gives the hot area its own zone), `-check` verify the
 translator's block table after each frame (hashed blocks with their code,
 RAM entry headers, zone counts, lookup entries) and report the first
 inconsistencies; the check runs in the model and shifts its clock, so a
-timing-dependent run may not reproduce with it.
+timing-dependent run may not reproduce with it. `-hash` prints a hash of
+the machine state (Z80 RAM and registers, VDP registers, video and colour
+RAM) every 100 frames, `-hashevery n` every n frames: two builds that
+should behave alike are compared with it frame by frame (the run's own
+timing decides what is translated when, and translated and interpreted
+code take interrupts at different boundaries, so a game can take another
+course without any fault; a change of course right from the first frames
+is a fault).
 
 `-dumpdiff n` with `-dump`: the frames compared because of a scroll or
 display band are only written when they differ, the first n of them; the

@@ -1187,6 +1187,53 @@ static uint32 *emit_out_loop_fast(jit_block_ctx *b, const jit_insn *in,
     return skip;
 }
 
+/*
+ * Fast path of LDIR / LDDR, at its head after the segment check: when the
+ * stretch has room for the BC - 1 further passes, the glue copies the
+ * bytes page by page and the T-states are those of the passes made. The
+ * glue stops before a destination page with a special write (paging
+ * registers, ROM): the block goes back to the head, where that byte gets
+ * the regular code of one pass (the fast path copies nothing then).
+ * Returns the site of the branch past the loop, to be patched; the
+ * regular code of one pass follows.
+ */
+static uint32 *emit_copy_loop_fast(jit_block_ctx *b, const jit_insn *in)
+{
+    z80j_state *j = b->j;
+    uint32 dec = (in->op & 0x08u) != 0;
+    uint32 t_pass = in->seg_t + 5;
+    uint32 *slow;
+    uint32 *slow2;
+    uint32 *skip;
+
+    dp_r(j, C_AL, OP_MOV, 1, R0, 0, RBC, SH_LSR, 16);
+    dp_i(j, C_EQ, OP_MOV, 0, R0, 0, 0x10000);
+    dp_i(j, C_AL, OP_SUB, 0, RAD, R0, 1);
+    dp_i(j, C_AL, OP_MOV, 0, R1, 0, t_pass * CYCLE);
+    emit(j, (C_AL << 28) | (R2 << 16) | (RAD << 8) | 0x90u | R1);     /* mul r2,r1,r12 */
+    cmp_r(j, C_AL, OP_CMP, RCYC, R2, SH_LSL, 0);
+    slow = j->cur;
+    emit(j, (C_CC << 28) | (5u << 25));
+    emit_b(j, C_AL, 1, dec ? j->glue.lddr : j->glue.ldir);         /* r0 = passes made */
+    dp_r(j, C_AL, OP_MOV, 1, R1, 0, R0, SH_LSL, 0);
+    slow2 = j->cur;
+    emit(j, (C_EQ << 28) | (5u << 25));
+    dp_i(j, C_AL, OP_MOV, 0, R2, 0, t_pass * CYCLE);
+    emit(j, (C_AL << 28) | (RAD << 16) | (R1 << 8) | 0x90u | R2);     /* mul r12,r2,r1 */
+    dp_r(j, C_AL, OP_SUB, 0, RCYC, RCYC, RAD, SH_LSL, 0);
+    dp_r(j, C_AL, OP_MOV, 1, R1, 0, RBC, SH_LSR, 16);        /* BC left */
+    dp_i(j, C_EQ, OP_ADD, 0, RCYC, RCYC, t_pass * CYCLE);   /* the last pass did not repeat */
+    dp_i(j, C_NE, OP_ADD, 0, RCYC, RCYC, in->seg_t * CYCLE);/* the head charges the next one */
+    emit_b(j, C_NE, 0, JIT_ADDR(in->host));
+    if (flags_live(in))
+        dp_i(j, C_AL, OP_BIC, 0, RF, RF, PSR_H | PSR_n | PSR_V);
+    skip = j->cur;
+    emit(j, (C_AL << 28) | (5u << 25));
+    patch_b(slow, JIT_ADDR(j->cur));
+    patch_b(slow2, JIT_ADDR(j->cur));
+    return skip;
+}
+
 static void emit_block_insn(jit_block_ctx *b, jit_insn *in, int32 index)
 {
     z80j_state *j = b->j;
@@ -1200,6 +1247,8 @@ static void emit_block_insn(jit_block_ctx *b, jit_insn *in, int32 index)
 
     switch (z) {
     case 0:                                         /* LDI LDD LDIR LDDR */
+        if (rep)
+            skip = emit_copy_loop_fast(b, in);
         emit_read(j, RHL);
         emit_write(b, in, RDE);
         dp_i(j, C_AL, dec ? OP_SUB : OP_ADD, 0, RHL, RHL, step);
@@ -1213,6 +1262,7 @@ static void emit_block_insn(jit_block_ctx *b, jit_insn *in, int32 index)
         if (rep) {
             cmp_i(j, C_AL, OP_TEQ, RBC, 0);
             emit_jump_cond(b, C_NE, in, index, 5);
+            patch_b(skip, JIT_ADDR(j->cur));
         }
         break;
     case 1:                                         /* CPI CPD CPIR CPDR */
