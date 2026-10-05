@@ -636,6 +636,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-dumpdiff") && i + 1 < argc) args[17] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-rasterlog")) args[18] = 1;
         else if (!strcmp(argv[i], "-framelog")) args[19] = 1;
+        else if (!strcmp(argv[i], "-dectest")) args[21] = 1;
         else if (!strcmp(argv[i], "-force") && i + 1 < argc) args[20] = atoi(argv[++i]) + 1;
         else if (!strcmp(argv[i], "-hotzones") && i + 1 < argc) args[12] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-budget") && i + 1 < argc) {

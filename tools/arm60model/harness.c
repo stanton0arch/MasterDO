@@ -37,6 +37,7 @@ extern uint32 sim_arg(uint32 i);
 extern uint32 sim_pad(uint32 frame);
 extern void sim_mark(uint32 id);
 extern void sim_codedump(uint32 code, uint32 cur, uint32 blocks, uint32 nblocks);
+extern void dec_test(void);
 
 static struct KernelBase kb;
 static Task task;
@@ -532,6 +533,10 @@ void hmain(void)
     if (bench) {
         bench_cpu_run(&bres);
         bench_cpu_log(&bres);
+    }
+    if (sim_arg(21)) {
+        dec_test();             /* -dectest: the decoder in assembly against C */
+        return;
     }
     if (frames == 0)
         return;

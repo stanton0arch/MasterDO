@@ -88,7 +88,10 @@
 #define IS_STATIC(k) ((k) >= K_JR && (k) <= K_RST)
 #define IS_END(k)    ((k) >= K_JR)
 
+/* Decoded instruction. CONTRACT with z80jit_dec.s, which writes the first
+ * twenty-one words with STM: keep the order (offsets checked in z80jit.c). */
 typedef struct {
+    /* decoded (jit_decode) */
     uint32  pc;
     uint32  len;
     uint32  pre;            /* PRE_* */
@@ -103,13 +106,7 @@ typedef struct {
     uint32  def;            /* flags written */
     uint32  ei;             /* EI: the block ends after the next instruction */
     uint32  mem;            /* (HL) or (IX+d) operand: H and L stay H and L */
-    /* analysis */
-    uint32  live_after;     /* flags read later on the fall-through path */
-    uint32  live_before;    /* flags read from this instruction on */
-    uint32  seg_start;      /* a cycle check precedes the instruction */
-    uint32  seg_t;          /* T-states of the segment starting here */
-    uint32  t_after;        /* T-states of its segment after this instruction */
-    uint32  fused;          /* FU_* valid in the ARM flags for the next jump */
+    /* set by the block decoder (jit_decode_block) */
     int32   internal;       /* index of the target inside the block, or -1 */
     uint32  busy;           /* jump back of a busy-wait loop */
     uint32  irq_check;      /* instruction after EI: check for a pending */
@@ -118,10 +115,32 @@ typedef struct {
                             /* the mask of its OUT (C),r elements << 8 and */
                             /* the opcode of OUT (C),r << 24; RUN_PART for */
                             /* the others */
+    uint32  seg_start;      /* a cycle check precedes the instruction */
+    uint32  fused;          /* FU_* valid in the ARM flags for the next jump */
     uint32  dyn;            /* JP / CALL in RAM: the target is read from */
                             /* memory when the instruction runs */
+    /* analysis */
+    uint32  live_after;     /* flags read later on the fall-through path */
+    uint32  live_before;    /* flags read from this instruction on */
+    uint32  seg_t;          /* T-states of the segment starting here */
+    uint32  t_after;        /* T-states of its segment after this instruction */
     uint32 *host;           /* generated code of the instruction */
 } jit_insn;
+
+/* Decoding of a block (jit_decode_block). */
+typedef struct {
+    jit_insn       *ins;    /* in: records of the instructions */
+    uint32          pc;     /* in: address of the block */
+    const z80j_ctx *ctx;    /* in */
+    uint32          key;    /* in: page kind and bank of the code */
+    uint32          serial; /* in: tag of the instruction map entries */
+                            /* (a multiple of 256) */
+    uint32          next_pc;/* out: address after the last instruction */
+    uint32          flags;  /* out: JIT_DEC_* */
+} jit_dec_block;
+
+#define JIT_DEC_DYN   0x4u  /* some operand is read when it runs */
+#define JIT_DEC_SEAM  0x8u  /* the block was cut at a seam of RAM */
 
 /* Branches resolved at the end of the block. */
 #define STUB_TIMEOUT 0      /* segment check -> time-out stub */
@@ -179,6 +198,17 @@ typedef struct {
     uint32      memo_val[SCAN_MEMO];
     int32       nmemo;
 } jit_block_ctx;
+
+/* z80jit_dec.s */
+/* Opcode properties (256 words, see main_info in z80jit.c), then the
+ * instruction map of the block being decoded: entry (address & 255) holds
+ * the serial of the decoding | the instruction's index + 1. */
+extern uint32 jit_dec_tab[512];
+/* Decodes the instruction at pc (16 bits): pc to mem of *in. */
+void   jit_decode(jit_insn *in, uint32 pc, const z80j_ctx *c);
+/* Decodes the instructions of a block (see translate_block): returns their
+ * number, 0 when the first one crosses a seam of RAM. */
+int32  jit_decode_block(jit_dec_block *d);
 
 /* z80jit_emit.c */
 uint32 arm_branch(uint32 cond, uint32 link, uint32 from, uint32 to);

@@ -59,6 +59,20 @@ CHECK_OFF(fenc, GOFF(fenc) == Z80J_FENC_OFF);
 CHECK_OFF(fdec, GOFF(fdec) == Z80J_FDEC_OFF);
 CHECK_OFF(mram, GOFF(mram) == Z80J_MRAM_OFF);
 CHECK_OFF(lookup, GOFF(lookup) == Z80J_TAB_OFF);
+/* The records and arguments of z80jit_dec.s. */
+CHECK_OFF(i_len, offsetof(jit_insn, len) == 4);
+CHECK_OFF(i_pre, offsetof(jit_insn, pre) == 8);
+CHECK_OFF(i_op, offsetof(jit_insn, op) == 12);
+CHECK_OFF(i_mem, offsetof(jit_insn, mem) == 52);
+CHECK_OFF(i_internal, offsetof(jit_insn, internal) == 56);
+CHECK_OFF(i_irq_check, offsetof(jit_insn, irq_check) == 64);
+CHECK_OFF(i_dyn, offsetof(jit_insn, dyn) == 80);
+CHECK_OFF(i_size, sizeof(jit_insn) == 104);
+CHECK_OFF(d_serial, offsetof(jit_dec_block, serial) == 16);
+CHECK_OFF(d_next, offsetof(jit_dec_block, next_pc) == 20);
+CHECK_OFF(d_flags, offsetof(jit_dec_block, flags) == 24);
+CHECK_OFF(c_slot_bank, offsetof(z80j_ctx, slot_bank) == 0x87C);
+CHECK_OFF(c_page_kind, offsetof(z80j_ctx, page_kind) == 0x900);
 
 #define SEG_MAX_T   200     /* a segment always fits in a fresh scanline */
 #define SCAN_INSNS  8       /* forward scan for the flags a target reads */
@@ -70,10 +84,13 @@ CHECK_OFF(lookup, GOFF(lookup) == Z80J_TAB_OFF);
 static jit_insn jit_insns[MAX_INSNS];
 static jit_stub jit_stubs[MAX_STUBS];
 static uint32   jit_last_n;
-/* Instruction index + 1 for each offset from the start of the block being
- * translated, tagged with the translation serial so that the map never
- * needs clearing (a block spans at most 256 bytes). */
-static uint32   jit_pcmap[256];
+
+/* Tables of z80jit_dec.s: the properties of the unprefixed opcodes, then
+ * the instruction index + 1 for each address of the block being
+ * translated, by its low byte (a block spans at most 256 bytes), tagged
+ * with the translation serial so that the map never needs clearing. */
+uint32 jit_dec_tab[512];
+#define jit_pcmap (jit_dec_tab + 256)
 
 /* Port tables of the generic handlers (machine C callbacks). */
 static uint32   port_in_c[Z80J_PORTS];
@@ -88,11 +105,6 @@ uint32 jit_byte(const z80j_ctx *ctx, uint32 addr)
 {
     addr &= 0xFFFFu;
     return *(const uint8 *)JIT_PTR(ctx->rtab[255 - (addr >> 8)] + addr);
-}
-
-static int32 jit_disp(uint32 v)
-{
-    return (int32)((v & 0xFFu) ^ 0x80u) - 0x80;
 }
 
 /* Identity of the code at pc: page kind, and bank for a paged slot. */
@@ -138,57 +150,21 @@ static const uint8 cc_use[8] = {
 
 #define FL_INCDEC (FL_S | FL_Z | FL_H | FL_PV | FL_N)
 
-static void jit_init_insn(jit_insn *in, uint32 pc)
-{
-    in->pc = pc;
-    in->len = 1;
-    in->pre = PRE_NONE;
-    in->op = 0;
-    in->d = 0;
-    in->n = 0;
-    in->t = 4;
-    in->kind = K_NORMAL;
-    in->cc = 0;
-    in->target = 0;
-    in->use = 0;
-    in->def = 0;
-    in->ei = 0;
-    in->mem = 0;
-}
-
-static void cb_flags(jit_insn *in)
-{
-    uint32 x = in->op >> 6;
-    uint32 y = (in->op >> 3) & 7;
-
-    if (x == 0) {
-        in->def = FL_ALL;
-        if (y == 2 || y == 3)
-            in->use = FL_C;
-    } else if (x == 1) {
-        in->def = FL_INCDEC;
-    }
-}
-
 /*
- * Unprefixed opcodes are decoded through a table of their properties,
- * built once from main_info():
- *   bits 0-4 T-states, 5-8 kind, 9-14 flags read, 15-20 flags written,
- *   21-22 immediate bytes, 23 relative jump, 24 uses H/L, 25 uses (HL),
- *   26 EI, 27-29 condition.
+ * The unprefixed opcodes, and those after DD / FD, are decoded by
+ * z80jit_dec.s from a table of their properties (jit_dec_tab), built once
+ * from main_info() (CONTRACT with the equates of z80jit_dec.s):
+ *   bits 0-4 T-states (0 for the prefixes CB, DD, ED and FD), 5-8 kind,
+ *   9-14 flags read, 15-20 flags written, 21 relative jump, 22 the target
+ *   is the operand, 23 the target is the RST vector, 24 uses H/L, 25 uses
+ *   (HL), 26 EI, 27-29 condition, 30-31 immediate operand bytes.
  */
-#define MI_T(i)      ((i) & 31u)
-#define MI_KIND(i)   (((i) >> 5) & 15u)
-#define MI_USE(i)    (((i) >> 9) & 63u)
-#define MI_DEF(i)    (((i) >> 15) & 63u)
-#define MI_NBYTES(i) (((i) >> 21) & 3u)
-#define MI_REL       (1u << 23)
+#define MI_REL       (1u << 21)
+#define MI_TN        (1u << 22)
+#define MI_RST       (1u << 23)
 #define MI_HL        (1u << 24)
 #define MI_MEM       (1u << 25)
 #define MI_EI        (1u << 26)
-#define MI_CC(i)     (((i) >> 27) & 7u)
-
-static uint32 dec_main[256];
 
 static uint32 main_info(uint32 op)
 {
@@ -370,183 +346,12 @@ static uint32 main_info(uint32 op)
     }
     if (bits & MI_REL)
         nbytes = 1;
-    return (uint32)t_main[op] | (kind << 5) | (use << 9) | (def << 15) |
-           (nbytes << 21) | bits | (cc << 27);
-}
-
-/* Unprefixed opcode at b[0], or the opcode after a DD / FD prefix (idx 1
- * or 2); the bytes that follow are at b[1..3]. */
-static void decode_main(jit_insn *in, const uint8 *b, uint32 idx)
-{
-    uint32 op = b[0];
-    uint32 info = dec_main[op];
-    uint32 kind = MI_KIND(info);
-    uint32 t = MI_T(info);
-    uint32 nbytes = MI_NBYTES(info);
-    uint32 a = 1;
-    uint32 n = 0;
-
-    in->pre = PRE_NONE;
-    in->d = 0;
-    if (idx != 0) {
-        if (info & MI_MEM) {
-            in->d = jit_disp(b[1]);
-            a = 2;
-            t = (op == 0x36) ? 19 : t + 12;
-        } else if (info & MI_HL) {
-            t += 4;
-        } else {
-            /* The prefix alone: a 4 T-state no-op, the opcode is decoded
-             * as the next instruction. */
-            jit_init_insn(in, in->pc);
-            return;
-        }
-        in->pre = (idx == 1) ? PRE_DD : PRE_FD;
-    }
-    in->op = op;
-    in->t = t;
-    in->kind = kind;
-    in->cc = MI_CC(info);
-    in->use = MI_USE(info);
-    in->def = MI_DEF(info);
-    in->ei = (info & MI_EI) != 0;
-    in->mem = (info & MI_MEM) != 0;
-    if (nbytes == 1)
-        n = b[a];
-    else if (nbytes == 2)
-        n = b[a] | ((uint32)b[a + 1] << 8);
-    in->n = n;
-    in->len = a + nbytes + (idx != 0);
-    if (info & MI_REL)
-        in->target = (in->pc + in->len + (uint32)jit_disp(n)) & 0xFFFFu;
-    else if (kind == K_JP || kind == K_JPCC || kind == K_CALL || kind == K_CALLCC)
-        in->target = n;
+    if (kind == K_JP || kind == K_JPCC || kind == K_CALL || kind == K_CALLCC)
+        bits |= MI_TN;
     else if (kind == K_RST)
-        in->target = op & 0x38u;
-    else
-        in->target = 0;
-}
-
-/* ED-prefixed opcode at b[0]. */
-static void decode_ed(jit_insn *in, const uint8 *b)
-{
-    uint32 op = b[0];
-    uint32 x = op >> 6;
-    uint32 y = (op >> 3) & 7;
-    uint32 z = op & 7;
-
-    in->pre = PRE_ED;
-    in->op = op;
-    in->len = 2;
-    in->t = 8;
-
-    if (x == 1) {
-        switch (z) {
-        case 0:                                     /* IN r,(C) */
-            in->t = 12;
-            in->def = FL_INCDEC;
-            break;
-        case 1:                                     /* OUT (C),r */
-            in->t = 12;
-            break;
-        case 2:                                     /* SBC / ADC HL,rr */
-            in->t = 15;
-            in->use = FL_C;
-            in->def = FL_ALL;
-            break;
-        case 3:                                     /* LD (nn),rr / LD rr,(nn) */
-            in->t = 20;
-            in->len = 4;
-            in->n = b[1] | ((uint32)b[2] << 8);
-            break;
-        case 4:                                     /* NEG */
-            in->def = FL_ALL;
-            break;
-        case 5:                                     /* RETN / RETI */
-            in->t = 14;
-            in->kind = K_RETN;
-            break;
-        case 6:                                     /* IM */
-            break;
-        default:
-            if (y <= 1) {                           /* LD I,A / LD R,A */
-                in->t = 9;
-            } else if (y <= 3) {                    /* LD A,I / LD A,R */
-                in->t = 9;
-                in->use = FL_C;
-                in->def = FL_INCDEC;
-            } else if (y <= 5) {                    /* RRD / RLD */
-                in->t = 18;
-                in->def = FL_INCDEC;
-            }
-            break;
-        }
-    } else if (x == 2 && z <= 3 && y >= 4) {        /* block instructions */
-        in->t = 16;
-        if (z == 0)
-            in->def = FL_H | FL_PV | FL_N;
-        else if (z == 1)
-            in->def = FL_INCDEC;
-        else
-            in->def = FL_Z | FL_N;
-        if (y >= 6) {
-            in->kind = K_REP;
-            in->target = in->pc;
-        }
-    }
-}
-
-static void jit_decode(const z80j_ctx *c, uint32 pc, jit_insn *in)
-{
-    const uint8 *b;
-    uint8 buf[4];
-    uint32 op;
-
-    /* The (up to) four bytes of the instruction. */
-    if ((pc & 0xFFu) <= 0xFCu) {
-        b = (const uint8 *)JIT_PTR(c->rtab[255 - (pc >> 8)] + pc);
-    } else {
-        buf[0] = (uint8)jit_byte(c, pc);
-        buf[1] = (uint8)jit_byte(c, pc + 1);
-        buf[2] = (uint8)jit_byte(c, pc + 2);
-        buf[3] = (uint8)jit_byte(c, pc + 3);
-        b = buf;
-    }
-    in->pc = pc;
-    op = b[0];
-    if (op == 0xCB) {
-        jit_init_insn(in, pc);
-        in->pre = PRE_CB;
-        in->op = b[1];
-        in->len = 2;
-        in->t = ((in->op & 7) != 6) ? 8 : ((in->op >> 6) == 1) ? 12 : 15;
-        in->mem = ((in->op & 7) == 6);
-        cb_flags(in);
-    } else if (op == 0xED) {
-        jit_init_insn(in, pc);
-        decode_ed(in, b + 1);
-    } else if (op == 0xDD || op == 0xFD) {
-        uint32 op2 = b[1];
-        uint32 idx = (op == 0xDD) ? 1 : 2;
-
-        if (op2 == 0xDD || op2 == 0xFD || op2 == 0xED) {
-            /* A prefix followed by another prefix: 4 T-state no-op. */
-            jit_init_insn(in, pc);
-        } else if (op2 == 0xCB) {
-            jit_init_insn(in, pc);
-            in->pre = (idx == 1) ? PRE_DDCB : PRE_FDCB;
-            in->d = jit_disp(b[2]);
-            in->op = b[3];
-            in->len = 4;
-            in->t = ((in->op >> 6) == 1) ? 20 : 23;
-            in->mem = 1;
-            cb_flags(in);
-        } else {
-            decode_main(in, b + 1, idx);
-        }
-    } else {
-        decode_main(in, b, 0);
-    }
+        bits |= MI_RST;
+    return (uint32)t_main[op] | (kind << 5) | (use << 9) | (def << 15) |
+           bits | (cc << 27) | (nbytes << 30);
 }
 
 void z80j_insn_info(const z80j_ctx *ctx, uint32 pc, uint32 *len, uint32 *t,
@@ -554,7 +359,7 @@ void z80j_insn_info(const z80j_ctx *ctx, uint32 pc, uint32 *len, uint32 *t,
 {
     jit_insn in;
 
-    jit_decode(ctx, pc & 0xFFFFu, &in);
+    jit_decode(&in, pc & 0xFFFFu, ctx);
     *len = in.len;
     *t = in.t;
     switch (in.kind) {
@@ -592,7 +397,7 @@ static uint32 scan_needed(jit_block_ctx *b, uint32 pc, int32 depth)
     for (k = 0; k < SCAN_INSNS; k++) {
         if (!scan_safe(b, pc))
             break;
-        jit_decode(b->j->ctx, pc, &in);
+        jit_decode(&in, pc, b->j->ctx);
         needed |= in.use & ~defined;
         defined |= in.def;
         if ((defined | needed) == FL_ALL)
@@ -1393,7 +1198,6 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
     uint32 addr = pc & 0xFFFFu;
     uint32 live;
     uint32 run;
-    uint32 page;
     uint32 span;
     uint32 serial;
     z80j_area *area;
@@ -1435,77 +1239,39 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
     serial = (j->stats.translations + 1) << 8;
 
     /* Decode up to an unconditional transfer, a page of another kind or
-     * the size limit. The instruction after EI gets an interrupt check,
-     * unless it is a transfer or a conditional instruction: the block
-     * then ends after it and is left, so that a pending interrupt is
-     * taken. The key only needs to be checked when a page boundary is
-     * crossed. */
-    page = addr >> 8;
-    for (;;) {
-        jit_insn *in = &ins[n++];
+     * the size limit (jit_decode_block, z80jit_dec.s). The instruction
+     * after EI gets an interrupt check, unless it is a transfer or a
+     * conditional instruction: the check then comes right after EI (the
+     * interrupt is taken one instruction early, before the transfer, as
+     * the hardware does for a HALT).
+     * The entry check of a RAM block reads the memory holding it as
+     * consecutive host words from the one holding its first byte
+     * (z80j_glue_verify): the block must not reach a page whose host
+     * memory does not follow (the mirror of the system RAM, the end of
+     * the address space). An instruction crossing such a seam ends the
+     * block before it; alone, it is left to the interpreter.
+     * In RAM, JP and CALL read their target when they run, so that a
+     * jump vector whose operand the game rewrites (an interrupt
+     * trampoline, typically) keeps its translation; so do the absolute
+     * addresses of LD A,(nn), LD (nn),A, LD HL,(nn) and LD (nn),HL, for
+     * a handler stepping through a table by patching its own operand. */
+    {
+        jit_dec_block d;
 
-        jit_pcmap[(addr - pc) & 0xFFu] = serial | (uint32)n;
-        jit_decode(ctx, addr, in);
-        in->internal = -1;
-        in->busy = 0;
-        in->irq_check = 0;
-        in->run = 0;
-        in->seg_start = 0;
-        in->fused = 0;
-        in->dyn = 0;
-        addr = (addr + in->len) & 0xFFFFu;
-        /* The entry check of a RAM block reads the memory holding it as
-         * consecutive host words from the one holding its first byte
-         * (z80j_glue_verify): the block must not reach a page whose host
-         * memory does not follow (the mirror of the system RAM, the end
-         * of the address space). An instruction crossing such a seam
-         * ends the block before it; alone, it is left to the interpreter. */
-        if (bc.key == KEY_RAM &&
-            (ctx->rtab[255 - (((addr - 1) & 0xFFFFu) >> 8)] != ctx->rtab[255 - (pc >> 8)] ||
-             ((addr - 1) & 0xFFFFu) < (pc & 0xFFFFu))) {
+        d.ins = ins;
+        d.pc = addr;
+        d.ctx = ctx;
+        d.key = bc.key;
+        d.serial = serial;
+        n = jit_decode_block(&d);
+        if (d.flags & JIT_DEC_SEAM)
             j->stats.seams++;
-            if (n == 1) {
-                j->error = 5;
-                return 0;
-            }
-            n--;
-            addr = in->pc;
-            break;
+        if (n == 0) {
+            j->error = 5;
+            return 0;
         }
-        /* JP and CALL in RAM read their target when they run: a jump
-         * vector whose operand the game rewrites (an interrupt
-         * trampoline, typically) keeps its translation. */
-        if (bc.key == KEY_RAM && (in->kind == K_JP || in->kind == K_JPCC ||
-                                  in->kind == K_CALL || in->kind == K_CALLCC)) {
-            in->dyn = 1;
-            bc.has_dyn = 1;
-        }
-        /* So do the absolute addresses of LD A,(nn), LD (nn),A,
-         * LD HL,(nn) and LD (nn),HL: a handler stepping through a table
-         * by patching its own operand keeps its translation too. */
-        if (bc.key == KEY_RAM && in->pre == PRE_NONE &&
-            (in->op == 0x3A || in->op == 0x32 || in->op == 0x2A || in->op == 0x22)) {
-            in->dyn = 1;
-            bc.has_dyn = 1;
-        }
-        if (n >= 2 && in[-1].ei) {
-            /* A pending interrupt is taken after the instruction that
-             * follows EI; when that instruction is a transfer or a
-             * conditional, the check comes right after EI instead (the
-             * interrupt is then taken one instruction early, before the
-             * transfer, as the hardware does for a HALT). */
-            if (in->kind != K_NORMAL)
-                in[-1].irq_check = 1;
-            else
-                in->irq_check = 1;
-        }
-        if (IS_END(in->kind) || n == MAX_INSNS)
-            break;
-        if ((addr >> 8) != page) {
-            page = addr >> 8;
-            if (jit_block_key(ctx, addr) != bc.key)
-                break;
-        }
+        addr = d.next_pc;
+        bc.has_dyn = (d.flags & JIT_DEC_DYN) != 0;
     }
     bc.n = n;
     bc.next_pc = addr;
@@ -1526,7 +1292,7 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
         off = (p->target - pc) & 0xFFFFu;
         if (off >= span)
             continue;
-        m = jit_pcmap[off];
+        m = jit_pcmap[p->target & 0xFFu];
         if ((m & ~0xFFu) == serial) {
             k = (int32)(m & 0xFFu) - 1;
             p->internal = k;
@@ -2335,9 +2101,9 @@ void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
         ctx->fdec[v] = (uint8)d;
     }
 
-    if (dec_main[0] == 0) {
+    if (jit_dec_tab[0] == 0) {
         for (v = 0; v < 256; v++)
-            dec_main[v] = main_info(v);
+            jit_dec_tab[v] = main_info(v);
     }
     for (v = 0; v < Z80J_PORTS; v++) {
         port_in_c[v] = JIT_ADDR(z80j_port_in_c);

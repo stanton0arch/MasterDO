@@ -7,8 +7,8 @@ built. It is not part of the ISO and `make` does not use it.
 ## How it works
 
 - `mk.sh` links the objects of the last `make clean && make` (`build/*.o`)
-  with `harness.c` (the driver, compiled by `armcc`) and `hstub.s` (host
-  services) into a plain binary (`armlink -bin` at 0x8000, symbols in
+  with `harness.c` (the driver) and `dectest.c` (the decoder check), both
+  compiled by `armcc`, and `hstub.s` (host services) into a plain binary (`armlink -bin` at 0x8000, symbols in
   `sim.sym`), and builds `sim` with `gcc`.
 - `sim` interprets the binary as an ARMv3 big-endian CPU and counts the S,
   N and I cycles of every instruction with the timings of the ARM60
@@ -73,6 +73,15 @@ active display (scroll, name table, display enable, colours) with the
 first line they affect (`Raster:` lines). The harness also checks the assembly sprite
 evaluation of every frame against a C reference and reports the frames
 with differences (`Sprites:` lines).
+
+`-dectest` (no cartridge needed) checks the instruction decoder in assembly
+(`src/z80jit_dec.s`) against the C decoder it replaced, kept in
+`dectest.c`: `jit_decode` on every pair of opcode bytes (operand bytes,
+page ends and the wrap at $FFFF included), then `jit_decode_block` on
+60 000 random blocks over pages of every kind (fixed, paged slots, RAM
+with a mirror), comparing the number of instructions, the next address,
+the flags, every word set per instruction and the instruction map. It
+prints two `Decoder test:` lines with the differences found (0 expected).
 
 A hang is located without a debugger: `kill -USR1 <pid of sim>` prints the
 simulated pc and lr with their symbols, the stack pointer, r0 and r1.
