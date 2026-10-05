@@ -107,11 +107,13 @@ static __inline void dp_i(z80j_state *j, uint32 cond, uint32 op, uint32 s,
 
     if (value >= 256) {
         /* The usual forms of the generated code: a byte in bits 16-23 or
-         * 24-31 (register pairs and A). */
+         * 24-31 (register pairs and A), or in bits 8-15 (T-states). */
         if ((value & 0xFF00FFFFu) == 0)
             enc = (8u << 8) | (value >> 16);
         else if ((value & 0x00FFFFFFu) == 0)
             enc = (4u << 8) | (value >> 24);
+        else if ((value & 0xFFFF00FFu) == 0)
+            enc = (12u << 8) | (value >> 8);
         else
             enc = arm_imm(value);
         if (enc == IMM_NONE)
@@ -221,6 +223,30 @@ static void emit_mov32(z80j_state *j, uint32 rd, uint32 value)
     int32 first = 1;
     uint32 k;
 
+    /* A 16-bit value (a Z80 address, mostly) with both bytes set: one
+     * MOV when its bits fit in 8 from an even position at or below its
+     * lowest set bit, else MOV + ORR (its complement has 16 bits set,
+     * never one MVN). The same words as the general path below. */
+    if (value <= 0xFFFFu && (value & 0xFFu) != 0 && value >= 256) {
+        uint32 p = 0;
+
+        if ((value & 0xFu) == 0) {
+            p = 4;
+            if ((value & 0x30u) == 0)
+                p = 6;
+        } else if ((value & 0x3u) == 0) {
+            p = 2;
+        }
+        if ((value >> p) < 256) {
+            emit(j, (C_AL << 28) | (1u << 25) | (OP_MOV << 21) | (rd << 12) |
+                    (((16u - p / 2) & 15u) << 8) | (value >> p));
+            return;
+        }
+        emit(j, (C_AL << 28) | (1u << 25) | (OP_MOV << 21) | (rd << 12) | (value & 0xFFu));
+        emit(j, (C_AL << 28) | (1u << 25) | (OP_ORR << 21) | (rd << 16) | (rd << 12) |
+                (12u << 8) | (value >> 8));
+        return;
+    }
     if (arm_imm(value) != IMM_NONE) {
         dp_i(j, C_AL, OP_MOV, 0, rd, 0, value);
         return;

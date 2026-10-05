@@ -519,7 +519,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: port output loops and block copies in one call, VDP status and counter reads in assembly, line-wait loops, sprite line limit counted by words\n");
+    printf("masterdo: hot address queue with bounded probes, immediate operands encoded inline, refused translations not asked again, forced translations counted\n");
     if (plat_init(&plat) < 0)
         return 1;
     memset(&st, 0, sizeof(st));

@@ -1279,12 +1279,19 @@ void jit_link_stub(z80j_state *j, uint32 *d, uint32 host)
 }
 
 /* Queues a hot address for translation in spare time (a bitmap tells
- * the addresses already queued); when the queue is full, the address
- * replaces the first entry found colder than itself, if any. */
+ * the addresses already queued). When the queue is full, a few entries
+ * from a rotating cursor are probed, and the address replaces the first
+ * one that has a translation by now (translated at once since it was
+ * queued) or is colder than itself; otherwise it is dropped. The queue
+ * is only a hint for the spare time: a full scan at every call cost up
+ * to 80 ms per frame when a game interprets a large working set. */
+#define QUEUE_PROBES 8
+
 static void queue_hot(z80j_state *j, uint32 pc)
 {
     uint32 bit;
     uint32 k;
+    uint32 q;
 
     pc &= 0xFFFFu;
     bit = (uint32)1 << (pc & 31);
@@ -1295,16 +1302,20 @@ static void queue_hot(z80j_state *j, uint32 pc)
         j->queued[pc >> 5] |= bit;
         return;
     }
-    for (k = 0; k < Z80J_QUEUE; k++) {
-        uint32 old = j->queue[k];
+    q = j->qcursor;
+    for (k = 0; k < QUEUE_PROBES; k++) {
+        uint32 old = j->queue[q];
 
-        if (j->hot[old] < j->hot[pc]) {
+        if (j->ctx->lookup[old] != j->glue.miss || j->hot[old] < j->hot[pc]) {
             j->queued[old >> 5] &= ~((uint32)1 << (old & 31));
-            j->queue[k] = pc;
+            j->queue[q] = pc;
             j->queued[pc >> 5] |= bit;
+            j->qcursor = (q + 1) & (Z80J_QUEUE - 1);
             return;
         }
+        q = (q + 1) & (Z80J_QUEUE - 1);
     }
+    j->qcursor = q;
     j->stats.queue_full++;
 }
 
@@ -1330,15 +1341,16 @@ static uint32 sync_allowed(z80j_state *j)
     }
     if (need <= paid)
         return 1;
-    if (j->sync_spent_us < j->sync_floor_us) {
+    {
         uint32 elapsed = (j->clock != 0) ? j->clock() - j->frame_start_us : 0;
+        uint32 end = elapsed + j->est_us + j->reserve_us;
 
-        if (elapsed + j->est_us + j->reserve_us <= j->frame_us)
+        if (j->sync_spent_us < j->sync_floor_us && end <= j->frame_us)
             return 1;
     }
     j->stats.sync_refused++;
     if (j->int_cost != 0)
-        ctx->hot_sync_gate = ctx->int_insns + ((need - paid) * 16) / j->int_cost + 1;
+        ctx->hot_sync_gate = ctx->int_insns + (((need - paid) * j->int_per_us) >> 12) + 1;
     else
         ctx->hot_sync_gate = 0xFFFFFFFFu;
     return 0;
@@ -1798,11 +1810,20 @@ static uint32 host_for(z80j_state *j, uint32 pc)
         j->hot[pc] = (uint8)++n;
         if (j->queue_at == 0)
             return j->glue.interp;      /* interpretation only */
-        if (n < j->sync_at || ((j->force_at == 0 || n < j->force_at) && !sync_allowed(j))) {
+        /* Below force_at the budget decides; after a refusal it cannot
+         * open again before the frame has interpreted enough to pay for a
+         * translation (hot_sync_gate), so a miss before that point is
+         * refused without asking. */
+        if (n < j->sync_at ||
+            ((j->force_at == 0 || n < j->force_at) &&
+             (j->ctx->int_insns < j->ctx->hot_sync_gate ? (j->stats.sync_refused++, 1)
+                                                        : !sync_allowed(j)))) {
             if (n >= j->queue_at)
                 queue_hot(j, pc);
             return j->glue.interp;
         }
+        if (j->force_at != 0 && n >= j->force_at)
+            j->stats.forced++;
         return sync_translate(j, pc);
     }
     return host_force(j, pc);
@@ -1874,6 +1895,7 @@ void z80j_set_budget(z80j_state *j, uint32 (*clock)(void), uint32 floor_us,
     j->clock = clock;
     j->sync_floor_us = floor_us;
     j->int_cost = int_cost;
+    j->int_per_us = (int_cost != 0) ? (16u << 12) / int_cost : 0;
     j->frame_us = frame_us;
     if (j->est_us == 0)
         j->est_us = 2000;
@@ -1921,8 +1943,11 @@ uint32 z80j_hot(z80j_state *j)
         j->ctx->hot_sync_gate = 0xFFFFFFFFu;    /* interpretation only, or parked */
         return j->glue.interp;
     }
-    if (j->hot[pc] >= j->sync_at &&
-        ((j->force_at != 0 && j->hot[pc] >= j->force_at) || sync_allowed(j)))
+    if (j->hot[pc] >= j->sync_at && j->force_at != 0 && j->hot[pc] >= j->force_at) {
+        j->stats.forced++;
+        return sync_translate(j, pc);
+    }
+    if (j->hot[pc] >= j->sync_at && sync_allowed(j))
         return sync_translate(j, pc);
     queue_hot(j, pc);
     return j->glue.interp;

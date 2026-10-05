@@ -80,8 +80,8 @@ static void print_window(const game_window_rec *p)
            "%lu draw errors, %lu long presents, Z80 idle %lu%%, "
            "%lu IRQ, %lu NMI, VDP %lu data writes, %lu data reads, %lu control writes, "
            "%lu status reads, %lu counter reads, PSG %lu, pad %lu, other %lu, %lu leaves, "
-           "%lu bank switches, %lu blocks (%lu in spare time, %lu at once in %lu us, "
-           "%lu refused, %lu promoted, %lu us of spare time), %lu interpreted "
+           "%lu bank switches, %lu blocks (%lu in spare time, %lu at once in %lu us "
+           "(%lu forced), %lu refused, %lu promoted, %lu us of spare time), %lu interpreted "
            "instructions in %lu stretches, %lu evictions (%lu blocks, %lu live chunks), "
            "%lu returns resumed, pad read %lu us\n",
            (unsigned long)p->first, (unsigned long)p->last,
@@ -101,7 +101,7 @@ static void print_window(const game_window_rec *p)
            (unsigned long)d->io.pad_r, (unsigned long)d->io.other,
            (unsigned long)d->io.leaves, (unsigned long)d->banks, (unsigned long)d->blocks,
            (unsigned long)d->prefetched, (unsigned long)d->sync, (unsigned long)d->sync_us,
-           (unsigned long)d->sync_refused, (unsigned long)d->promoted,
+           (unsigned long)d->forced, (unsigned long)d->sync_refused, (unsigned long)d->promoted,
            (unsigned long)w->spare_us, (unsigned long)d->interp_insns, (unsigned long)d->interp,
            (unsigned long)d->evictions, (unsigned long)d->evicted,
            (unsigned long)d->evicted_live, (unsigned long)d->resumed,
@@ -219,6 +219,7 @@ static void read_counters(const game *g, game_counters *c)
     c->sync = g->jit.stats.sync;
     c->sync_us = g->jit.stats.sync_us;
     c->sync_refused = g->jit.stats.sync_refused;
+    c->forced = g->jit.stats.forced;
     c->resumed = g->jit.stats.resumed + g->ctx->resumed_count;
     c->vdp_data_w = g->sms->vdp.n_data_w;
     c->vdp_data_r = g->sms->vdp.n_data_r;
@@ -705,7 +706,7 @@ void game_log_summary(game *g)
            "(frame %lu), update %lu us average, draw %lu us average, total %lu us average "
            "(%lu%%), worst %lu us (frame %lu), %lu frames over %d us, Z80 idle %lu%%, %lu IRQ, "
            "%lu NMI, %lu bank switches, %lu blocks translated while running (%lu in spare "
-           "time, %lu at once in %lu us, %lu refused, %lu promoted), %lu interpreted "
+           "time, %lu at once in %lu us (%lu forced), %lu refused, %lu promoted), %lu interpreted "
            "instructions in %lu stretches, %lu evictions (%lu blocks, %lu live chunks), "
            "%lu busy-wait loops found (%lu waiting for a line), %lu RAM blocks cut at a seam, "
            "status %ld\n",
@@ -720,7 +721,7 @@ void game_log_summary(game *g)
            (unsigned long)percent(g->idle_t16, n * (FRAME_T / 16)),
            (unsigned long)d.irqs, (unsigned long)d.nmis, (unsigned long)d.banks,
            (unsigned long)d.blocks, (unsigned long)d.prefetched, (unsigned long)d.sync,
-           (unsigned long)d.sync_us, (unsigned long)d.sync_refused,
+           (unsigned long)d.sync_us, (unsigned long)d.forced, (unsigned long)d.sync_refused,
            (unsigned long)d.promoted, (unsigned long)d.interp_insns, (unsigned long)d.interp,
            (unsigned long)d.evictions, (unsigned long)d.evicted, (unsigned long)d.evicted_live,
            (unsigned long)g->jit.stats.busy_loops, (unsigned long)g->jit.stats.line_loops,

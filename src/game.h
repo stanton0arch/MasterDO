@@ -40,6 +40,7 @@ typedef struct {
     uint32 sync;            /* hot blocks translated at once */
     uint32 sync_us;         /* time they took */
     uint32 sync_refused;    /* translations at once refused, budget spent */
+    uint32 forced;          /* translations at once past the forced count */
     uint32 resumed;         /* interrupt returns resumed inside their block */
     uint32 vdp_data_w;
     uint32 vdp_data_r;

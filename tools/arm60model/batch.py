@@ -45,6 +45,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import present  # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 FRAME_US = 16683
@@ -101,7 +104,9 @@ def parse_window(line):
                       r"(\d+) status reads, (\d+) counter reads, PSG (\d+)", (0,) * 6)
     (w["banks"], w["blocks"], w["spare"], w["sync"], w["sync_us"], w["refused"],
      w["promoted"]) = grab(line, r"(\d+) bank switches, (\d+) blocks \((\d+) in spare time, "
-                           r"(\d+) at once in (\d+) us, (\d+) refused, (\d+) promoted", (0,) * 7)
+                           r"(\d+) at once in (\d+) us(?: \(\d+ forced\))?, (\d+) refused, (\d+) promoted",
+                           (0,) * 7)
+    w["forced"] = grab(line, r"\((\d+) forced\)", 0)
     w["interp"], w["stretches"], w["evictions"], w["evicted"] = grab(
         line, r"(\d+) interpreted instructions in (\d+) stretches, (\d+) evictions \((\d+) blocks",
         (0, 0, 0, 0))
@@ -187,8 +192,9 @@ def parse_log(path, err_path):
                                                   (0, 0, 0))
             (s["blocks"], s["spare"], s["sync"], s["sync_us"], s["refused"],
              s["promoted"]) = grab(line, r"(\d+) blocks translated while running \((\d+) in spare "
-                                   r"time, (\d+) at once in (\d+) us, (\d+) refused, (\d+) promoted",
-                                   (0,) * 6)
+                                   r"time, (\d+) at once in (\d+) us(?: \(\d+ forced\))?, (\d+) refused, "
+                                   r"(\d+) promoted", (0,) * 6)
+            s["forced"] = grab(line, r"\((\d+) forced\)", 0)
             s["interp"], s["stretches"], s["evictions"], s["evicted"] = grab(
                 line, r"(\d+) interpreted instructions in (\d+) stretches, (\d+) evictions "
                 r"\((\d+) blocks", (0, 0, 0, 0))
@@ -313,6 +319,17 @@ def analyse(name, size, frames_wanted, pad, run, parsed):
     worst = max(diffs, key=lambda c: c["diff"]) if diffs else None
     g["pics_worst"] = (worst["frame"], worst["diff"]) if worst else None
     g["sprites"] = parsed["sprites"]
+    # The screen: the frame times replayed through the queued presentation
+    # of the ISO (present.py).
+    g["screen"] = None
+    fr = present.frames_of(run["log"])
+    if len(fr) >= 2:
+        shown = present.present(fr, present.OVERHEAD)
+        st = present.stats(shown, 1, len(shown), fr)
+        gaps = sorted(((shown[k] - shown[k - 1], k) for k in range(1, len(shown)) if fr[k - 1][5]),
+                      reverse=True)
+        st["freezes"] = [(gap, k) for gap, k in gaps[:3]]
+        g["screen"] = st
     return g
 
 # ---------------------------------------------------------------- pictures
@@ -371,7 +388,8 @@ def run_one(args, name, path, frames, pad, workdir):
         os.remove(f)
     cmd = [os.path.join(HERE, "sim"), "-img", os.path.join(HERE, "sim.bin"),
            "-sym", os.path.join(HERE, "sim.sym"), "-rom", path,
-           "-frames", str(frames), "-dump", str(args.dump), "-dumpdiff", "16"]
+           "-frames", str(frames), "-dump", str(args.dump), "-dumpdiff", "16", "-framelog"]
+    cmd += args.simargs.split()
     env = dict(os.environ)
     env["SIMPAD"] = pad
     env.pop("SIMPROF", None)
@@ -392,7 +410,8 @@ def run_one(args, name, path, frames, pad, workdir):
             except (subprocess.TimeoutExpired, OSError):
                 proc.kill()
                 proc.wait()
-    run = {"wall": time.time() - t0, "timeout": timeout, "returncode": proc.returncode}
+    run = {"wall": time.time() - t0, "timeout": timeout, "returncode": proc.returncode,
+           "log": os.path.join(workdir, "log.txt")}
     parsed = parse_log(os.path.join(workdir, "log.txt"), os.path.join(workdir, "sim.err"))
     if not args.nosheets:
         make_sheets(workdir, args.dump, {c["frame"] for c in parsed["compares"] if c["diff"]})
@@ -442,6 +461,11 @@ def game_lines(g):
         ms(s["upd"]), ms(g.get("upd_min", 0)), ms(g.get("upd_max", 0)),
         ms(s["total"]), ms(DRAW_US), s["over"], pct)
     out.append(line)
+    sc = g.get("screen")
+    if sc:
+        out.append("  screen: real %.0f us per frame, %d VBLs without a new picture, %d of them with a picture on the screen (%.1f%%), %d long presents; longest on the screen: %s" % (
+            sc["real"], sc["missed"], sc["visible"], 100.0 * sc["visible"] / (s["frames"] or 1), sc["long"],
+            ", ".join("%s ms before frame %d" % (ms(gap), k) for gap, k in sc["freezes"])))
     if g.get("busiest"):
         b = g["busiest"]
         out.append("  busiest window %d-%d: emulation %s, update %s, total %s ms, %d over budget, Z80 idle %d%%; idle over the run %d%% (windows %d-%d%%)" % (
@@ -470,8 +494,8 @@ def game_lines(g):
         (g["vdp"] or {}).get("data_w", 0) // n, (g["vdp"] or {}).get("data_r", 0) // n,
         (g["vdp"] or {}).get("ctrl_w", 0) // n, (g["vdp"] or {}).get("stat_r", 0) // n,
         (g["vdp"] or {}).get("counter_r", 0) // n, (g["vdp"] or {}).get("psg", 0) / n))
-    out.append("  translator: %d blocks while running (%d at once in %s ms, %d promoted), %s interpreted instructions, %d evictions (%d blocks), %d busy-wait loops" % (
-        s["blocks"], s["sync"], ms(s["sync_us"]), s["promoted"], kcount(s["interp"]),
+    out.append("  translator: %d blocks while running (%d at once in %s ms, %d of them forced, %d promoted), %s interpreted instructions, %d evictions (%d blocks), %d busy-wait loops" % (
+        s["blocks"], s["sync"], ms(s["sync_us"]), s.get("forced", 0), s["promoted"], kcount(s["interp"]),
         s["evictions"], s["evicted"], s["busy_loops"]))
     p = g["picture"]
     if p:
@@ -498,8 +522,9 @@ def game_lines(g):
 
 
 def table(games):
-    hdr = "%-18s %-8s %6s %6s %6s %6s %6s %8s %7s %s" % (
-        "cartridge", "status", "emu", "upd", "total", "over%", "worst", "pictures", "sprites", "notes")
+    hdr = "%-18s %-8s %6s %6s %6s %6s %6s %7s %6s %8s %7s %s" % (
+        "cartridge", "status", "emu", "upd", "total", "over%", "worst", "missed", "freeze",
+        "pictures", "sprites", "notes")
     rows = [hdr, "-" * len(hdr)]
     for g in games:
         s = g["summary"]
@@ -526,9 +551,11 @@ def table(games):
                 notes.append("%d anomalies" % g["n_anomalies"])
             if g["pics_on"] == 0:
                 notes.append("display never on")
-            rows.append("%-18s %-8s %6s %6s %6s %5.1f%% %6s %8s %7s %s" % (
+            sc = g.get("screen") or {"visible": 0, "worst": 0}
+            rows.append("%-18s %-8s %6s %6s %6s %5.1f%% %6s %6.1f%% %6s %8s %7s %s" % (
                 g["name"][:18], g["status"][:8], ms(s["emu"]), ms(s["upd"]), ms(s["total"]),
                 100.0 * s["over"] / (s["frames"] or 1), ms(s["total_worst"]),
+                100.0 * sc["visible"] / (s["frames"] or 1), ms(sc["worst"]),
                 "%d/%d" % (g["pics"] - g["pics_diff"], g["pics"]),
                 ("%d/%d" % (g["sprites"]["checked"] - g["sprites"]["errors"], g["sprites"]["checked"])
                  if g["sprites"] else "-"),
@@ -560,6 +587,12 @@ def compare_reports(games, prev):
                 changes.append("over budget %d -> %d" % (so["over"], s["over"]))
             if s["total_worst"] // 1000 != so["total_worst"] // 1000:
                 changes.append("worst frame %s -> %s ms" % (ms(so["total_worst"]), ms(s["total_worst"])))
+            sc, sco = g.get("screen"), o.get("screen")
+            if sc and sco:
+                if sc.get("visible") != sco.get("visible"):
+                    changes.append("visible VBLs without a new picture %s -> %d" % (sco.get("visible"), sc["visible"]))
+                if sc["worst"] // 1000 != sco["worst"] // 1000:
+                    changes.append("longest on the screen %s -> %s ms" % (ms(sco["worst"]), ms(sc["worst"])))
             if s["evictions"] != so["evictions"]:
                 changes.append("evictions %d -> %d" % (so["evictions"], s["evictions"]))
             if s["blocks"] != so["blocks"]:
@@ -614,6 +647,7 @@ def main():
     ap.add_argument("-dump", type=int, default=100, help="compare the pictures every n frames (100)")
     ap.add_argument("-nosheets", action="store_true", help="no PNG contact sheets")
     ap.add_argument("-label", default="", help="a note written in the report header")
+    ap.add_argument("-simargs", default="", help="extra options for sim (policy overrides)")
     args = ap.parse_args()
 
     for f in ("sim", "sim.bin", "sim.sym"):

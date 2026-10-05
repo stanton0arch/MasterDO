@@ -265,6 +265,7 @@ typedef struct {
     uint32 sync;            /* blocks translated at once, hot without spare time */
     uint32 sync_us;         /* time they took (microseconds, cumulative) */
     uint32 sync_refused;    /* translations at once refused for lack of budget */
+    uint32 forced;          /* of the translations at once, those past force_at */
     uint32 queue_full;      /* hot addresses dropped for lack of room */
     uint32 resumed;         /* interrupt returns resumed inside their block */
     uint32 dyn_blocks;      /* RAM blocks translated with dynamic targets */
@@ -381,6 +382,7 @@ typedef struct {
     uint32      sync_floor_us;  /* budget of translations at once per frame */
     uint32      int_cost;       /* estimated cost of an interpreted instruction, */
                                 /* in 1/16 microsecond */
+    uint32      int_per_us;     /* interpreted instructions per microsecond, << 12 */
     uint32      sync_spent_us;  /* spent in this frame */
     uint32      int_insns0;     /* interpreted instructions when the frame began */
     uint32      frame_start_us; /* clock at the start of the frame */
@@ -389,6 +391,7 @@ typedef struct {
     uint32      est_us;         /* running average of the cost of a translation */
     uint32      queue[Z80J_QUEUE];  /* unordered; the hottest goes first */
     uint32      nqueue;
+    uint32      qcursor;        /* where a full queue is probed next */
     uint32      queued[2048];   /* bitmap of the addresses in the queue */
     uint32      line_ports[8];  /* bitmap of the ports set by z80j_set_line_port */
     /* Segments interrupted at a stretch end: the interrupt's return

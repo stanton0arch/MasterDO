@@ -552,6 +552,8 @@ void hmain(void)
          * translated at once. */
         z80j_set_interp(&g.jit, g.hot, sim_arg(8), sim_arg(9));
     }
+    if (sim_arg(20))
+        z80j_set_force(&g.jit, sim_arg(20) - 1);     /* -force n */
     if (sim_arg(7)) {
         /* -budget floor:cost: the budget of translations at once (us per
          * frame, 1/16 us per interpreted instruction). */
@@ -565,6 +567,8 @@ void hmain(void)
             sim_mark(15);           /* profile from here on */
         {
             uint32 t0 = plat_usec_now();
+            z80j_stats s0 = g.jit.stats;
+            uint32 i0 = g.ctx->int_insns;
 
             if (game_frame(&g, pad & 0x3F, (pad >> 8) & 1) != 0)
                 break;
@@ -572,6 +576,23 @@ void hmain(void)
              * the console, before the spare time is used. */
             game_frame_done(&g, 3500);
             game_spare_time(&g, t0 - 3500, t0 - 3500 + PLAT_NTSC_FRAME_US);
+            if (sim_arg(19)) {
+                /* -framelog: one line per frame, for the presentation
+                 * model (present.py) and the translation policy. */
+                const z80j_stats *s = &g.jit.stats;
+
+                printf("Frame: %lu emu %lu upd %lu draw %lu spare %lu sync %lu sync_us %lu "
+                       "forced %lu refused %lu spare_blocks %lu insns %lu shown %lu\n",
+                       (unsigned long)f, (unsigned long)g.last_us, (unsigned long)g.last_upd_us,
+                       (unsigned long)(render_display_on(g.rd) ? 3500 : 0),
+                       (unsigned long)g.last_spare_us,
+                       (unsigned long)(s->sync - s0.sync), (unsigned long)(s->sync_us - s0.sync_us),
+                       (unsigned long)(s->forced - s0.forced),
+                       (unsigned long)(s->sync_refused - s0.sync_refused),
+                       (unsigned long)(s->prefetched - s0.prefetched),
+                       (unsigned long)(g.ctx->int_insns - i0),
+                       (unsigned long)render_display_on(g.rd));
+            }
         }
         if (sim_arg(13))
             check_blocks(f);
