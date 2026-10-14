@@ -519,7 +519,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: instruction decoder and block decoding loop of the translator in assembly\n");
+    printf("masterdo: entry check mask of RAM blocks built in one pass over the instructions\n");
     if (plat_init(&plat) < 0)
         return 1;
     memset(&st, 0, sizeof(st));

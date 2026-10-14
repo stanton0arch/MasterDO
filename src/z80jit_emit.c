@@ -2147,31 +2147,38 @@ void emit_block_code(jit_block_ctx *b)
         uint32 nwords = (lead + len + 3) >> 2;
         uint32 w = 0;
         uint32 k2;
-        uint32 pass;
+        uint32 *mask;
         emit_b(j, C_AL, 1, j->glue.verify);
         emit(j, ins[0].pc);
         emit(j, nwords);
-        for (pass = 0; pass < 2; pass++) {
-            for (k2 = 0; k2 < nwords * 4; k2++) {
-                uint32 v = 0;
+        for (k2 = 0; k2 < nwords * 4; k2++) {
+            uint32 v = 0;
 
-                if (k2 >= lead && k2 < lead + len) {
-                    uint32 a = (ins[0].pc + k2 - lead) & 0xFFFFu;
+            if (k2 >= lead && k2 < lead + len)
+                v = jit_byte(j->ctx, (ins[0].pc + k2 - lead) & 0xFFFFu);
+            w = (w << 8) | v;
+            if ((k2 & 3) == 3) {
+                emit(j, w);
+                w = 0;
+            }
+        }
+        /* The mask: every byte of the block, then the two operand bytes
+         * of each instruction that reads them at run time cleared. */
+        mask = j->cur;
+        for (k2 = 0; k2 < nwords * 4; k2++) {
+            w = (w << 8) | ((k2 >= lead && k2 < lead + len) ? 0xFFu : 0);
+            if ((k2 & 3) == 3) {
+                emit(j, w);
+                w = 0;
+            }
+        }
+        for (i = 0; i < n; i++) {
+            if (ins[i].dyn) {
+                uint32 off = (ins[i].pc + ins[i].len - 2 - ins[0].pc) & 0xFFFFu;
 
-                    if (pass == 0) {
-                        v = jit_byte(j->ctx, a);
-                    } else {
-                        v = 0xFFu;
-                        for (i = 0; i < n; i++) {
-                            if (ins[i].dyn && ((a - (ins[i].pc + ins[i].len - 2)) & 0xFFFFu) < 2)
-                                v = 0;
-                        }
-                    }
-                }
-                w = (w << 8) | v;
-                if ((k2 & 3) == 3) {
-                    emit(j, w);
-                    w = 0;
+                for (k2 = off + lead; k2 < off + lead + 2; k2++) {
+                    if (k2 - lead < len)
+                        mask[k2 >> 2] &= ~(0xFFu << (24 - 8 * (k2 & 3)));
                 }
             }
         }
