@@ -9,6 +9,8 @@
         EXPORT  render_tile_cells
         EXPORT  render_rebuild_cells
         EXPORT  render_stale_cells
+        EXPORT  render_tile_cells_part
+        EXPORT  render_rebuild_cells_part
         EXPORT  render_tile_conv
         EXPORT  render_rect_pieces
         EXPORT  render_sprite_runs
@@ -599,6 +601,75 @@ sc_next_row
         ldmfd   sp!,{r4-r11,pc}
 
 ;----------------------------------------------------------------------------
+; uint32 render_tile_cells_part(render_layer *l, const uint8 *vram, uint32 t,
+;                               uint32 from, uint32 budget)
+;
+; render_tile_cells for the list of tile t from cell from on (NONE: from
+; the head of the list): the cells not stamped in this update are drawn
+; from the shadow when their row is shown (shown_rows), else left stale;
+; stops once budget cells have been drawn. Returns the cell to continue
+; from, NONE when the list is done. Counts the cells in st.tile_cells.
+; Used by the catch-up of the picture in spare time, which looks at the
+; clock between two calls.
+;----------------------------------------------------------------------------
+render_tile_cells_part
+        stmfd   sp!,{r4-r11,lr}
+        mov     r9,r0
+        mov     r10,r1
+        ldr     r8,[sp,#36]             ; budget
+        cmp     r3,#NONE
+        ldreq   r4,[r9,#R_HEAD]
+        ldreq   r11,[r4,r2,lsl #2]
+        movne   r11,r3
+tp_loop
+        cmp     r11,#NONE
+        beq     tp_done
+        ldr     r2,[r9,#R_STAMP]
+        ldrb    r3,[r2,r11]
+        ldr     r4,[r9,#R_STAMPNOW]
+        and     r4,r4,#0xFF
+        cmp     r3,r4
+        beq     tp_next
+        ldr     r2,[r9,#R_SHOWNROWS]
+        mov     r3,r11,lsr #5           ; row shown?
+        mov     r2,r2,lsr r3
+        tst     r2,#1
+        bne     tp_draw
+        ldr     r2,[r9,#R_STALE]        ; no: stale until it is
+        mov     r4,#1
+        strb    r4,[r2,r11]
+        ldr     r2,[r9,#R_STALEROWS]
+        orr     r2,r2,r4,lsl r3
+        str     r2,[r9,#R_STALEROWS]
+        b       tp_next
+tp_draw
+        cmp     r8,#0                   ; budget spent: continue from this cell
+        beq     tp_done
+        sub     r8,r8,#1
+        ldr     r2,[r9,#R_STALE]
+        mov     r3,#0
+        strb    r3,[r2,r11]
+        ldr     r2,[r9,#R_SHADOW]
+        add     r2,r2,r11,lsl #1
+        ldrb    r1,[r2]
+        ldrb    r3,[r2,#1]
+        orr     r1,r1,r3,lsl #8
+        mov     r0,r11
+        stmfd   sp!,{r8}                ; cell_draw clobbers r0-r8
+        bl      cell_draw
+        ldmfd   sp!,{r8}
+        ldr     r2,[r9,#R_STTILECELLS]
+        add     r2,r2,#1
+        str     r2,[r9,#R_STTILECELLS]
+tp_next
+        ldr     r2,[r9,#R_NEXT]
+        ldr     r11,[r2,r11,lsl #2]
+        b       tp_loop
+tp_done
+        mov     r0,r11
+        ldmfd   sp!,{r4-r11,pc}
+
+;----------------------------------------------------------------------------
 ; void render_tile_conv(render_layer *l, uint32 t, uint32 flip, const uint8 *vram)
 ;
 ; Converts tile t from the VDP's four bit planes (4 bytes per row) to 8
@@ -782,17 +853,34 @@ rp_done
         ldmfd   sp!,{r1,r4-r11,pc}
 
 ;----------------------------------------------------------------------------
-; void render_rebuild_cells(renderer *r, const uint8 *vram)
+; void render_rebuild_cells(render_layer *l, const uint8 *vram)
 ;
 ; Links every cell of the table (ncells) into the list of its tile (the
 ; heads must hold NONE), counts the priority cells of each row and draws
 ; every cell, from the entries of the shadow.
+;
+; uint32 render_rebuild_cells_part(render_layer *l, const uint8 *vram,
+;                                  uint32 from, uint32 budget)
+;
+; The same for cells from to from + budget - 1 (bounded by ncells), so
+; that a rebuild can be spread over the spare time of several frames;
+; returns the next cell, ncells once the table is done.
 ;----------------------------------------------------------------------------
 render_rebuild_cells
+        mov     r2,#0
+        ldr     r3,[r0,#R_NCELLS]
+render_rebuild_cells_part
         stmfd   sp!,{r4-r11,lr}
         mov     r9,r0
         mov     r10,r1
-        mov     r11,#0
+        mov     r11,r2
+        ldr     r0,[r9,#R_NCELLS]
+        add     r3,r2,r3
+        cmp     r3,r0
+        movhi   r3,r0
+        cmp     r11,r3
+        bhs     rb_done
+        str     r3,[sp,#-4]!            ; last cell + 1
 rb_loop
         ldr     r2,[r9,#R_SHADOW]
         add     r2,r2,r11,lsl #1
@@ -821,9 +909,12 @@ rb_draw
         mov     r0,r11
         bl      cell_draw
         add     r11,r11,#1
-        ldr     r0,[r9,#R_NCELLS]
+        ldr     r0,[sp]
         cmp     r11,r0
         bne     rb_loop
+        add     sp,sp,#4
+rb_done
+        mov     r0,r11
         ldmfd   sp!,{r4-r11,pc}
 
         ;----------------------------------------------------------------------------

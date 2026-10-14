@@ -70,6 +70,20 @@
  * window is the 256 x render_height() picture; the border around the
  * picture and the whole picture while the display is off take the
  * backdrop colour (render_backdrop()).
+ *
+ * Catch-up in spare time: while the display is off the update draws
+ * nothing and the work waits (a game rebuilding a screen writes most of
+ * its name table and many tiles then), so the first frame with the
+ * display on used to pay the whole catch-up at once. render_catch_up(),
+ * called by the caller in the spare time of a frame with the display off,
+ * does that work ahead up to a deadline: the written tiles are converted
+ * and the changed cells and the cells of the written tiles redrawn, chunk
+ * by chunk and cell by cell, and a table with no layer yet gets one
+ * rebuilt in steps. What is not done keeps its dirty byte or its cursor
+ * and is finished by the next call or by the update of the first frame
+ * with the display on. The sprites, the bands, the pieces and the
+ * palettes belong to the frame that shows the picture and are not
+ * touched.
  */
 
 #include "types.h"
@@ -119,6 +133,11 @@ typedef struct {
     uint32 pbands;          /* frames with more than one palette band */
     uint32 pmerged;         /* colour writes beyond the palette bands */
     uint32 tall;            /* frames of more than 192 lines */
+    uint32 ahead_cells;     /* cells drawn by the catch-up in spare time */
+    uint32 ahead_tiles;     /* tiles it converted */
+    uint32 ahead_calls;     /* catch-up calls that found work */
+    uint32 ahead_cut;       /* of which stopped by their deadline */
+    uint32 ahead_us;        /* time they took */
 } render_stats;
 
 /*
@@ -172,7 +191,22 @@ typedef struct render_layer_s {
     uint32  nrows;
     uint32  ncells;         /* nrows * 32 */
     uint32  cap_cells;      /* cells the lists and the shadow can hold */
+    /* Catch-up in spare time (render_catch_up): the work it took from
+     * the VDP's dirty bytes and has not finished: the name table chunks
+     * whose entries are to be compared (bit per chunk), the tiles whose
+     * cells are to be redrawn (bit per tile), the tile whose cell list
+     * is being walked with the cell to continue from (RENDER_NO_TILE
+     * when none), and the next cell of a rebuild begun ahead
+     * (RENDER_NO_TILE when no rebuild is in progress; a layer with one
+     * holds its table although it is not valid yet). */
+    uint32  nt_pend[2];
+    uint32  tile_pend[VDP_TILES / 32];
+    uint32  pend_tile;
+    uint32  pend_cell;
+    uint32  rb_next;
 } render_layer;
+
+#define RENDER_NO_TILE  0xFFFFFFFFu
 
 typedef struct {
     render_layer layer[RENDER_LAYERS];
@@ -229,6 +263,14 @@ void  render_reset(renderer *r);
 /* Brings the bitmaps, the pieces and the sprite cels up to date with the
  * VDP; clears the VDP's dirty flags. */
 void  render_update(renderer *r, vdp_state *v);
+
+/* Spare time of a frame with the display off: converts the written tiles
+ * and redraws the changed cells and the cells of the written tiles into
+ * the bitmaps, and rebuilds in steps a layer for the name table the VDP
+ * points at when none holds it, until the microsecond clock now() reaches
+ * deadline_us (looked at every few cells); what is left waits for the
+ * next call or the next update. Returns nonzero when work is left. */
+uint32 render_catch_up(renderer *r, vdp_state *v, uint32 (*now)(void), uint32 deadline_us);
 
 /* Assembly helpers (render_a.s). CONTRACT: render_sprite_args matches
  * the SA_* equates of render_a.s. */
@@ -291,6 +333,15 @@ void   render_entries(render_layer *l, const uint8 *vram, uint32 n);
 void   render_tile_cells(render_layer *l, const uint8 *vram, uint32 t);
 void   render_stale_cells(render_layer *l, const uint8 *vram);
 void   render_rebuild_cells(render_layer *l, const uint8 *vram);
+/* Resumable forms for the catch-up: render_tile_cells for the list of
+ * tile t from cell from (RENDER_NT_CELLS_MAX: the head of the list), at
+ * most budget cells drawn, returning the cell to continue from
+ * (RENDER_NT_CELLS_MAX once the list is done); and the rebuild of cells
+ * from to from + budget - 1, returning the next cell (ncells at the end). */
+uint32 render_tile_cells_part(render_layer *l, const uint8 *vram, uint32 t, uint32 from,
+                              uint32 budget);
+uint32 render_rebuild_cells_part(render_layer *l, const uint8 *vram, uint32 from,
+                                 uint32 budget);
 /* Pieces of a bitmap rectangle on a line band in the usual case (no
  * scroll inhibit); see render.c, rect_pieces. CONTRACT: the PC_*
  * equates of render_a.s. */

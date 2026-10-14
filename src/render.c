@@ -62,6 +62,19 @@ CHECK_OFF(two_layers, RENDER_LAYERS == 2);      /* render_update handles both by
 #define WLIST_WORDS     VDP_TILES           /* the largest work list */
 #define NONE            RENDER_NT_CELLS_MAX /* end of a cell list */
 
+/* Index of the lowest set bit of a nonzero word. */
+static uint32 lowest_bit(uint32 w)
+{
+    uint32 b = 0;
+
+    if ((w & 0xFFFF) == 0) { b += 16; w >>= 16; }
+    if ((w & 0xFF) == 0) { b += 8; w >>= 8; }
+    if ((w & 0xF) == 0) { b += 4; w >>= 4; }
+    if ((w & 0x3) == 0) { b += 2; w >>= 2; }
+    if ((w & 0x1) == 0) { b += 1; }
+    return b;
+}
+
 #define CEL_PRIO0       RENDER_MAX_PIECES
 #define CEL_DBLANK0     (CEL_PRIO0 + RENDER_MAX_PRIO)
 #define CEL_BLANK       (CEL_DBLANK0 + RENDER_MAX_DBLANK)
@@ -228,6 +241,10 @@ static void set_mode(renderer *r, uint32 height, uint32 force)
             l->valid = 0;
             l->nt_base = 0xFFFFFFFFu;
             l->last_used = 0;
+            l->pend_tile = RENDER_NO_TILE;
+            l->rb_next = RENDER_NO_TILE;
+            l->nt_pend[0] = l->nt_pend[1] = 0;
+            memset(l->tile_pend, 0, sizeof(l->tile_pend));
             l->stale_rows = 0;
             l->shown_rows = 0;
             l->pg_n = 0;
@@ -353,8 +370,9 @@ void render_reset(renderer *r)
  * Tiles and cells
  *------------------------------------------------------------------------*/
 
-/* Draws the whole name table of the layer into its bitmap. */
-static void rebuild(renderer *r, render_layer *l, const uint8 *vram)
+/* Takes the name table of the layer as its shadow and empties the cell
+ * lists and the priority bookkeeping, before the cells are drawn. */
+static void rebuild_start(render_layer *l, const uint8 *vram)
 {
     const uint8 *nt = vram + l->nt_base;
     uint32 i;
@@ -365,10 +383,34 @@ static void rebuild(renderer *r, render_layer *l, const uint8 *vram)
     memset(l->prio_dirty, 1, sizeof(l->prio_dirty));
     memset(l->stale, 0, (size_t)l->ncells);
     l->stale_rows = 0;
+    l->pend_tile = RENDER_NO_TILE;
+    l->nt_pend[0] = l->nt_pend[1] = 0;
+    memset(l->tile_pend, 0, sizeof(l->tile_pend));
     for (i = 0; i < VDP_TILES; i++)
         l->head[i] = NONE;
+}
+
+/* A rebuild begun ahead (render_catch_up) goes on from the table as it
+ * stands: the shadow of the cells not drawn yet is taken again, and the
+ * pending chunks entirely beyond the next cell are dropped, their cells
+ * being drawn with the current entries. */
+static void rebuild_refresh(render_layer *l, const uint8 *vram)
+{
+    uint32 from = l->rb_next;
+    uint32 c;
+
+    memcpy(l->shadow + 2 * from, vram + l->nt_base + 2 * from, (size_t)(2 * (l->ncells - from)));
+    for (c = (from + 15) >> 4; c < l->nrows * 2; c++)
+        l->nt_pend[c >> 5] &= ~((uint32)1 << (c & 31));
+}
+
+/* Draws the whole name table of the layer into its bitmap. */
+static void rebuild(renderer *r, render_layer *l, const uint8 *vram)
+{
+    rebuild_start(l, vram);
     render_rebuild_cells(l, vram);
     l->valid = 1;
+    l->rb_next = RENDER_NO_TILE;
     r->st.rebuilds++;
 }
 
@@ -387,12 +429,15 @@ static void update_entries(render_layer *l, const uint32 *nt_mask, const uint8 *
  * Layers
  *------------------------------------------------------------------------*/
 
-/* The layer holding the name table at base, valid or not. */
+/* The layer holding the name table at base: valid, or being rebuilt for
+ * it in spare time. */
+#define layer_holds(l, b) (((l)->valid || (l)->rb_next != RENDER_NO_TILE) && (l)->nt_base == (b))
+
 static render_layer *layer_of(renderer *r, uint32 base)
 {
-    if (r->layer[0].valid && r->layer[0].nt_base == base)
+    if (layer_holds(&r->layer[0], base))
         return &r->layer[0];
-    if (r->nlayers > 1 && r->layer[1].valid && r->layer[1].nt_base == base)
+    if (r->nlayers > 1 && layer_holds(&r->layer[1], base))
         return &r->layer[1];
     return NULL;
 }
@@ -452,6 +497,7 @@ static void assign_layers(renderer *r, const vdp_state *v, uint32 nnb)
             l = best;
             l->nt_base = base;
             l->valid = 0;               /* rebuilt by the update */
+            l->rb_next = RENDER_NO_TILE;    /* a rebuild begun ahead for another table is dropped */
         }
         l->last_used = r->update;
         r->nlayer[m] = l;
@@ -1184,10 +1230,19 @@ void render_update(renderer *r, vdp_state *v)
     }
 
     /* Written tiles: forget their conversions and note the name table
-     * chunks among them, for each layer. */
+     * chunks among them, for each layer; with them, the work the
+     * catch-up took in spare time and left unfinished (a tile whose cell
+     * list it was walking is drawn again whole). */
     nd = render_dirty_scan(v->dirty, r->dlist);
-    for (m = 0; m < RENDER_LAYERS; m++)
+    for (m = 0; m < RENDER_LAYERS; m++) {
+        render_layer *l = &r->layer[m];
+
+        if (l->pend_tile != RENDER_NO_TILE) {
+            l->tile_pend[l->pend_tile >> 5] |= (uint32)1 << (l->pend_tile & 31);
+            l->pend_tile = RENDER_NO_TILE;
+        }
         nt_mask[m][0] = nt_mask[m][1] = 0;
+    }
     c0 = r->layer[0].nt_base >> 5;      /* first chunk and chunks of each table */
     n0 = r->layer[0].nrows * 2;
     c1 = r->layer[1].nt_base >> 5;
@@ -1223,9 +1278,23 @@ void render_update(renderer *r, vdp_state *v)
         if (!used && !l->valid)
             continue;
         if (!l->valid) {
-            rebuild(r, l, vram);
-            continue;
+            if (l->rb_next == RENDER_NO_TILE) {
+                rebuild(r, l, vram);
+                continue;
+            }
+            /* A rebuild begun ahead: the rest of its cells from the
+             * table as it stands, then the entries written since the
+             * drawn cells took their shadow, and the tiles written
+             * since, which the catch-up left pending. */
+            rebuild_refresh(l, vram);
+            render_rebuild_cells_part(l, vram, l->rb_next, l->ncells);
+            l->valid = 1;
+            l->rb_next = RENDER_NO_TILE;
+            r->st.rebuilds++;
         }
+        nt_mask[m][0] |= l->nt_pend[0];
+        nt_mask[m][1] |= l->nt_pend[1];
+        l->nt_pend[0] = l->nt_pend[1] = 0;
         if ((nt_mask[m][0] | nt_mask[m][1]) != 0)
             update_entries(l, nt_mask[m], vram);
         if ((l->stale_rows & l->shown_rows) != 0)
@@ -1235,6 +1304,17 @@ void render_update(renderer *r, vdp_state *v)
 
             if (l->head[j] != NONE)
                 render_tile_cells(l, vram, j);
+        }
+        for (k = 0; k < VDP_TILES / 32; k++) {
+            uint32 w = l->tile_pend[k];
+
+            l->tile_pend[k] = 0;
+            for (; w != 0; w &= w - 1) {
+                uint32 j = k * 32 + lowest_bit(w);
+
+                if (l->head[j] != NONE)
+                    render_tile_cells(l, vram, j);
+            }
         }
     }
     for (m = 0; m < RENDER_LAYERS; m++) {
@@ -1283,4 +1363,259 @@ void render_update(renderer *r, vdp_state *v)
     last->ccb_Flags |= CCB_LAST;
     r->last_cel = last;
     r->chain = &r->cels[0];
+}
+
+/*--------------------------------------------------------------------------
+ * Catch-up in spare time
+ *------------------------------------------------------------------------*/
+
+#define CATCH_BUDGET    16      /* cells drawn between two looks at the clock (a
+                                   look costs two system time samples on the console) */
+
+#define past(now, deadline) ((int32)((now)() - (deadline)) >= 0)
+
+/* When no layer holds the name table the VDP points at, a layer gets it
+ * and its rebuild starts (the cells are drawn by the catch-up steps): a
+ * layer with no table, else the least recently used of those the last
+ * picture did not use; a layer being rebuilt for another table is left
+ * to finish. */
+static void assign_ahead(renderer *r, const vdp_state *v)
+{
+    uint32 base = vdp_nt_base(v, v->reg[2]);
+    render_layer *best = NULL;
+    uint32 k;
+
+    if (layer_of(r, base) != NULL)
+        return;
+    for (k = 0; k < r->nlayers; k++) {
+        render_layer *c = &r->layer[k];
+
+        if (c->rb_next != RENDER_NO_TILE)
+            continue;
+        if (!c->valid) {
+            best = c;
+            break;
+        }
+        if (c->last_used < r->update && (best == NULL || c->last_used < best->last_used))
+            best = c;
+    }
+    if (best == NULL)
+        return;
+    best->nt_base = base;
+    best->valid = 0;
+    best->last_used = r->update;
+    rebuild_start(best, v->vram);
+    best->rb_next = 0;
+}
+
+/* The layer's counters of the work done, into the statistics. */
+static void count_ahead(renderer *r, render_layer *l)
+{
+    r->st.cells += l->cells;
+    r->st.ahead_cells += l->cells;
+    r->st.tile_cells += l->tile_cells;
+    r->st.tiles += l->tiles_conv;
+    r->st.ahead_tiles += l->tiles_conv;
+    l->cells = 0;
+    l->tile_cells = 0;
+    l->tiles_conv = 0;
+}
+
+uint32 render_catch_up(renderer *r, vdp_state *v, uint32 (*now)(void), uint32 deadline_us)
+{
+    const uint8 *vram = v->vram;
+    uint32 t0 = now();
+    uint32 pending = 0;
+    uint32 cut = 0;
+    uint32 nd;
+    uint32 k;
+    uint32 m;
+
+    if ((int32)(t0 - deadline_us) >= 0)
+        return 1;
+    set_mode(r, v->active, 0);
+
+    /* The written tiles become pending work of every layer holding a
+     * table: their conversions are forgotten, their cells are to be
+     * redrawn, and the name table chunks among them are to be compared
+     * (once the rebuild of a layer begun ahead is done, for that layer).
+     * A tile written again while its list was being walked starts over.
+     * A layer given a table below takes its shadow now, so the pending
+     * work of a fresh rebuild is dropped with it. */
+    nd = render_dirty_scan(v->dirty, r->dlist);
+    for (k = 0; k < nd; k++) {
+        uint32 j = r->dlist[k];
+
+        r->t_ok[j] = 0;
+        v->spr_tile_ok[j] = 0;
+        for (m = 0; m < RENDER_LAYERS; m++) {
+            render_layer *l = &r->layer[m];
+            uint32 d;
+
+            if (!layer_holds(l, l->nt_base))
+                continue;
+            l->tile_pend[j >> 5] |= (uint32)1 << (j & 31);
+            if (j == l->pend_tile)
+                l->pend_tile = RENDER_NO_TILE;
+            d = j - (l->nt_base >> 5);
+            if (d < l->nrows * 2)
+                l->nt_pend[d >> 5] |= (uint32)1 << (d & 31);
+        }
+    }
+    assign_ahead(r, v);
+    for (m = 0; m < RENDER_LAYERS; m++) {
+        render_layer *l = &r->layer[m];
+
+        pending |= l->nt_pend[0] | l->nt_pend[1] | (l->pend_tile != RENDER_NO_TILE) |
+                   (l->rb_next != RENDER_NO_TILE);
+        for (k = 0; k < VDP_TILES / 32; k++)
+            pending |= l->tile_pend[k];
+    }
+    if (!pending)
+        return 0;
+    r->st.ahead_calls++;
+    for (m = 0; m < RENDER_LAYERS; m++) {
+        render_layer *l = &r->layer[m];
+
+        l->stamp_now = (l->stamp_now + 1) & 0xFF;
+        if (l->stamp_now == 0)
+            memset(l->stamp, 0xFF, (size_t)l->cap_cells);
+        /* The rows of the last picture decide what is drawn first and
+         * which cells of the written tiles are left stale; before the
+         * first picture every row counts (the next update sets them
+         * again from its bands). */
+        if (l->shown_rows == 0 && l->nrows != 0)
+            l->shown_rows = (l->nrows >= 32) ? 0xFFFFFFFFu : (((uint32)1 << l->nrows) - 1);
+    }
+
+    /* The changed entries of the pending chunks first (an entry decides
+     * which tile a cell shows: a cell drawn for a written tile before
+     * its entry changes is drawn for nothing), a chunk at a time, the
+     * chunks of the rows the last picture showed first. */
+    for (m = 0; m < RENDER_LAYERS; m++) {
+        render_layer *l = &r->layer[m];
+        uint32 nchunks = l->nrows * 2;
+        uint32 pass;
+
+        if (!l->valid || (l->nt_pend[0] | l->nt_pend[1]) == 0)
+            continue;
+        for (pass = 0; pass < 2; pass++) {
+            uint32 c;
+
+            for (c = 0; c < nchunks; c++) {
+                uint32 one[2];
+                uint32 n;
+
+                if (!((l->nt_pend[c >> 5] >> (c & 31)) & 1))
+                    continue;
+                if ((((l->shown_rows >> (c >> 1)) & 1) != 0) != (pass == 0))
+                    continue;
+                one[0] = one[1] = 0;
+                one[c >> 5] = (uint32)1 << (c & 31);
+                n = render_nt_scan((const uint32 *)(vram + l->nt_base),
+                                   (const uint32 *)l->shadow, one, l->wlist, nchunks);
+                if (n != 0)
+                    render_entries(l, vram, n);
+                l->nt_pend[c >> 5] &= ~((uint32)1 << (c & 31));
+                if (past(now, deadline_us)) {
+                    cut = 1;
+                    goto out;
+                }
+            }
+        }
+    }
+
+    /* The list walk left unfinished by the previous call, when its cell
+     * still belongs to the tile (an entry change since then moved the
+     * cell to another list, which cannot be followed: the tile is then
+     * drawn again whole; the cells the entries moved in the meantime
+     * were drawn with their new entry). */
+    for (m = 0; m < RENDER_LAYERS; m++) {
+        render_layer *l = &r->layer[m];
+        uint32 t = l->pend_tile;
+
+        if (t == RENDER_NO_TILE)
+            continue;
+        if ((((uint32)l->shadow[2 * l->pend_cell + 1] & 1) << 8 |
+             l->shadow[2 * l->pend_cell]) != t) {
+            l->tile_pend[t >> 5] |= (uint32)1 << (t & 31);
+            l->pend_tile = RENDER_NO_TILE;
+            continue;
+        }
+        for (;;) {
+            uint32 next = render_tile_cells_part(l, vram, t, l->pend_cell, CATCH_BUDGET);
+
+            if (next == NONE) {
+                l->pend_tile = RENDER_NO_TILE;
+                break;
+            }
+            l->pend_cell = next;
+            if (past(now, deadline_us)) {
+                cut = 1;
+                goto out;
+            }
+        }
+    }
+
+    /* The cells of a rebuild in progress, from the table as it stands. */
+    for (m = 0; m < RENDER_LAYERS; m++) {
+        render_layer *l = &r->layer[m];
+
+        if (l->rb_next != RENDER_NO_TILE)
+            rebuild_refresh(l, vram);
+        while (l->rb_next != RENDER_NO_TILE) {
+            l->rb_next = render_rebuild_cells_part(l, vram, l->rb_next, CATCH_BUDGET);
+            if (l->rb_next >= l->ncells) {
+                l->valid = 1;
+                l->rb_next = RENDER_NO_TILE;
+                r->st.rebuilds++;
+            } else if (past(now, deadline_us)) {
+                cut = 1;
+                goto out;
+            }
+        }
+    }
+
+    /* The cells of the pending tiles of each layer holding a table (a
+     * layer being rebuilt has linked the cells drawn so far: the ones
+     * to redraw), in the rows the last picture showed; the others are
+     * left stale, as the update leaves them. */
+    for (m = 0; m < RENDER_LAYERS; m++) {
+        render_layer *l = &r->layer[m];
+
+        if (!layer_holds(l, l->nt_base))
+            continue;
+        for (k = 0; k < VDP_TILES / 32; k++) {
+            uint32 w;
+
+            while ((w = l->tile_pend[k]) != 0) {
+                uint32 j = k * 32 + lowest_bit(w);
+                uint32 from = NONE;
+
+                l->tile_pend[k] = w & (w - 1);
+                if (l->head[j] == NONE)
+                    continue;
+                for (;;) {
+                    uint32 next = render_tile_cells_part(l, vram, j, from, CATCH_BUDGET);
+
+                    if (next == NONE)
+                        break;
+                    from = next;
+                    if (past(now, deadline_us)) {
+                        /* The rest of this list is the cursor's. */
+                        l->pend_tile = j;
+                        l->pend_cell = next;
+                        cut = 1;
+                        goto out;
+                    }
+                }
+            }
+        }
+    }
+out:
+    for (m = 0; m < RENDER_LAYERS; m++)
+        count_ahead(r, &r->layer[m]);
+    r->st.ahead_cut += cut;
+    r->st.ahead_us += now() - t0;
+    return cut;
 }

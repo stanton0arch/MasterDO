@@ -113,7 +113,8 @@ static void print_window(const game_window_rec *p)
            "%lu frames short of layers, %lu frames with sprites past the line limit, "
            "%lu sprite runs dropped, %lu frames with sprite overflow, %lu with sprite collision, "
            "%lu frames in palette bands, %lu colour writes merged, %lu frames of more than "
-           "192 lines\n",
+           "192 lines, %lu cells and %lu tiles ahead in %lu frames with the display off "
+           "(%lu us, %lu cut short)\n",
            (unsigned long)p->first, (unsigned long)p->last,
            (unsigned long)d->rd.tiles, (unsigned long)d->rd.cells, (unsigned long)d->rd.rebuilds,
            (unsigned long)d->rd.tile_cells, (unsigned long)d->rd.palettes,
@@ -124,7 +125,10 @@ static void print_window(const game_window_rec *p)
            (unsigned long)d->rd.ntbands, (unsigned long)d->rd.dropped, (unsigned long)d->rd.layers,
            (unsigned long)d->rd.spr_partial, (unsigned long)d->rd.spr_dropped,
            (unsigned long)d->rd.overflows, (unsigned long)d->rd.collisions,
-           (unsigned long)d->rd.pbands, (unsigned long)d->rd.pmerged, (unsigned long)d->rd.tall);
+           (unsigned long)d->rd.pbands, (unsigned long)d->rd.pmerged, (unsigned long)d->rd.tall,
+           (unsigned long)d->rd.ahead_cells, (unsigned long)d->rd.ahead_tiles,
+           (unsigned long)d->rd.ahead_calls, (unsigned long)d->rd.ahead_us,
+           (unsigned long)d->rd.ahead_cut);
 }
 
 static void print_slow(const game_slow_rec *p)
@@ -652,6 +656,13 @@ uint32 game_spare_time(game *g, uint32 frame_start, uint32 deadline_us)
     uint32 origin = deadline_us - g->frame_us;  /* the frame the deadline ends */
 
     (void)frame_start;
+    /* With the display off the picture's catch-up comes first (the work
+     * the first frame with the display on would pay), then the
+     * translation of queued code in what is left. */
+    if (!render_display_on(g->rd)) {
+        render_catch_up(g->rd, &g->sms->vdp, plat_usec_now, deadline_us - FRAME_MARGIN_US);
+        now = plat_usec_now();
+    }
     while (z80j_spare_fits(&g->jit, now - origin, FRAME_MARGIN_US)) {
         if (!z80j_prefetch(&g->jit))
             break;
@@ -733,7 +744,8 @@ void game_log_summary(game *g)
            "%lu frames with sprites past the line limit, %lu sprite runs dropped, "
            "%lu frames with sprite overflow, %lu with sprite collision, "
            "%lu frames in palette bands, %lu colour writes merged, %lu frames of more than "
-           "192 lines\n",
+           "192 lines, %lu cells and %lu tiles ahead in %lu frames with the display off "
+           "(%lu us, %lu cut short)\n",
            (unsigned long)d.rd.tiles, (unsigned long)d.rd.cells, (unsigned long)d.rd.rebuilds,
            (unsigned long)d.rd.tile_cells, (unsigned long)d.rd.palettes,
            (unsigned long)d.rd.sprites, (unsigned long)d.rd.pieces,
@@ -742,7 +754,10 @@ void game_log_summary(game *g)
            (unsigned long)d.rd.ntbands, (unsigned long)d.rd.dropped, (unsigned long)d.rd.layers,
            (unsigned long)d.rd.spr_partial, (unsigned long)d.rd.spr_dropped,
            (unsigned long)d.rd.overflows, (unsigned long)d.rd.collisions,
-           (unsigned long)d.rd.pbands, (unsigned long)d.rd.pmerged, (unsigned long)d.rd.tall);
+           (unsigned long)d.rd.pbands, (unsigned long)d.rd.pmerged, (unsigned long)d.rd.tall,
+           (unsigned long)d.rd.ahead_cells, (unsigned long)d.rd.ahead_tiles,
+           (unsigned long)d.rd.ahead_calls, (unsigned long)d.rd.ahead_us,
+           (unsigned long)d.rd.ahead_cut);
     printf("Game summary: VDP %lu data writes, %lu data reads, %lu control writes, "
            "%lu status reads, %lu counter reads, PSG %lu writes, pad %lu reads\n",
            (unsigned long)d.vdp_data_w, (unsigned long)d.vdp_data_r,

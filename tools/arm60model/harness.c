@@ -50,6 +50,7 @@ static bench_cpu_result bres;
 static uint32 fb[256 * (VDP_ACTIVE_MAX / 2)];
 static uint32 fb2[256 * (VDP_ACTIVE_MAX / 2)];
 static uint32 pic_h;            /* lines of the pictures compared */
+static uint32 prev_on;          /* display on at the previous frame */
 
 /* LRFORM pixel access. */
 static void put_pixel(uint32 *f, int32 x, int32 y, uint32 c)
@@ -397,6 +398,17 @@ static uint32 sprite_flag_frames[2];
 /* Compares the assembly evaluation of the current frame with the
  * reference (both pure functions of the VDP state apart from the status
  * bits, which the assembly ORs in again here). */
+/* Tiles whose dirty byte is set (work waiting for the renderer). */
+static uint32 count_dirty(const vdp_state *v)
+{
+    uint32 n = 0;
+    uint32 k;
+
+    for (k = 0; k < VDP_TILES; k++)
+        n += v->dirty[k] != 0;
+    return n;
+}
+
 static void check_sprites(vdp_state *v, uint32 f)
 {
     int32 ry[VDP_SPRITES];
@@ -584,29 +596,36 @@ void hmain(void)
             uint32 t0 = plat_usec_now();
             z80j_stats s0 = g.jit.stats;
             uint32 i0 = g.ctx->int_insns;
+            uint32 dw0 = g.sms->vdp.n_data_w;
+
+            uint32 draw;
 
             if (game_frame(&g, pad & 0x3F, (pad >> 8) & 1) != 0)
                 break;
             /* A DrawCels of 3.5 ms is added to the frame time, as on
-             * the console, before the spare time is used. */
-            game_frame_done(&g, 3500);
-            game_spare_time(&g, t0 - 3500, t0 - 3500 + PLAT_NTSC_FRAME_US);
+             * the console, before the spare time is used (none with the
+             * display off: nothing is drawn). */
+            draw = render_display_on(g.rd) ? 3500 : 0;
+            game_frame_done(&g, draw);
+            game_spare_time(&g, t0 - draw, t0 - draw + PLAT_NTSC_FRAME_US);
             if (sim_arg(19)) {
                 /* -framelog: one line per frame, for the presentation
                  * model (present.py) and the translation policy. */
                 const z80j_stats *s = &g.jit.stats;
 
                 printf("Frame: %lu emu %lu upd %lu draw %lu spare %lu sync %lu sync_us %lu "
-                       "forced %lu refused %lu spare_blocks %lu insns %lu shown %lu\n",
+                       "forced %lu refused %lu spare_blocks %lu insns %lu shown %lu "
+                       "dataw %lu dirty %lu\n",
                        (unsigned long)f, (unsigned long)g.last_us, (unsigned long)g.last_upd_us,
-                       (unsigned long)(render_display_on(g.rd) ? 3500 : 0),
-                       (unsigned long)g.last_spare_us,
+                       (unsigned long)draw, (unsigned long)g.last_spare_us,
                        (unsigned long)(s->sync - s0.sync), (unsigned long)(s->sync_us - s0.sync_us),
                        (unsigned long)(s->forced - s0.forced),
                        (unsigned long)(s->sync_refused - s0.sync_refused),
                        (unsigned long)(s->prefetched - s0.prefetched),
                        (unsigned long)(g.ctx->int_insns - i0),
-                       (unsigned long)render_display_on(g.rd));
+                       (unsigned long)render_display_on(g.rd),
+                       (unsigned long)(g.sms->vdp.n_data_w - dw0),
+                       (unsigned long)count_dirty(&g.sms->vdp));
             }
         }
         if (sim_arg(13))
@@ -732,11 +751,14 @@ void hmain(void)
                            (unsigned long)(((s->ccb_PRE0 >> PRE0_VCNT_SHIFT) & 0x3FF) + 1));
             }
         }
-        /* Compared: the frames at multiples of the dump period and those
+        /* Compared: the frames at multiples of the dump period, those
          * with a scroll or display band (a frame whose display was off
-         * from its start with no band is blank in both pictures). */
+         * from its start with no band is blank in both pictures), and
+         * the first frame with the display on after frames without it
+         * (the picture caught up in their spare time). */
         if (dump_every && ((f + 1) % dump_every == 0 || g.sms->vdp.de_n != 0 ||
-                           g.sms->vdp.hs_n != 0 || g.sms->vdp.cr_n != 0)) {
+                           g.sms->vdp.hs_n != 0 || g.sms->vdp.cr_n != 0 ||
+                           (render_display_on(g.rd) && !prev_on))) {
             const vdp_state *v = &g.sms->vdp;
 
             pic_h = v->active;
@@ -768,6 +790,7 @@ void hmain(void)
                    v->reg[0], v->reg[1], v->reg[2], v->reg[5], v->reg[6], v->reg[8], v->reg[9],
                    (unsigned long)v->hs_n);
         }
+        prev_on = render_display_on(g.rd);
     }
     game_log_summary(&g);
     printf("Sprites: %lu frames checked, %lu with differences, %lu with overflow, %lu with collision\n",

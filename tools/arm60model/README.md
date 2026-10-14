@@ -60,6 +60,20 @@ code take interrupts at different boundaries, so a game can take another
 course without any fault; a change of course right from the first frames
 is a fault).
 
+The frames compared with the reference view are those at multiples of
+the dump period, those with a scroll, display or colour band, and the
+first frame with the display on after frames without it (the picture
+caught up in their spare time). A frame with the display off is charged
+no drawing time, as on the console, so its spare time goes to the
+picture's catch-up and to translation like the ISO's.
+
+`-framelog` prints one `Frame:` line per frame (emulation, update and
+drawing times, spare time used, translations at once and their time,
+forced ones, refusals, blocks translated in spare time, interpreted
+instructions, display on, VDP data writes, dirty tiles left at the end
+of the frame); `present.py` replays those lines through the queued
+presentation of the ISO.
+
 `-dumpdiff n` with `-dump`: the frames compared because of a scroll or
 display band are only written when they differ, the first n of them; the
 pictures at multiples of the dump period are always written (a raster game
