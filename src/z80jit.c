@@ -1,7 +1,9 @@
 /*
- * Z80 to ARM translator: decoding, analysis, block management and the C
- * side of the glue. See z80jit.h for the overall design and z80jit_emit.c
- * for the generated code.
+ * Z80 to ARM translator: block management, the flag scans and the
+ * busy-wait loop rules of the analysis, and the C side of the glue. See
+ * z80jit.h for the overall design, z80jit_dec.s for the decoder,
+ * z80jit_ana.s for the analysis passes and z80jit_emit.c for the
+ * generated code.
  */
 
 #include "z80jit_int.h"
@@ -68,9 +70,18 @@ CHECK_OFF(i_internal, offsetof(jit_insn, internal) == 56);
 CHECK_OFF(i_irq_check, offsetof(jit_insn, irq_check) == 64);
 CHECK_OFF(i_dyn, offsetof(jit_insn, dyn) == 80);
 CHECK_OFF(i_size, sizeof(jit_insn) == 104);
+CHECK_OFF(i_seg_start, offsetof(jit_insn, seg_start) == 72);
+CHECK_OFF(i_live_after, offsetof(jit_insn, live_after) == 84);
+CHECK_OFF(i_t_after, offsetof(jit_insn, t_after) == 96);
 CHECK_OFF(d_serial, offsetof(jit_dec_block, serial) == 16);
 CHECK_OFF(d_next, offsetof(jit_dec_block, next_pc) == 20);
 CHECK_OFF(d_flags, offsetof(jit_dec_block, flags) == 24);
+/* The arguments of z80jit_ana.s. */
+CHECK_OFF(a_next_pc, offsetof(jit_ana_block, next_pc) == 12);
+CHECK_OFF(a_bc, offsetof(jit_ana_block, bc) == 20);
+CHECK_OFF(a_busy, offsetof(jit_ana_block, busy) == 24);
+CHECK_OFF(a_fused, offsetof(jit_ana_block, fused) == 32);
+CHECK_OFF(b_j, offsetof(jit_block_ctx, j) == 0);
 CHECK_OFF(c_slot_bank, offsetof(z80j_ctx, slot_bank) == 0x87C);
 CHECK_OFF(c_page_kind, offsetof(z80j_ctx, page_kind) == 0x900);
 
@@ -391,12 +402,16 @@ static uint32 scan_needed(jit_block_ctx *b, uint32 pc, int32 depth)
 {
     uint32 defined = 0;
     uint32 needed = 0;
+    uint32 safe_page = 0xFFFFFFFFu;     /* page found safe (its key does not change) */
     int32 k;
     jit_insn in;
 
     for (k = 0; k < SCAN_INSNS; k++) {
-        if (!scan_safe(b, pc))
-            break;
+        if ((pc >> 8) != safe_page) {
+            if (!scan_safe(b, pc))
+                break;
+            safe_page = pc >> 8;
+        }
         jit_decode(&in, pc, b->j->ctx);
         needed |= in.use & ~defined;
         defined |= in.def;
@@ -421,7 +436,9 @@ static uint32 scan_needed(jit_block_ctx *b, uint32 pc, int32 depth)
     return needed | (FL_ALL & ~defined);
 }
 
-static uint32 flags_needed(jit_block_ctx *b, uint32 pc)
+/* Flags the code at pc may read before writing them (scan_needed), with
+ * a memo per block and a cache across blocks. Called by z80jit_ana.s. */
+uint32 jit_flags_needed(jit_block_ctx *b, uint32 pc)
 {
     z80j_state *j = b->j;
     uint32 ckey = (pc & 0xFFFFu) | (b->key << 16);      /* pc and bank */
@@ -453,69 +470,6 @@ static uint32 flags_needed(jit_block_ctx *b, uint32 pc)
         b->nmemo++;
     }
     return v;
-}
-
-/* Z80 flags a producer can leave in the ARM flags (FU_*). */
-/* Element of a port output run started by the ED opcode first: 1 for an
- * OUTI (an OUTD in a run of OUTD), 2 for an OUT (C),r on the run's
- * register *outc (set by the first one met), 0 when op ends the run. */
-static uint32 run_elem(uint32 first, uint32 op, uint32 *outc)
-{
-    if (first == 0xAB)
-        return op == 0xAB;
-    if (op == 0xA3)
-        return 1;
-    if ((op == 0x79 || op == 0x51 || op == 0x59) && (*outc == 0 || *outc == op)) {
-        *outc = op;
-        return 2;
-    }
-    return 0;
-}
-
-static uint32 fuse_mask(const jit_insn *in)
-{
-    uint32 x = in->op >> 6;
-    uint32 y = (in->op >> 3) & 7;
-    uint32 z = in->op & 7;
-
-    switch (in->pre) {
-    case PRE_NONE:
-    case PRE_DD:
-    case PRE_FD:
-        if (x == 2 || (x == 3 && z == 6)) {         /* ALU */
-            if (y <= 1)
-                return FU_Z_EQ | FU_C_CS | FU_S_MI | FU_V_VS;
-            if (y <= 3 || y == 7)
-                return FU_Z_EQ | FU_C_CC | FU_S_MI | FU_V_VS;
-            return FU_Z_EQ | FU_S_MI;
-        }
-        if (x == 0 && (z == 4 || z == 5) && y != 6)  /* INC / DEC r */
-            return FU_Z_EQ | FU_S_MI | FU_V_VS;
-        if (x == 0 && z == 1 && (y & 1))            /* ADD HL,rr */
-            return FU_C_CS;
-        return 0;
-    case PRE_CB:
-    case PRE_DDCB:
-    case PRE_FDCB:
-        return (x == 1) ? FU_Z_EQ : 0;              /* BIT */
-    default:                                        /* ED */
-        if (x == 1 && z == 4)                       /* NEG */
-            return FU_Z_EQ | FU_C_CC | FU_S_MI | FU_V_VS;
-        if (x == 1 && z == 2)                       /* SBC / ADC HL,rr */
-            return (y & 1) ? (FU_Z_EQ | FU_S_MI | FU_V_VS | FU_C_CS) : (FU_Z_EQ | FU_S_MI | FU_V_VS | FU_C_CC);
-        return 0;
-    }
-}
-
-/* FU_* a condition can use. */
-static uint32 cc_fuse_need(uint32 cc)
-{
-    switch (cc) {
-    case 0: case 1: return FU_Z_EQ | FU_Z_CS;
-    case 2: case 3: return FU_C_CS | FU_C_CC;
-    case 4: case 5: return FU_V_VS;
-    default:        return FU_S_MI;
-    }
 }
 
 /*--------------------------------------------------------------------------
@@ -708,9 +662,10 @@ static int32 busy_insn(const jit_insn *in, const uint32 *line_ports, uint32 *rd,
  * pass, and no other jump enters it past its head. Memory can then only
  * change through an interrupt, so the loop runs until the next one
  * (returns 1). A loop that reads a line port computes the same thing on
- * every pass of a line, and waits for the next line (returns 2).
+ * every pass of a line, and waits for the next line (returns 2). Called
+ * by z80jit_ana.s for each jump back of a block.
  */
-static int32 busy_loop(const z80j_state *j, const jit_insn *ins, int32 n, int32 h, int32 e)
+int32 jit_busy_loop(const z80j_state *j, const jit_insn *ins, int32 n, int32 h, int32 e)
 {
     uint32 written = 0;
     uint32 exposed = 0;
@@ -1196,17 +1151,10 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
     jit_insn *ins = jit_insns;
     z80j_block *blk;
     uint32 addr = pc & 0xFFFFu;
-    uint32 live;
-    uint32 run;
-    uint32 span;
     uint32 serial;
     z80j_area *area;
     int32 n = 0;
-    jit_insn *seg;
-    jit_insn *p;
-    jit_insn *end;
     int32 i;
-    int32 k;
 
     /* Area: hot for a block translated before (evicted since), cold
      * otherwise; the zone is emptied when it cannot take another block
@@ -1276,167 +1224,41 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
     bc.n = n;
     bc.next_pc = addr;
     jit_last_n = (uint32)n;
-    end = ins + n;
 
-    /* Jump targets inside the block become segment starts. */
-    span = (addr - pc) & 0xFFFFu;
-    for (p = ins; p < end; p++) {
-        uint32 kd = p->kind;
-        uint32 off;
-        uint32 m;
+    /* Analysis (jit_analyse_block, z80jit_ana.s), in three walks over the
+     * records:
+     * - jump targets inside the block become segment starts, and the
+     *   jumps back that close a busy-wait loop (jit_busy_loop) are
+     *   marked;
+     * - segments: block start, after each conditional instruction, and
+     *   whenever the running total would exceed SEG_MAX_T. Runs of port
+     *   outputs inside a segment become one transfer: OUTD alone, or
+     *   OUTI mixed with OUT (C),r for one register r among A, D and E,
+     *   which the run does not change (a byte written between the bytes
+     *   read from memory, as in an upload of three bit planes and a
+     *   constant fourth one); a run stops after the instruction that
+     *   follows EI, whose interrupt check comes after the run. An OUTI
+     *   (OUTD) closed by JR NZ or JP NZ back to it sends B bytes, as
+     *   OTIR (OTDR) does: the passes go out in one run when the stretch
+     *   has room for all of them (emit_out_loop);
+     * - backwards: the T-states of each segment from each instruction
+     *   on (seg_t) and after it (t_after), the flag liveness from the
+     *   block exit (jit_flags_needed for the code the exits lead to),
+     *   and the producers whose only reader is the next conditional
+     *   jump, which leave their result in the ARM flags (fused). */
+    {
+        jit_ana_block a;
 
-        if (!(IS_COND(kd) && kd != K_RETCC && kd != K_CALLCC) && kd != K_JR && kd != K_JP)
-            continue;
-        if (p->dyn)
-            continue;
-        off = (p->target - pc) & 0xFFFFu;
-        if (off >= span)
-            continue;
-        m = jit_pcmap[p->target & 0xFFu];
-        if ((m & ~0xFFu) == serial) {
-            k = (int32)(m & 0xFFu) - 1;
-            p->internal = k;
-            ins[k].seg_start = 1;
-        }
-    }
-
-    /* Jumps back that close a busy-wait loop. */
-    for (p = ins, k = 0; p < end; p++, k++) {
-        uint32 kd = p->kind;
-
-        if (p->internal >= 0 && p->internal <= k &&
-            (kd == K_JRCC || kd == K_JPCC || kd == K_JR || kd == K_JP) &&
-            (p->busy = (uint32)busy_loop(j, ins, n, p->internal, k)) != 0) {
-            j->stats.busy_loops++;
-            if (p->busy == 2)
-                j->stats.line_loops++;
-        }
-    }
-
-    /* Segments: block start, after each conditional instruction, and
-     * whenever the running total would exceed SEG_MAX_T. */
-    ins[0].seg_start = 1;
-    run = 0;
-    seg = ins;
-    for (p = ins; p < end; p++) {
-        if (p > ins && IS_COND(p[-1].kind))
-            p->seg_start = 1;
-        if (!p->seg_start && run + p->t > SEG_MAX_T)
-            p->seg_start = 1;
-        if (p->seg_start) {
-            seg = p;
-            run = 0;
-        }
-        run += p->t;
-        seg->seg_t = run;
-    }
-    run = 0;
-    for (p = ins; p < end; p++) {
-        if (p->seg_start)
-            run = p->seg_t;
-        run -= p->t;
-        p->t_after = run;
-    }
-
-    /* Runs of port outputs inside a segment become one transfer: OUTD
-     * alone, or OUTI mixed with OUT (C),r for one register r among A, D
-     * and E, which the run does not change (a byte written between the
-     * bytes read from memory, as in an upload of three bit planes and a
-     * constant fourth one). A run stops after the instruction that
-     * follows EI, whose interrupt check comes after the run. */
-    for (p = ins; p < end; p++) {
-        jit_insn *q;
-        uint32 len = 0;
-        uint32 mask = 0;
-        uint32 outc = 0;
-        uint32 e;
-
-        if (p->run != 0 || p->pre != PRE_ED)
-            continue;
-        e = run_elem(p->op, p->op, &outc);
-        for (q = p; e != 0; ) {
-            if (e == 2)
-                mask |= (uint32)1 << len;
-            len++;
-            if (q->irq_check || len == Z80J_RUN_MAX)
-                break;
-            q++;
-            if (q >= end || q->seg_start || q->pre != PRE_ED)
-                break;
-            e = run_elem(p->op, q->op, &outc);
-        }
-        if (len >= 2) {
-            p->run = len | (mask << 8) | (outc << 24);
-            for (q = p + 1; q < p + len; q++)
-                q->run = RUN_PART;
-        }
-    }
-
-    /* An OUTI (OUTD) closed by JR NZ or JP NZ back to it sends B bytes,
-     * as OTIR (OTDR) does: the passes go out in one run when the stretch
-     * has room for all of them (emit_out_loop). */
-    for (p = ins, k = 0; p + 1 < end; p++, k++) {
-        jit_insn *c = p + 1;
-
-        if (p->run == 0 && p->pre == PRE_ED && (p->op == 0xA3 || p->op == 0xAB) &&
-            !p->irq_check && (c->kind == K_JRCC || c->kind == K_JPCC) && c->cc == 0 &&
-            c->internal == k && !c->dyn && !c->busy && !c->irq_check)
-            p->run = RUN_LOOP;
-    }
-
-    /* Flag liveness, backwards from the block exit. */
-    switch (end[-1].kind) {
-    case K_JR: case K_JP: case K_CALL: case K_RST:
-        live = end[-1].dyn ? FL_ALL : flags_needed(&bc, end[-1].target);
-        break;
-    case K_RET: case K_RETN: case K_JPIND: case K_HALT:
-        live = FL_ALL;
-        break;
-    default:
-        live = flags_needed(&bc, bc.next_pc);
-        break;
-    }
-    for (p = end - 1; p >= ins; p--) {
-        p->live_after = live;
-        if (IS_COND(p->kind)) {
-            uint32 taken;
-            if (p->kind == K_RETCC || p->dyn)
-                taken = FL_ALL;
-            else if (p->internal >= 0 && &ins[p->internal] > p)
-                taken = ins[p->internal].live_before;
-            else
-                taken = flags_needed(&bc, p->target);
-            live |= p->use | taken;
-        } else {
-            live = (live & ~p->def) | p->use;
-        }
-        p->live_before = live;
-    }
-
-    /* A producer whose only reader is the next conditional jump leaves
-     * its result in the ARM flags. */
-    for (p = ins; p + 1 < end; p++) {
-        jit_insn *c = p + 1;
-        uint32 fm;
-        uint32 after;
-
-        if (c->seg_start || c->kind == K_DJNZ || c->kind == K_REP || !IS_COND(c->kind) ||
-            p->irq_check)
-            continue;
-        fm = fuse_mask(p) & cc_fuse_need(c->cc);
-        if (fm == 0)
-            continue;
-        if (c->kind == K_RETCC || c->dyn)
-            after = FL_ALL;
-        else if (c->internal >= 0 && &ins[c->internal] > c)
-            after = ins[c->internal].live_before;
-        else
-            after = flags_needed(&bc, c->target);
-        after |= c->live_after;
-        if ((p->def & after) == 0) {
-            p->fused = fm;
-            j->stats.fused++;
-        }
+        a.ins = ins;
+        a.n = n;
+        a.pc = pc & 0xFFFFu;
+        a.next_pc = bc.next_pc;
+        a.serial = serial;
+        a.bc = &bc;
+        jit_analyse_block(&a);
+        j->stats.busy_loops += a.busy;
+        j->stats.line_loops += a.line;
+        j->stats.fused += a.fused;
     }
 
     /* Report static exits. */

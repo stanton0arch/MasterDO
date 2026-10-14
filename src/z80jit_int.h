@@ -142,6 +142,20 @@ typedef struct {
 #define JIT_DEC_DYN   0x4u  /* some operand is read when it runs */
 #define JIT_DEC_SEAM  0x8u  /* the block was cut at a seam of RAM */
 
+/* Analysis of a decoded block (jit_analyse_block). CONTRACT with
+ * z80jit_ana.s (offsets checked in z80jit.c). */
+typedef struct {
+    jit_insn       *ins;    /* in: the decoded instructions */
+    int32           n;      /* in: their number */
+    uint32          pc;     /* in: address of the block (16 bits) */
+    uint32          next_pc;/* in: address after the last instruction */
+    uint32          serial; /* in: tag of the instruction map entries */
+    struct jit_block_ctx_s *bc; /* in: block context of the flag scans */
+    uint32          busy;   /* out: busy-wait loops found */
+    uint32          line;   /* out: of which wait for a line */
+    uint32          fused;  /* out: flag tests fused with their jump */
+} jit_ana_block;
+
 /* Branches resolved at the end of the block. */
 #define STUB_TIMEOUT 0      /* segment check -> time-out stub */
 #define STUB_FORWARD 1      /* jump forward inside the block */
@@ -178,8 +192,9 @@ struct z80j_block {
 
 #define SCAN_MEMO 16
 
-/* Translation of one block, shared by the two parts. */
-typedef struct {
+/* Translation of one block, shared by the two parts. CONTRACT with
+ * z80jit_ana.s: the translator state comes first. */
+typedef struct jit_block_ctx_s {
     z80j_state *j;
     jit_insn   *ins;
     int32       n;
@@ -209,6 +224,17 @@ void   jit_decode(jit_insn *in, uint32 pc, const z80j_ctx *c);
 /* Decodes the instructions of a block (see translate_block): returns their
  * number, 0 when the first one crosses a seam of RAM. */
 int32  jit_decode_block(jit_dec_block *d);
+
+/* z80jit_ana.s */
+/* Runs the analysis passes over a decoded block (see translate_block). */
+void   jit_analyse_block(jit_ana_block *a);
+
+/* z80jit.c, for z80jit_ana.s */
+/* Flags the code at pc may read before writing them, for the block b. */
+uint32 jit_flags_needed(jit_block_ctx *b, uint32 pc);
+/* Whether the loop from ins[h] to the jump back ins[e] waits for an
+ * interrupt (1) or for a line (2); 0 when it may do something else. */
+int32  jit_busy_loop(const z80j_state *j, const jit_insn *ins, int32 n, int32 h, int32 e);
 
 /* z80jit_emit.c */
 uint32 arm_branch(uint32 cond, uint32 link, uint32 from, uint32 to);
