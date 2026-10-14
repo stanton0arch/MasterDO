@@ -525,6 +525,8 @@ void ana_test(void)
             a.pc = pc;
             a.next_pc = d.next_pc;
             a.serial = serial;
+            a.targets = 0;
+            a.max_targets = 0;
             a.bc = &bcb;
             a.busy = a.line = a.fused = 0x12345678u;
             jit_analyse_block(&a);

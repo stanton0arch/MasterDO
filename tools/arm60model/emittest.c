@@ -2444,6 +2444,8 @@ void emit_test(void)
             a.pc = pc;
             a.next_pc = d.next_pc;
             a.serial = serial;
+            a.targets = 0;
+            a.max_targets = 0;
             a.bc = &bca;
             jit_analyse_block(&a);
             memcpy(eb, ea, n * sizeof(jit_insn));

@@ -402,6 +402,7 @@ typedef struct {
      * eviction of the zone holding its code. */
     z80j_resume resume[Z80J_RESUMES];
     z80j_stats  stats;
+    uint32      zone_shift; /* log2 of zone_words */
 } z80j_state;
 
 /* Memory for max_blocks block descriptors, and for a link log of

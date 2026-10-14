@@ -35,6 +35,9 @@ I_SIZE          EQU     104
 ; jit_ana_block (z80jit_int.h).
 A_NEXT_PC       EQU     12
 A_BUSY          EQU     24
+A_TARGETS       EQU     36
+A_MAX_TARGETS   EQU     40
+A_NTARGETS      EQU     44
 
 ; jit_block_ctx: the translator state comes first.
 B_J             EQU     0
@@ -47,6 +50,8 @@ K_DJNZ          EQU     5
 K_REP           EQU     6
 K_JR            EQU     7
 K_JP            EQU     8
+K_CALL          EQU     9
+K_RST           EQU     10
 K_RET           EQU     11
 
 PRE_CB          EQU     1
@@ -78,7 +83,20 @@ F_BUSY          EQU     24
 F_LINE          EQU     28
 F_NBACK         EQU     32              ; jumps back found by the first pass
 F_BACK          EQU     36              ; head index | index << 8 of each
-F_SIZE          EQU     36 + 4 * MAX_INSNS
+F_TARGETS       EQU     36 + 4 * MAX_INSNS      ; next static exit to report (0: none asked)
+F_TEND          EQU     F_TARGETS + 4           ; end of the room for them
+F_SIZE          EQU     F_TEND + 4
+
+; Reports the static exit $v (a Z80 address) when exits are asked for and
+; there is room left. Uses r12, lr.
+        MACRO
+        REPORT  $v
+        ldr     r12,[sp,#F_TARGETS]
+        ldr     lr,[sp,#F_TEND]
+        cmp     r12,lr
+        strlo   $v,[r12],#4
+        strlo   r12,[sp,#F_TARGETS]
+        MEND
 
 ;----------------------------------------------------------------------------
 ; void jit_analyse_block(jit_ana_block *a)
@@ -109,10 +127,21 @@ jit_analyse_block
         str     r1,[sp,#F_BUSY]
         str     r1,[sp,#F_LINE]
         str     r1,[sp,#F_FUSED]
+        ldr     r1,[r0,#A_TARGETS]
+        ldr     r2,[r0,#A_MAX_TARGETS]
+        add     r2,r1,r2,lsl #2
+        str     r1,[sp,#F_TARGETS]
+        str     r2,[sp,#F_TEND]
 
 ; Pass 1: a jump whose static target lies inside the block gets the index
 ; of the target instruction, which starts a segment. Jumps back by JR, JP,
 ; JR cc and JP cc are kept for the busy-wait loop analysis.
+; When the caller asks for them (the code reachable from the entry points,
+; translated before the run), the static exits of the block are reported
+; on the way, in instruction order: the target of a conditional jump
+; leaving the block, of a JR, JP, CALL or RST (inside or not), the return
+; address of a CALL or RST after its target, and the address after the
+; block when it does not end with a transfer.
 ; r0 = record, r4 = ins, r5 = end, r6 = pc, r7 = span, r8 = serial,
 ; r9 = jit_dec_tab, r11 = index.
         mov     r0,r4
@@ -125,6 +154,20 @@ p1_loop
         cmp     r1,#K_JR
         cmpne   r1,#K_JP
         beq     p1_target
+        cmp     r1,#K_CALL
+        cmpne   r1,#K_RST
+        bne     p1_next
+        ; CALL and RST: the target, then the return address.
+        ldr     r2,[r0,#I_DYN]
+        cmp     r2,#0
+        bne     p1_next
+        ldr     r2,[r0,#I_TARGET]
+        REPORT  r2
+        ldmia   r0,{r2,r3}              ; pc, len
+        add     r2,r2,r3
+        mov     r2,r2,lsl #16
+        mov     r2,r2,lsr #16
+        REPORT  r2
 p1_next
         add     r11,r11,#1
         add     r0,r0,#I_SIZE
@@ -133,8 +176,16 @@ p1_next
         b       p1_done
 p1_cond
         cmp     r1,#K_RETCC
-        cmpne   r1,#K_CALLCC
         beq     p1_next
+        cmp     r1,#K_CALLCC
+        bne     p1_target
+        ; CALL cc: never a jump inside the block, its target is an exit.
+        ldr     r2,[r0,#I_DYN]
+        cmp     r2,#0
+        bne     p1_next
+        ldr     r2,[r0,#I_TARGET]
+        REPORT  r2
+        b       p1_next
 p1_target
         ldr     r2,[r0,#I_DYN]
         cmp     r2,#0                   ; the target is read when it runs
@@ -144,13 +195,13 @@ p1_target
         mov     r3,r3,lsl #16
         mov     r3,r3,lsr #16           ; offset from the block start
         cmp     r3,r7
-        bhs     p1_next
+        bhs     p1_outside
         and     r3,r2,#0xFF
         add     r3,r9,r3,lsl #2
         ldr     r3,[r3,#1024]           ; instruction map entry
-        bic     r2,r3,#0xFF
-        cmp     r2,r8                   ; of this decoding
-        bne     p1_next
+        bic     r12,r3,#0xFF
+        cmp     r12,r8                  ; of this decoding
+        bne     p1_outside
         and     r3,r3,#0xFF
         sub     r3,r3,#1                ; index of the target
         str     r3,[r0,#I_INTERNAL]
@@ -159,6 +210,12 @@ p1_target
         add     r2,r4,r2,lsl #3
         mov     r12,#1
         str     r12,[r2,#I_SEG_START]   ; the target starts a segment
+        cmp     r1,#K_JR                ; an unconditional transfer is an
+        cmpne   r1,#K_JP                ; exit even inside the block
+        bne     p1_back
+        ldr     r2,[r0,#I_TARGET]
+        REPORT  r2
+p1_back
         cmp     r3,r11                  ; a jump back
         bhi     p1_next
         cmp     r1,#K_JRCC
@@ -173,7 +230,20 @@ p1_target
         add     r2,r2,#1
         str     r2,[sp,#F_NBACK]
         b       p1_next
+p1_outside
+        ; A jump leaving the block: an exit (r2 = its target).
+        REPORT  r2
+        b       p1_next
 p1_done
+        ; The address after the block is an exit when the block does not
+        ; end with a transfer.
+        ldr     r1,[r5,#I_KIND - I_SIZE]
+        cmp     r1,#K_JR
+        bhs     p1_nofall
+        ldr     r2,[sp,#F_ARGS]
+        ldr     r2,[r2,#A_NEXT_PC]
+        REPORT  r2
+p1_nofall
 
 ; Busy-wait loops: each jump back kept is given to jit_busy_loop (C),
 ; which says whether the loop it closes waits for an interrupt (1) or
@@ -473,6 +543,11 @@ p3_store
         ldr     r3,[sp,#F_FUSED]
         add     r0,r0,#A_BUSY
         stmia   r0,{r1-r3}
+        ldr     r1,[sp,#F_TARGETS]
+        ldr     r2,[r0,#A_TARGETS - A_BUSY]
+        sub     r1,r1,r2
+        mov     r1,r1,lsr #2
+        str     r1,[r0,#A_NTARGETS - A_BUSY]
         add     sp,sp,#F_SIZE
         ldmfd   sp!,{r4-r9,r11,pc}
 

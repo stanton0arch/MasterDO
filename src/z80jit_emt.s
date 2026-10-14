@@ -75,9 +75,9 @@ ST_KIND         EQU     0
 ST_SITE         EQU     4
 ST_PC           EQU     8
 ST_T            EQU     12
-ST_INDEX        EQU     16
-ST_REG          EQU     20
-ST_RESUME       EQU     24
+ST_RESUME       EQU     16
+ST_INDEX        EQU     20
+ST_REG          EQU     24
 ST_SIZE         EQU     28
 MAX_STUBS       EQU     256
 
@@ -349,20 +349,22 @@ eb_body
 
         ldr     r6,[r4,#B_INS]
         mov     r7,#0
+        ldr     r0,[r4,#B_N]
+        str     r0,[r4,#B_SKIP_TO]      ; no skip pending: the loop runs to the end
 eb_loop
-        ldr     r0,[r4,#B_SKIP_SITE]
-        cmp     r0,#0
-        bne     eb_skip
-eb_noskip
         str     r5,[r6,#I_HOST]
         ; The EF_* flags of the instruction: its interrupt check, fused
-        ; test and live flags, then a segment check when it starts one.
+        ; test, live flags and memory operand, then a segment check when
+        ; it starts one.
         add     r0,r6,#I_IRQ_CHECK
         ldmia   r0,{r0,r1,r2,r3,r12,lr} ; irq_check run seg_start fused dyn live_after
-        ldr     r9,[r6,#I_DEF]
+        add     r9,r6,#I_DEF
+        ldmia   r9,{r9,r11,r12}         ; def ei mem
         tst     r9,lr
         movne   r11,#EF_LIVE
         moveq   r11,#0
+        cmp     r12,#0
+        orrne   r11,r11,#EF_MEM
         cmp     r3,#0
         orrne   r11,r11,#EF_FUSED
         cmp     r0,#0
@@ -372,9 +374,6 @@ eb_noskip
 eb_insn
         add     r0,r6,#I_PRE
         ldmia   r0,{r0,r9}              ; pre, op
-        ldr     r1,[r6,#I_MEM]
-        cmp     r1,#0
-        orrne   r11,r11,#EF_MEM
         cmp     r0,#PRE_ED
         beq     emit_ed
         bhi     eb_dd
@@ -393,33 +392,22 @@ eb_dd
         orrne   r11,r11,#EF_IY
         b       eb_main
 
-; The branch past a port output loop, patched where the loop ends.
-eb_skip
-        ldr     r1,[r4,#B_SKIP_TO]
-        cmp     r1,r7
-        bne     eb_noskip
-        mov     r1,r5
-        PATCHB  r0,r1,r2
-        mov     r0,#0
-        str     r0,[r4,#B_SKIP_SITE]
-        b       eb_noskip
-
 ; Segment check: SUBS r8,r8,#t * CYCLE, then BMI to the time-out stub,
-; which resumes at the check.
+; which resumes at the check. r9 is loaded again at eb_insn.
 eb_seg
-        ldr     r1,[r6,#I_SEG_T]
+        ldr     r9,[r6,#I_SEG_T]
         TMPL    r0,t_subs_cyc
         orr     r0,r0,#0xC00
-        orr     r0,r0,r1                ; (always below 256: a byte in bits 8-15)
+        orr     r0,r0,r9                ; (always below 256: a byte in bits 8-15)
+        mov     r12,r5                  ; the check, where the stub resumes
         EMIT    r0
         mov     r0,#STUB_TIMEOUT
         bl      new_stub
         ldr     r1,[r6,#I_PC]
-        ldr     r2,[r6,#I_SEG_T]
-        ldr     r3,[r6,#I_HOST]
-        str     r1,[r0,#ST_PC]
-        str     r2,[r0,#ST_T]
-        str     r3,[r0,#ST_RESUME]
+        mov     r2,r9
+        mov     r3,r12
+        add     r0,r0,#ST_PC
+        stmia   r0,{r1,r2,r3}           ; pc, t, resume
         mov     r0,#B_MI
         EMIT    r0
         b       eb_insn
@@ -427,9 +415,33 @@ eb_seg
 ; Every handler comes back here.
 eb_done
         tst     r11,#EF_IRQ
-        beq     eb_next
-        ; The instruction after EI: a pending interrupt is taken now (the
-        ; block is left for it), otherwise the block goes on.
+        bne     eb_irq
+eb_next
+        add     r7,r7,#1
+        add     r6,r6,#I_SIZE
+        ldr     r0,[r4,#B_SKIP_TO]
+        cmp     r7,r0
+        blo     eb_loop
+
+        ; The end of the instructions, or the instruction the branch past
+        ; a port output loop skips to: the branch is patched here and the
+        ; loop goes on to the end.
+        ldr     r0,[r4,#B_SKIP_SITE]
+        cmp     r0,#0
+        beq     eb_noskip2
+        mov     r1,r5
+        PATCHB  r0,r1,r2
+        mov     r0,#0
+        str     r0,[r4,#B_SKIP_SITE]
+        ldr     r0,[r4,#B_N]
+        str     r0,[r4,#B_SKIP_TO]
+        cmp     r7,r0
+        blo     eb_loop
+        b       eb_noskip2
+
+; The instruction after EI: a pending interrupt is taken now (the block
+; is left for it), otherwise the block goes on.
+eb_irq
         adr     lr,t_irq_check
         ldmia   lr,{r0-r2}
         stmia   r5!,{r0-r2}
@@ -441,25 +453,12 @@ eb_done
         mov     r1,r1,lsl #16
         mov     r1,r1,lsr #16
         ldr     r2,[r6,#I_T_AFTER]
-        str     r1,[r0,#ST_PC]
-        str     r2,[r0,#ST_T]
+        add     r0,r0,#ST_PC
+        stmia   r0,{r1,r2}              ; pc, t
         mov     r0,#B_NE
         EMIT    r0
-eb_next
-        add     r7,r7,#1
-        add     r6,r6,#I_SIZE
-        ldr     r0,[r4,#B_N]
-        cmp     r7,r0
-        blo     eb_loop
+        b       eb_next
 
-        ; End of the instructions.
-        ldr     r0,[r4,#B_SKIP_SITE]
-        cmp     r0,#0
-        beq     eb_noskip2
-        mov     r1,r5
-        PATCHB  r0,r1,r2
-        mov     r0,#0
-        str     r0,[r4,#B_SKIP_SITE]
 eb_noskip2
         ; Fall-through exit when the block did not end with a transfer.
         sub     r6,r6,#I_SIZE           ; the last instruction
@@ -483,77 +482,77 @@ eb_noskip2
 
         ; The stubs, in the order they were made.
 eb_stubs
-        mov     r7,#0
-eb_stub_loop
+        ldr     r7,[r4,#B_STUBS]        ; the stub
         ldr     r0,[r4,#B_NSTUBS]
-        cmp     r7,r0
+        rsb     r0,r0,r0,lsl #3
+        add     r9,r7,r0,lsl #2         ; the end of the stubs
+        ldr     r11,[r8,#G_SEG_TIMEOUT] ; (r9 and r11 are free by now)
+eb_stub_loop
+        cmp     r7,r9
         bhs     eb_end
-        ldr     r6,[r4,#B_STUBS]
-        rsb     r0,r7,r7,lsl #3
-        add     r6,r6,r0,lsl #2         ; the stub
-        add     r7,r7,#1
-        ldr     r0,[r6,#ST_KIND]
+        ldr     r0,[r7,#ST_KIND]
         adr     r1,stub_tab
         ldr     pc,[r1,r0,lsl #2]
+eb_stub_next
+        add     r7,r7,#ST_SIZE
+        b       eb_stub_loop
 stub_tab
         DCD     st_timeout, st_forward, st_link, st_taken, st_write, st_leave, st_dyn
 
 st_timeout
-        ldr     r0,[r6,#ST_SITE]
+        ldr     r0,[r7,#ST_SITE]
         mov     r1,r5
         PATCHB  r0,r1,r2
-        ldr     r0,[r8,#G_SEG_TIMEOUT]
-        EMITB   r1,r0,BL_AL
-        ldr     r0,[r6,#ST_T]
-        ldr     r1,[r6,#ST_PC]
-        ldr     r2,[r6,#ST_RESUME]
-        mov     r0,r0,lsl #8
-        stmia   r5!,{r0-r2}
-        b       eb_stub_loop
+        EMITB   r1,r11,BL_AL
+        add     r3,r7,#ST_PC
+        ldmia   r3,{r1,r2,r3}           ; pc, t, resume
+        mov     r0,r2,lsl #8
+        stmia   r5!,{r0,r1,r3}          ; t * CYCLE, pc, resume
+        b       eb_stub_next
 st_forward
-        ldr     r0,[r6,#ST_SITE]
-        ldr     r1,[r6,#ST_INDEX]
+        ldr     r0,[r7,#ST_SITE]
+        ldr     r1,[r7,#ST_INDEX]
         ldr     r2,[r4,#B_INS]
         RECORD  r3,r2,r1
         ldr     r1,[r3,#I_HOST]
         PATCHB  r0,r1,r2
-        b       eb_stub_loop
+        b       eb_stub_next
 st_link
-        ldr     r0,[r6,#ST_SITE]
+        ldr     r0,[r7,#ST_SITE]
         mov     r1,r5
         PATCHB  r0,r1,r2
         ldr     r0,[r8,#G_LINK]
         EMITB   r1,r0,BL_AL
-        ldr     r0,[r6,#ST_PC]
-        ldr     r1,[r6,#ST_SITE]
+        ldr     r0,[r7,#ST_PC]
+        ldr     r1,[r7,#ST_SITE]
         ldr     r2,[r4,#B_KEY]
         mov     r3,r5                   ; the data words
         stmia   r5!,{r0-r2}
         bl      e_link
-        b       eb_stub_loop
+        b       eb_stub_next
 st_taken
-        ldr     r0,[r6,#ST_SITE]
+        ldr     r0,[r7,#ST_SITE]
         mov     r1,r5
         PATCHB  r0,r1,r2
-        ldr     r1,[r6,#ST_INDEX]
+        ldr     r1,[r7,#ST_INDEX]
         ldr     r2,[r4,#B_INS]
         RECORD  r6,r2,r1                ; the instruction, for the helpers
         bl      e_taken
-        b       eb_stub_loop
+        b       eb_stub_next
 st_dyn
-        ldr     r0,[r6,#ST_SITE]
+        ldr     r0,[r7,#ST_SITE]
         mov     r1,r5
         PATCHB  r0,r1,r2
-        ldr     r1,[r6,#ST_INDEX]
+        ldr     r1,[r7,#ST_INDEX]
         ldr     r2,[r4,#B_INS]
         RECORD  r6,r2,r1
         bl      e_dyn_exit
-        b       eb_stub_loop
+        b       eb_stub_next
 st_write
-        ldr     r0,[r6,#ST_SITE]
+        ldr     r0,[r7,#ST_SITE]
         mov     r1,r5
         PATCHB  r0,r1,r2
-        ldr     r0,[r6,#ST_REG]
+        ldr     r0,[r7,#ST_REG]
         cmp     r0,#RAD
         TMPL    r1,t_mov_r12_r
         orrne   r1,r1,r0
@@ -562,26 +561,26 @@ st_write
         EMIT    r0
         ldr     r0,[r8,#G_WRITE]
         EMITB   r1,r0,BL_AL
-        ldr     r0,[r6,#ST_PC]
-        ldr     r1,[r6,#ST_T]
+        ldr     r0,[r7,#ST_PC]
+        ldr     r1,[r7,#ST_T]
         ldr     r2,[r4,#B_KEY]
         mov     r1,r1,lsl #8
         stmia   r5!,{r0-r2}
-        b       eb_stub_loop
+        b       eb_stub_next
 st_leave
-        ldr     r0,[r6,#ST_SITE]
+        ldr     r0,[r7,#ST_SITE]
         mov     r1,r5
         PATCHB  r0,r1,r2
-        ldr     r0,[r6,#ST_PC]
+        ldr     r0,[r7,#ST_PC]
         mov     r1,#0
         bl      e_mov32
-        ldr     r1,[r6,#ST_T]
+        ldr     r1,[r7,#ST_T]
         mov     r1,r1,lsl #8
         TMPL    r0,t_mov_r1_imm
         bl      e_dpi
         ldr     r0,[r8,#G_LEAVE]
         EMITB   r1,r0,B_AL
-        b       eb_stub_loop
+        b       eb_stub_next
 
 eb_end
         ldr     r1,[sp,#F_J]
@@ -751,8 +750,9 @@ eb_ram_done
 ; Stubs and encodings
 ;----------------------------------------------------------------------------
 
-; new_stub: r0 = kind -> r0 = a new stub (site = the cursor, the other
-; fields zero). Uses r1-r3, r12.
+; new_stub: r0 = kind -> r0 = a new stub (site = the cursor; the other
+; fields are left to the caller: each kind reads only the ones its creator
+; sets). Uses r1-r3.
 new_stub
         ldr     r1,[r4,#B_NSTUBS]
         ldr     r2,[r4,#B_STUBS]
@@ -764,12 +764,7 @@ new_stub
         bhi     ns_many
 ns_fill
         mov     r1,r5
-        mov     r3,#0
-        mov     r12,#0
-        stmia   r2,{r0,r1,r3,r12}
-        str     r3,[r2,#ST_INDEX]
-        str     r3,[r2,#ST_REG]
-        str     r3,[r2,#ST_RESUME]
+        stmia   r2,{r0,r1}
         mov     r0,r2
         mov     pc,lr
 ns_many
@@ -835,8 +830,18 @@ e_imm
 
 ; e_dpi: emits the data processing word r0 (with its immediate bit) with
 ; the immediate value r1 encoded in it; an unencodable value is an
-; error. Uses r1-r3, r12.
+; error. A byte, or a byte in bits 8-15 (T-states), is encoded here; the
+; other forms go through e_imm. Uses r1-r3, r12.
 e_dpi
+        cmp     r1,#256
+        orrlo   r0,r0,r1
+        strlo   r0,[r5],#4
+        movlo   pc,lr
+        bics    r2,r1,#0xFF00
+        orreq   r0,r0,#0xC00
+        orreq   r0,r0,r1,lsr #8
+        streq   r0,[r5],#4
+        moveq   pc,lr
         stmfd   sp!,{lr}
         bl      e_imm
         cmp     r1,#IMM_NONE
@@ -852,18 +857,16 @@ ed_none
 ; e_mov32: emits r1 = r0 (32 bits), one to four instructions.
 ; Uses r0-r3, r12.
 e_mov32
-        stmfd   sp!,{r4,r6,r7,lr}
-        mov     r4,r1,lsl #12           ; the destination field
-        mov     r6,r0                   ; the value
-        ; A 16-bit value with both bytes set: one MOV when its bits fit
-        ; in 8 from an even position at or below its lowest set bit, else
-        ; MOV + ORR.
+        ; A 16-bit value with both bytes set (the usual case: a Z80
+        ; address): one MOV when its bits fit in 8 from an even position
+        ; at or below its lowest set bit, else MOV + ORR. Nothing saved.
         cmp     r0,#0x10000
         bhs     em_general
-        ands    r1,r0,#0xFF
+        ands    r2,r0,#0xFF
         beq     em_general
         cmp     r0,#256
         blo     em_general
+        mov     r12,r1,lsl #12          ; the destination field
         tst     r0,#0xF
         bne     em_p03
         mov     r2,#4
@@ -883,23 +886,26 @@ em_p
         and     r2,r2,#15
         orr     r3,r3,r2,lsl #8
         TMPL    r1,t_mov_imm
-        orr     r1,r1,r4
+        orr     r1,r1,r12
         orr     r1,r1,r3
         EMIT    r1
-        ldmfd   sp!,{r4,r6,r7,pc}
+        mov     pc,lr
 em_two
         TMPL    r1,t_mov_imm
-        orr     r1,r1,r4
+        orr     r1,r1,r12
         and     r2,r0,#0xFF
         orr     r1,r1,r2
         TMPL    r2,t_orr_imm
-        orr     r2,r2,r4
-        orr     r2,r2,r4,lsl #4         ; the same register as source
+        orr     r2,r2,r12
+        orr     r2,r2,r12,lsl #4        ; the same register as source
         orr     r2,r2,#0xC00
         orr     r2,r2,r0,lsr #8
         stmia   r5!,{r1,r2}
-        ldmfd   sp!,{r4,r6,r7,pc}
+        mov     pc,lr
 em_general
+        stmfd   sp!,{r4,r6,r7,lr}
+        mov     r4,r1,lsl #12           ; the destination field
+        mov     r6,r0                   ; the value
         mov     r1,r0
         bl      e_imm
         cmp     r1,#IMM_NONE
@@ -2626,7 +2632,10 @@ eed_loop
         add     r0,r6,#I_SIZE
         bl      e_out_loop
         str     r0,[r4,#B_SKIP_SITE]
-        add     r0,r7,#2
+        add     r0,r7,#2                ; the block loop patches it there
+        ldr     r1,[r4,#B_N]
+        cmp     r0,r1
+        movhs   r0,r1                   ; (or at the end of the instructions)
         str     r0,[r4,#B_SKIP_TO]
         bl      e_block_insn
         b       eb_done

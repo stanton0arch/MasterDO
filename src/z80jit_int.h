@@ -154,6 +154,9 @@ typedef struct {
     uint32          busy;   /* out: busy-wait loops found */
     uint32          line;   /* out: of which wait for a line */
     uint32          fused;  /* out: flag tests fused with their jump */
+    uint32         *targets;/* in: where to report the static exits (0: not asked) */
+    uint32          max_targets;    /* in: room there */
+    uint32          ntargets;       /* out: exits reported */
 } jit_ana_block;
 
 /* Branches resolved at the end of the block. CONTRACT with z80jit_emt.s
@@ -171,9 +174,9 @@ typedef struct {
     uint32 *site;           /* branch to patch */
     uint32  pc;             /* Z80 address */
     uint32  t;              /* T-states to give back / segment T-states */
+    uint32 *resume;         /* STUB_TIMEOUT: segment check to resume at */
     int32   index;          /* instruction */
     uint32  reg;            /* STUB_WRITE: register holding the address */
-    uint32 *resume;         /* STUB_TIMEOUT: segment check to resume at */
 } jit_stub;
 
 #define RUN_PART   0xFFFFFFFFu
@@ -192,6 +195,14 @@ struct z80j_block {
 };
 
 #define SCAN_MEMO 16
+
+/* Translation scratch shared by z80jit.c and z80jit_blk.s, and the
+ * instruction count and end address of the block translated last. */
+extern jit_insn jit_insns[MAX_INSNS];
+extern jit_stub jit_stubs[MAX_STUBS];
+extern uint32   jit_last_n;
+extern uint32   jit_last_next;
+extern uint32   jit_last_ntargets;
 
 /* Translation of one block, shared by the parts. CONTRACT with
  * z80jit_ana.s and z80jit_emt.s (offsets checked in z80jit.c): the
@@ -262,5 +273,16 @@ uint32 jit_link_host(z80j_state *j, uint32 target, uint32 from_key, uint32 from_
  * jump site or 0, key), preceded by its call to the linker, a direct
  * branch to host, and logs it; does nothing when the log is full. */
 void   jit_link_stub(z80j_state *j, uint32 *d, uint32 host);
+/* Moves an area on to another zone, emptied first if it holds code. */
+void   jit_next_zone(z80j_state *j, z80j_area *a);
+
+/* z80jit_blk.s */
+/* Translates the block at pc: the block management around the decoding,
+ * the analysis and the emission. Returns 0 with j->error set when the
+ * block could not be translated (5: nothing decodable). With a non-null
+ * targets, the static exits of the block are written there (at most
+ * max_targets), their number in jit_last_ntargets. */
+z80j_block *jit_translate_block(z80j_state *j, uint32 pc, uint32 *targets,
+                                uint32 max_targets);
 
 #endif /* Z80JIT_INT_H */
