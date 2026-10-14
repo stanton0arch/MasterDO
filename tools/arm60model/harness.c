@@ -39,6 +39,7 @@ extern void sim_mark(uint32 id);
 extern void sim_codedump(uint32 code, uint32 cur, uint32 blocks, uint32 nblocks);
 extern void dec_test(void);
 extern void ana_test(void);
+extern void emit_test(void);
 
 static struct KernelBase kb;
 static Task task;
@@ -541,6 +542,10 @@ void hmain(void)
     }
     if (sim_arg(22)) {
         ana_test();             /* -anatest: the analysis passes in assembly against C */
+        return;
+    }
+    if (sim_arg(23)) {
+        emit_test();            /* -emittest: the code emitter in assembly against C */
         return;
     }
     if (frames == 0)

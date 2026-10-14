@@ -7,8 +7,9 @@ built. It is not part of the ISO and `make` does not use it.
 ## How it works
 
 - `mk.sh` links the objects of the last `make clean && make` (`build/*.o`)
-  with `harness.c` (the driver), `dectest.c` (the decoder check) and
-  `anatest.c` (the analysis check), all compiled by `armcc`, and `hstub.s` (host services) into a plain binary (`armlink -bin` at 0x8000, symbols in
+  with `harness.c` (the driver), `dectest.c`, `anatest.c` and `emittest.c`
+  (the checks of the assembly decoder, analysis passes and code emitter
+  against their C references), all compiled by `armcc`, and `hstub.s` (host services) into a plain binary (`armlink -bin` at 0x8000, symbols in
   `sim.sym`), and builds `sim` with `gcc`.
 - `sim` interprets the binary as an ARMv3 big-endian CPU and counts the S,
   N and I cycles of every instruction with the timings of the ARM60
@@ -94,6 +95,19 @@ ways from the same records; the fields the analysis writes (internal
 targets, busy-wait loops, runs, segment starts, fused tests, flag
 liveness, segment T-states) and the counts are compared. It prints one
 `Analysis test:` line with the differences found (0 expected).
+
+`-emittest` (no cartridge needed) checks the code emitter in assembly
+(`src/z80jit_emt.s`) against the C emitter it replaced, kept in
+`emittest.c`: 60 000 random blocks (the instruction templates of the
+analysis test, with random bytes sprinkled in for the other opcode forms)
+over pages of every kind (fixed, paged slots with large bank numbers, RAM
+with a mirror, mapped near the context or out of reach of the fixed
+offsets) are decoded and analysed once, then emitted twice at the same
+address, by the C and by the assembly; the generated words, the code
+address of each instruction, the body address, the number of stubs, the
+error and the count of full flag computations are compared. It prints one
+`Emitter test:` line with the differences found (0 expected); the first
+differing blocks are dumped word by word.
 
 A hang is located without a debugger: `kill -USR1 <pid of sim>` prints the
 simulated pc and lr with their symbols, the stack pointer, r0 and r1.

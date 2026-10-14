@@ -638,6 +638,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-framelog")) args[19] = 1;
         else if (!strcmp(argv[i], "-dectest")) args[21] = 1;
         else if (!strcmp(argv[i], "-anatest")) args[22] = 1;
+        else if (!strcmp(argv[i], "-emittest")) args[23] = 1;
         else if (!strcmp(argv[i], "-force") && i + 1 < argc) args[20] = atoi(argv[++i]) + 1;
         else if (!strcmp(argv[i], "-hotzones") && i + 1 < argc) args[12] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-budget") && i + 1 < argc) {

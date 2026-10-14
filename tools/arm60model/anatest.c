@@ -281,8 +281,8 @@ static jit_insn ra[MAX_INSNS];
 static jit_insn rb[MAX_INSNS];
 
 /* Writes a block of code at pc: about len bytes of random instructions
- * whose jumps mostly land inside it. */
-static void gen_code(const z80j_ctx *c, uint32 pc, uint32 len)
+ * whose jumps mostly land inside it (also used by the emitter test). */
+void ana_gen_code(const z80j_ctx *c, uint32 pc, uint32 len)
 {
     uint32 at = 0;
     uint32 r;
@@ -493,7 +493,7 @@ void ana_test(void)
 
             if ((v & 7) == 0)
                 pc = (pc & 0xFF00u) | (0xF0u + (pc & 15u));     /* near a page end */
-            gen_code(c, (pc - 8) & 0xFFFFu, 160);
+            ana_gen_code(c, (pc - 8) & 0xFFFFu, 160);
             key = jit_block_key(c, pc);
             d.ins = ra;
             d.pc = pc;

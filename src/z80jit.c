@@ -82,6 +82,53 @@ CHECK_OFF(a_bc, offsetof(jit_ana_block, bc) == 20);
 CHECK_OFF(a_busy, offsetof(jit_ana_block, busy) == 24);
 CHECK_OFF(a_fused, offsetof(jit_ana_block, fused) == 32);
 CHECK_OFF(b_j, offsetof(jit_block_ctx, j) == 0);
+CHECK_OFF(b_ins, offsetof(jit_block_ctx, ins) == 4);
+CHECK_OFF(b_n, offsetof(jit_block_ctx, n) == 8);
+CHECK_OFF(b_next_pc, offsetof(jit_block_ctx, next_pc) == 12);
+CHECK_OFF(b_key, offsetof(jit_block_ctx, key) == 16);
+CHECK_OFF(b_end_leave, offsetof(jit_block_ctx, end_leave) == 20);
+CHECK_OFF(b_stubs, offsetof(jit_block_ctx, stubs) == 24);
+CHECK_OFF(b_nstubs, offsetof(jit_block_ctx, nstubs) == 28);
+CHECK_OFF(b_entry_check, offsetof(jit_block_ctx, entry_check) == 32);
+CHECK_OFF(b_has_dyn, offsetof(jit_block_ctx, has_dyn) == 36);
+CHECK_OFF(b_mark_off, offsetof(jit_block_ctx, mark_off) == 40);
+CHECK_OFF(b_body, offsetof(jit_block_ctx, body) == 44);
+CHECK_OFF(b_skip_site, offsetof(jit_block_ctx, skip_site) == 48);
+CHECK_OFF(b_skip_to, offsetof(jit_block_ctx, skip_to) == 52);
+CHECK_OFF(st_size, sizeof(jit_stub) == 28);
+CHECK_OFF(st_site, offsetof(jit_stub, site) == 4);
+CHECK_OFF(st_pc, offsetof(jit_stub, pc) == 8);
+CHECK_OFF(st_t, offsetof(jit_stub, t) == 12);
+CHECK_OFF(st_index, offsetof(jit_stub, index) == 16);
+CHECK_OFF(st_reg, offsetof(jit_stub, reg) == 20);
+CHECK_OFF(st_resume, offsetof(jit_stub, resume) == 24);
+CHECK_OFF(s_cur, offsetof(z80j_state, cur) == 12);
+CHECK_OFF(s_zone_end, offsetof(z80j_state, zone_end) == 16);
+CHECK_OFF(s_glue, offsetof(z80j_state, glue) == 0x4F84);
+CHECK_OFF(s_error, offsetof(z80j_state, error) == 0x4F84 + 0x1060);
+CHECK_OFF(s_full_flags, offsetof(z80j_state, stats.full_flags) == 0x4F84 + 0x38D8);
+CHECK_OFF(g_link, offsetof(z80j_glue, link) == 0);
+CHECK_OFF(g_lddr, offsetof(z80j_glue, lddr) == 60);
+CHECK_OFF(iy, GOFF(iy) == 0x424);
+CHECK_OFF(i_reg, GOFF(i) == 0x43C);
+CHECK_OFF(r_reg, GOFF(r) == 0x440);
+CHECK_OFF(iff2, GOFF(iff2) == 0x448);
+CHECK_OFF(im, GOFF(im) == 0x44C);
+CHECK_OFF(scratch, GOFF(scratch) == 0x494);
+CHECK_OFF(c_port_in, offsetof(z80j_ctx, port_in) == 0x89C);
+CHECK_OFF(c_port_out, offsetof(z80j_ctx, port_out) == 0x8A0);
+CHECK_OFF(i_pc, offsetof(jit_insn, pc) == 0);
+CHECK_OFF(i_d, offsetof(jit_insn, d) == 16);
+CHECK_OFF(i_n, offsetof(jit_insn, n) == 20);
+CHECK_OFF(i_t, offsetof(jit_insn, t) == 24);
+CHECK_OFF(i_kind, offsetof(jit_insn, kind) == 28);
+CHECK_OFF(i_target, offsetof(jit_insn, target) == 36);
+CHECK_OFF(i_def, offsetof(jit_insn, def) == 44);
+CHECK_OFF(i_busy, offsetof(jit_insn, busy) == 60);
+CHECK_OFF(i_run, offsetof(jit_insn, run) == 68);
+CHECK_OFF(i_fused, offsetof(jit_insn, fused) == 76);
+CHECK_OFF(i_seg_t, offsetof(jit_insn, seg_t) == 92);
+CHECK_OFF(i_host, offsetof(jit_insn, host) == 100);
 CHECK_OFF(c_slot_bank, offsetof(z80j_ctx, slot_bank) == 0x87C);
 CHECK_OFF(c_page_kind, offsetof(z80j_ctx, page_kind) == 0x900);
 
@@ -1285,7 +1332,7 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
     blk->entry = j->cur;
     bc.entry_check = (bc.key == KEY_FIXED) ? 0 : (bc.key == KEY_RAM) ? 2 : 1;
     j->error = 0;
-    emit_block_code(&bc);
+    jit_emit_block(&bc);
     if (j->error == 4) {
         /* The zone was too full for this block: emit it again in the
          * next one. */
@@ -1297,7 +1344,7 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
         j->zone_end = area->end;
         bc.mark_off = (uint32)GOFF(chunk_mark) + 4 * chunk_of(j, j->cur);
         j->error = 0;
-        emit_block_code(&bc);
+        jit_emit_block(&bc);
     }
     if (j->error) {
         printf("Z80 translator: block at $%04lx not translated (error %ld, %ld instructions)\n",

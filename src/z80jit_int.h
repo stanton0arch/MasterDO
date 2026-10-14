@@ -156,7 +156,8 @@ typedef struct {
     uint32          fused;  /* out: flag tests fused with their jump */
 } jit_ana_block;
 
-/* Branches resolved at the end of the block. */
+/* Branches resolved at the end of the block. CONTRACT with z80jit_emt.s
+ * (offsets checked in z80jit.c). */
 #define STUB_TIMEOUT 0      /* segment check -> time-out stub */
 #define STUB_FORWARD 1      /* jump forward inside the block */
 #define STUB_LINK    2      /* jump to untranslated code -> linker stub */
@@ -192,8 +193,9 @@ struct z80j_block {
 
 #define SCAN_MEMO 16
 
-/* Translation of one block, shared by the two parts. CONTRACT with
- * z80jit_ana.s: the translator state comes first. */
+/* Translation of one block, shared by the parts. CONTRACT with
+ * z80jit_ana.s and z80jit_emt.s (offsets checked in z80jit.c): the
+ * translator state comes first. */
 typedef struct jit_block_ctx_s {
     z80j_state *j;
     jit_insn   *ins;
@@ -239,8 +241,10 @@ int32  jit_busy_loop(const z80j_state *j, const jit_insn *ins, int32 n, int32 h,
 /* z80jit_emit.c */
 uint32 arm_branch(uint32 cond, uint32 link, uint32 from, uint32 to);
 void   patch_b(uint32 *site, uint32 to);
-void   emit_b(z80j_state *j, uint32 cond, uint32 link, uint32 to);
-void   emit_block_code(jit_block_ctx *b);
+
+/* z80jit_emt.s */
+/* Emits the code of the block at b->j->cur (see translate_block). */
+void   jit_emit_block(jit_block_ctx *b);
 
 /* Block keys. */
 #define KEY_FIXED 0u
