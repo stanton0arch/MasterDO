@@ -9,14 +9,12 @@
 
 /* Offsets used by sms_io.s. */
 #define CHECK_OFF(name, cond) typedef char check_##name[(cond) ? 1 : -1]
-CHECK_OFF(addr, offsetof(vdp_state, addr) == 0x00);
-CHECK_OFF(ctl, offsetof(vdp_state, ctl) == 0x04);
-CHECK_OFF(latch, offsetof(vdp_state, latch) == 0x08);
-CHECK_OFF(buffer, offsetof(vdp_state, buffer) == 0x0C);
-CHECK_OFF(cram_dirty, offsetof(vdp_state, cram_dirty) == 0x10);
-CHECK_OFF(n_data_w, offsetof(vdp_state, n_data_w) == 0x14);
-CHECK_OFF(n_data_r, offsetof(vdp_state, n_data_r) == 0x18);
-CHECK_OFF(n_ctrl_w, offsetof(vdp_state, n_ctrl_w) == 0x1C);
+CHECK_OFF(acc, offsetof(vdp_state, acc) == 0x00);
+CHECK_OFF(latch, offsetof(vdp_state, latch) == 0x04);
+CHECK_OFF(buffer, offsetof(vdp_state, buffer) == 0x08);
+CHECK_OFF(cram_dirty, offsetof(vdp_state, cram_dirty) == 0x0C);
+CHECK_OFF(n_data_r, offsetof(vdp_state, n_data_r) == 0x10);
+CHECK_OFF(n_ctrl_w, offsetof(vdp_state, n_ctrl_w) == 0x14);
 CHECK_OFF(cram, offsetof(vdp_state, cram) == 0x20);
 CHECK_OFF(reg, offsetof(vdp_state, reg) == 0x40);
 CHECK_OFF(status, offsetof(vdp_state, status) == 0x50);
@@ -182,8 +180,7 @@ void vdp_reset(vdp_state *v)
     memset(v->spr_tile_ok, 0, sizeof(v->spr_tile_ok));
     memset(v->reg, 0, sizeof(v->reg));
     memcpy(v->reg, vdp_power_on, sizeof(vdp_power_on));
-    v->addr = 0;
-    v->ctl = 0;
+    v->acc = 0;
     v->latch = 0;
     v->buffer = 0;
     v->status = 0;
@@ -201,7 +198,6 @@ void vdp_reset(vdp_state *v)
     vdp_mode(v);
     memset(v->dirty, 1, sizeof(v->dirty));
     v->cram_dirty = 1;
-    v->n_data_w = 0;
     v->n_data_r = 0;
     v->n_ctrl_w = 0;
     v->n_stat_r = 0;
@@ -259,25 +255,34 @@ void vdp_event(vdp_state *v)
     vdp_schedule(v);
 }
 
+/* The access word with its pending control word ended: the slow mark
+ * stays for code 3. */
+static uint32 acc_unpend(uint32 a)
+{
+    a &= ~(uint32)(VDP_PENDING | VDP_ACC_SLOW);
+    if (((a >> VDP_ACC_CODE_SHIFT) & 3) == 3)
+        a |= VDP_ACC_SLOW;
+    return a;
+}
+
 uint32 vdp_data_read(vdp_state *v)
 {
+    uint32 a = v->acc;
     uint32 r = v->buffer;
 
     v->n_data_r++;
-    v->ctl &= ~VDP_PENDING;
-    v->buffer = v->vram[v->addr];
-    v->addr = (v->addr + 1) & (VDP_VRAM_SIZE - 1);
+    v->buffer = v->vram[a >> VDP_ACC_ADDR_SHIFT];
+    v->acc = acc_unpend(a) + (1u << VDP_ACC_ADDR_SHIFT);
     return r;
 }
 
 void vdp_data_write(vdp_state *v, uint32 value, uint32 left)
 {
-    uint32 a = v->addr;
+    uint32 acc = acc_unpend(v->acc);
+    uint32 a = acc >> VDP_ACC_ADDR_SHIFT;
 
-    v->n_data_w++;
-    v->ctl &= ~VDP_PENDING;
     v->buffer = value;
-    if (v->ctl == 3) {
+    if (acc & VDP_ACC_SLOW) {
         /* A colour written during the active display shows from the next
          * line on (most of the current one is drawn). */
         uint32 hpos;
@@ -291,7 +296,8 @@ void vdp_data_write(vdp_state *v, uint32 value, uint32 left)
         v->vram[a] = (uint8)value;
         v->dirty[a >> 5] = 1;
     }
-    v->addr = (a + 1) & (VDP_VRAM_SIZE - 1);
+    /* The next address (wrapping by itself), one more write. */
+    v->acc = acc + (1u << VDP_ACC_ADDR_SHIFT) + 1;
 }
 
 uint32 vdp_status_read(vdp_state *v, uint32 left)
@@ -303,7 +309,7 @@ uint32 vdp_status_read(vdp_state *v, uint32 left)
     lc_sync(v, vdp_lines_done(v, left));
     v->status = 0;
     v->line_flag = 0;
-    v->ctl &= ~VDP_PENDING;
+    v->acc = acc_unpend(v->acc);
     v->ctx->irq_line = 0;
     return s;
 }
@@ -359,19 +365,24 @@ static uint32 vdp_reg_write(vdp_state *v, uint32 r, uint32 d, uint32 left)
 
 uint32 vdp_control_write(vdp_state *v, uint32 value, uint32 left)
 {
+    uint32 code;
+    uint32 addr;
+
     v->n_ctrl_w++;
-    if (!(v->ctl & VDP_PENDING)) {
+    if (!(v->acc & VDP_PENDING)) {
         v->latch = value;
-        v->addr = (v->addr & 0x3F00) | value;
-        v->ctl |= VDP_PENDING;
+        v->acc = (v->acc & ~(0xFFu << VDP_ACC_ADDR_SHIFT)) | (value << VDP_ACC_ADDR_SHIFT) |
+                 VDP_PENDING | VDP_ACC_SLOW;
         return 0;
     }
-    v->ctl = value >> 6;
-    v->addr = ((value & 0x3F) << 8) | v->latch;
-    if (v->ctl == 0) {
-        v->buffer = v->vram[v->addr];
-        v->addr = (v->addr + 1) & (VDP_VRAM_SIZE - 1);
-    } else if (v->ctl == 2) {
+    code = value >> 6;
+    addr = ((value & 0x3F) << 8) | v->latch;
+    v->acc = (v->acc & VDP_ACC_DW_MASK) | (code << VDP_ACC_CODE_SHIFT) |
+             (addr << VDP_ACC_ADDR_SHIFT) | (code == 3 ? VDP_ACC_SLOW : 0);
+    if (code == 0) {
+        v->buffer = v->vram[addr];
+        v->acc += 1u << VDP_ACC_ADDR_SHIFT;
+    } else if (code == 2) {
         return vdp_reg_write(v, value & 0x0F, v->latch, left);
     }
     return 0;

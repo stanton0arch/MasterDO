@@ -43,9 +43,14 @@ typedef struct {
     uint32 leaves;          /* VDP control writes that left the block */
 } sms_io_stats;
 
+/* The VDP comes first: the machine is allocated right after the
+ * translator's context, where the assembly port handlers address it at a
+ * fixed offset from the global pointer (SMS_VDP_OFFSET, checked in
+ * sms.c). The callbacks of the translator recover the machine from the
+ * mapper, whose first member they point at. */
 typedef struct {
-    sms_mem      mem;       /* first member: holds the translator callbacks */
     vdp_state    vdp;
+    sms_mem      mem;       /* holds the translator callbacks */
     z80j_ctx    *ctx;
     uint32       mem_ctrl;  /* port $3E */
     uint32       io_ctrl;   /* port $3F */
@@ -60,6 +65,12 @@ typedef struct {
     uint32       port_out[Z80J_PORTS];
     uint32       port_outn[Z80J_PORTS];
 } sms_machine;
+
+/* Offset of the VDP state from the context (its size): the machine must
+ * be placed right after the context, as game.c allocates them, for the
+ * assembly port handlers (sms_io.s, which address it from the global
+ * pointer, 0x400 into the context). */
+#define SMS_VDP_OFFSET  0x44400
 
 /* Sets up the machine on ctx for a cartridge image, then resets it;
  * lines is VDP_LINES_NTSC or VDP_LINES_PAL. */

@@ -197,7 +197,8 @@ typedef struct {
     uint32        f_idle;
     uint32        f_blocks;
     uint32        f_flush;
-    uint32        f_data;
+    uint32        f_data;       /* VDP data port writes of the frame */
+    uint32        data_w_total; /* over the run (the VDP counts per frame) */
     uint32        f_tiles;
     uint32        f_cells;
     uint32        f_interp;

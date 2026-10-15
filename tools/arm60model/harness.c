@@ -596,7 +596,6 @@ void hmain(void)
             uint32 t0 = plat_usec_now();
             z80j_stats s0 = g.jit.stats;
             uint32 i0 = g.ctx->int_insns;
-            uint32 dw0 = g.sms->vdp.n_data_w;
 
             uint32 draw;
 
@@ -624,7 +623,7 @@ void hmain(void)
                        (unsigned long)(s->prefetched - s0.prefetched),
                        (unsigned long)(g.ctx->int_insns - i0),
                        (unsigned long)render_display_on(g.rd),
-                       (unsigned long)(g.sms->vdp.n_data_w - dw0),
+                       (unsigned long)g.f_data,
                        (unsigned long)count_dirty(&g.sms->vdp));
             }
         }

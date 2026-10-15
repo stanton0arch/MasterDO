@@ -6,7 +6,9 @@
 ; The handlers follow the port handler conventions of z80jit.h: called by
 ; the generated code with r10 = global pointer, arguments in r0-r2, r7 =
 ; HL for runs; r3-r11 are preserved, r0-r2, r12 and lr may be lost. The
-; context's mdata field points to the vdp_state.
+; vdp_state lies at a fixed offset from the context (SMS_VDP_OFFSET of
+; sms.h: the machine is allocated right after it; the global pointer is
+; the context's write table, 0x400 into it).
 ;
 ; Layouts: CONTRACT with z80j_ctx (z80jit.h) and vdp_state (vdp.h) - keep
 ; in sync (z80jit.c and vdp.c check the offsets at compile time).
@@ -29,17 +31,16 @@
 IRQ_LINE        EQU     0x454
 LINE            EQU     0x460
 EVENT_LINE      EQU     0x464
-MDATA           EQU     0x4A8
+VDP_OFFSET      EQU     0x44000         ; the vdp_state: SMS_VDP_OFFSET of sms.h from the
+                                        ; context, less the read table below the global pointer
 
 ; vdp_state fields.
-V_ADDR          EQU     0x00
-V_CTL           EQU     0x04
-V_LATCH         EQU     0x08
-V_BUFFER        EQU     0x0C
-V_CRAMDIRTY     EQU     0x10
-V_NDATAW        EQU     0x14
-V_NDATAR        EQU     0x18
-V_NCTRLW        EQU     0x1C
+V_ACC           EQU     0x00
+V_LATCH         EQU     0x04
+V_BUFFER        EQU     0x08
+V_CRAMDIRTY     EQU     0x0C
+V_NDATAR        EQU     0x10
+V_NCTRLW        EQU     0x14
 V_CRAM          EQU     0x20
 V_REG           EQU     0x40
 V_STATUS        EQU     0x50
@@ -64,7 +65,45 @@ VDP_HS_LOG      EQU     256
 VDP_NT_LOG      EQU     16
 VDP_CR_LOG      EQU     64
 
-VDP_PENDING     EQU     0x100
+; The access word (vdp.h): the address in bits 18-31, the code in bits
+; 14-15, the pending and slow marks, the data port writes of the frame in
+; bits 0-13.
+ACC_ADDR1       EQU     0x40000         ; one in the address field
+ACC_CODE3       EQU     0xC000
+ACC_PENDING     EQU     0x10000
+ACC_SLOW        EQU     0x20000
+
+; $r = the vdp_state.
+        MACRO
+        VDPR    $r
+        add     $r,r10,#VDP_OFFSET
+        MEND
+
+        MACRO
+        VDP
+        VDPR    r12
+        MEND
+
+; The pending control word of the access word $a ended; the slow mark
+; stays for code 3 (colour RAM).
+        MACRO
+        UNPEND  $a
+        bic     $a,$a,#ACC_PENDING+ACC_SLOW
+        tst     $a,#0x4000
+        tstne   $a,#0x8000
+        orrne   $a,$a,#ACC_SLOW
+        MEND
+
+; The address field of the access word := $a (0x4000 wraps to 0), the
+; rest kept; $t clobbered, $s = the vdp_state.
+        MACRO
+        SETADDR $a,$t,$s
+        ldr     $t,[$s,#V_ACC]
+        mov     $t,$t,lsl #14
+        mov     $t,$t,lsr #14
+        orr     $t,$t,$a,lsl #18
+        str     $t,[$s,#V_ACC]
+        MEND
 
 ;----------------------------------------------------------------------------
 ; OUT to the data port. In: r0 = value, r2 = T-states left. Out: r0 = 0
@@ -72,48 +111,44 @@ VDP_PENDING     EQU     0x100
 ; dirty), code 3 colour RAM; the write also loads the read buffer and ends
 ; a pending control word. A colour written during the active display is
 ; recorded with the line it shows from (the next one), for the picture.
+; The usual write (video RAM, no control word pending) is the hot path of
+; every tile upload: one load of the access word, three stores, the
+; address and the count advanced in that word.
 ;----------------------------------------------------------------------------
 sms_vdp_data_w
-        ldr     r12,[r10,#MDATA]
-        ldr     r1,[r12,#V_CTL]
+        VDP
+        ldr     r1,[r12,#V_ACC]
         and     r0,r0,#0xFF
+        tst     r1,#ACC_SLOW
+        bne     data_w_slow
         str     r0,[r12,#V_BUFFER]
-        cmp     r1,#3
-        bhs     data_w_slow
-        ldr     r1,[r12,#V_ADDR]
 data_w_vram
         add     r2,r12,#V_VRAM
-        strb    r0,[r2,r1]
+        strb    r0,[r2,r1,lsr#18]
         add     r2,r12,#V_DIRTY
         mov     r0,#1
-        strb    r0,[r2,r1,lsr#5]
+        strb    r0,[r2,r1,lsr#23]
 data_w_next
-        add     r1,r1,#1
-        bic     r1,r1,#0x4000
-        str     r1,[r12,#V_ADDR]
-        ldr     r2,[r12,#V_NDATAW]
-        add     r2,r2,#1
-        str     r2,[r12,#V_NDATAW]
+        add     r1,r1,#ACC_ADDR1        ; the next address (wrapping by itself)
+        add     r1,r1,#1                ; one more write
+        str     r1,[r12,#V_ACC]
         mov     r0,#0
         mov     pc,lr
-data_w_slow                             ; r1 = code 3, or a control word pending
-        bic     r1,r1,#VDP_PENDING
-        str     r1,[r12,#V_CTL]
-        cmp     r1,#3
-        ldr     r1,[r12,#V_ADDR]
-        bne     data_w_vram
-        and     r0,r0,#0x3F
-        and     r1,r1,#31
-        add     r1,r1,r12
-        strb    r0,[r1,#V_CRAM]         ; colour RAM
-        mov     r1,#1
-        str     r1,[r12,#V_CRAMDIRTY]
-        ldr     r1,[r12,#V_VBLDONE]     ; past the active display: not recorded
-        teq     r1,#0
-        ldr     r1,[r12,#V_ADDR]
-        bne     data_w_next
+data_w_slow                             ; code 3, or a control word pending
+        str     r0,[r12,#V_BUFFER]
+        UNPEND  r1
+        beq     data_w_vram             ; a pending control word ended: video RAM
         stmfd   sp!,{r1,r3,r4}
-        and     r3,r1,#31               ; colour index
+        and     r0,r0,#0x3F
+        mov     r3,r1,lsr#18
+        and     r3,r3,#31               ; colour index
+        add     r4,r3,r12
+        strb    r0,[r4,#V_CRAM]         ; colour RAM
+        mov     r4,#1
+        str     r4,[r12,#V_CRAMDIRTY]
+        ldr     r4,[r12,#V_VBLDONE]     ; past the active display: not recorded
+        teq     r4,#0
+        bne     cram_done
         ldr     r4,[r10,#LINE]
         ldr     r1,[r12,#V_FRAMEBASE]
         sub     r4,r4,r1
@@ -149,18 +184,15 @@ cram_done
 ; the next address.
 ;----------------------------------------------------------------------------
 sms_vdp_data_r
-        ldr     r12,[r10,#MDATA]
-        ldr     r1,[r12,#V_ADDR]
+        VDP
+        ldr     r1,[r12,#V_ACC]
         ldr     r0,[r12,#V_BUFFER]
         add     r2,r12,#V_VRAM
-        ldrb    r2,[r2,r1]
+        ldrb    r2,[r2,r1,lsr#18]
         str     r2,[r12,#V_BUFFER]
-        add     r1,r1,#1
-        bic     r1,r1,#0x4000
-        str     r1,[r12,#V_ADDR]
-        ldr     r2,[r12,#V_CTL]
-        bic     r2,r2,#VDP_PENDING
-        str     r2,[r12,#V_CTL]
+        UNPEND  r1
+        add     r1,r1,#ACC_ADDR1
+        str     r1,[r12,#V_ACC]
         ldr     r2,[r12,#V_NDATAR]
         add     r2,r2,#1
         str     r2,[r12,#V_NDATAR]
@@ -177,7 +209,7 @@ sms_vdp_data_r
 ; and through the C path when it crossed an underflow.
 ;----------------------------------------------------------------------------
 sms_vdp_stat_r
-        ldr     r12,[r10,#MDATA]
+        VDP
         ldrb    r0,[r12,#V_REG]         ; register 0
         tst     r0,#0x10
         beq     stat_lc
@@ -187,9 +219,9 @@ stat_clear
         str     r2,[r12,#V_STATUS]
         str     r2,[r12,#V_LINEFLAG]
         str     r2,[r10,#IRQ_LINE]
-        ldr     r2,[r12,#V_CTL]
-        bic     r2,r2,#VDP_PENDING
-        str     r2,[r12,#V_CTL]
+        ldr     r2,[r12,#V_ACC]
+        UNPEND  r2
+        str     r2,[r12,#V_ACC]
         add     r2,r12,#0x4800
         ldr     r1,[r2,#V_NSTATR-0x4800]
         add     r1,r1,#1
@@ -271,7 +303,7 @@ stat_lc_slow
         MEND
 
 sms_vdp_vc_r
-        ldr     r12,[r10,#MDATA]
+        VDP
         BEAM
         ldr     r1,[r12,#V_VCJUMP]
         cmp     r2,r1
@@ -284,7 +316,7 @@ sms_vdp_vc_r
         mov     pc,lr
 
 sms_vdp_hc_r
-        ldr     r12,[r10,#MDATA]
+        VDP
         BEAM
         add     r1,r1,r12
         ldrb    r0,[r1,#V_HC]
@@ -301,18 +333,16 @@ sms_vdp_hc_r
 ; may raise the interrupt line or move the next event.
 ;----------------------------------------------------------------------------
 sms_vdp_ctrl_w
-        ldr     r12,[r10,#MDATA]
+        VDP
         and     r0,r0,#0xFF
-        ldr     r1,[r12,#V_CTL]
-        tst     r1,#VDP_PENDING
+        ldr     r1,[r12,#V_ACC]
+        tst     r1,#ACC_PENDING
         bne     ctrl_second
         str     r0,[r12,#V_LATCH]
-        orr     r1,r1,#VDP_PENDING
-        str     r1,[r12,#V_CTL]
-        ldr     r1,[r12,#V_ADDR]
-        bic     r1,r1,#0xFF
-        orr     r1,r1,r0
-        str     r1,[r12,#V_ADDR]
+        bic     r1,r1,#0x03FC0000       ; bits 0-7 of the address
+        orr     r1,r1,r0,lsl#18
+        orr     r1,r1,#ACC_PENDING+ACC_SLOW
+        str     r1,[r12,#V_ACC]
         b       ctrl_count
 ctrl_second
         mov     r1,r0,lsr#6             ; code
@@ -327,20 +357,25 @@ ctrl_second
         beq     ctrl_reg2
         mov     r1,#0xBF
         b       z80j_port_out_c         ; register write (r0, r2 unchanged)
-ctrl_data
-        str     r1,[r12,#V_CTL]         ; pending cleared
+ctrl_data                               ; r1 = code 0, 1 or 3
         ldr     r2,[r12,#V_LATCH]
         and     r0,r0,#0x3F
-        orr     r2,r2,r0,lsl#8
+        orr     r2,r2,r0,lsl#8          ; the address
+        ldr     r0,[r12,#V_ACC]
+        mov     r0,r0,lsl#18            ; the count kept, the pending mark ended
+        mov     r0,r0,lsr#18
+        orr     r0,r0,r1,lsl#14
+        cmp     r1,#3
+        orreq   r0,r0,#ACC_SLOW         ; colour RAM writes take the slow path
         teq     r1,#0
         bne     ctrl_addr
-        add     r0,r12,#V_VRAM          ; read code: read ahead
-        ldrb    r0,[r0,r2]
-        str     r0,[r12,#V_BUFFER]
-        add     r2,r2,#1
-        bic     r2,r2,#0x4000
+        add     r1,r12,#V_VRAM          ; read code: read ahead
+        ldrb    r1,[r1,r2]
+        str     r1,[r12,#V_BUFFER]
+        add     r2,r2,#1                ; (0x4000 wraps to 0 in the word)
 ctrl_addr
-        str     r2,[r12,#V_ADDR]
+        orr     r0,r0,r2,lsl#18
+        str     r0,[r12,#V_ACC]
 ctrl_count
         ldr     r1,[r12,#V_NCTRLW]
         add     r1,r1,#1
@@ -406,9 +441,12 @@ ctrl_reg_store
         add     r1,r12,#V_REG
         strb    r2,[r1,r0]
         orr     r2,r2,r0,lsl#8
-        str     r2,[r12,#V_ADDR]
-        mov     r1,#2
-        str     r1,[r12,#V_CTL]
+        ldr     r1,[r12,#V_ACC]
+        mov     r1,r1,lsl#18            ; the count kept
+        mov     r1,r1,lsr#18
+        orr     r1,r1,#0x8000           ; code 2
+        orr     r1,r1,r2,lsl#18
+        str     r1,[r12,#V_ACC]
         add     sp,sp,#4
         b       ctrl_count
 ; Line counter: lc_sync(k) with k = lines done (r1), in its simple case.
@@ -456,33 +494,34 @@ ctrl_reg_slow
 sms_vdp_data_wn
         cmp     r0,#0x40000000          ; OUTD runs are negative
         bge     data_wm                 ; mixed run (OUTI and OUT (C),r)
-        ldr     r12,[r10,#MDATA]
-        ldr     r1,[r12,#V_CTL]
-        cmp     r1,#3
-        bhs     wn_slow_entry           ; r2 = T-states left at the end
+        VDP
+        ldr     r1,[r12,#V_ACC]
+        tst     r1,#ACC_SLOW
+        bne     wn_slow_entry           ; r2 = T-states left at the end
         cmp     r0,#1
         blo     wn_general              ; OUTD
         cmp     r0,#4
         bhi     wn_general
         ; Short forward run (1-4 bytes, the usual name table update):
         ; nothing is saved but the return address.
-        ldr     r1,[r12,#V_ADDR]
         mov     r2,r7,lsr#16
         and     r2,r2,#0xFF
         cmp     r2,#0xFC
         bhi     wn_general              ; the source may cross a page
-        add     r2,r1,r0
+        add     r2,r0,r1,lsr#18         ; destination end
         cmp     r2,#0x4000
         bhi     wn_general              ; the destination may wrap
         str     lr,[sp,#-4]!
-        str     r2,[r12,#V_ADDR]
+        add     lr,r1,r0                ; the bytes counted
+        mov     lr,lr,lsl#14
+        mov     lr,lr,lsr#14
+        orr     lr,lr,r2,lsl#18         ; the address after the run (0x4000 wraps to 0)
+        str     lr,[r12,#V_ACC]
+        mov     r1,r1,lsr#18            ; the address
         sub     r2,r2,#1
         add     lr,r12,#V_DIRTY
         strb    r0,[lr,r1,lsr#5]        ; first and last tile written
         strb    r0,[lr,r2,lsr#5]
-        ldr     r2,[r12,#V_NDATAW]
-        add     r2,r2,r0
-        str     r2,[r12,#V_NDATAW]
         mvn     lr,r7,lsr#24
         ldr     lr,[r10,lr,lsl#2]
         add     lr,lr,r7,lsr#16         ; host source
@@ -501,7 +540,7 @@ wn_slow_entry
         movs    r0,r0
         rsbmi   r0,r0,#0
         rsbmi   r12,r12,#0
-        ldr     r6,[r10,#MDATA]
+        VDPR    r6
         mov     r3,r7                   ; source address (bits 16-31)
         b       wn_slow
 wn_general
@@ -510,12 +549,12 @@ wn_general
         movs    r0,r0
         rsbmi   r0,r0,#0
         rsbmi   r12,r12,#0
-        ldr     r6,[r10,#MDATA]
+        VDPR    r6
         mov     r3,r7                   ; source address (bits 16-31)
-        ldr     r1,[r6,#V_NDATAW]
-        add     r1,r1,r0
-        str     r1,[r6,#V_NDATAW]
-        ldr     r1,[r6,#V_ADDR]
+        ldr     r1,[r6,#V_ACC]
+        add     r1,r1,r0                ; the bytes counted (the address is stored again below)
+        str     r1,[r6,#V_ACC]
+        mov     r1,r1,lsr#18            ; the address
         add     r5,r6,#V_VRAM
         add     r8,r6,#V_DIRTY
         mov     r9,#1
@@ -533,7 +572,7 @@ wn_general
         add     r4,r1,r0                ; destination end
         cmp     r4,#0x4000
         bhi     wn_loop
-        str     r4,[r6,#V_ADDR]         ; address after the run
+        SETADDR r4,r2,r6                ; address after the run
         mov     r2,r1,lsr#5             ; tiles written: first to last
         sub     r4,r4,#1
         mov     r4,r4,lsr#5
@@ -594,7 +633,7 @@ wn_loop
         bic     r1,r1,#0x4000
         subs    r0,r0,#1
         bne     wn_loop
-        str     r1,[r6,#V_ADDR]
+        SETADDR r1,r2,r6
         str     r4,[r6,#V_BUFFER]
         mov     r0,#0
         ldmfd   sp!,{r3-r9,pc}
@@ -624,19 +663,18 @@ wn_slow_loop
 ; does not wrap takes the page entry and the dirty marks once.
 data_wm
         stmfd   sp!,{r3-r9,lr}
-        ldr     r6,[r10,#MDATA]
+        VDPR    r6
         mov     r4,r0,lsr#8
         and     r4,r4,#0x1F             ; elements
         mov     r5,r0,lsr#13
         bic     r5,r5,#0x20000          ; mask, bit 0 = the next element
         and     r9,r0,#0xFF             ; byte of OUT (C),r
-        ldr     r1,[r6,#V_CTL]
-        cmp     r1,#3
-        bhs     wm_slow                 ; colour RAM, or a control word pending
-        ldr     r1,[r6,#V_NDATAW]
-        add     r1,r1,r4
-        str     r1,[r6,#V_NDATAW]
-        ldr     r1,[r6,#V_ADDR]
+        ldr     r1,[r6,#V_ACC]
+        tst     r1,#ACC_SLOW
+        bne     wm_slow                 ; colour RAM, or a control word pending
+        add     r1,r1,r4                ; the elements counted
+        str     r1,[r6,#V_ACC]
+        mov     r1,r1,lsr#18            ; the address
         add     r8,r1,r4                ; destination end
         cmp     r8,#0x4000
         bhi     wm_bytes
@@ -645,7 +683,7 @@ data_wm
         add     r2,r2,r4                ; source end, at worst
         cmp     r2,#0x100
         bhi     wm_bytes
-        str     r8,[r6,#V_ADDR]
+        SETADDR r8,r2,r6
         mov     r2,r1,lsr#5             ; tiles written: first to last
         sub     r8,r8,#1
         mov     r8,r8,lsr#5
@@ -691,8 +729,8 @@ wm_put
         bic     r1,r1,#0x4000
         subs    r4,r4,#1
         bne     wm_byte
-        str     r1,[r6,#V_ADDR]
         str     r0,[r6,#V_BUFFER]
+        SETADDR r1,r0,r6
         mov     r0,#0
         ldmfd   sp!,{r3-r9,pc}
 wm_slow                                 ; each byte through sms_vdp_data_w, with its time
@@ -726,7 +764,7 @@ wm_slow_put
 ; nothing is changed in that case.
 ;----------------------------------------------------------------------------
 sms_vdp_event_a
-        ldr     r12,[r10,#MDATA]
+        VDP
         stmfd   sp!,{r3,r4,r5}
         ldr     r3,[r12,#V_ACTIVE]      ; r3 = a, active lines
         ldr     r0,[r10,#LINE]

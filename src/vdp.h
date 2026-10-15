@@ -72,10 +72,25 @@
 #define VDP_ST_OVERFLOW 0x40
 #define VDP_ST_COLLIDE  0x20
 
-/* vdp_state.ctl: access code of the last control word (0 VRAM read,
- * 1 VRAM write, 2 register write, 3 CRAM write), and VDP_PENDING while the
- * second byte of a control word is expected. */
-#define VDP_PENDING     0x100
+/* vdp_state.acc, the access word of the ports: the 14-bit address
+ * register in bits 18-31 (so that its increment wraps at the end of
+ * video RAM by itself), the access code of the last control word in bits
+ * 14-15 (0 VRAM read, 1 VRAM write, 2 register write, 3 CRAM write),
+ * VDP_PENDING while the second byte of a control word is expected,
+ * VDP_ACC_SLOW whenever a data port write cannot take the plain video RAM
+ * path (code 3, or a control word pending), and in bits 0-13 the data port
+ * writes since the caller last cleared them (vdp_clear_data_writes, once
+ * per frame: the field holds 16 383, more than a frame of Z80 time can
+ * write). */
+#define VDP_ACC_ADDR_SHIFT  18
+#define VDP_ACC_CODE_SHIFT  14
+#define VDP_PENDING         0x10000
+#define VDP_ACC_SLOW        0x20000
+#define VDP_ACC_DW_MASK     0x3FFF
+#define vdp_addr(v)             ((v)->acc >> VDP_ACC_ADDR_SHIFT)
+#define vdp_code(v)             (((v)->acc >> VDP_ACC_CODE_SHIFT) & 3)
+#define vdp_data_writes(v)      ((v)->acc & VDP_ACC_DW_MASK)
+#define vdp_clear_data_writes(v) ((v)->acc &= ~(uint32)VDP_ACC_DW_MASK)
 
 /*
  * The port state comes first: the data and control ports also have
@@ -83,14 +98,13 @@
  * equates of sms_io.s - vdp.c checks the offsets at compile time.
  */
 typedef struct {
-    uint32  addr;           /* +0x00: 14-bit address register */
-    uint32  ctl;            /* +0x04: code | VDP_PENDING */
-    uint32  latch;          /* +0x08: first byte of a control word */
-    uint32  buffer;         /* +0x0C: read buffer */
-    uint32  cram_dirty;     /* +0x10: colour RAM written since last cleared */
-    uint32  n_data_w;       /* +0x14: data port writes */
-    uint32  n_data_r;       /* +0x18: data port reads */
-    uint32  n_ctrl_w;       /* +0x1C: control port writes */
+    uint32  acc;            /* +0x00: the access word (see VDP_ACC_*) */
+    uint32  latch;          /* +0x04: first byte of a control word */
+    uint32  buffer;         /* +0x08: read buffer */
+    uint32  cram_dirty;     /* +0x0C: colour RAM written since last cleared */
+    uint32  n_data_r;       /* +0x10: data port reads */
+    uint32  n_ctrl_w;       /* +0x14: control port writes */
+    uint32  pad0[2];        /* +0x18 */
     uint8   cram[32];       /* +0x20 */
     uint8   reg[16];        /* +0x40 */
     uint32  status;         /* VDP_ST_* */

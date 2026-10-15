@@ -120,8 +120,8 @@ static void log_vdp(const char *what)
     printf("View: %s at frame %lu, VDP registers", what, (unsigned long)g.frame);
     for (k = 0; k < 11; k++)
         printf(" %02x", v->reg[k]);
-    printf(", address $%04lx code %lu, status $%02lx, CRAM", (unsigned long)v->addr,
-           (unsigned long)(v->ctl & 3), (unsigned long)v->status);
+    printf(", address $%04lx code %lu, status $%02lx, CRAM", (unsigned long)vdp_addr(v),
+           (unsigned long)vdp_code(v), (unsigned long)v->status);
     for (k = 0; k < 32; k++)
         printf(" %02x", v->cram[k]);
     printf(", %lu sprites, backdrop $%04lx, %lu lines\n", (unsigned long)g.rd->n_sprites,

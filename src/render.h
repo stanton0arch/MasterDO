@@ -62,8 +62,9 @@
  *
  * Tiles are converted from the VDP's planar format into 8 bpp rows of 8
  * bytes (two words) the first time a cell or a sprite needs them after
- * they were written; the horizontally flipped copy has its own store.
- * The tile stores are shared by the layers.
+ * they were written (a cell needing the conversion is drawn from its rows
+ * on the way); the horizontally flipped copy has its own store. The tile
+ * stores are shared by the layers.
  *
  * The caller: render_update() after each emulated frame, then, if the
  * display is on, DrawCels(bitmap, render_chain()) into a bitmap whose clip
@@ -147,22 +148,22 @@ typedef struct {
  * layers: each layer holds the same pointers.
  */
 typedef struct render_layer_s {
-    uint8  *bitmap;         /* RENDER_W x 8 * nrows, 8 bpp */
-    uint8  *prio_bm;        /* same, priority cells only */
     uint32 *tiles;          /* VDP_TILES x 16 words (shared) */
     uint32 *tiles_f;        /* horizontally flipped copies (shared) */
-    uint8  *shadow;         /* name table bytes as drawn (64 per row) */
     uint8  *t_ok;           /* tile converted (bit 0: tiles, bit 1: tiles_f) (shared) */
+    uint8  *bitmap;         /* RENDER_W x 8 * nrows, 8 bpp */
+    uint8  *prio_bm;        /* same, priority cells only */
+    uint32 *xtab;           /* expansion tables (2 x 256 words) (shared) */
+    uint8  *shadow;         /* name table bytes as drawn (64 per row) */
+    uint8  *stamp;          /* update in which each cell was last drawn */
+    uint32  stamp_now;
     /* Cells using each tile, as doubly linked lists (RENDER_NT_CELLS_MAX
      * means none), so that a written tile only redraws its cells. */
-    uint32 *head;           /* VDP_TILES */
     uint32 *next;           /* ncells */
+    uint32 *head;           /* VDP_TILES */
     uint32 *prev;
     uint32 *wlist;          /* work list: changed words, tiles to convert (shared) */
     uint32 *dlist;          /* dirty tiles of the update (shared) */
-    uint8  *stamp;          /* update in which each cell was last drawn */
-    uint32  stamp_now;
-    uint32 *xtab;           /* expansion tables (4 x 256 words) (shared) */
     uint32  nt_base;        /* VRAM address of the name table drawn */
     uint32  valid;          /* shadow and lists describe the bitmap */
     uint32  last_used;      /* update in which the layer was last drawn */

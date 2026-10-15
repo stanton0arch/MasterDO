@@ -230,7 +230,7 @@ static void read_counters(const game *g, game_counters *c)
     c->forced = g->jit.stats.forced;
     c->resumed = g->jit.stats.resumed + g->ctx->resumed_count;
     c->tweaks = g->snd != NULL ? g->snd->tweaks : 0;
-    c->vdp_data_w = g->sms->vdp.n_data_w;
+    c->vdp_data_w = g->data_w_total;
     c->vdp_data_r = g->sms->vdp.n_data_r;
     c->vdp_ctrl_w = g->sms->vdp.n_ctrl_w;
     memcpy(&c->io, &g->sms->io, sizeof(c->io));
@@ -274,14 +274,13 @@ void game_free(game *g)
         render_free(g->rd);
         FreeMem(g->rd, sizeof(renderer));
     }
-    if (g->sms != NULL) FreeMem(g->sms, sizeof(sms_machine));
     if (g->blocks != NULL) FreeMem(g->blocks, (int32)z80j_block_bytes(JIT_BLOCKS));
     if (g->links != NULL) FreeMem(g->links, (int32)z80j_link_bytes(JIT_LINKS));
     if (g->hot != NULL) FreeMem(g->hot, 0x10000);
     if (g->log != NULL) FreeMem(g->log, GAME_LOG_WORDS * 4);
     if (g->pad_log != NULL) FreeMem(g->pad_log, GAME_PAD_LOGS * 4);
     if (g->code != NULL) FreeMem(g->code, JIT_CODE_BYTES);
-    if (g->ctx != NULL) FreeMem(g->ctx, sizeof(z80j_ctx));
+    if (g->ctx != NULL) FreeMem(g->ctx, sizeof(z80j_ctx) + sizeof(sms_machine));
     if (g->cart_ram != NULL) FreeMem(g->cart_ram, (int32)g->cart_ram_size);
     g->rd = NULL;
     g->sms = NULL;
@@ -303,7 +302,11 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
     memset(g, 0, sizeof(*g));
     g->rom = rom;
     g->rom_size = rom_size;
-    g->ctx = (z80j_ctx *)AllocMem(sizeof(z80j_ctx), MEMTYPE_DRAM | MEMTYPE_FILL);
+    /* The machine follows the context in one block: the assembly port
+     * handlers address its VDP state at a fixed offset from the context
+     * (SMS_VDP_OFFSET, sms.h). */
+    g->ctx = (z80j_ctx *)AllocMem(sizeof(z80j_ctx) + sizeof(sms_machine), MEMTYPE_DRAM | MEMTYPE_FILL);
+    g->sms = (g->ctx != NULL) ? (sms_machine *)((uint8 *)g->ctx + sizeof(z80j_ctx)) : NULL;
     g->code = (uint32 *)AllocMem(JIT_CODE_BYTES, MEMTYPE_DRAM);
     g->blocks = AllocMem((int32)z80j_block_bytes(JIT_BLOCKS), MEMTYPE_DRAM);
     g->links = (uint32 *)AllocMem((int32)z80j_link_bytes(JIT_LINKS), MEMTYPE_DRAM);
@@ -317,7 +320,6 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
         g->hot = (uint8 *)AllocMem(0x10000, MEMTYPE_DRAM);
     }
     g->log = (uint32 *)AllocMem(GAME_LOG_WORDS * 4, MEMTYPE_DRAM);
-    g->sms = (sms_machine *)AllocMem(sizeof(sms_machine), MEMTYPE_DRAM);
     g->rd = (renderer *)AllocMem(sizeof(renderer), MEMTYPE_DRAM | MEMTYPE_FILL);
     /* The pad recorder is optional: without memory nothing is recorded. */
     g->pad_log = (uint32 *)AllocMem(GAME_PAD_LOGS * 4, MEMTYPE_DRAM);
@@ -455,6 +457,7 @@ void game_reset(game *g)
     g->status = 0;
     g->stop_pc = 0;
     g->frame = 0;
+    g->data_w_total = 0;
     g->last_us = 0;
     g->last_upd_us = 2000;      /* usual values, for the first frame's budget */
     g->last_draw_us = 3500;
@@ -525,7 +528,7 @@ int32 game_frame(game *g, uint32 pad, uint32 pause)
     idle0 = ctx->idle;
     g->f_blocks = g->jit.stats.translations;
     g->f_flush = g->jit.stats.evictions;
-    g->f_data = g->sms->vdp.n_data_w;
+    vdp_clear_data_writes(&g->sms->vdp);
     g->f_tiles = g->rd->st.tiles;
     g->f_cells = g->rd->st.cells;
     g->f_interp = g->ctx->int_runs;
@@ -551,6 +554,8 @@ int32 game_frame(game *g, uint32 pad, uint32 pause)
     sms_frame(g->sms, pad, pause);
     t1 = plat_usec_now();
     g->last_us = t1 - t0;
+    g->f_data = vdp_data_writes(&g->sms->vdp);
+    g->data_w_total += g->f_data;
 
     if (ctx->exit_reason != Z80J_EXIT_LINES) {
         g->status = (int32)ctx->exit_reason;
@@ -622,7 +627,7 @@ void game_frame_done(game *g, uint32 draw_us)
                 p->sync_us = g->jit.stats.sync_us - g->f_sync_us;
                 p->insns = g->ctx->int_insns - g->f_interp_insns;
                 p->stretches = g->ctx->int_runs - g->f_interp;
-                p->data_w = g->sms->vdp.n_data_w - g->f_data;
+                p->data_w = g->f_data;
                 p->tiles = g->rd->st.tiles - g->f_tiles;
                 p->cells = g->rd->st.cells - g->f_cells;
                 p->snd_us = g->last_snd_us;

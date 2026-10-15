@@ -16,18 +16,19 @@
 
 /* Offsets of the layer fields read by render_a.s (its R_* equates). */
 #define CHECK_OFF(name, cond) typedef char check_##name[(cond) ? 1 : -1]
-CHECK_OFF(bitmap, offsetof(render_layer, bitmap) == 0);
-CHECK_OFF(prio_bm, offsetof(render_layer, prio_bm) == 4);
-CHECK_OFF(tiles, offsetof(render_layer, tiles) == 8);
-CHECK_OFF(tiles_f, offsetof(render_layer, tiles_f) == 12);
-CHECK_OFF(shadow, offsetof(render_layer, shadow) == 16);
-CHECK_OFF(t_ok, offsetof(render_layer, t_ok) == 20);
-CHECK_OFF(head, offsetof(render_layer, head) == 24);
-CHECK_OFF(next, offsetof(render_layer, next) == 28);
-CHECK_OFF(prev, offsetof(render_layer, prev) == 32);
-CHECK_OFF(wlist, offsetof(render_layer, wlist) == 36);
-CHECK_OFF(stamp, offsetof(render_layer, stamp) == 44);
-CHECK_OFF(stamp_now, offsetof(render_layer, stamp_now) == 48);
+CHECK_OFF(tiles, offsetof(render_layer, tiles) == 0);
+CHECK_OFF(tiles_f, offsetof(render_layer, tiles_f) == 4);
+CHECK_OFF(t_ok, offsetof(render_layer, t_ok) == 8);
+CHECK_OFF(bitmap, offsetof(render_layer, bitmap) == 12);
+CHECK_OFF(prio_bm, offsetof(render_layer, prio_bm) == 16);
+CHECK_OFF(xtab, offsetof(render_layer, xtab) == 20);
+CHECK_OFF(shadow, offsetof(render_layer, shadow) == 24);
+CHECK_OFF(stamp, offsetof(render_layer, stamp) == 28);
+CHECK_OFF(stamp_now, offsetof(render_layer, stamp_now) == 32);
+CHECK_OFF(next, offsetof(render_layer, next) == 36);
+CHECK_OFF(head, offsetof(render_layer, head) == 40);
+CHECK_OFF(prev, offsetof(render_layer, prev) == 44);
+CHECK_OFF(wlist, offsetof(render_layer, wlist) == 48);
 CHECK_OFF(nt_base, offsetof(render_layer, nt_base) == 56);
 CHECK_OFF(prio_rows, offsetof(render_layer, prio_rows) == 68);
 CHECK_OFF(prio_dirty, offsetof(render_layer, prio_dirty) == 164);
@@ -37,7 +38,6 @@ CHECK_OFF(ccb_plut, offsetof(CCB, ccb_PLUTPtr) == 12);
 CHECK_OFF(ccb_pre0, offsetof(CCB, ccb_PRE0) == 52);
 CHECK_OFF(ccb_pre1, offsetof(CCB, ccb_PRE1) == 56);
 CHECK_OFF(st_tiles_conv, offsetof(render_layer, tiles_conv) == 204);
-CHECK_OFF(xtab, offsetof(render_layer, xtab) == 52);
 CHECK_OFF(stale, offsetof(render_layer, stale) == 340);
 CHECK_OFF(stale_rows, offsetof(render_layer, stale_rows) == 344);
 CHECK_OFF(shown_rows, offsetof(render_layer, shown_rows) == 348);
@@ -94,37 +94,35 @@ static uint32 lowest_bit(uint32 w)
 
 #define PIXC_OPAQUE_WORD 0x1F001F00u
 
-/* Expansion tables: the word holding pixels 0-3 (hi) or 4-7 (lo) of a
- * tile row, one byte per pixel, from one plane byte (bit 7 = pixel 0);
- * the flipped tables give pixels 7-4 and 3-0. */
-#define XT_HI   0
-#define XT_LO   256
-#define XT_FHI  512
-#define XT_FLO  768
+/* Expansion tables (render_a.s): for a pair of nibbles of two bit planes
+ * (plane a in bits 4-7, plane b in bits 0-3, bit 3 of each the first
+ * pixel of the group), the word holding the four pixels of the group one
+ * byte each, plane a at bit 0 and plane b at bit 1 of every pixel; the
+ * mirrored table holds the pixels in reverse order, for the store of the
+ * horizontally flipped tiles. A row of a tile is converted with four
+ * lookups: the high nibbles of planes 0 and 1 give pixels 0-3, their low
+ * nibbles pixels 4-7, and planes 2 and 3 are OR-ed in two bits up. */
+#define XT_PAIR     0
+#define XT_FPAIR    256
+#define XT_WORDS    512
 
 static void init_tables(uint32 *t)
 {
-    uint32 b;
+    uint32 i;
 
-    for (b = 0; b < 256; b++) {
-        uint32 hi = 0;
-        uint32 lo = 0;
-        uint32 fhi = 0;
-        uint32 flo = 0;
+    for (i = 0; i < 256; i++) {
+        uint32 w = 0;
+        uint32 wf = 0;
         uint32 k;
 
         for (k = 0; k < 4; k++) {
-            uint32 shift = 24 - 8 * k;          /* byte k of the word */
+            uint32 v = ((i >> (7 - k)) & 1) | (((i >> (3 - k)) & 1) << 1);  /* pixel k */
 
-            hi |= ((b >> (7 - k)) & 1) << shift;        /* pixel k */
-            lo |= ((b >> (3 - k)) & 1) << shift;        /* pixel 4 + k */
-            fhi |= ((b >> k) & 1) << shift;             /* pixel 7 - k */
-            flo |= ((b >> (4 + k)) & 1) << shift;       /* pixel 3 - k */
+            w |= v << (24 - 8 * k);     /* byte k of the word */
+            wf |= v << (8 * k);         /* byte 3 - k */
         }
-        t[XT_HI + b] = hi;
-        t[XT_LO + b] = lo;
-        t[XT_FHI + b] = fhi;
-        t[XT_FLO + b] = flo;
+        t[XT_PAIR + i] = w;
+        t[XT_FPAIR + i] = wf;
     }
 }
 
@@ -185,7 +183,7 @@ void render_free(renderer *r)
         if (r->bm_pool[k] != NULL)
             FreeMem(r->bm_pool[k], POOL_BYTES);
     }
-    if (r->xtab != NULL) FreeMem(r->xtab, 1024 * 4);
+    if (r->xtab != NULL) FreeMem(r->xtab, XT_WORDS * 4);
     if (r->blank != NULL) FreeMem(r->blank, 16);
     if (r->pluts != NULL) FreeMem(r->pluts, VDP_PAL_BANDS * RENDER_PLUT_SET * 2);
     if (r->cels != NULL) FreeMem(r->cels, N_CELS * sizeof(CCB));
@@ -280,7 +278,7 @@ Err render_init(renderer *r)
     r->cels = (CCB *)AllocMem(N_CELS * sizeof(CCB), CEL_MEM);
     r->pluts = (uint16 *)AllocMem(VDP_PAL_BANDS * RENDER_PLUT_SET * 2, CEL_MEM);
     r->blank = (uint32 *)AllocMem(16, CEL_MEM);
-    r->xtab = (uint32 *)AllocMem(1024 * 4, PLAIN_MEM);
+    r->xtab = (uint32 *)AllocMem(XT_WORDS * 4, PLAIN_MEM);
     r->bm_pool[0] = (uint8 *)AllocMem(POOL_BYTES, CEL_MEM);
     r->bm_pool[1] = (uint8 *)AllocMem(POOL_BYTES, CEL_MEM);
     if (r->tiles == NULL || r->tiles_f == NULL || r->t_ok == NULL || r->wlist == NULL ||

@@ -6,6 +6,17 @@
 
 #include "stdio.h"
 #include "string.h"
+#include "stddef.h"
+
+/* The machine from the callback block of its mapper (sms_mem.m). */
+#define SMS_OF(m) ((sms_machine *)((uint8 *)(m) - offsetof(sms_machine, mem)))
+
+/* Layout relied on by the assembly port handlers (sms_io.s): the VDP
+ * state at SMS_VDP_OFFSET from the context, which game.c places the
+ * machine right after. */
+#define CHECK_OFF(name, cond) typedef char check_##name[(cond) ? 1 : -1]
+CHECK_OFF(ctx_size, sizeof(z80j_ctx) == SMS_VDP_OFFSET);
+CHECK_OFF(vdp_first, offsetof(sms_machine, vdp) == 0);
 
 /* Port index: address bits 7 and 6, then bit 0. */
 #define PORT_KIND(p) ((((p) >> 5) & 6) | ((p) & 1))
@@ -67,7 +78,7 @@ static void sdsc_write(sms_machine *s, uint32 c)
 
 static uint32 sms_in(z80j_machine *m, uint32 port, uint32 left)
 {
-    sms_machine *s = (sms_machine *)m;
+    sms_machine *s = SMS_OF(m);
 
     switch (PORT_KIND(port)) {
     case 2:
@@ -95,7 +106,7 @@ static uint32 sms_in(z80j_machine *m, uint32 port, uint32 left)
 
 static uint32 sms_out(z80j_machine *m, uint32 port, uint32 value, uint32 left)
 {
-    sms_machine *s = (sms_machine *)m;
+    sms_machine *s = SMS_OF(m);
     uint32 r;
 
     value &= 0xFF;
@@ -130,7 +141,7 @@ static uint32 sms_out(z80j_machine *m, uint32 port, uint32 value, uint32 left)
 
 static void sms_event(z80j_machine *m)
 {
-    vdp_event(&((sms_machine *)m)->vdp);
+    vdp_event(&SMS_OF(m)->vdp);
 }
 
 void sms_reset(sms_machine *s)
