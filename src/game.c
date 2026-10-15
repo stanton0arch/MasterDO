@@ -83,7 +83,8 @@ static void print_window(const game_window_rec *p)
            "%lu bank switches, %lu blocks (%lu in spare time, %lu at once in %lu us "
            "(%lu forced), %lu refused, %lu promoted, %lu us of spare time), %lu interpreted "
            "instructions in %lu stretches, %lu evictions (%lu blocks, %lu live chunks), "
-           "%lu returns resumed, pad read %lu us\n",
+           "%lu returns resumed, pad read %lu us, sound %lu us average, %lu us worst, "
+           "%lu knob tweaks\n",
            (unsigned long)p->first, (unsigned long)p->last,
            (unsigned long)(w->us / frames), (unsigned long)w->max_us,
            (unsigned long)w->max_frame,
@@ -105,7 +106,8 @@ static void print_window(const game_window_rec *p)
            (unsigned long)w->spare_us, (unsigned long)d->interp_insns, (unsigned long)d->interp,
            (unsigned long)d->evictions, (unsigned long)d->evicted,
            (unsigned long)d->evicted_live, (unsigned long)d->resumed,
-           (unsigned long)(w->pad_us / frames));
+           (unsigned long)(w->pad_us / frames), (unsigned long)(w->snd_us / frames),
+           (unsigned long)w->max_snd_us, (unsigned long)d->tweaks);
     printf("Picture: frames %lu-%lu: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
            "%lu cells for written tiles, %lu palettes, %lu backdrop changes, %lu sprite cels, "
            "%lu pieces, %lu priority strips, %lu priority patches, %lu frames in scroll bands, "
@@ -136,23 +138,25 @@ static void print_slow(const game_slow_rec *p)
     printf("Game: frame %lu took %lu us (emulation %lu, update %lu, draw %lu): "
            "Z80 idle %lu%%, %lu blocks translated%s (%lu us at once), "
            "%lu interpreted instructions in %lu stretches, "
-           "%lu VDP data writes, %lu tiles converted, %lu cells drawn\n",
+           "%lu VDP data writes, %lu tiles converted, %lu cells drawn, sound %lu us\n",
            (unsigned long)p->frame, (unsigned long)p->total_us, (unsigned long)p->us,
            (unsigned long)p->upd_us, (unsigned long)p->draw_us,
            (unsigned long)p->idle_pct, (unsigned long)p->blocks,
            p->evicted ? " after an eviction" : "", (unsigned long)p->sync_us,
            (unsigned long)p->insns, (unsigned long)p->stretches,
-           (unsigned long)p->data_w, (unsigned long)p->tiles, (unsigned long)p->cells);
+           (unsigned long)p->data_w, (unsigned long)p->tiles, (unsigned long)p->cells,
+           (unsigned long)p->snd_us);
 }
 
 static void print_long(const game_long_rec *p)
 {
     printf("Game: frame %lu shown after %lu us though under budget: emulation %lu, "
            "update %lu, draw %lu, spare time %lu, pad %lu us, %lu us of translations "
-           "at once\n",
+           "at once, sound %lu\n",
            (unsigned long)p->frame, (unsigned long)p->period_us,
            (unsigned long)p->us, (unsigned long)p->upd_us, (unsigned long)p->draw_us,
-           (unsigned long)p->spare_us, (unsigned long)p->pad_us, (unsigned long)p->sync_us);
+           (unsigned long)p->spare_us, (unsigned long)p->pad_us, (unsigned long)p->sync_us,
+           (unsigned long)p->snd_us);
 }
 
 /* The pad script of the run so far, as a line of the panel file of the
@@ -225,6 +229,7 @@ static void read_counters(const game *g, game_counters *c)
     c->sync_refused = g->jit.stats.sync_refused;
     c->forced = g->jit.stats.forced;
     c->resumed = g->jit.stats.resumed + g->ctx->resumed_count;
+    c->tweaks = g->snd != NULL ? g->snd->tweaks : 0;
     c->vdp_data_w = g->sms->vdp.n_data_w;
     c->vdp_data_r = g->sms->vdp.n_data_r;
     c->vdp_ctrl_w = g->sms->vdp.n_ctrl_w;
@@ -541,7 +546,8 @@ int32 game_frame(game *g, uint32 pad, uint32 pause)
     }
 
     t0 = plat_usec_now();
-    z80j_frame_start(&g->jit, t0, g->last_upd_us + g->last_draw_us + FRAME_MARGIN_US);
+    z80j_frame_start(&g->jit, t0, g->last_snd_us + g->last_upd_us + g->last_draw_us +
+                     FRAME_MARGIN_US);
     sms_frame(g->sms, pad, pause);
     t1 = plat_usec_now();
     g->last_us = t1 - t0;
@@ -556,6 +562,20 @@ int32 game_frame(game *g, uint32 pad, uint32 pause)
     }
     g->f_idle = (ctx->idle - idle0) >> 8;
 
+    /* The PSG registers as the frame leaves them go to the DSP voices
+     * before the picture is built: the sound of the frame then plays
+     * while its picture waits for its VBL. */
+    g->last_snd_us = 0;
+    if (g->snd != NULL) {
+        uint32 t2;
+
+        psg_update(g->snd, g->sms->psg_reg,
+                   g->sms->vdp.lines == VDP_LINES_PAL ? PSG_CLOCK_PAL : PSG_CLOCK_NTSC);
+        t2 = plat_usec_now();
+        g->last_snd_us = t2 - t1;
+        t1 = t2;
+    }
+
     render_update(g->rd, &g->sms->vdp);
     g->last_upd_us = plat_usec_now() - t1;
     return 0;
@@ -564,12 +584,13 @@ int32 game_frame(game *g, uint32 pad, uint32 pause)
 void game_frame_done(game *g, uint32 draw_us)
 {
     uint32 dt = g->last_us;
-    uint32 total = dt + g->last_upd_us + draw_us;
+    uint32 total = dt + g->last_snd_us + g->last_upd_us + draw_us;
     uint32 b;
 
     g->last_draw_us = draw_us;
     g->idle_t16 += g->f_idle >> 4;
     g->total_us += dt;
+    g->snd_total_us += g->last_snd_us;
     if (dt > g->max_us) {
         g->max_us = dt;
         g->max_frame = g->frame;
@@ -604,6 +625,7 @@ void game_frame_done(game *g, uint32 draw_us)
                 p->data_w = g->sms->vdp.n_data_w - g->f_data;
                 p->tiles = g->rd->st.tiles - g->f_tiles;
                 p->cells = g->rd->st.cells - g->f_cells;
+                p->snd_us = g->last_snd_us;
             }
         }
     }
@@ -620,6 +642,9 @@ void game_frame_done(game *g, uint32 draw_us)
     g->win.draw_us += draw_us;
     if (draw_us > g->win.max_draw_us)
         g->win.max_draw_us = draw_us;
+    g->win.snd_us += g->last_snd_us;
+    if (g->last_snd_us > g->win.max_snd_us)
+        g->win.max_snd_us = g->last_snd_us;
     g->win.total_us += total;
     if (total > g->win.max_total_us) {
         g->win.max_total_us = total;
@@ -641,6 +666,11 @@ void game_pad_time(game *g, uint32 us)
 void game_set_name(game *g, const char *name)
 {
     g->name = name;
+}
+
+void game_set_sound(game *g, psg_dsp *snd)
+{
+    g->snd = snd;
 }
 
 void game_set_frame_us(game *g, uint32 us)
@@ -680,7 +710,7 @@ void game_note_draw_error(game *g)
 
 void game_note_long_vbl(game *g, uint32 period_us)
 {
-    uint32 total = g->last_us + g->last_upd_us + g->last_draw_us;
+    uint32 total = g->last_us + g->last_snd_us + g->last_upd_us + g->last_draw_us;
 
     g->win.long_vbl++;
     if (total <= g->frame_us && g->long_logged < GAME_LONG_LOGS) {
@@ -696,6 +726,7 @@ void game_note_long_vbl(game *g, uint32 period_us)
             p->spare_us = g->last_spare_us;
             p->pad_us = g->last_pad_us;
             p->sync_us = g->jit.stats.sync_us - g->f_sync_us;
+            p->snd_us = g->last_snd_us;
         }
     }
 }
@@ -714,7 +745,8 @@ void game_log_summary(game *g)
     read_counters(g, &now);
     diff_counters(&d, &now, &g->run_start);
     printf("Game summary: %lu frames, emulation %lu us average (%lu%% of %d us), worst %lu us "
-           "(frame %lu), update %lu us average, draw %lu us average, total %lu us average "
+           "(frame %lu), update %lu us average, draw %lu us average, sound %lu us average "
+           "(%lu knob tweaks), total %lu us average "
            "(%lu%%), worst %lu us (frame %lu), %lu frames over %d us, Z80 idle %lu%%, %lu IRQ, "
            "%lu NMI, %lu bank switches, %lu blocks translated while running (%lu in spare "
            "time, %lu at once in %lu us (%lu forced), %lu refused, %lu promoted), %lu interpreted "
@@ -726,6 +758,7 @@ void game_log_summary(game *g)
            (unsigned long)g->max_us, (unsigned long)g->max_frame,
            (unsigned long)(n ? g->upd_total_us / n : 0),
            (unsigned long)(n ? g->draw_total_us / n : 0),
+           (unsigned long)(n ? g->snd_total_us / n : 0), (unsigned long)d.tweaks,
            (unsigned long)all, (unsigned long)percent(all, g->frame_us),
            (unsigned long)g->max_all_us, (unsigned long)g->max_all_frame,
            (unsigned long)g->over, (int)g->frame_us,

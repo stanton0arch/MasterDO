@@ -14,6 +14,7 @@
 #include "z80jit.h"
 #include "sms.h"
 #include "render.h"
+#include "psg.h"
 
 #define GAME_WINDOW     100     /* frames per log line */
 #define GAME_HIST       32      /* frame time histogram, 1 ms per bucket */
@@ -42,6 +43,7 @@ typedef struct {
     uint32 sync_refused;    /* translations at once refused, budget spent */
     uint32 forced;          /* translations at once past the forced count */
     uint32 resumed;         /* interrupt returns resumed inside their block */
+    uint32 tweaks;          /* DSP knob tweaks of the PSG voices */
     uint32 vdp_data_w;
     uint32 vdp_data_r;
     uint32 vdp_ctrl_w;
@@ -60,7 +62,9 @@ typedef struct {
     uint32 max_upd_us;
     uint32 draw_us;         /* DrawCels, timed by the caller */
     uint32 max_draw_us;
-    uint32 total_us;        /* the three together */
+    uint32 snd_us;          /* PSG voices update */
+    uint32 max_snd_us;
+    uint32 total_us;        /* emulation, sound, update and drawing together */
     uint32 max_total_us;
     uint32 max_total_frame;
     uint32 over;            /* frames whose total is over the budget */
@@ -108,6 +112,7 @@ typedef struct {
     uint32 data_w;
     uint32 tiles;
     uint32 cells;
+    uint32 snd_us;
 } game_slow_rec;
 
 typedef struct {
@@ -119,6 +124,7 @@ typedef struct {
     uint32 spare_us;
     uint32 pad_us;
     uint32 sync_us;
+    uint32 snd_us;
 } game_long_rec;
 
 /* Zones of the code buffer given to the hot area; set before game_init
@@ -144,6 +150,7 @@ typedef struct {
     uint32        frame_us; /* period of the display: the frame budget */
     sms_machine  *sms;
     renderer     *rd;
+    psg_dsp      *snd;      /* PSG voices on the DSP, or NULL (silent run) */
     z80j_state    jit;
     const uint8  *rom;
     uint32        rom_size;
@@ -160,6 +167,7 @@ typedef struct {
     /* Run since the last reset. */
     uint32        frame;
     uint32        last_us;  /* last frame: emulation */
+    uint32        last_snd_us;
     uint32        last_upd_us;
     uint32        last_draw_us;
     uint32        last_spare_us;
@@ -168,6 +176,7 @@ typedef struct {
     uint32        total_us; /* emulation */
     uint32        max_us;
     uint32        max_frame;
+    uint32        snd_total_us;
     uint32        upd_total_us;
     uint32        draw_total_us;
     uint32        all_total_us;
@@ -235,6 +244,10 @@ void  game_set_frame_us(game *g, uint32 us);
 /* Names the cartridge in the pad script line of the log (the string is
  * kept, not copied). */
 void  game_set_name(game *g, const char *name);
+
+/* The PSG voices the frames send their registers to (NULL: none). The
+ * caller silences them when the run pauses or ends. */
+void  game_set_sound(game *g, psg_dsp *snd);
 
 /* Spare time at the end of a frame that began at frame_start
  * (microsecond clock): translates queued code ahead while a translation

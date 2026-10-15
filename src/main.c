@@ -19,7 +19,9 @@
  * R toggles the presentation between the queue (a presenter thread shows
  * the finished screens one per VBL, the emulation working a frame ahead)
  * and the direct mode (present and wait for the VBL after each frame);
- * X ends the run. Results go to the debug log and to the screen.
+ * X ends the run. Results go to the debug log and to the screen. The PSG
+ * registers of each frame drive voices on the DSP (psg.c), silenced
+ * whenever the run pauses or ends.
  */
 
 #include "platform.h"
@@ -68,6 +70,9 @@ typedef struct {
 
 /* The run holds the translator state: kept off the small task stack. */
 static game g;
+
+/* The PSG voices on the DSP, opened once for the whole session. */
+static psg_dsp snd;
 
 static void text_line(const platform *p, int32 screen, int32 line, Color color,
                       const char *text)
@@ -286,6 +291,7 @@ static void run_game(platform *p, app_state *st)
             break;
         if (pressed & ControlLeftShift) {
             plat_drain(p);
+            psg_mute(&snd);
             game_log_flush(&g);
             prev = show_snapshot(p, st, prev);
             if (prev & ControlX)
@@ -358,6 +364,7 @@ static void run_game(platform *p, app_state *st)
         }
     }
     plat_drain(p);
+    psg_mute(&snd);
     plat_reset_clip(p);
     game_log_summary(&g);
 }
@@ -497,8 +504,9 @@ static void draw_results(platform *p, const app_state *st)
         sprintf(buf, " %lu frames: emulation %lu, update %lu", (unsigned long)g.frame,
                 (unsigned long)(g.total_us / frames), (unsigned long)(g.upd_total_us / frames));
         text_line(p, s, n++, COLOR_TEXT, buf);
-        sprintf(buf, " draw %lu, total %lu = %lu pct",
-                (unsigned long)(g.draw_total_us / frames), (unsigned long)all,
+        sprintf(buf, " draw %lu, sound %lu, total %lu = %lu pct",
+                (unsigned long)(g.draw_total_us / frames),
+                (unsigned long)(g.snd_total_us / frames), (unsigned long)all,
                 (unsigned long)percent_of(all, p->frame_us));
         text_line(p, s, n++, all <= p->frame_us ? COLOR_GOOD : COLOR_BAD, buf);
         sprintf(buf, " worst %lu us, %lu over %lu us", (unsigned long)g.max_all_us,
@@ -519,9 +527,10 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: block management of the translator in assembly, leaner code emission\n");
+    printf("masterdo: PSG voices on the DSP through the audio folio\n");
     if (plat_init(&plat) < 0)
         return 1;
+    psg_open(&snd);
     memset(&st, 0, sizeof(st));
     st.pic_x = (plat.width - RENDER_W) / 2;
     st.pic_y = ((plat.height - RENDER_H) / 2) & ~1;
@@ -560,6 +569,7 @@ int main(int argc, char **argv)
 
             st.have_game = 1;
             game_set_name(&g, st.rom.name);
+            game_set_sound(&g, snd.ok ? &snd : NULL);
             game_set_frame_us(&g, plat.frame_us);
             show_message(&plat, "Translating the cartridge code...");
             game_translate_rom(&g);
@@ -599,6 +609,7 @@ leave:
 
 quit:
     printf("masterdo: quit\n");
+    psg_close(&snd);
     plat_shutdown(&plat);
     return 0;
 }
