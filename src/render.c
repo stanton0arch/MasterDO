@@ -1369,8 +1369,12 @@ void render_update(renderer *r, vdp_state *v)
  * Catch-up in spare time
  *------------------------------------------------------------------------*/
 
-#define CATCH_BUDGET    16      /* cells drawn between two looks at the clock (a
-                                   look costs two system time samples on the console) */
+#define CATCH_BUDGET    32      /* cells drawn between two looks at the clock: a
+                                   look costs two system time samples, tens of
+                                   microseconds each on the console, so a look is
+                                   worth about a millisecond and a half of cells */
+#define CATCH_SCANS     16      /* name table chunks compared between two looks,
+                                   when the chunks hold few changed entries */
 
 #define past(now, deadline) ((int32)((now)() - (deadline)) >= 0)
 
@@ -1495,6 +1499,8 @@ uint32 render_catch_up(renderer *r, vdp_state *v, uint32 (*now)(void), uint32 de
     for (m = 0; m < RENDER_LAYERS; m++) {
         render_layer *l = &r->layer[m];
         uint32 nchunks = l->nrows * 2;
+        uint32 drawn = 0;       /* cells drawn since the last look at the clock */
+        uint32 scans = 0;       /* chunks compared since then */
         uint32 pass;
 
         if (!l->valid || (l->nt_pend[0] | l->nt_pend[1]) == 0)
@@ -1517,6 +1523,13 @@ uint32 render_catch_up(renderer *r, vdp_state *v, uint32 (*now)(void), uint32 de
                 if (n != 0)
                     render_entries(l, vram, n);
                 l->nt_pend[c >> 5] &= ~((uint32)1 << (c & 31));
+                /* A changed word is two entries, hence up to two cells. */
+                drawn += 2 * n;
+                scans++;
+                if (drawn < CATCH_BUDGET && scans < CATCH_SCANS)
+                    continue;
+                drawn = 0;
+                scans = 0;
                 if (past(now, deadline_us)) {
                     cut = 1;
                     goto out;
