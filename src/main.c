@@ -60,6 +60,7 @@ typedef struct {
     uint32             dram_free;   /* before the benchmarks */
     uint32             vram_free;
     uint32             run_free;    /* DRAM free during the run */
+    uint32             run_vram;    /* VRAM free during the run, or after a failed load */
     int32              pic_x;       /* picture position on screen (y even) */
     int32              pic_y;
     uint32             pic_h;       /* picture height: 192, 224 or 240 lines */
@@ -83,7 +84,7 @@ static void text_line(const platform *p, int32 screen, int32 line, Color color,
 static void show_message(platform *p, const char *text)
 {
     plat_clear(p, p->back);
-    text_line(p, p->back, 0, COLOR_TITLE, "MASTERDO - STEP 3D");
+    text_line(p, p->back, 0, COLOR_TITLE, "MASTERDO");
     text_line(p, p->back, 2, COLOR_TEXT, text);
     plat_present(p);
 }
@@ -369,6 +370,19 @@ static void run_game(platform *p, app_state *st)
     game_log_summary(&g);
 }
 
+/* The display and the memory left, for the screens: the console has no
+ * log, so this is where its figures are read. */
+static void memory_line(platform *p, int32 screen, int32 line, uint32 dram, uint32 vram)
+{
+    char buf[80];
+
+    sprintf(buf, "%s %ldx%ld %ld SCREENS, DRAM %luK VRAM %luK FREE",
+            p->is_pal ? "PAL" : "NTSC", (long)p->width, (long)p->height,
+            (long)p->num_screens, (unsigned long)(dram / 1024),
+            (unsigned long)(vram / 1024));
+    text_line(p, screen, line, COLOR_HEAD, buf);
+}
+
 /*--------------------------------------------------------------------------
  * ROM menu
  *------------------------------------------------------------------------*/
@@ -384,6 +398,7 @@ static void draw_menu(platform *p, const app_state *st, int32 cur)
     sprintf(buf, "MASTERDO - CHOOSE A CARTRIDGE (%ld FILES)   A: RUN  X: QUIT",
             (long)st->roms.count);
     text_line(p, s, 0, COLOR_TITLE, buf);
+    memory_line(p, s, 1, st->dram_free, st->vram_free);
     for (k = first; k < st->roms.count && k < first + MENU_LINES; k++) {
         sprintf(buf, "%c %-32s %4luK", k == cur ? '>' : ' ', st->roms.name[k],
                 (unsigned long)((st->roms.size[k] + 1023) / 1024));
@@ -474,9 +489,9 @@ static void draw_results(platform *p, const app_state *st)
     if (st->rom.size <= 0)
         sprintf(buf, "ROM not loaded (0x%lx)", (unsigned long)st->rom.size);
     else
-        sprintf(buf, "%s: %ld bytes, %s, DRAM %luK free", st->rom.name, (long)st->rom.size,
-                p->is_pal ? "PAL" : "NTSC", (unsigned long)(st->run_free / 1024));
+        sprintf(buf, "%s: %ld bytes", st->rom.name, (long)st->rom.size);
     text_line(p, s, n++, st->rom.size > 0 ? COLOR_TEXT : COLOR_BAD, buf);
+    memory_line(p, s, n++, st->run_free, st->run_vram);
 
     text_line(p, s, n++, COLOR_HEAD, p->is_pal ? "BENCHMARKS (Z80 PER PAL FRAME)"
                                                : "BENCHMARKS (Z80 PER NTSC FRAME)");
@@ -527,7 +542,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: PSG voices on the DSP through the audio folio\n");
+    printf("masterdo: 320x240 display bitmaps whatever the display type, memory figures on screen\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);
@@ -563,20 +578,21 @@ int main(int argc, char **argv)
         st.have_game = 0;
         if (rom_load(&st.rom, st.roms.name[pick]) == 0)
             rom_log(&st.rom);
+        /* The memory left after a failed load (the results screen shows
+         * it); replaced by the run's figures once the game is set up. */
+        plat_mem_free(&st.run_free, &st.run_vram);
         if (st.rom.data != NULL && st.rom.size >= 0x4000 &&
             game_init(&g, st.rom.data, (uint32)st.rom.size) == 0) {
-            uint32 vram;
-
             st.have_game = 1;
             game_set_name(&g, st.rom.name);
             game_set_sound(&g, snd.ok ? &snd : NULL);
             game_set_frame_us(&g, plat.frame_us);
             show_message(&plat, "Translating the cartridge code...");
             game_translate_rom(&g);
-            plat_mem_free(&st.run_free, &vram);
+            plat_mem_free(&st.run_free, &st.run_vram);
             printf("Memory: %lu bytes of DRAM and %lu bytes of VRAM free during the run; "
                    "picture at (%ld,%ld)\n",
-                   (unsigned long)st.run_free, (unsigned long)vram, (long)st.pic_x,
+                   (unsigned long)st.run_free, (unsigned long)st.run_vram, (long)st.pic_x,
                    (long)st.pic_y);
         }
 

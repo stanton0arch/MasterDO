@@ -20,6 +20,12 @@
 #include "displayutils.h"
 
 #define PLAT_NUM_SCREENS 3
+/* Bitmap size asked of the display whatever the display type: the
+ * emulated picture is at most 240 lines, and a PAL display built with the
+ * system defaults takes 288-line bitmaps (180 KiB of VRAM each instead
+ * of 150), which leaves no room for a 512 KiB cartridge image. */
+#define PLAT_BITMAP_W 320
+#define PLAT_BITMAP_H 240
 #define PLAT_QUEUE_LEN   4     /* power of two, more than the screens */
 #define PLAT_LONG_US     25000 /* a presentation two VBLs or more after the previous one */
 
@@ -40,6 +46,8 @@ typedef struct {
     int32  is_pal;      /* 1 when the console runs a 50 Hz display */
     uint32 frame_us;    /* period of the display */
     int32  num_screens; /* screens created (3, or 2 without memory for the third) */
+    void  *bm_mem;      /* the bitmaps, when the group was built here (else NULL) */
+    uint32 bm_bytes;    /* bytes per bitmap in that block */
     int32  back;        /* index of the screen being drawn */
     /* Presenter thread: the screens queued by the main task, shown one
      * per vertical blank. The queue is read by the thread and written by

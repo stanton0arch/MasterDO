@@ -111,6 +111,93 @@ static void presenter_stop(platform *p)
     p->thread = -1;
 }
 
+/* Create the screen group with PLAT_BITMAP_W x PLAT_BITMAP_H bitmaps in
+ * one VRAM block, and fill the screen context fields the rest of the
+ * platform uses. CreateBasicDisplay() takes the system's default bitmap
+ * height instead, 288 lines on a PAL console. */
+static Err create_group(platform *p, int32 display_type, int32 num_screens)
+{
+    int32 page_size = GetPageSize(MEMTYPE_VRAM);
+    int32 bm_w[1];
+    int32 bm_h[1];
+    void *bm_buf[MAXSCREENS];
+    TagArg tags[9];
+    Item group;
+    Err err;
+    uint32 pages;
+    int32 i;
+
+    if (page_size <= 0)
+        page_size = 2048;
+    pages = (uint32)((PLAT_BITMAP_W * PLAT_BITMAP_H * 2 + page_size - 1) / page_size);
+    p->bm_bytes = pages * (uint32)page_size;
+    p->bm_mem = AllocMem((int32)(p->bm_bytes * (uint32)num_screens),
+                         MEMTYPE_STARTPAGE | MEMTYPE_VRAM | MEMTYPE_CEL);
+    if (p->bm_mem == NULL)
+        return GRAFERR_NOMEM;
+    for (i = 0; i < num_screens; i++)
+        bm_buf[i] = (uint8 *)p->bm_mem + (uint32)i * p->bm_bytes;
+    bm_w[0] = PLAT_BITMAP_W;
+    bm_h[0] = PLAT_BITMAP_H;
+
+    tags[0].ta_Tag = CSG_TAG_DISPLAYTYPE;      tags[0].ta_Arg = (TagData)display_type;
+    tags[1].ta_Tag = CSG_TAG_SCREENCOUNT;      tags[1].ta_Arg = (TagData)num_screens;
+    tags[2].ta_Tag = CSG_TAG_SCREENHEIGHT;     tags[2].ta_Arg = (TagData)PLAT_BITMAP_H;
+    tags[3].ta_Tag = CSG_TAG_DISPLAYHEIGHT;    tags[3].ta_Arg = (TagData)PLAT_BITMAP_H;
+    tags[4].ta_Tag = CSG_TAG_BITMAPCOUNT;      tags[4].ta_Arg = (TagData)1;
+    tags[5].ta_Tag = CSG_TAG_BITMAPWIDTH_ARRAY;  tags[5].ta_Arg = (TagData)bm_w;
+    tags[6].ta_Tag = CSG_TAG_BITMAPHEIGHT_ARRAY; tags[6].ta_Arg = (TagData)bm_h;
+    tags[7].ta_Tag = CSG_TAG_BITMAPBUF_ARRAY;  tags[7].ta_Arg = (TagData)bm_buf;
+    tags[8].ta_Tag = CSG_TAG_DONE;             tags[8].ta_Arg = (TagData)0;
+
+    group = CreateScreenGroup(p->sc.sc_ScreenItems, tags);
+    if (group < 0) {
+        FreeMem(p->bm_mem, (int32)(p->bm_bytes * (uint32)num_screens));
+        p->bm_mem = NULL;
+        return group;
+    }
+    err = AddScreenGroup(group, NULL);
+    if (err < 0) {
+        DeleteScreenGroup(group);
+        FreeMem(p->bm_mem, (int32)(p->bm_bytes * (uint32)num_screens));
+        p->bm_mem = NULL;
+        return err;
+    }
+    p->sc.sc_ScreenGroup = group;
+    p->sc.sc_DisplayType = (uint32)display_type;
+    p->sc.sc_NumScreens = (uint32)num_screens;
+    p->sc.sc_CurrentScreen = 0;
+    p->sc.sc_NumBitmapPages = pages;
+    p->sc.sc_NumBitmapBytes = p->bm_bytes;
+    p->sc.sc_BitmapBank = GetBankBits(p->bm_mem);
+    p->sc.sc_BitmapWidth = PLAT_BITMAP_W;
+    p->sc.sc_BitmapHeight = PLAT_BITMAP_H;
+    for (i = 0; i < num_screens; i++) {
+        Screen *scr = (Screen *)LookupItem(p->sc.sc_ScreenItems[i]);
+
+        if (scr == NULL || scr->scr_TempBitmap == NULL) {
+            printf("WARNING: screen %ld has no bitmap\n", (long)i);
+            RemoveScreenGroup(group);
+            DeleteScreenGroup(group);
+            FreeMem(p->bm_mem, (int32)(p->bm_bytes * (uint32)num_screens));
+            p->bm_mem = NULL;
+            return GRAFERR_BADPTR;
+        }
+        p->sc.sc_Bitmaps[i] = scr->scr_TempBitmap;
+        p->sc.sc_BitmapItems[i] = scr->scr_TempBitmap->bm.n_Item;
+    }
+    return 0;
+}
+
+static void delete_group(platform *p)
+{
+    RemoveScreenGroup(p->sc.sc_ScreenGroup);
+    DeleteScreenGroup(p->sc.sc_ScreenGroup);
+    FreeMem(p->bm_mem, (int32)(p->bm_bytes * p->sc.sc_NumScreens));
+    p->bm_mem = NULL;
+    CloseGraphicsFolio();
+}
+
 #define PLAT_ALL_BUTTONS (ControlDown | ControlUp | ControlRight | ControlLeft | ControlA | \
                           ControlB | ControlC | ControlStart | ControlX | ControlRightShift | \
                           ControlLeftShift)
@@ -147,17 +234,31 @@ Err plat_init(platform *p)
     p->frame_us = p->is_pal ? PLAT_PAL_FRAME_US : PLAT_NTSC_FRAME_US;
 
     /* Three screens: one displayed, one queued, one being drawn. Without
-     * the memory for the third, two (no queued presentation). */
+     * the memory for the third, two (no queued presentation). The bitmaps
+     * are asked at 320 x 240 whatever the display type; should the system
+     * refuse such a group, the basic display with its default bitmaps. */
     p->num_screens = PLAT_NUM_SCREENS;
-    err = CreateBasicDisplay(&p->sc, (uint32)display_type, PLAT_NUM_SCREENS);
+    err = create_group(p, display_type, PLAT_NUM_SCREENS);
     if (err < 0) {
-        printf("WARNING: CreateBasicDisplay failed for %d screens (0x%lx), trying 2\n",
-               PLAT_NUM_SCREENS, (unsigned long)err);
+        printf("WARNING: CreateScreenGroup failed for %d screens of %dx%d (0x%lx), trying 2\n",
+               PLAT_NUM_SCREENS, PLAT_BITMAP_W, PLAT_BITMAP_H, (unsigned long)err);
         p->num_screens = 2;
-        err = CreateBasicDisplay(&p->sc, (uint32)display_type, 2);
+        err = create_group(p, display_type, 2);
+    }
+    if (err < 0) {
+        printf("WARNING: CreateScreenGroup failed for 2 screens (0x%lx), trying the basic display\n",
+               (unsigned long)err);
+        p->num_screens = PLAT_NUM_SCREENS;
+        err = CreateBasicDisplay(&p->sc, (uint32)display_type, PLAT_NUM_SCREENS);
         if (err < 0) {
-            printf("ERROR: CreateBasicDisplay failed (0x%lx)\n", (unsigned long)err);
-            return err;
+            printf("WARNING: CreateBasicDisplay failed for %d screens (0x%lx), trying 2\n",
+                   PLAT_NUM_SCREENS, (unsigned long)err);
+            p->num_screens = 2;
+            err = CreateBasicDisplay(&p->sc, (uint32)display_type, 2);
+            if (err < 0) {
+                printf("ERROR: CreateBasicDisplay failed (0x%lx)\n", (unsigned long)err);
+                return err;
+            }
         }
     }
 
@@ -201,10 +302,11 @@ Err plat_init(platform *p)
     else
         p->thread = -1;
 
-    printf("Display: %s, bitmap %ldx%ld, %lu VRAM pages per screen, %ld screens, "
+    printf("Display: %s, bitmap %ldx%ld (%s), %lu VRAM pages per screen, %ld screens, "
            "presenter thread %s\n",
            p->is_pal ? "PAL 50 Hz" : "NTSC 60 Hz",
            (long)p->width, (long)p->height,
+           p->bm_mem != NULL ? "requested" : "system default",
            (unsigned long)p->sc.sc_NumBitmapPages, (long)p->num_screens,
            p->thread >= 0 ? "running" : "absent");
     return 0;
@@ -214,7 +316,10 @@ void plat_shutdown(platform *p)
 {
     presenter_stop(p);
     KillControlPad();
-    DeleteBasicDisplay(&p->sc);
+    if (p->bm_mem != NULL)
+        delete_group(p);
+    else
+        DeleteBasicDisplay(&p->sc);
 }
 
 static uint32 usec_sample(void)
