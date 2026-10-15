@@ -28,7 +28,15 @@
 ; C side refuses one, it sets the count of interpreted instructions from
 ; which it may be asked again (hot_sync_gate); reaching force_at hands
 ; the address over whatever the budget. Instructions interpreted are
-; counted (int_insns) for the logs and for that budget.
+; counted for the logs and for that budget: the count is kept in the
+; low byte of r8 (the T-states are a multiple of 256 there, and every
+; use of r8 outside this file goes through bits 8-31) and added to the
+; context (int_insns) when the byte wraps and whenever the interpreter
+; leaves, so that the C side and the port handlers, which get the
+; T-states in r2, never see the byte.
+;
+; A chain of OUTI (or OUTD) on a port the machine provides a run handler
+; for goes out in one call of that handler, as the translated code does.
 ;
 ; Context layout: CONTRACT with z80j_ctx (z80jit.h) - keep in sync
 ; (z80jit.c checks the offsets at compile time).
@@ -47,6 +55,7 @@
         IMPORT  z80j_hot
         IMPORT  z80j_io_write
         IMPORT  z80j_push_slow
+        IMPORT  z80j_port_outn_loop
 
 ; Context fields, relative to the global pointer.
 R_PC            EQU     0x418
@@ -63,6 +72,7 @@ STATE           EQU     0x474
 SCRATCH         EQU     0x494
 PORT_IN         EQU     0x49C
 PORT_OUT        EQU     0x4A0
+PORT_OUTN       EQU     0x4A4
 HOT_TAB         EQU     0x4B4
 HOT_QUEUE_AT    EQU     0x4B8
 HOT_SYNC_AT     EQU     0x4BC
@@ -90,6 +100,17 @@ MIN_T           EQU     0x1700          ; 23 T-states times 256
 ;============================================================================
 ; Macros
 ;============================================================================
+
+; Adds the instructions counted in the low byte of r8 to the context and
+; clears the byte. Uses $a and $b.
+        MACRO
+        FLUSH   $a,$b
+        and     $a,r8,#0xFF
+        ldr     $b,[r10,#INT_INSNS]
+        bic     r8,r8,#0xFF
+        add     $b,$b,$a
+        str     $b,[r10,#INT_INSNS]
+        MEND
 
 ; Calls a C function of the translator (first argument: its state; the
 ; others in r1, r2). Preserves r3 and the global pointer; r12 is lost.
@@ -353,7 +374,7 @@ MIN_T           EQU     0x1700          ; 23 T-states times 256
         MACRO
         PORTIN
         str     r12,[r10,#R_PC]
-        mov     r2,r8
+        bic     r2,r8,#0xFF
         ldr     r12,[r10,#PORT_IN]
         mov     lr,pc
         ldr     pc,[r12,r1,lsl#2]
@@ -363,7 +384,7 @@ MIN_T           EQU     0x1700          ; 23 T-states times 256
         MACRO
         PORTOUT
         str     r12,[r10,#R_PC]
-        mov     r2,r8
+        bic     r2,r8,#0xFF
         ldr     r12,[r10,#PORT_OUT]
         mov     lr,pc
         ldr     pc,[r12,r1,lsl#2]
@@ -578,13 +599,16 @@ z80i_loop
         add     r0,r0,#1
         str     r0,[r10,#INT_RUNS]
 
-; Next instruction: the stretch must have room for the longest one.
+; Next instruction: the stretch must have room for the longest one (the
+; count byte of r8 cannot make the compare pass: MIN_T is a multiple of
+; 256). The instruction is counted in that byte.
 next
         cmp     r8,#MIN_T
         blt     int_done
-        ldr     r0,[r10,#INT_INSNS]
-        add     r0,r0,#1
-        str     r0,[r10,#INT_INSNS]
+        add     r8,r8,#1
+        tst     r8,#0xFF
+        beq     int_wrap
+next_fetch
         bic     r12,r12,#0x10000
         mvn     r0,r12,lsr#8
         ldr     r0,[r10,r0,lsl#2]
@@ -592,6 +616,15 @@ next
         add     r12,r12,#1
         adrl    lr,optable
         ldr     pc,[lr,r0,lsl#2]
+
+; The count byte wrapped and carried into the T-states: 256 instructions
+; go to the context.
+int_wrap
+        sub     r8,r8,#0x100
+        ldr     r0,[r10,#INT_INSNS]
+        add     r0,r0,#256
+        str     r0,[r10,#INT_INSNS]
+        b       next_fetch
 
 ; After an instruction that may have written a special page.
 next_w
@@ -602,8 +635,9 @@ next_w
         str     r0,[r10,#INT_LEAVE]
         b       int_leave
 
-; Transfer of control to r12: translated code is entered directly, else
-; the entry is counted and interpretation goes on.
+; Transfer of control to r12: translated code is entered directly (the
+; count flushed first), else the entry is counted and interpretation goes
+; on.
 int_jump
         mov     r12,r12,lsl#16
         mov     r12,r12,lsr#16
@@ -614,7 +648,10 @@ int_jump
         ldr     r0,[r0,r12,lsl#2]
         ldr     r1,lit_miss
         cmp     r0,r1
-        movne   pc,r0
+        beq     int_jump_count
+        FLUSH   r1,r2
+        mov     pc,r0
+int_jump_count
         ldr     r1,[r10,#HOT_TAB]
         teq     r1,#0
         beq     next
@@ -631,11 +668,14 @@ int_jump
         ldr     r2,[r10,#HOT_FORCE_AT]
         cmp     r0,r2
         beq     int_hot
+        and     r0,r8,#0xFF
         ldr     r2,[r10,#INT_INSNS]
         ldr     r1,[r10,#HOT_SYNC_GATE]
+        add     r2,r2,r0
         cmp     r2,r1
         bcc     next
 int_hot
+        FLUSH   r0,r1
         mov     r0,r12
         bl      jit_save
         callc   z80j_hot
@@ -648,6 +688,7 @@ int_done
         ldr     r0,[r10,#EI_SAVED]
         teq     r0,#0
         bne     int_leave
+        FLUSH   r0,r1
         mov     r0,r12
         bl      jit_save
         callc   z80j_stretch_end
@@ -664,6 +705,7 @@ int_leave
         mov     r1,#0
         str     r1,[r10,#EI_SAVED]
 int_leave2
+        FLUSH   r0,r1
         mov     r0,r12
         mov     r1,#0
         b       z80j_glue_leave
@@ -676,6 +718,7 @@ int_halt
         addne   r8,r0,r1
         movne   r0,#0
         strne   r0,[r10,#EI_SAVED]
+        FLUSH   r0,r1
         mov     r0,r12
         b       z80j_glue_halt
 
@@ -1332,9 +1375,10 @@ op_ei
         ldr     r0,[r10,#EI_SAVED]
         teq     r0,#0
         subne   r0,r0,#4*256            ; already pending: this EI's time
-        moveq   r0,r8
+        biceq   r0,r8,#0xFF
         str     r0,[r10,#EI_SAVED]
-        mov     r8,#MIN_T               ; one more instruction runs
+        and     r8,r8,#0xFF             ; (the count byte stays)
+        orr     r8,r8,#MIN_T            ; one more instruction runs
         b       next
 
 op_c4   CALLCC  0
@@ -1992,10 +2036,96 @@ ed_ini  INBLK   0,0
 ed_ind  INBLK   1,0
 ed_inir INBLK   0,1
 ed_indr INBLK   1,1
-ed_outi OUTBLK  0,0
-ed_outd OUTBLK  1,0
+; OUTI / OUTD at the head of a chain of the same instruction (the
+; unrolled uploads of many games): when the machine provides a run
+; handler for the port, the chain goes out in one call of it, as the
+; translated code does, up to what the stretch has room for (the n-th
+; instruction of the chain runs when (n - 1) x 16 + 23 T-states are
+; left, exactly as if interpreted one by one). B, HL, the flags and the
+; T-states end as after the last one, and the chain counts as its
+; instructions. The generic run handler would only spare the dispatch,
+; and a byte handler asking to leave the block would be answered after
+; the run instead of at once: such ports keep the one-instruction path.
+        MACRO
+$lab    OUTRUN  $dec,$op,$one
+$lab
+        mov     r1,r5,lsr#16
+        and     r1,r1,#0xFF
+        ldr     r2,[r10,#PORT_OUTN]
+        ldr     r2,[r2,r1,lsl#2]
+        ldr     r0,lit_outn_loop
+        cmp     r2,r0
+        beq     $one
+        sub     r2,r8,#MIN_T
+        mov     r2,r2,lsr#12            ; the instructions that fit, less one
+        bic     r12,r12,#0x10000
+        mov     lr,#1                   ; the chain so far
+$lab.scan
+        cmp     lr,r2
+        bhi     $lab.run
+        mvn     r0,r12,lsr#8
+        ldr     r0,[r10,r0,lsl#2]
+        ldrb    r0,[r0,r12]
+        cmp     r0,#0xED
+        bne     $lab.run
+        add     r1,r12,#1
+        bic     r1,r1,#0x10000
+        mvn     r0,r1,lsr#8
+        ldr     r0,[r10,r0,lsl#2]
+        ldrb    r0,[r0,r1]
+        cmp     r0,#$op
+        bne     $lab.run
+        add     r12,r1,#1
+        bic     r12,r12,#0x10000
+        add     lr,lr,#1
+        b       $lab.scan
+$lab.run
+        and     r0,r8,#0xFF             ; the chain counted (its head was)
+        add     r0,r0,lr
+        sub     r0,r0,#1
+        ldr     r1,[r10,#INT_INSNS]
+        bic     r8,r8,#0xFF
+        add     r1,r1,r0
+        str     r1,[r10,#INT_INSNS]
+        sub     r5,r5,lr,lsl#24         ; B
+        sub     r8,r8,lr,lsl#12         ; 16 T-states each
+        mov     r1,r5,lsr#16
+        and     r1,r1,#0xFF             ; port C
+        [ $dec = 0
+        mov     r0,lr
+        |
+        rsb     r0,lr,#0
+        ]
+        str     lr,[sp,#-4]!
+        str     r12,[r10,#R_PC]
+        mov     r2,r8
+        ldr     r12,[r10,#PORT_OUTN]
+        mov     lr,pc
+        ldr     pc,[r12,r1,lsl#2]
+        ldr     r12,[r10,#R_PC]
+        ldr     r1,[sp],#4
+        [ $dec = 0
+        add     r7,r7,r1,lsl#16
+        |
+        sub     r7,r7,r1,lsl#16
+        ]
+        bic     r3,r3,#PSR_Z
+        orr     r3,r3,#PSR_N
+        tst     r5,#0xFF000000
+        orreq   r3,r3,#PSR_Z
+        teq     r0,#0
+        bne     int_leave
+        b       next
+        MEND
+
+ed_outi OUTRUN  0,0xA3,ed_outi1
+ed_outd OUTRUN  1,0xAB,ed_outd1
+ed_outi1 OUTBLK 0,0
+ed_outd1 OUTBLK 1,0
 ed_otir OUTBLK  0,1
 ed_otdr OUTBLK  1,1
+lit_outn_loop
+        DCD     z80j_port_outn_loop
 
 ;============================================================================
 ; DD and FD prefixes. The next opcode is looked up in the prefix's table
