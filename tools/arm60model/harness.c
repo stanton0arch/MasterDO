@@ -635,23 +635,10 @@ void hmain(void)
             /* -hash: a hash of the machine state (Z80 RAM and registers,
              * VDP registers, video and colour RAM) every 100 frames
              * (-hashevery n: every n frames), to compare runs made under
-             * different host timings or by two builds. */
-            const z80j_ctx *c = g.ctx;
-            uint32 h = 0;
-            uint32 k;
+             * different host timings or by two builds; the ISO records the
+             * same hash every 16 frames (game_state_hash). */
+            uint32 h = game_state_hash(&g);
 
-            for (k = 0; k < 0x2000; k++)
-                h = h * 31 + c->mram[k];
-            for (k = 0; k < 8; k++)
-                h = h * 31 + c->regs[k];
-            h = h * 31 + c->ix + c->iy * 7 + c->bc2 * 11 + c->de2 * 13 + c->hl2 * 17 +
-                c->iff1 * 19 + c->im * 23 + c->a2 * 29 + c->f2 * 31;
-            for (k = 0; k < 11; k++)
-                h = h * 31 + g.sms->vdp.reg[k];
-            for (k = 0; k < VDP_VRAM_SIZE; k++)
-                h = h * 31 + g.sms->vdp.vram[k];
-            for (k = 0; k < 32; k++)
-                h = h * 31 + g.sms->vdp.cram[k];
             printf("Hash: frame %lu: %08lx\n", (unsigned long)(f + 1), (unsigned long)h);
         }
         {

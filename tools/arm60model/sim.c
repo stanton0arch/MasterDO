@@ -17,7 +17,8 @@
  * Options: -rom file, -frames n, -bench, -dump n, -from n, -img, -sym.
  * Environment: SIMPAD="frame:bits,..." (buttons held from that frame on,
  * SMS_PAD_* bits, 0x100 PAUSE), SIMPROF=1 (cycles per function),
- * SIMALLOC=1 (every allocation with its size and memory type),
+ * SIMALLOC=1 (every allocation with its size and memory type), SIMSCALE=f
+ * (every cycle weight multiplied by f: another host timing),
  * SIMDIS=symbol (executions per instruction of a function).
  */
 #include <stdio.h>
@@ -682,6 +683,12 @@ int main(int argc, char **argv)
             memmove(mem + ROM_ADDR, mem + ROM_ADDR + 512, rom_size - 512);
             rom_size -= 512;
         }
+    }
+    if (getenv("SIMSCALE")) {
+        /* Every cycle weight scaled: another host timing, to see whether
+         * a run that depends on its own clock takes another course. */
+        double f = atof(getenv("SIMSCALE"));
+        weightS *= f; weightN *= f; weightI *= f;
     }
     padenv = getenv("SIMPAD");
     if (padenv) {

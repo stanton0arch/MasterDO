@@ -4,6 +4,7 @@
 
 #include "game.h"
 #include "platform.h"
+#include "z80jit_int.h"
 
 #include "stdio.h"
 #include "string.h"
@@ -84,7 +85,8 @@ static void print_window(const game_window_rec *p)
            "(%lu forced), %lu refused, %lu promoted, %lu us of spare time), %lu interpreted "
            "instructions in %lu stretches, %lu evictions (%lu blocks, %lu live chunks), "
            "%lu returns resumed, pad read %lu us, sound %lu us average, %lu us worst, "
-           "%lu knob tweaks\n",
+           "%lu knob tweaks, end PC $%04lx SP $%04lx IFF %lu, %lu links (%lu refused), "
+           "%lu descriptors\n",
            (unsigned long)p->first, (unsigned long)p->last,
            (unsigned long)(w->us / frames), (unsigned long)w->max_us,
            (unsigned long)w->max_frame,
@@ -107,7 +109,9 @@ static void print_window(const game_window_rec *p)
            (unsigned long)d->evictions, (unsigned long)d->evicted,
            (unsigned long)d->evicted_live, (unsigned long)d->resumed,
            (unsigned long)(w->pad_us / frames), (unsigned long)(w->snd_us / frames),
-           (unsigned long)w->max_snd_us, (unsigned long)d->tweaks);
+           (unsigned long)w->max_snd_us, (unsigned long)d->tweaks,
+           (unsigned long)p->end_pc, (unsigned long)p->end_sp, (unsigned long)p->end_iff,
+           (unsigned long)p->nlinks, (unsigned long)p->link_full, (unsigned long)p->nblocks);
     printf("Picture: frames %lu-%lu: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
            "%lu cells for written tiles, %lu palettes, %lu backdrop changes, %lu sprite cels, "
            "%lu pieces, %lu priority strips, %lu priority patches, %lu frames in scroll bands, "
@@ -146,6 +150,38 @@ static void print_slow(const game_slow_rec *p)
            (unsigned long)p->insns, (unsigned long)p->stretches,
            (unsigned long)p->data_w, (unsigned long)p->tiles, (unsigned long)p->cells,
            (unsigned long)p->snd_us);
+}
+
+static void print_hash(const game_hash_rec *p)
+{
+    uint32 k;
+
+    for (k = 0; k < GAME_HASH_PER_REC; k++)
+        printf("Hash: frame %lu: %08lx\n", (unsigned long)(p->first + k * GAME_HASH_EVERY),
+               (unsigned long)p->h[k]);
+}
+
+/* The ring of the last frames: PC and SP at the end of each, and what
+ * the frame did (interrupts, data port writes, status reads, blocks
+ * translated, instructions interpreted), oldest first. */
+static void print_trace(const game *g)
+{
+    uint32 n = g->trace_n < GAME_TRACE ? g->trace_n : GAME_TRACE;
+    uint32 k;
+
+    if (n < 2)
+        return;
+    printf("Game: last frames (PC SP +IRQ +data +status +blocks +interpreted):");
+    for (k = 1; k < n; k++) {
+        const uint32 *t = &g->trace[(g->trace_n - n + k) % GAME_TRACE][0];
+        const uint32 *u = &g->trace[(g->trace_n - n + k - 1) % GAME_TRACE][0];
+
+        printf(" %lu: $%04lx $%04lx %lu %lu %lu %lu %lu;", (unsigned long)t[0],
+               (unsigned long)t[1], (unsigned long)t[2], (unsigned long)(t[3] - u[3]),
+               (unsigned long)(t[4] - u[4]), (unsigned long)(t[5] - u[5]),
+               (unsigned long)(t[6] - u[6]), (unsigned long)(t[7] - u[7]));
+    }
+    printf("\n");
 }
 
 static void print_long(const game_long_rec *p)
@@ -187,6 +223,7 @@ void game_log_flush(game *g)
     uint32 k = 0;
 
     print_pad_script(g);
+    print_trace(g);
     if (g->log_len == 0 && g->log_dropped == 0)
         return;
     printf("Log: %lu words of records from frame %lu, written at frame %lu, %lu records dropped\n",
@@ -200,6 +237,7 @@ void game_log_flush(game *g)
         case GAME_REC_WINDOW: print_window((const game_window_rec *)body); break;
         case GAME_REC_SLOW:   print_slow((const game_slow_rec *)body); break;
         case GAME_REC_LONG:   print_long((const game_long_rec *)body); break;
+        case GAME_REC_HASH:   print_hash((const game_hash_rec *)body); break;
         default: break;
         }
         k += 1 + (head & 0xFFFFFFu);
@@ -525,6 +563,12 @@ static void window_close(game *g)
         memcpy(&p->w, w, sizeof(p->w));
         diff_counters(&p->d, &now, &g->win_start);
         g->win_idle_pct = percent(p->d.idle >> 8, w->frames * FRAME_T);
+        p->end_pc = g->ctx->regs[6] & 0xFFFFu;
+        p->end_sp = g->ctx->regs[7] >> 16;
+        p->end_iff = g->ctx->iff1;
+        p->nlinks = g->jit.nlinks;
+        p->link_full = g->jit.stats.link_full;
+        p->nblocks = g->jit.nblocks;
     }
     window_start(g);
 }
@@ -673,6 +717,31 @@ void game_frame_done(game *g, uint32 draw_us)
     g->frame++;
     if (g->jit.nblocks > g->blocks_peak)
         g->blocks_peak = g->jit.nblocks;
+    {
+        uint32 *t = &g->trace[g->trace_n % GAME_TRACE][0];
+
+        t[0] = g->frame;
+        t[1] = g->ctx->regs[6] & 0xFFFFu;
+        t[2] = g->ctx->regs[7] >> 16;
+        t[3] = g->jit.stats.interrupts + g->ctx->irq_count;
+        t[4] = g->data_w_total;
+        t[5] = g->sms->io.vdp_stat_r + g->sms->vdp.n_stat_r;
+        t[6] = g->jit.stats.translations;
+        t[7] = g->ctx->int_insns;
+        g->trace_n++;
+    }
+    if ((g->frame % GAME_HASH_EVERY) == 0) {
+        if (g->hash_n == 0)
+            g->hash_cur.first = g->frame;
+        g->hash_cur.h[g->hash_n++] = game_state_hash(g);
+        if (g->hash_n == GAME_HASH_PER_REC) {
+            game_hash_rec *p = (game_hash_rec *)rec_alloc(g, GAME_REC_HASH, sizeof(*p));
+
+            if (p != NULL)
+                memcpy(p, &g->hash_cur, sizeof(*p));
+            g->hash_n = 0;
+        }
+    }
     if (g->win.frames == GAME_WINDOW)
         window_close(g);
 }
@@ -824,4 +893,68 @@ void game_log_summary(game *g)
                    (unsigned long)g->hist[k]);
     }
     printf("\n");
+}
+
+uint32 game_state_hash(const game *g)
+{
+    const z80j_ctx *c = g->ctx;
+    const uint32 *w = (const uint32 *)c->mram;
+    uint32 h = 0;
+    uint32 k;
+
+    for (k = 0; k < 0x2000 / 4; k++)
+        h = h * 31 + w[k];
+    for (k = 0; k < 8; k++)
+        h = h * 31 + c->regs[k];
+    h = h * 31 + c->ix + c->iy * 7 + c->bc2 * 11 + c->de2 * 13 + c->hl2 * 17 +
+        c->iff1 * 19 + c->im * 23 + c->a2 * 29 + c->f2 * 31 + c->i * 37;
+    for (k = 0; k < 11; k++)
+        h = h * 31 + g->sms->vdp.reg[k];
+    for (k = 0; k < 32; k++)
+        h = h * 31 + g->sms->vdp.cram[k];
+    for (k = 0; k < 4; k++)
+        h = h * 31 + g->sms->mem.reg[k];
+    return h;
+}
+
+void game_log_state(game *g)
+{
+    const z80j_ctx *c = g->ctx;
+    const z80j_state *j = &g->jit;
+    uint32 pc = c->regs[6] & 0xFFFFu;
+    uint32 host = c->lookup[pc];
+    const z80j_resume *e = &j->resume[Z80J_RESUME_SLOT(pc)];
+    uint32 k;
+
+    printf("View: Z80 PC $%04lx SP $%04lx AF $%02lx%02lx BC $%04lx DE $%04lx HL $%04lx "
+           "IX $%04lx IY $%04lx I $%02lx IFF %lu %lu IM %lu%s, paging registers %02lx %02lx %02lx %02lx, "
+           "bytes at PC",
+           (unsigned long)pc, (unsigned long)(c->regs[7] >> 16),
+           (unsigned long)(c->regs[1] >> 24), (unsigned long)(c->regs[0] & 0xFFu),
+           (unsigned long)(c->regs[2] >> 16), (unsigned long)(c->regs[3] >> 16),
+           (unsigned long)(c->regs[4] >> 16), (unsigned long)(c->ix >> 16),
+           (unsigned long)(c->iy >> 16), (unsigned long)c->i, (unsigned long)c->iff1,
+           (unsigned long)c->iff2, (unsigned long)c->im, c->halted ? " halted" : "",
+           (unsigned long)g->sms->mem.reg[0], (unsigned long)g->sms->mem.reg[1],
+           (unsigned long)g->sms->mem.reg[2], (unsigned long)g->sms->mem.reg[3]);
+    for (k = 0; k < 12; k++)
+        printf(" %02lx", (unsigned long)jit_byte(c, pc + k));
+    printf("; lookup %s, entry count %lu, resume slot %s\n",
+           host == j->glue.miss ? "miss" :
+           host == j->glue.interp ? "interpreter" : "block entry",
+           (unsigned long)(j->hot != 0 ? j->hot[pc] : 0),
+           (e->host != 0 && e->pc == pc) ? "held for this address" :
+           e->host != 0 ? "held for another address" : "empty");
+    printf("View: translator: %lu blocks in use (%lu at most), %lu links of %lu (%lu refused), "
+           "%lu evictions (%lu blocks, %lu unlinked), %lu RAM retranslations, %lu dynamic RAM "
+           "blocks, %lu seams, %lu returns resumed, %lu hot addresses dropped, "
+           "%lu interpreted instructions, generation %lu\n",
+           (unsigned long)j->nblocks, (unsigned long)g->blocks_peak, (unsigned long)j->nlinks,
+           (unsigned long)j->max_links, (unsigned long)j->stats.link_full,
+           (unsigned long)j->stats.evictions, (unsigned long)j->stats.evicted,
+           (unsigned long)j->stats.unlinked, (unsigned long)j->stats.retranslations,
+           (unsigned long)j->stats.dyn_blocks, (unsigned long)j->stats.seams,
+           (unsigned long)(j->stats.resumed + c->resumed_count),
+           (unsigned long)j->stats.queue_full, (unsigned long)c->int_insns,
+           (unsigned long)j->generation);
 }

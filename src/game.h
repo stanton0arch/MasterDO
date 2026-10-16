@@ -89,13 +89,28 @@ typedef struct {
 #define GAME_REC_WINDOW 1
 #define GAME_REC_SLOW   2
 #define GAME_REC_LONG   3
+#define GAME_REC_HASH   4       /* machine state hashes, one every GAME_HASH_EVERY frames */
+#define GAME_HASH_EVERY 16
+#define GAME_HASH_PER_REC 8
+#define GAME_TRACE      32      /* last frames kept for the log (ring) */
 
 typedef struct {
     uint32        first;    /* frames first-last */
     uint32        last;
     game_window   w;
     game_counters d;        /* counters over the window */
+    uint32        end_pc;   /* Z80 state at the end of the window */
+    uint32        end_sp;
+    uint32        end_iff;
+    uint32        nlinks;   /* link log entries in use, links refused */
+    uint32        link_full;
+    uint32        nblocks;  /* block descriptors in use */
 } game_window_rec;
+
+typedef struct {
+    uint32        first;    /* frame of the first hash; one every GAME_HASH_EVERY */
+    uint32        h[GAME_HASH_PER_REC];
+} game_hash_rec;
 
 typedef struct {
     uint32 frame;
@@ -184,6 +199,14 @@ typedef struct {
     uint32        max_all_frame;
     uint32        over;     /* frames whose total is over the NTSC budget */
     uint32        blocks_peak; /* most block descriptors in use at a frame end */
+    /* Diagnostics kept outside the record arena: the state hash being
+     * collected, and a ring of the last frames (frame, PC, SP, and the
+     * cumulative interrupts, data writes, status reads, translations and
+     * interpreted instructions at their end). */
+    uint32        hash_n;
+    game_hash_rec hash_cur;
+    uint32        trace_n;
+    uint32        trace[GAME_TRACE][8];
     uint32        idle_t16; /* idle T-states / 16 */
     uint32        slow_logged;
     uint32        hist[GAME_HIST];  /* total time per frame */
@@ -262,6 +285,13 @@ uint32 game_spare_time(game *g, uint32 frame_start, uint32 deadline_us);
  * 35 us per character on the debug link, so the run only buffers them):
  * called when the run pauses or ends, never by the run itself. */
 void  game_log_flush(game *g);
+/* A hash of the machine state (Z80 RAM and registers, VDP registers and
+ * colour RAM, paging registers), the same in the ISO and in the analysis
+ * harness, to find the first frames where two runs differ. */
+uint32 game_state_hash(const game *g);
+/* Logs the Z80 state, where its PC leads in the translator, and the
+ * translator's counters (View: lines, for the pause). */
+void  game_log_state(game *g);
 
 void  game_log_summary(game *g);
 

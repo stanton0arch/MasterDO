@@ -209,6 +209,7 @@ static uint32 show_snapshot(platform *p, app_state *st, uint32 prev)
     char buf[64];
 
     log_vdp("paused");
+    game_log_state(&g);
     for (;;) {
         uint32 held;
         uint32 pressed;
