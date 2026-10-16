@@ -17,6 +17,7 @@
  * Options: -rom file, -frames n, -bench, -dump n, -from n, -img, -sym.
  * Environment: SIMPAD="frame:bits,..." (buttons held from that frame on,
  * SMS_PAD_* bits, 0x100 PAUSE), SIMPROF=1 (cycles per function),
+ * SIMALLOC=1 (every allocation with its size and memory type),
  * SIMDIS=symbol (executions per instruction of a function).
  */
 #include <stdio.h>
@@ -290,6 +291,7 @@ static double mark_t[16];
 static double mark_sum[16];
 static uint32_t mark_n[16];
 
+static const char *sym_near(uint32_t a, uint32_t *off);
 static void do_swi(uint32_t n)
 {
     switch (n) {
@@ -303,6 +305,12 @@ static void do_swi(uint32_t n)
         if (heap > HEAP_END) fatal("out of heap");
         if (r[2] & 0x100u) memset(mem + a, r[2] & 0xFF, size);  /* MEMTYPE_FILL */
         else memset(mem + a, 0xA5, size);
+        if (getenv("SIMALLOC")) {
+            uint32_t o;
+            const char *sy = sym_near(r[14], &o);
+            fprintf(stderr, "Alloc: %u bytes %s from %s+%x\n", (unsigned)r[1],
+                    (r[2] & 0x10000u) ? "VRAM" : "DRAM", sy, (unsigned)o);
+        }
         r[0] = a;
         break;
     }

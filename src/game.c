@@ -10,7 +10,7 @@
 #include "mem.h"
 
 #define JIT_ZONE_BYTES  (32 * 1024)
-#define JIT_ZONES       14
+#define JIT_ZONES       13
 #define JIT_HOT_ZONES   5       /* code translated again after an eviction goes there */
 #define JIT_CODE_BYTES  (JIT_ZONE_BYTES * JIT_ZONES)
 #define JIT_BLOCKS      2048
@@ -56,7 +56,7 @@ static uint32 *rec_alloc(game *g, uint32 kind, uint32 bytes)
     uint32 words = bytes / 4;
     uint32 *r;
 
-    if (g->log_len + 1 + words > GAME_LOG_WORDS) {
+    if (g->log == NULL || g->log_len + 1 + words > GAME_LOG_WORDS) {
         g->log_dropped++;
         return NULL;
     }
@@ -319,12 +319,9 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
         g->hot_vram = 0;
         g->hot = (uint8 *)AllocMem(0x10000, MEMTYPE_DRAM);
     }
-    g->log = (uint32 *)AllocMem(GAME_LOG_WORDS * 4, MEMTYPE_DRAM);
     g->rd = (renderer *)AllocMem(sizeof(renderer), MEMTYPE_DRAM | MEMTYPE_FILL);
-    /* The pad recorder is optional: without memory nothing is recorded. */
-    g->pad_log = (uint32 *)AllocMem(GAME_PAD_LOGS * 4, MEMTYPE_DRAM);
     if (g->ctx == NULL || g->code == NULL || g->blocks == NULL || g->links == NULL ||
-        g->hot == NULL || g->log == NULL || g->sms == NULL || g->rd == NULL) {
+        g->hot == NULL || g->sms == NULL || g->rd == NULL) {
         printf("ERROR: out of memory for the machine (%lu + %lu + %lu + %lu + %lu bytes)\n",
                (unsigned long)sizeof(z80j_ctx), (unsigned long)JIT_CODE_BYTES,
                (unsigned long)z80j_block_bytes(JIT_BLOCKS), (unsigned long)z80j_link_bytes(JIT_LINKS),
@@ -346,7 +343,9 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
      * by register $FFFC): 32 KiB in VRAM, which the CPU reads and writes
      * like DRAM, when the renderer has left some, else the 16 KiB page
      * most cartridges have, in DRAM; zero-filled, as a cartridge with no
-     * save would be. */
+     * save would be. It is allocated before the arenas of the logs, which
+     * the game can do without: a shortage of memory then hits the logs
+     * rather than the game, whose cartridge RAM holds its saves. */
     g->cart_ram_size = 0x8000;
     g->cart_ram_vram = 1;
     g->cart_ram = (uint8 *)AllocMem(0x8000, MEMTYPE_VRAM | MEMTYPE_FILL);
@@ -357,15 +356,23 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
     }
     if (g->cart_ram == NULL)
         g->cart_ram_size = 0;
+    /* The record arena of the run's log (also lent to the translation of
+     * the reachable code before the run) and the pad recorder are
+     * optional: without memory the records are dropped and counted, and
+     * nothing is recorded. */
+    g->log = (uint32 *)AllocMem(GAME_LOG_WORDS * 4, MEMTYPE_DRAM);
+    g->pad_log = (uint32 *)AllocMem(GAME_PAD_LOGS * 4, MEMTYPE_DRAM);
     sms_init(g->sms, g->ctx, rom, rom_size, VDP_LINES_NTSC, g->cart_ram, g->cart_ram_size);
     for (k = 0; k < Z80J_PORTS; k++) {
         if (SMS_PORT_VCOUNTER(k))
             z80j_set_line_port(&g->jit, k);
     }
-    printf("Cartridge RAM: %lu bytes in %s; entry counters in %s\n",
+    printf("Cartridge RAM: %lu bytes in %s; entry counters in %s; log arena %s, pad log %s\n",
            (unsigned long)g->cart_ram_size,
            g->cart_ram == NULL ? "no memory" : g->cart_ram_vram ? "VRAM" : "DRAM",
-           g->hot_vram ? "VRAM" : "DRAM");
+           g->hot_vram ? "VRAM" : "DRAM",
+           g->log != NULL ? "allocated" : "out of memory",
+           g->pad_log != NULL ? "allocated" : "out of memory");
     printf("Mapper: %s\n", g->sms->mem.mapper == SMS_MAPPER_CODEMASTERS ?
            "Codemasters (header at $7FE0; slots paged by writes to $0000, $4000, $8000)" :
            "Sega (paging registers at $FFFC-$FFFF)");
@@ -387,6 +394,10 @@ void game_translate_rom(game *g)
 
     /* The visited bitmap and the queue borrow the log arena, which holds
      * nothing before the run. */
+    if (g->log == NULL) {
+        printf("ROM translation: out of memory (no log arena for the visited bitmap and the queue)\n");
+        return;
+    }
     visited = g->log;
     queue = g->log + 0x10000 / 32;
     memset(visited, 0, 0x10000 / 8);
@@ -428,6 +439,8 @@ void game_translate_rom(game *g)
         }
     }
     g->rom_us = plat_usec_now() - t0;
+    if (j->nblocks > g->blocks_peak)
+        g->blocks_peak = j->nblocks;
     g->rom_busy = j->stats.busy_loops - busy0;
 
     g->log_len = 0;
@@ -658,6 +671,8 @@ void game_frame_done(game *g, uint32 draw_us)
     if (total > g->frame_us)
         g->win.over++;
     g->frame++;
+    if (g->jit.nblocks > g->blocks_peak)
+        g->blocks_peak = g->jit.nblocks;
     if (g->win.frames == GAME_WINDOW)
         window_close(g);
 }
@@ -757,7 +772,7 @@ void game_log_summary(game *g)
            "time, %lu at once in %lu us (%lu forced), %lu refused, %lu promoted), %lu interpreted "
            "instructions in %lu stretches, %lu evictions (%lu blocks, %lu live chunks), "
            "%lu busy-wait loops found (%lu waiting for a line), %lu RAM blocks cut at a seam, "
-           "status %ld\n",
+           "%lu block descriptors in use at most, status %ld\n",
            (unsigned long)n, (unsigned long)avg,
            (unsigned long)percent(avg, g->frame_us), (int)g->frame_us,
            (unsigned long)g->max_us, (unsigned long)g->max_frame,
@@ -774,7 +789,7 @@ void game_log_summary(game *g)
            (unsigned long)d.promoted, (unsigned long)d.interp_insns, (unsigned long)d.interp,
            (unsigned long)d.evictions, (unsigned long)d.evicted, (unsigned long)d.evicted_live,
            (unsigned long)g->jit.stats.busy_loops, (unsigned long)g->jit.stats.line_loops,
-           (unsigned long)g->jit.stats.seams, (long)g->status);
+           (unsigned long)g->jit.stats.seams, (unsigned long)g->blocks_peak, (long)g->status);
     printf("Game summary: picture: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
            "%lu cells for written tiles, %lu palettes, %lu sprite cels, %lu pieces, %lu priority strips, "
            "%lu priority patches, %lu frames in bands, %lu frames partly blanked, "

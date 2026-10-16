@@ -203,8 +203,9 @@ def parse_log(path, err_path):
                 r"\((\d+) blocks", (0, 0, 0, 0))
             s["busy_loops"], s["seams"], s["status"] = grab(
                 line, r"(\d+) busy-wait loops found(?: \(\d+ waiting for a line\))?, (\d+) RAM blocks "
-                r"cut at a seam, status (-?\d+)",
+                r"cut at a seam, (?:\d+ block descriptors in use at most, )?status (-?\d+)",
                 (0, 0, 0))
+            s["blocks_peak"] = grab(line, r"(\d+) block descriptors in use at most", 0)
             r["summary"] = s
         elif line.startswith("ROM translation:"):
             r["rom"] = dict(zip(
@@ -500,6 +501,8 @@ def game_lines(g):
     out.append("  translator: %d blocks while running (%d at once in %s ms, %d of them forced, %d promoted), %s interpreted instructions, %d evictions (%d blocks), %d busy-wait loops" % (
         s["blocks"], s["sync"], ms(s["sync_us"]), s.get("forced", 0), s["promoted"], kcount(s["interp"]),
         s["evictions"], s["evicted"], s["busy_loops"]))
+    if s.get("blocks_peak"):
+        out[-1] += ", %d block descriptors in use at most" % s["blocks_peak"]
     p = g["picture"]
     if p:
         pf = g["per_frame"]

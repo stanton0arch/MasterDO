@@ -183,6 +183,7 @@ typedef struct {
     uint32        max_all_us;
     uint32        max_all_frame;
     uint32        over;     /* frames whose total is over the NTSC budget */
+    uint32        blocks_peak; /* most block descriptors in use at a frame end */
     uint32        idle_t16; /* idle T-states / 16 */
     uint32        slow_logged;
     uint32        hist[GAME_HIST];  /* total time per frame */
