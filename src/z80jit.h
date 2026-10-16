@@ -270,6 +270,8 @@ typedef struct {
     uint32 resumed;         /* interrupt returns resumed inside their block */
     uint32 dyn_blocks;      /* RAM blocks translated with dynamic targets */
     uint32 seams;           /* RAM blocks cut, or refused, at a seam of the host memory */
+    uint32 evict_us;        /* time of the evictions (microseconds, cumulative) */
+    uint32 evict_ahead;     /* of the evictions, those made ahead in spare time */
 } z80j_stats;
 
 /* An interrupted segment: where its block resumes, for the return. */
@@ -403,6 +405,9 @@ typedef struct {
     z80j_resume resume[Z80J_RESUMES];
     z80j_stats  stats;
     uint32      zone_shift; /* log2 of zone_words */
+    z80j_block *zone_head[JIT_MAX_ZONES];   /* the blocks of each zone, chained by znext */
+    uint32      evict_est_us;               /* running average of the cost of an eviction */
+    uint32      evict_ahead_wait;           /* frame from which an eviction ahead is tried again */
 } z80j_state;
 
 /* Memory for max_blocks block descriptors, and for a link log of
@@ -459,6 +464,10 @@ uint32 z80j_spare_fits(const z80j_state *j, uint32 elapsed_us, uint32 margin_us)
 /* Translates one queued hot address; returns 0 when the queue is empty.
  * Meant for the spare time at the end of a frame. */
 uint32 z80j_prefetch(z80j_state *j);
+/* Empties ahead, in spare time, the zone the next area to fill up would
+ * evict, when the frame (elapsed_us into it) has room for the usual cost
+ * of an eviction plus margin_us; returns nonzero when a zone was emptied. */
+uint32 z80j_evict_ahead(z80j_state *j, uint32 elapsed_us, uint32 margin_us);
 
 /* Translates the block at pc if needed, and reports its static exits
  * (jump and call targets, fall-through) in targets. Returns the number of

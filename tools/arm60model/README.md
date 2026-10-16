@@ -71,7 +71,8 @@ picture's catch-up and to translation like the ISO's.
 drawing times, spare time used, translations at once and their time,
 forced ones, refusals, blocks translated in spare time, interpreted
 instructions, display on, VDP data writes, dirty tiles left at the end
-of the frame); `present.py` replays those lines through the queued
+of the frame, code buffer evictions, those made ahead in spare time and
+their time); `present.py` replays those lines through the queued
 presentation of the ISO.
 
 `-dumpdiff n` with `-dump`: the frames compared because of a scroll or
@@ -133,7 +134,8 @@ Environment variables:
   or the end of the run as a `Pad script:` line holding a `panel.txt`
   entry (cartridge, frames, script), so that a run played on the console
   or on Phoenix is replayed here;
-- `SIMPROF=1`: cycles per function of the image, and of the generated code;
+- `SIMPROF=1`: cycles per function of the image, and of the generated code
+  (the 40 largest; `SIMPROFALL=1` lists every function with cycles);
 - `SIMDIS=symbol`: executions of each instruction of a function.
 
 Scripts on `code.bin` (the whole code buffer and the block descriptors,

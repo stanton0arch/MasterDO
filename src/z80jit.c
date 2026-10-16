@@ -137,6 +137,13 @@ CHECK_OFF(s_seen, offsetof(z80j_state, seen) == 0x3C);
 CHECK_OFF(s_zone_blocks, offsetof(z80j_state, zone_blocks) == 0x403C);
 CHECK_OFF(s_chunk_shift, offsetof(z80j_state, chunk_shift) == 0x437C);
 CHECK_OFF(s_free_blocks, offsetof(z80j_state, free_blocks) == 0x4FC8);
+CHECK_OFF(s_links, offsetof(z80j_state, links) == 0x5FD4);
+CHECK_OFF(s_nlinks, offsetof(z80j_state, nlinks) == 0x5FD8);
+CHECK_OFF(s_zone_shift, offsetof(z80j_state, zone_shift) == 0x88C0);
+CHECK_OFF(s_zone_head, offsetof(z80j_state, zone_head) == 0x88C4);
+CHECK_OFF(g_miss, offsetof(z80j_glue, miss) == 4);
+CHECK_OFF(b_znext, offsetof(z80j_block, znext) == 20);
+CHECK_OFF(b_size, sizeof(z80j_block) == 24);
 CHECK_OFF(s_nblocks, offsetof(z80j_state, nblocks) == 0x4FD0);
 CHECK_OFF(s_hash, offsetof(z80j_state, hash) == 0x4FD4);
 CHECK_OFF(s_seed_hot, offsetof(z80j_state, seed_hot) == 0x5FE8);
@@ -149,7 +156,6 @@ CHECK_OFF(s_line_loops, offsetof(z80j_state, stats.line_loops) == 0x8880);
 CHECK_OFF(s_promoted, offsetof(z80j_state, stats.promoted) == 0x8894);
 CHECK_OFF(s_dyn_blocks, offsetof(z80j_state, stats.dyn_blocks) == 0x88B0);
 CHECK_OFF(s_seams, offsetof(z80j_state, stats.seams) == 0x88B4);
-CHECK_OFF(s_zone_shift, offsetof(z80j_state, zone_shift) == 0x88B8);
 CHECK_OFF(ar_count, offsetof(z80j_area, count) == 12 && sizeof(z80j_area) == 16);
 CHECK_OFF(blk_body, offsetof(z80j_block, body) == 12);
 CHECK_OFF(blk_next, offsetof(z80j_block, next) == 16);
@@ -854,50 +860,39 @@ static void free_block(z80j_state *j, z80j_block *blk)
     j->nblocks--;
 }
 
-/* Target of the branch instruction at site. */
-static uint32 branch_target(const uint32 *site)
-{
-    uint32 w = *site;
-    uint32 off = (w & 0x00FFFFFFu) << 2;
-
-    if (off & 0x02000000u)
-        off |= 0xFC000000u;
-    return JIT_ADDR(site) + 8 + off;
-}
-
 /*
- * Empties zone z: its blocks lose their descriptors and their lookup
- * entries, and every direct branch into the zone recorded in the link
- * log becomes a call to the linker again (a trampoline left by a
- * retranslation becomes a jump to the translator).
+ * Empties zone z: its blocks (chained from zone_head) lose their
+ * descriptors and their lookup entries, and every direct branch into the
+ * zone recorded in the link log becomes a call to the linker again (a
+ * trampoline left by a retranslation becomes a jump to the translator),
+ * by jit_unlink_zone (z80jit_blk.s). The cost is measured for the
+ * evictions made ahead in spare time (z80j_evict_ahead).
  */
 static void evict_zone(z80j_state *j, uint32 z)
 {
     z80j_ctx *ctx = j->ctx;
     uint32 lo = JIT_ADDR(j->code + z * j->zone_words);
     uint32 hi = lo + j->zone_words * 4;
+    uint32 t0;
     uint32 k;
-    uint32 n;
     uint32 freed = 0;
+    z80j_block *blk;
+    z80j_block *next;
 
     if (j->zone_blocks[z] == 0)
-        return;                         /* nothing to evict: no scan */
-    for (k = 0; k < j->max_blocks; k++) {
-        z80j_block *blk = &j->blocks[k];
-        uint32 e = JIT_ADDR(blk->entry);
-
-        if (e >= lo && e < hi) {
-            unhash_block(j, blk);
-            ctx->lookup[blk->pc] = j->glue.miss;
-            /* Interpreted again until it proves hot, in spare time. */
-            if (j->hot != 0 && j->queue_at != 0)
-                j->hot[blk->pc] = (uint8)(j->queue_at - 1);
-            free_block(j, blk);
-            freed++;
-        }
+        return;                         /* nothing to evict */
+    t0 = (j->clock != 0) ? j->clock() : 0;
+    for (blk = j->zone_head[z]; blk != 0; blk = next) {
+        next = blk->znext;
+        unhash_block(j, blk);
+        ctx->lookup[blk->pc] = j->glue.miss;
+        /* Interpreted again until it proves hot, in spare time. */
+        if (j->hot != 0 && j->queue_at != 0)
+            j->hot[blk->pc] = (uint8)(j->queue_at - 1);
+        free_block(j, blk);
+        freed++;
     }
-    if (freed == 0)
-        return;
+    j->zone_head[z] = 0;
     j->stats.evicted += freed;
     {
         uint32 fresh;
@@ -908,46 +903,16 @@ static void evict_zone(z80j_state *j, uint32 z)
         if (j->resume[k].host >= lo && j->resume[k].host < hi)
             j->resume[k].host = 0;
     }
-    n = 0;
-    for (k = 0; k < j->nlinks; k++) {
-        uint32 e = j->links[k];
-        uint32 *site;
-
-        if (e & 1) {
-            site = (uint32 *)JIT_PTR(e & ~1u);
-            if (e - 1 >= lo && e - 1 < hi)
-                continue;
-            if (branch_target(site) >= lo && branch_target(site) < hi) {
-                /* The trampoline of a retranslated RAM block: its target
-                 * goes, so it jumps to the translator with the block's
-                 * address (kept in the word after it by the entry check
-                 * it replaced). */
-                uint32 pc = site[1] & 0xFFFFu;
-                site[0] = 0xE3A00C00u | (pc >> 8);              /* mov r0,#pc & 0xFF00 */
-                site[1] = 0xE3800000u | (pc & 0xFFu);           /* orr r0,r0,#pc & 0xFF */
-                site[2] = arm_branch(0xEu, 0, JIT_ADDR(site + 2), j->glue.miss);
-                j->stats.unlinked++;
-                continue;
-            }
-        } else {
-            uint32 *d = (uint32 *)JIT_PTR(e);
-            site = d - 1;
-            if (e >= lo && e < hi)
-                continue;
-            if (branch_target(site) >= lo && branch_target(site) < hi) {
-                *site = arm_branch(0xEu, 1, JIT_ADDR(site), j->glue.link);
-                if (d[1] != 0)
-                    patch_b((uint32 *)JIT_PTR(d[1]), JIT_ADDR(site));
-                j->stats.unlinked++;
-                continue;
-            }
-        }
-        j->links[n++] = e;
-    }
-    j->nlinks = n;
+    j->stats.unlinked += jit_unlink_zone(j, lo, hi);
     ctx->resume_host = 0;
     j->generation++;
     j->stats.evictions++;
+    if (j->clock != 0) {
+        uint32 dt = j->clock() - t0;
+
+        j->stats.evict_us += dt;
+        j->evict_est_us = (j->evict_est_us + dt) >> 1;
+    }
 }
 
 /* The zone an area takes next: an empty one, else the one whose code
@@ -1013,6 +978,51 @@ void jit_next_zone(z80j_state *j, z80j_area *a)
         j->stats.flushes++;
 }
 
+/* An area's zone with less than half left, or fewer free descriptors
+ * than this, calls for the next zone to be emptied ahead. */
+#define EVICT_AHEAD_BLOCKS 32
+
+uint32 z80j_evict_ahead(z80j_state *j, uint32 elapsed_us, uint32 margin_us)
+{
+    uint32 a;
+    uint32 z;
+
+    if (j->nzones < 3 || (int32)(j->frame_no - j->evict_ahead_wait) < 0)
+        return 0;
+    if (elapsed_us + j->evict_est_us + margin_us > j->frame_us)
+        return 0;
+    for (a = 0; a < 2; a++) {
+        const z80j_area *ar = &j->area[a];
+        uint32 fresh;
+
+        if (ar->count == 0)
+            continue;
+        if ((uint32)(ar->end - ar->cur) >= (j->zone_words >> 1) &&
+            j->nblocks + EVICT_AHEAD_BLOCKS <= j->max_blocks)
+            continue;
+        /* Nothing to do while an empty zone waits. */
+        for (z = 0; z < j->nzones; z++) {
+            if (j->zone_blocks[z] == 0 && z != j->area[0].zone &&
+                (j->area[1].count == 0 || z != j->area[1].zone))
+                return 0;
+        }
+        /* The zone the area would take; a zone whose code ran lately is
+         * left to the real moment (the area may never fill up) and looked
+         * at again after a round of ageing. */
+        z = pick_zone(j, ar);
+        if (z == j->area[0].zone || (j->area[1].count != 0 && z == j->area[1].zone))
+            return 0;
+        if (zone_live(j, z, &fresh) != 0) {
+            j->evict_ahead_wait = j->frame_no + j->nzones;
+            return 0;
+        }
+        evict_zone(j, z);
+        j->stats.evict_ahead++;
+        return 1;
+    }
+    return 0;
+}
+
 /* Turns the run marks of the chunks of zone z into ages: a chunk whose
  * mark was set since the last round is live (age 0), the others age by
  * one round. */
@@ -1058,6 +1068,7 @@ void z80j_flush(z80j_state *j)
     memset(j->seen, 0, sizeof(j->seen));
     memset(j->flaky, 0, sizeof(j->flaky));
     memset(j->zone_blocks, 0, sizeof(j->zone_blocks));
+    memset(j->zone_head, 0, sizeof(j->zone_head));
     memset(j->scan_kind, 0xFF, sizeof(j->scan_kind));
     j->free_blocks = 0;
     for (k = j->max_blocks; k > 0; k--) {
@@ -1816,6 +1827,7 @@ void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
     j->max_blocks = max_blocks;
     j->links = link_mem;
     j->max_links = (link_mem != 0) ? max_links : 0;
+    j->evict_est_us = 4000;         /* until one is measured */
     memcpy(&j->glue, glue, sizeof(j->glue));
     ctx->resume_tab = JIT_ADDR(j->resume);
     ctx->irq_count = 0;

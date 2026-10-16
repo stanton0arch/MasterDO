@@ -34,6 +34,8 @@ typedef struct {
     uint32 evictions;       /* code buffer zones emptied */
     uint32 evicted;         /* blocks lost to them */
     uint32 evicted_live;    /* live chunks of the evicted zones */
+    uint32 evict_ahead;     /* of the evictions, those made ahead in spare time */
+    uint32 evict_us;        /* time of the evictions */
     uint32 prefetched;      /* blocks translated in spare time */
     uint32 promoted;        /* blocks translated again into the hot area */
     uint32 interp;          /* stretches of interpretation */

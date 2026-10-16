@@ -520,9 +520,26 @@ static void check_blocks(uint32 f)
         }
     }
     for (k = 0; k < j->nzones && check_printed < 40; k++) {
-        if (cnt[k] != j->zone_blocks[k]) {
-            printf("Check: frame %lu: zone %lu holds %lu hashed blocks, counted %lu\n",
-                   (unsigned long)f, (unsigned long)k, (unsigned long)cnt[k],
+        const z80j_block *b;
+        uint32 n = 0;
+
+        /* The zone's list holds every descriptor whose code is in the
+         * zone (hashed or not), as many as the zone counts. */
+        for (b = j->zone_head[k]; b != 0 && n <= j->max_blocks; b = b->znext) {
+            uint32 z = (uint32)(b->entry - j->code) / j->zone_words;
+
+            n++;
+            if (b->entry == 0 || z != k) {
+                printf("Check: frame %lu: zone %lu lists block $%04lx whose code is in zone %lu\n",
+                       (unsigned long)f, (unsigned long)k, (unsigned long)b->pc,
+                       (unsigned long)z);
+                check_printed++;
+                break;
+            }
+        }
+        if (n != j->zone_blocks[k] || cnt[k] > n) {
+            printf("Check: frame %lu: zone %lu holds %lu hashed blocks, lists %lu, counted %lu\n",
+                   (unsigned long)f, (unsigned long)k, (unsigned long)cnt[k], (unsigned long)n,
                    (unsigned long)j->zone_blocks[k]);
             check_printed++;
         }
@@ -614,7 +631,7 @@ void hmain(void)
 
                 printf("Frame: %lu emu %lu upd %lu draw %lu spare %lu sync %lu sync_us %lu "
                        "forced %lu refused %lu spare_blocks %lu insns %lu shown %lu "
-                       "dataw %lu dirty %lu\n",
+                       "dataw %lu dirty %lu evict %lu evict_ahead %lu evict_us %lu\n",
                        (unsigned long)f, (unsigned long)g.last_us, (unsigned long)g.last_upd_us,
                        (unsigned long)draw, (unsigned long)g.last_spare_us,
                        (unsigned long)(s->sync - s0.sync), (unsigned long)(s->sync_us - s0.sync_us),
@@ -624,7 +641,10 @@ void hmain(void)
                        (unsigned long)(g.ctx->int_insns - i0),
                        (unsigned long)render_display_on(g.rd),
                        (unsigned long)g.f_data,
-                       (unsigned long)count_dirty(&g.sms->vdp));
+                       (unsigned long)count_dirty(&g.sms->vdp),
+                       (unsigned long)(s->evictions - s0.evictions),
+                       (unsigned long)(s->evict_ahead - s0.evict_ahead),
+                       (unsigned long)(s->evict_us - s0.evict_us));
             }
         }
         if (sim_arg(13))

@@ -40,6 +40,11 @@ S_CHUNK_SHIFT   EQU     0x437C
 S_FREE_BLOCKS   EQU     0x4FC8
 S_NBLOCKS       EQU     0x4FD0
 S_HASH          EQU     0x4FD4
+S_GLUE          EQU     0x4F84
+G_LINK          EQU     0               ; z80j_glue.link
+G_MISS          EQU     4               ; z80j_glue.miss
+S_LINKS         EQU     0x5FD4
+S_NLINKS        EQU     0x5FD8
 S_ERROR         EQU     0x5FE4
 S_SEED_HOT      EQU     0x5FE8
 ST_TRANSLATIONS EQU     0x884C
@@ -51,7 +56,8 @@ ST_LINE_LOOPS   EQU     0x8880
 ST_PROMOTED     EQU     0x8894
 ST_DYN_BLOCKS   EQU     0x88B0
 ST_SEAMS        EQU     0x88B4
-S_ZONE_SHIFT    EQU     0x88B8
+S_ZONE_SHIFT    EQU     0x88C0
+S_ZONE_HEAD     EQU     0x88C4
 
 ; z80j_area
 A_CUR           EQU     0
@@ -64,6 +70,7 @@ BLK_KEY         EQU     4
 BLK_ENTRY       EQU     8
 BLK_BODY        EQU     12
 BLK_NEXT        EQU     16
+BLK_ZNEXT       EQU     20              ; the blocks of the same zone
 
 ; jit_block_ctx
 B_J             EQU     0
@@ -358,6 +365,11 @@ tb_commit
         ldr     r12,[r3,#S_ZONE_BLOCKS :AND: 0xFF]
         add     r12,r12,#1
         str     r12,[r3,#S_ZONE_BLOCKS :AND: 0xFF]
+        add     r3,r4,#S_ZONE_HEAD :AND: 0xFF00
+        add     r3,r3,r2,lsl #2
+        ldr     r12,[r3,#S_ZONE_HEAD :AND: 0xFF]
+        str     r12,[r9,#BLK_ZNEXT]
+        str     r9,[r3,#S_ZONE_HEAD :AND: 0xFF]
         ldr     r2,[sp,#B_BODY]
         str     r2,[r9,#BLK_BODY]
         mov     r2,r5,lsl #22           ; HASH(pc): the low 10 bits
@@ -383,6 +395,119 @@ tb_nodyn
 tb_exit
         add     sp,sp,#F_SIZE
         ldmfd   sp!,{r4-r9,r11,pc}
+
+;----------------------------------------------------------------------------
+; jit_unlink_zone(j, lo, hi): undoes the direct branches into the code
+; between lo and hi recorded in the link log (the call to the linker is
+; restored, and the conditional jump that led to it points at the call
+; again; the trampoline of a retranslated RAM block becomes a jump to the
+; translator with the block's address), drops the entries whose own words
+; lie there, compacts the log and returns the number of branches undone.
+; r1 = lo, r2 = hi - lo; r5 reads the log, r7 writes it, r8 and r9 the
+; link and miss glue, r11 the count. (The scan in C cost about 60 cycles
+; per entry: a call to decode each branch, the log and its count
+; reloaded at every entry.)
+        EXPORT  jit_unlink_zone
+jit_unlink_zone
+        stmfd   sp!,{r4-r9,r11,lr}
+        mov     r4,r0
+        sub     r2,r2,r1
+        add     r3,r4,#S_LINKS :AND: 0xFF00
+        ldr     r5,[r3,#S_LINKS :AND: 0xFF]
+        ldr     r6,[r3,#S_NLINKS :AND: 0xFF]
+        mov     r7,r5
+        add     r6,r5,r6,lsl #2
+        add     r3,r4,#S_GLUE :AND: 0xFF00
+        ldr     r8,[r3,#(S_GLUE :AND: 0xFF) + G_LINK]
+        ldr     r9,[r3,#(S_GLUE :AND: 0xFF) + G_MISS]
+        mov     r11,#0
+ul_loop
+        cmp     r5,r6
+        bhs     ul_done
+        ldr     r0,[r5],#4
+        tst     r0,#1
+        bne     ul_tramp
+        ; A link stub: r0 = its data words, the branch is the word before.
+        ; A stub inside the zone goes with its code: dropped.
+        sub     r3,r0,r1
+        cmp     r3,r2
+        blo     ul_loop
+        ldr     r3,[r0,#-4]
+        mov     r3,r3,lsl #8
+        add     r3,r0,r3,asr #6         ; target = site + 8 + offset
+        add     r3,r3,#4
+        sub     r3,r3,r1
+        cmp     r3,r2
+        bhs     ul_keep
+        sub     r3,r8,r0                ; bl link from site = d - 4
+        sub     r3,r3,#4
+        mov     r3,r3,lsr #2
+        bic     r3,r3,#0xFF000000
+        orr     r3,r3,#0xEB000000
+        str     r3,[r0,#-4]
+        ldr     r3,[r0,#4]              ; the conditional jump, if any
+        cmp     r3,#0
+        beq     ul_undone
+        ldr     r12,[r3]
+        and     r12,r12,#0xFF000000
+        sub     lr,r0,r3                ; its offset to the site
+        sub     lr,lr,#12
+        mov     lr,lr,lsr #2
+        bic     lr,lr,#0xFF000000
+        orr     r12,r12,lr
+        str     r12,[r3]
+ul_undone
+        add     r11,r11,#1
+        b       ul_loop
+ul_keep
+        sub     r3,r5,#4                ; stored only once the log is being compacted
+        cmp     r3,r7
+        strne   r0,[r7]
+        add     r7,r7,#4
+        b       ul_loop
+ul_tramp
+        ; The trampoline of a retranslated RAM block: the old entry holds
+        ; a branch to the new one, and the block's address is kept in the
+        ; word after it by the entry check it replaced.
+        bic     r0,r0,#1
+        sub     r3,r0,r1
+        cmp     r3,r2
+        blo     ul_loop
+        ldr     r3,[r0]
+        mov     r3,r3,lsl #8
+        add     r3,r0,r3,asr #6
+        add     r3,r3,#8
+        sub     r3,r3,r1
+        cmp     r3,r2
+        orrhs   r0,r0,#1
+        bhs     ul_keep
+        ldr     r3,[r0,#4]
+        mov     r3,r3,lsl #16
+        mov     r3,r3,lsr #16           ; the Z80 address
+        ldr     r12,ul_mov_r0
+        orr     r12,r12,r3,lsr #8
+        str     r12,[r0]
+        ldr     r12,ul_orr_r0
+        and     r3,r3,#0xFF
+        orr     r12,r12,r3
+        str     r12,[r0,#4]
+        sub     r3,r9,r0                ; b miss from site + 8
+        sub     r3,r3,#16
+        mov     r3,r3,lsr #2
+        bic     r3,r3,#0xFF000000
+        orr     r3,r3,#0xEA000000
+        str     r3,[r0,#8]
+        b       ul_undone
+ul_done
+        add     r3,r4,#S_LINKS :AND: 0xFF00
+        ldr     r0,[r3,#S_LINKS :AND: 0xFF]
+        sub     r7,r7,r0
+        mov     r7,r7,lsr #2
+        str     r7,[r3,#S_NLINKS :AND: 0xFF]
+        mov     r0,r11
+        ldmfd   sp!,{r4-r9,r11,pc}
+ul_mov_r0       DCD     0xE3A00C00      ; mov r0,#0
+ul_orr_r0       DCD     0xE3800000      ; orr r0,r0,#0
 
 tb_insns        DCD     jit_insns
 tb_stubs        DCD     jit_stubs

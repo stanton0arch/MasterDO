@@ -192,6 +192,7 @@ struct z80j_block {
     uint32     *entry;      /* generated code, entry check included; 0: free */
     uint32     *body;       /* generated code after the entry check */
     z80j_block *next;       /* hash chain, or free list */
+    z80j_block *znext;      /* the blocks of the same zone (z80j_state.zone_head) */
 };
 
 #define SCAN_MEMO 16
@@ -275,6 +276,10 @@ uint32 jit_link_host(z80j_state *j, uint32 target, uint32 from_key, uint32 from_
 void   jit_link_stub(z80j_state *j, uint32 *d, uint32 host);
 /* Moves an area on to another zone, emptied first if it holds code. */
 void   jit_next_zone(z80j_state *j, z80j_area *a);
+/* Undoes the direct branches recorded in the link log that lead into the
+ * code between lo and hi, drops the entries whose own words lie there,
+ * and returns the number of branches undone (z80jit_blk.s). */
+uint32 jit_unlink_zone(z80j_state *j, uint32 lo, uint32 hi);
 
 /* z80jit_blk.s */
 /* Translates the block at pc: the block management around the decoding,

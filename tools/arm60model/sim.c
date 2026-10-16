@@ -16,7 +16,8 @@
  *
  * Options: -rom file, -frames n, -bench, -dump n, -from n, -img, -sym.
  * Environment: SIMPAD="frame:bits,..." (buttons held from that frame on,
- * SMS_PAD_* bits, 0x100 PAUSE), SIMPROF=1 (cycles per function),
+ * SMS_PAD_* bits, 0x100 PAUSE), SIMPROF=1 (cycles per function, the 40
+ * largest; SIMPROFALL=1 every function),
  * SIMALLOC=1 (every allocation with its size and memory type), SIMSCALE=f
  * (every cycle weight multiplied by f: another host timing),
  * SIMDIS=symbol (executions per instruction of a function).
@@ -336,7 +337,9 @@ static void do_swi(uint32_t n)
             uint32_t hdr[4] = { r[0], r[1], r[2], r[3] };
             fwrite(hdr, 4, 4, f);
             fwrite(mem + r[0], 1, r[1] - r[0], f);
-            for (k = 0; k < r[3]; k++) fwrite(mem + r[2] + 20 * k, 1, 20, f);
+            /* The first five words of each 24-byte descriptor (pc, key,
+             * entry, body, hash chain), as the scripts read them. */
+            for (k = 0; k < r[3]; k++) fwrite(mem + r[2] + 24 * k, 1, 20, f);
             fwrite(execmap + (r[0] >> 2), 1, (r[1] - r[0]) >> 2, f);
             fwrite(jitcyc + (r[0] >> 2), 4, (r[1] - r[0]) >> 2, f);
             fclose(f);
@@ -616,7 +619,8 @@ static void report_profile(double total)
     }
     fprintf(stderr, "profile: total %.0f cycles (%.0f us)\n", total, total * 0.08);
     fprintf(stderr, "  %-28s %12.0f cycles %6.2f%%\n", "(generated code)", prof_jit, 100.0 * prof_jit / total);
-    for (i = 0; i < ne && i < 40; i++)
+    /* The 40 largest, or every function with cycles (SIMPROFALL). */
+    for (i = 0; i < ne && (i < 40 || getenv("SIMPROFALL")); i++)
         fprintf(stderr, "  %-28s %12.0f cycles %6.2f%%\n", syms[e[i].i].name, e[i].c, 100.0 * e[i].c / total);
 }
 

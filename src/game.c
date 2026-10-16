@@ -14,8 +14,10 @@
 #define JIT_ZONES       13
 #define JIT_HOT_ZONES   5       /* code translated again after an eviction goes there */
 #define JIT_CODE_BYTES  (JIT_ZONE_BYTES * JIT_ZONES)
-#define JIT_BLOCKS      2048
-#define JIT_LINKS       (2 * JIT_BLOCKS)
+/* Block descriptors (24 bytes each, about 40 KiB): the recorded plays of
+ * the panel use 1 226 at most; when they run out a zone is evicted. */
+#define JIT_BLOCKS      1700
+#define JIT_LINKS       4096
 #define ROM_QUEUE       1024
 #define ROM_MAX_BLOCKS  4000
 /* The code translated before the run stops at half of the code buffer:
@@ -83,7 +85,8 @@ static void print_window(const game_window_rec *p)
            "%lu status reads, %lu counter reads, PSG %lu, pad %lu, other %lu, %lu leaves, "
            "%lu bank switches, %lu blocks (%lu in spare time, %lu at once in %lu us "
            "(%lu forced), %lu refused, %lu promoted, %lu us of spare time), %lu interpreted "
-           "instructions in %lu stretches, %lu evictions (%lu blocks, %lu live chunks), "
+           "instructions in %lu stretches, %lu evictions (%lu blocks, %lu live chunks, "
+           "%lu ahead in spare time, %lu us), "
            "%lu returns resumed, pad read %lu us, sound %lu us average, %lu us worst, "
            "%lu knob tweaks, end PC $%04lx SP $%04lx IFF %lu, %lu links (%lu refused), "
            "%lu descriptors\n",
@@ -107,7 +110,8 @@ static void print_window(const game_window_rec *p)
            (unsigned long)d->forced, (unsigned long)d->sync_refused, (unsigned long)d->promoted,
            (unsigned long)w->spare_us, (unsigned long)d->interp_insns, (unsigned long)d->interp,
            (unsigned long)d->evictions, (unsigned long)d->evicted,
-           (unsigned long)d->evicted_live, (unsigned long)d->resumed,
+           (unsigned long)d->evicted_live, (unsigned long)d->evict_ahead,
+           (unsigned long)d->evict_us, (unsigned long)d->resumed,
            (unsigned long)(w->pad_us / frames), (unsigned long)(w->snd_us / frames),
            (unsigned long)w->max_snd_us, (unsigned long)d->tweaks,
            (unsigned long)p->end_pc, (unsigned long)p->end_sp, (unsigned long)p->end_iff,
@@ -258,6 +262,8 @@ static void read_counters(const game *g, game_counters *c)
     c->evictions = g->jit.stats.evictions;
     c->evicted = g->jit.stats.evicted;
     c->evicted_live = g->jit.stats.evicted_live;
+    c->evict_ahead = g->jit.stats.evict_ahead;
+    c->evict_us = g->jit.stats.evict_us;
     c->prefetched = g->jit.stats.prefetched;
     c->promoted = g->jit.stats.promoted;
     c->interp = g->ctx->int_runs;
@@ -782,6 +788,11 @@ uint32 game_spare_time(game *g, uint32 frame_start, uint32 deadline_us)
         render_catch_up(g->rd, &g->sms->vdp, plat_usec_now, deadline_us - FRAME_MARGIN_US);
         now = plat_usec_now();
     }
+    /* The zone the next translations would have to empty is emptied now
+     * when the frame has room for it, so that no frame pays an eviction
+     * with a translation at once. */
+    if (z80j_evict_ahead(&g->jit, now - origin, FRAME_MARGIN_US))
+        now = plat_usec_now();
     while (z80j_spare_fits(&g->jit, now - origin, FRAME_MARGIN_US)) {
         if (!z80j_prefetch(&g->jit))
             break;
@@ -839,7 +850,8 @@ void game_log_summary(game *g)
            "(%lu%%), worst %lu us (frame %lu), %lu frames over %d us, Z80 idle %lu%%, %lu IRQ, "
            "%lu NMI, %lu bank switches, %lu blocks translated while running (%lu in spare "
            "time, %lu at once in %lu us (%lu forced), %lu refused, %lu promoted), %lu interpreted "
-           "instructions in %lu stretches, %lu evictions (%lu blocks, %lu live chunks), "
+           "instructions in %lu stretches, %lu evictions (%lu blocks, %lu live chunks, "
+           "%lu ahead in spare time, %lu us), "
            "%lu busy-wait loops found (%lu waiting for a line), %lu RAM blocks cut at a seam, "
            "%lu block descriptors in use at most, status %ld\n",
            (unsigned long)n, (unsigned long)avg,
@@ -857,6 +869,7 @@ void game_log_summary(game *g)
            (unsigned long)d.sync_us, (unsigned long)d.forced, (unsigned long)d.sync_refused,
            (unsigned long)d.promoted, (unsigned long)d.interp_insns, (unsigned long)d.interp,
            (unsigned long)d.evictions, (unsigned long)d.evicted, (unsigned long)d.evicted_live,
+           (unsigned long)d.evict_ahead, (unsigned long)d.evict_us,
            (unsigned long)g->jit.stats.busy_loops, (unsigned long)g->jit.stats.line_loops,
            (unsigned long)g->jit.stats.seams, (unsigned long)g->blocks_peak, (long)g->status);
     printf("Game summary: picture: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
@@ -946,13 +959,15 @@ void game_log_state(game *g)
            (e->host != 0 && e->pc == pc) ? "held for this address" :
            e->host != 0 ? "held for another address" : "empty");
     printf("View: translator: %lu blocks in use (%lu at most), %lu links of %lu (%lu refused), "
-           "%lu evictions (%lu blocks, %lu unlinked), %lu RAM retranslations, %lu dynamic RAM "
+           "%lu evictions (%lu blocks, %lu unlinked, %lu ahead in spare time, %lu us), "
+           "%lu RAM retranslations, %lu dynamic RAM "
            "blocks, %lu seams, %lu returns resumed, %lu hot addresses dropped, "
            "%lu interpreted instructions, generation %lu\n",
            (unsigned long)j->nblocks, (unsigned long)g->blocks_peak, (unsigned long)j->nlinks,
            (unsigned long)j->max_links, (unsigned long)j->stats.link_full,
            (unsigned long)j->stats.evictions, (unsigned long)j->stats.evicted,
-           (unsigned long)j->stats.unlinked, (unsigned long)j->stats.retranslations,
+           (unsigned long)j->stats.unlinked, (unsigned long)j->stats.evict_ahead,
+           (unsigned long)j->stats.evict_us, (unsigned long)j->stats.retranslations,
            (unsigned long)j->stats.dyn_blocks, (unsigned long)j->stats.seams,
            (unsigned long)(j->stats.resumed + c->resumed_count),
            (unsigned long)j->stats.queue_full, (unsigned long)c->int_insns,

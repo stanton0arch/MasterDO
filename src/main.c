@@ -543,7 +543,8 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: 320x240 display bitmaps whatever the display type, memory figures on screen\n");
+    printf("masterdo: code buffer zones evicted through their block lists, the link scan in "
+           "assembly, the next zone emptied ahead in spare time\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);
