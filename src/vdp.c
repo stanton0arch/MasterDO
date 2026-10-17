@@ -38,6 +38,8 @@ CHECK_OFF(lines, offsetof(vdp_state, lines) == 0x5C);
 CHECK_OFF(vc_jump, offsetof(vdp_state, vc_jump) == 0x60);
 CHECK_OFF(vc_back, offsetof(vdp_state, vc_back) == 0x64);
 CHECK_OFF(cr_n, offsetof(vdp_state, cr_n) == 0x4F84);
+CHECK_OFF(spr_order, offsetof(vdp_state, spr_order) == 0x5088);
+CHECK_OFF(spr_nord, offsetof(vdp_state, spr_nord) == 0x5188);
 CHECK_OFF(cr_log, offsetof(vdp_state, cr_log) == 0x4F88);
 CHECK_OFF(dirty, offsetof(vdp_state, dirty) == 0x200);
 CHECK_OFF(vram, offsetof(vdp_state, vram) == 0x400);
@@ -211,6 +213,7 @@ void vdp_init(vdp_state *v, z80j_ctx *ctx, uint32 lines)
     v->ctx = ctx;
     v->spr_n = 0;
     v->spr_partial = 0;
+    v->spr_nord = 0;
     memset(v->spr_tile_ok, 0, sizeof(v->spr_tile_ok));
     v->lines = lines;
     /* A line is 342 pixels long: the 9-bit H counter runs from $000 to

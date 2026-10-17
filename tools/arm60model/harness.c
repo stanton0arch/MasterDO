@@ -409,6 +409,25 @@ static uint32 count_dirty(const vdp_state *v)
     return n;
 }
 
+/* Rows of sprite k holding an opaque pixel, from the video RAM: the
+ * reference of the spr_rows cache of the assembly. */
+static uint32 ref_opaque_rows(const vdp_state *v, const uint8 *sat, uint32 k)
+{
+    uint32 tall = (v->reg[1] & 0x02) != 0;
+    uint32 tile = (sat[0x81 + 2 * k] & (tall ? 0xFE : 0xFF)) + ((v->reg[6] & 0x04) ? 256 : 0);
+    uint32 rows = tall ? 16 : 8;
+    uint32 mask = 0;
+    uint32 r;
+
+    for (r = 0; r < rows; r++) {
+        const uint8 *p = v->vram + (((tile + (r >> 3)) & 0x1FF) << 5) + ((r & 7) << 2);
+
+        if (p[0] | p[1] | p[2] | p[3])
+            mask |= (uint32)1 << r;
+    }
+    return mask;
+}
+
 static void check_sprites(vdp_state *v, uint32 f)
 {
     int32 ry[VDP_SPRITES];
@@ -433,6 +452,54 @@ static void check_sprites(vdp_state *v, uint32 f)
     for (k = 0; k < rn && !bad; k++) {
         if (ry[k] != v->spr_y[k] || ((rflags & VDP_ST_OVERFLOW) && rvis[k] != v->spr_vis[k]))
             bad = 1;
+    }
+    /* The ordered list of the sprites on the screen with an opaque pixel
+     * (spr_order): the sprites it names (each once, every one on the
+     * screen with an opaque pixel, none missing), their boxes, and the
+     * order by first row. */
+    if (!bad) {
+        const uint8 *sat = v->vram + ((v->reg[5] & 0x7E) << 7);
+        int32 h = (int32)v->spr_h;
+        int32 act = (int32)v->active;
+        uint32 want = 0;
+        uint8 seen[VDP_SPRITES];
+        int32 py = -1000;
+
+        memset(seen, 0, sizeof(seen));
+        for (k = 0; k < rn; k++) {
+            int32 a = ry[k] < 0 ? 0 : ry[k];
+            int32 b = ry[k] + h;
+
+            if (b > act)
+                b = act;
+            if (a < b && ref_opaque_rows(v, sat, k) != 0)
+                want++;
+        }
+        if (v->spr_nord != want)
+            bad = 2;
+        for (k = 0; k < v->spr_nord && !bad; k++) {
+            uint32 w = v->spr_order[k];
+            uint32 sp = w & 0xFF;
+            int32 a;
+            int32 b;
+
+            if (sp >= rn || seen[sp]) {
+                bad = 2;
+                break;
+            }
+            seen[sp] = 1;
+            a = ry[sp] < 0 ? 0 : ry[sp];
+            b = ry[sp] + h;
+            if (b > act)
+                b = act;
+            if (a >= b || ref_opaque_rows(v, sat, sp) == 0 || ((w >> 8) & 0xFF) != sat[0x80 + 2 * sp] ||
+                ((w >> 16) & 0xFF) != (uint32)a || (w >> 24) != (uint32)b || ry[sp] < py)
+                bad = 2;
+            py = ry[sp];
+        }
+        if (bad == 2 && sprite_errors < 20)
+            printf("Sprites: frame %lu: order list of %lu sprites (reference %lu)\n",
+                   (unsigned long)f, (unsigned long)v->spr_nord, (unsigned long)want);
     }
     if (bad && sprite_errors++ < 20) {
         const uint8 *sat = v->vram + ((v->reg[5] & 0x7E) << 7);

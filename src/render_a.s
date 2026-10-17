@@ -15,6 +15,7 @@
         EXPORT  render_rect_pieces
         EXPORT  render_sprite_runs
         EXPORT  render_prio_patches
+        EXPORT  render_prio_groups
         EXPORT  cell_draw
         EXPORT  cell_conv
         EXPORT  conv_rows
@@ -46,13 +47,21 @@ R_PREV          EQU     44
 R_WLIST         EQU     48
 R_NTBASE        EQU     56
 R_PRIOROWS      EQU     68
+R_PRIOMIN       EQU     100
+R_PRIOMAX       EQU     132
 R_PRIODIRTY     EQU     164
+R_PGN           EQU     208
+R_PGROW0        EQU     212
+R_PGNROWS       EQU     244
+R_PGCOL0        EQU     276
+R_PGCOL1        EQU     308
 R_STCELLS       EQU     196
 R_STTILECELLS   EQU     200
 R_STTILESCONV   EQU     204
 R_STALE         EQU     340
 R_STALEROWS     EQU     344
 R_SHOWNROWS     EQU     348
+R_NROWS         EQU     352
 R_NCELLS        EQU     356
 
 ; piece_ctx fields (render.h).
@@ -73,6 +82,7 @@ SA_YWRAP        EQU     28
 SA_END          EQU     32
 SA_DROPPED      EQU     36
 SA_NEEDED       EQU     40
+SA_HEIGHT       EQU     44
 
 ;----------------------------------------------------------------------------
 ; uint32 render_nt_scan(const uint32 *nt, const uint32 *shadow,
@@ -212,52 +222,69 @@ dscan_next
         ldmfd   sp!,{r4-r11,pc}
 
 ;----------------------------------------------------------------------------
-; uint32 render_sprites(const uint8 *sat, uint32 n, CCB *cel,
-;                       const render_sprite_args *a)
+; CCB *render_sprites(const uint8 *sat, uint32 n, CCB *cel,
+;                     render_sprite_args *a)
 ;
-; Sets the source, X and Y of the cels of sprites 0 to n - 1 from the
-; sprite attribute table; appends to a->need the tiles (first tile of the
-; sprite) whose conversion is missing (a->t_ok bit 0 clear for the tile,
-; or for the second one of a tall sprite) and returns their count.
+; Sets the source, X and Y of one cel per sprite among sprites 0 to n - 1
+; that reaches the screen (a->height lines; a sprite entirely above or
+; below it gets no cel), in table order from cel; appends to a->need the
+; tiles (first tile of the sprite) whose conversion is missing (a->t_ok
+; bit 0 clear for the tile, or for the second one of a tall sprite),
+; a->needed of them, and returns the cel after the last one set up.
 ;----------------------------------------------------------------------------
 render_sprites
         stmfd   sp!,{r4-r11,lr}
         ldmia   r3,{r4-r10}             ; tiles, t_ok, tbase, tmask, xoff, need, tall
-        ldr     r3,[r3,#SA_YWRAP]
+        ldr     r11,[r3,#SA_YWRAP]
+        ldr     lr,[r3,#SA_HEIGHT]
         add     r10,r5,r10              ; t_ok + 1 for tall sprites, else t_ok
-        stmfd   sp!,{r3,r9}             ; Y wrap, start of the need list
-        add     r3,r0,#0x80             ; x / tile pairs
+        orr     r11,r11,lr,lsl #16
+        stmfd   sp!,{r3,r9}             ; args, start of the need list
+        mov     r3,r11                  ; r3 = Y wrap | height << 16
+        add     r11,r0,#0x80            ; x / tile pairs
         movs    r1,r1
         beq     spr_done
 spr_loop
-        ldrb    r11,[r3],#1             ; x
-        ldrb    r12,[r3],#1             ; tile
-        and     r12,r12,r7
-        add     r12,r12,r6
-        ldrb    lr,[r5,r12]             ; conversion of the tile(s) present?
-        tst     lr,#1
-        ldrneb  lr,[r10,r12]
-        tstne   lr,#1
-        streq   r12,[r9],#4
-        add     lr,r4,r12,lsl #6
-        str     lr,[r2,#CCB_SOURCE]
-        sub     r11,r11,r8
-        mov     r11,r11,lsl #16
-        str     r11,[r2,#CCB_XPOS]
         ldrb    r12,[r0],#1             ; y
-        ldr     lr,[sp]                 ; a sprite past the wrap shows at the top
+        and     lr,r3,#0xFF
         add     r12,r12,#1
         cmp     r12,lr
-        subgt   r12,r12,#256
+        subgt   r12,r12,#256            ; a sprite past the wrap shows at the top
+        cmp     r12,r3,lsr #16
+        bge     spr_skip                ; below the screen
+        sub     lr,lr,#256              ; - lines per sprite
+        cmp     r12,lr
+        ble     spr_skip                ; above it
         mov     r12,r12,lsl #16
         str     r12,[r2,#CCB_YPOS]
+        ldrb    r12,[r11],#1            ; x
+        ldrb    lr,[r11],#1             ; tile
+        sub     r12,r12,r8
+        mov     r12,r12,lsl #16
+        str     r12,[r2,#CCB_XPOS]
+        and     lr,lr,r7
+        add     lr,lr,r6
+        ldrb    r12,[r5,lr]             ; conversion of the tile(s) present?
+        tst     r12,#1
+        ldrneb  r12,[r10,lr]
+        tstne   r12,#1
+        streq   lr,[r9],#4
+        add     lr,r4,lr,lsl #6
+        str     lr,[r2,#CCB_SOURCE]
         add     r2,r2,#CCB_SIZE
         subs    r1,r1,#1
         bne     spr_loop
+        b       spr_done
+spr_skip
+        add     r11,r11,#2
+        subs    r1,r1,#1
+        bne     spr_loop
 spr_done
-        ldmfd   sp!,{r0,r1}
-        sub     r0,r9,r1
-        mov     r0,r0,lsr #2
+        ldmfd   sp!,{r1,r12}
+        sub     r12,r9,r12
+        mov     r12,r12,lsr #2
+        str     r12,[r1,#SA_NEEDED]
+        mov     r0,r2
         ldmfd   sp!,{r4-r11,pc}
 
 ;----------------------------------------------------------------------------
@@ -1061,6 +1088,8 @@ S_Y             EQU     16
 S_PARTIAL       EQU     12
 S_VIS           EQU     272
 S_ROWS          EQU     528
+S_ORDER         EQU     0x814
+S_NORD          EQU     0x914
 
 render_sprite_runs
         stmfd   sp!,{r4-r11,lr}
@@ -1209,10 +1238,14 @@ rs_done
 ; The priority layer under the sprites: the strips of the frame (cels
 ; already set up, a->strips, a->nstrips) are screen rectangles each
 ; showing a contiguous part of a priority bitmap; for each sprite on the
-; screen (a->height lines), the part of each strip under it becomes a cel
-; of its own, with the PLUT of the strip, appended to a->p. Gives up with 0 when the pixels of the patches
-; exceed a->limit or the cels run out; else returns 1 with the pixels in
-; a->area.
+; screen with an opaque pixel (the VDP's spr_order list), the part of each
+; strip under it becomes a cel of its own, with the PLUT of the strip,
+; appended to a->p. The rectangle of each strip is packed in a word first,
+; and the strips reaching each row of eight lines are noted in a bit mask
+; (the first 32 strips), so that a sprite only tests the strips of its
+; rows; the strips beyond the first 32 are tested one by one. Gives up
+; with 0 when the pixels of the patches exceed a->limit or the cels run
+; out; else returns 1 with the pixels in a->area.
 ;----------------------------------------------------------------------------
 PA_STRIPS       EQU     0
 PA_NSTRIPS      EQU     4
@@ -1224,91 +1257,235 @@ PA_AREA         EQU     24
 PA_P            EQU     28
 PA_HEIGHT       EQU     32
 
+; Stack frame.
+PF_RECT         EQU     0               ; 128 words: strip k as x0 | x1 - 1 << 8 |
+                                        ; y0 << 16 | y1 - 1 << 24 (clipped to the screen)
+PF_MASK         EQU     512             ; 32 words: bit k: strip k (k < 32) reaches
+                                        ; lines 8 r to 8 r + 7
+PF_SPR          EQU     640             ; xoff | sprite width << 8 | partial << 16
+PF_END          EQU     644             ; end of the sprite list
+PF_SIZE         EQU     648
+
+        ; PTEST: skips to $miss when the strip packed in r2 does not meet
+        ; the sprite's box r5 .. r4 - 1, r7 .. r6 - 1. Clobbers r3.
+        MACRO
+        PTEST   $miss
+        cmp     r7,r2,lsr #24           ; y1 - 1 < sy0
+        bhi     $miss
+        and     r3,r2,#0xFF0000
+        cmp     r3,r6,lsl #16           ; y0 >= sy1
+        bhs     $miss
+        and     r3,r2,#0xFF
+        cmp     r3,r4                   ; x0 >= sx1
+        bhs     $miss
+        and     r3,r2,#0xFF00
+        cmp     r3,r5,lsl #8            ; x1 - 1 < sx0
+        blo     $miss
+        MEND
+
 render_prio_patches
         stmfd   sp!,{r4-r11,lr}
+        sub     sp,sp,#PF_SIZE
         mov     r11,r0                  ; args
         mov     r10,#0                  ; area
-        ldr     r9,[r11,#PA_V]
-        add     r9,r9,#0x4800
-        add     r9,r9,#V_SPR-0x4800     ; &spr_n
-        mov     r8,#0                   ; sprite
-pp_sprite
-        ldr     r0,[r9,#S_N]
-        cmp     r8,r0
-        bhs     pp_ok
-        add     r0,r9,r8,lsl #2
-        ldr     r1,[r9,#S_PARTIAL]      ; spr_vis is only valid in a frame
-        cmp     r1,#0                   ; where some sprite loses lines
-        beq     pp_shown
-        ldr     r1,[r0,#S_VIS]
-        cmp     r1,#0
-        beq     pp_nexts                ; hidden on every line
-pp_shown
-        ldr     r1,[r0,#S_ROWS]
-        cmp     r1,#0
-        beq     pp_nexts                ; no opaque pixel: nothing to cover
-        ldr     r0,[r0,#S_Y]
-        ldr     r1,[r9,#S_H]
-        add     r6,r0,r1
-        ldr     r1,[r11,#PA_HEIGHT]
-        cmp     r6,r1
-        movgt   r6,r1                   ; r6 = sy1
-        movs    r7,r0
-        movmi   r7,#0                   ; r7 = sy0
-        cmp     r7,r6
-        bge     pp_nexts
-        ldr     r0,[r11,#PA_SAT]
-        add     r0,r0,r8,lsl #1
-        ldrb    r0,[r0,#0x80]
-        ldr     r1,[r11,#PA_XOFF]
-        sub     r0,r0,r1                ; x
-        ldr     r1,[r9,#S_ZOOM]
-        mov     r2,#8
-        mov     r2,r2,lsl r1
-        add     r4,r0,r2
-        cmp     r4,#256
-        movgt   r4,#256                 ; r4 = sx1
-        movs    r5,r0
-        movmi   r5,#0                   ; r5 = sx0
-        cmp     r5,r4
-        bge     pp_nexts
+        mov     r0,#0
+        mov     r1,#0
+        mov     r2,#0
+        mov     r3,#0
+        add     r12,sp,#PF_MASK
+        stmia   r12!,{r0-r3}
+        stmia   r12!,{r0-r3}
+        stmia   r12!,{r0-r3}
+        stmia   r12!,{r0-r3}
+        stmia   r12!,{r0-r3}
+        stmia   r12!,{r0-r3}
+        stmia   r12!,{r0-r3}
+        stmia   r12!,{r0-r3}
+        ; The rectangles of the strips, and the rows each reaches.
         ldr     r3,[r11,#PA_STRIPS]
         ldr     r2,[r11,#PA_NSTRIPS]
         mov     r12,#CCB_SIZE
         mla     r2,r12,r2,r3            ; end of the strips
-pp_strip
+        mov     r8,#1                   ; the strip's bit (0 from the 33rd on)
+        add     r9,sp,#PF_RECT
+pk_loop
         cmp     r3,r2
-        bhs     pp_nexts
+        bhs     pk_done
         ldr     r0,[r3,#CCB_YPOS]
         mov     r0,r0,asr #16           ; first line of the strip
         ldr     r1,[r3,#CCB_PRE0]
         mov     r1,r1,lsr #6
-        add     r1,r1,#1
-        add     r1,r0,r1                ; its end
-        cmp     r0,r7
-        movlt   r0,r7                   ; iy0
-        cmp     r1,r6
-        movgt   r1,r6                   ; iy1
-        cmp     r0,r1
-        bge     pp_nextst
+        add     r1,r0,r1                ; its last line
+        cmp     r1,#255
+        movgt   r1,#255
         ldr     r12,[r3,#CCB_XPOS]
-        mov     r12,r12,asr #16         ; first column of the strip
+        mov     r12,r12,asr #16         ; first column (a piece may start left of the screen)
         ldr     lr,[r3,#CCB_PRE1]
         mov     lr,lr,lsl #21
         mov     lr,lr,lsr #21
-        add     lr,lr,#1
-        add     lr,r12,lr               ; its end
+        add     lr,lr,r12               ; its last column
+        cmp     lr,#255
+        movgt   lr,#255
+        cmp     r12,#0
+        movlt   r12,#0
+        orr     r12,r12,lr,lsl #8
+        orr     r12,r12,r0,lsl #16
+        orr     r12,r12,r1,lsl #24
+        str     r12,[r9],#4
+        cmp     r8,#0
+        beq     pk_next
+        mov     r0,r0,lsr #3            ; its rows
+        mov     r1,r1,lsr #3
+        sub     r1,r1,r0
+        add     lr,sp,#PF_MASK
+        add     lr,lr,r0,lsl #2
+pk_rows
+        ldr     r0,[lr]
+        orr     r0,r0,r8
+        str     r0,[lr],#4
+        subs    r1,r1,#1
+        bpl     pk_rows
+        movs    r8,r8,lsl #1
+pk_next
+        add     r3,r3,#CCB_SIZE
+        b       pk_loop
+pk_done
+        ldr     r9,[r11,#PA_V]
+        add     r9,r9,#0x4800
+        add     r9,r9,#V_SPR-0x4800     ; &spr_n
+        ldr     r0,[r9,#S_PARTIAL]      ; spr_vis is only valid in a frame
+        ldr     r1,[r11,#PA_XOFF]       ; where some sprite loses lines
+        ldr     r2,[r9,#S_ZOOM]
+        mov     r3,#8
+        mov     r3,r3,lsl r2            ; sprite width
+        orr     r1,r1,r3,lsl #8
+        orr     r1,r1,r0,lsl #16
+        str     r1,[sp,#PF_SPR]
+        ldr     r0,[r9,#S_NORD]
+        add     r8,r9,#0x800
+        add     r8,r8,#S_ORDER-0x800    ; r8 = the sprites, by first row
+        add     r0,r8,r0,lsl #2
+        str     r0,[sp,#PF_END]
+pp_sprite
+        ldr     r0,[sp,#PF_END]
+        cmp     r8,r0
+        bhs     pp_ok
+        ldr     r0,[r8],#4              ; sprite | x << 8 | first << 16 | last + 1 << 24
+        ldr     r1,[sp,#PF_SPR]
+        tst     r1,#0xFF0000
+        beq     pp_shown
+        and     r2,r0,#0x3F
+        add     r2,r9,r2,lsl #2
+        ldr     r2,[r2,#S_VIS]
+        cmp     r2,#0
+        beq     pp_sprite               ; hidden on every line
+pp_shown
+        mov     r7,r0,lsl #8
+        mov     r7,r7,lsr #24           ; r7 = sy0: its first screen line
+        mov     r6,r0,lsr #24           ; r6 = sy1: its last screen line + 1
+        ldr     r2,[r11,#PA_HEIGHT]
+        cmp     r6,r2
+        movgt   r6,r2
+        cmp     r7,r6
+        bge     pp_sprite
+        mov     r2,r0,lsr #8
+        and     r2,r2,#0xFF             ; x of the table
+        and     r3,r1,#0xFF
+        sub     r2,r2,r3                ; x on the screen
+        mov     r3,r1,lsr #8
+        and     r3,r3,#0xFF             ; width
+        add     r4,r2,r3
+        cmp     r4,#256
+        movgt   r4,#256                 ; r4 = sx1
+        movs    r5,r2
+        movmi   r5,#0                   ; r5 = sx0
+        cmp     r5,r4
+        bge     pp_sprite
+        ; The strips of its rows, then those beyond the first 32.
+        mov     r0,r7,lsr #3
+        sub     r1,r6,#1
+        mov     r1,r1,lsr #3
+        sub     r1,r1,r0                ; rows - 1
+        add     lr,sp,#PF_MASK
+        add     lr,lr,r0,lsl #2
+        mov     r0,#0
+pp_rows
+        ldr     r2,[lr],#4
+        orr     r0,r0,r2
+        subs    r1,r1,#1
+        bpl     pp_rows
+        mov     r1,#0                   ; strip
+pp_bits
+        movs    r0,r0
+        beq     pp_rest
+        tst     r0,#0xFF
+        moveq   r0,r0,lsr #8
+        addeq   r1,r1,#8
+        beq     pp_bits
+        tst     r0,#1
+        beq     pp_bnext
+        add     r2,sp,#PF_RECT
+        ldr     r2,[r2,r1,lsl #2]
+        PTEST   pp_bnext
+        bl      pp_patch
+pp_bnext
+        mov     r0,r0,lsr #1
+        add     r1,r1,#1
+        b       pp_bits
+pp_rest
+        ldr     r0,[r11,#PA_NSTRIPS]
+        mov     r1,#32
+        cmp     r1,r0
+        bhs     pp_sprite
+        add     r12,sp,#PF_RECT+128
+pp_rloop
+        ldr     r2,[r12],#4
+        PTEST   pp_rnext
+        bl      pp_patch
+pp_rnext
+        add     r1,r1,#1
+        cmp     r1,r0
+        blo     pp_rloop
+        b       pp_sprite
+pp_fail
+        add     sp,sp,#24+PF_SIZE       ; the registers pp_patch saved, the frame
+        mov     r0,#0
+        ldmfd   sp!,{r4-r11,pc}
+pp_ok
+        str     r10,[r11,#PA_AREA]
+        mov     r0,#1
+        add     sp,sp,#PF_SIZE
+        ldmfd   sp!,{r4-r11,pc}
+
+; pp_patch: the part of strip r1 (its rectangle packed in r2), which meets
+; the sprite's box (r5 .. r4 - 1, r7 .. r6 - 1), becomes a cel. Preserves
+; r0, r1, r4, r5 and r12; leaves through pp_fail when the pixels exceed
+; the limit or the cels run out.
+pp_patch
+        stmfd   sp!,{r0,r1,r4,r5,r12,lr}
+        ldr     r3,[r11,#PA_STRIPS]
+        add     r3,r3,r1,lsl #6
+        add     r3,r3,r1,lsl #2         ; the strip's cel
+        mov     r0,r2,lsl #8
+        mov     r0,r0,lsr #24           ; first line of the strip
+        cmp     r0,r7
+        movlt   r0,r7                   ; iy0
+        mov     r1,r2,lsr #24
+        add     r1,r1,#1                ; its end
+        cmp     r1,r6
+        movgt   r1,r6                   ; iy1
+        and     r12,r2,#0xFF            ; first column of the strip on the screen
         cmp     r12,r5
         movlt   r12,r5                  ; ix0
+        mov     lr,r2,lsr #8
+        and     lr,lr,#0xFF
+        add     lr,lr,#1                ; its end
         cmp     lr,r4
         movgt   lr,r4                   ; ix1
-        cmp     r12,lr
-        bge     pp_nextst
         ; A patch: lines r0 to r1 - 1, columns r12 to lr - 1 of the strip.
         sub     r1,r1,r0                ; rows
         sub     lr,lr,r12               ; columns
         mla     r10,r1,lr,r10
-        stmfd   sp!,{r2,r3,r4,r5}
         ldr     r2,[r11,#PA_LIMIT]
         cmp     r10,r2
         bhi     pp_fail
@@ -1344,20 +1521,112 @@ pp_strip
         mov     r1,r1,lsl #6
         orr     r1,r1,#5                ; PRE0: rows - 1, 8 bpp
         str     r1,[r4,#CCB_PRE0]
-        ldmfd   sp!,{r2,r3,r4,r5}
-pp_nextst
-        add     r3,r3,#CCB_SIZE
-        b       pp_strip
-pp_nexts
-        add     r8,r8,#1
-        b       pp_sprite
-pp_fail
-        add     sp,sp,#16
-        mov     r0,#0
-        ldmfd   sp!,{r4-r11,pc}
-pp_ok
-        str     r10,[r11,#PA_AREA]
-        mov     r0,#1
-        ldmfd   sp!,{r4-r11,pc}
+        ldmfd   sp!,{r0,r1,r4,r5,r12,pc}
+
+;----------------------------------------------------------------------------
+; void render_prio_groups(render_layer *l)
+;
+; The priority strip groups of a layer: runs of consecutive name table
+; rows holding priority cells, each with the union of the column ranges
+; of its rows (pg_row0, pg_nrows, pg_col0, pg_col1, pg_n). The column
+; range of a row whose priority cells changed (prio_dirty) is found again
+; from the shadow name table first: two entries per word, the priority
+; bit in bit 4 of the high byte of each (bits 20 and 4 on this CPU), the
+; row holding at least one such cell. A row whose range was just found
+; starts a group of its own, as the strips it was in are stale.
+;----------------------------------------------------------------------------
+render_prio_groups
+        stmfd   sp!,{r4-r9,lr}
+        ldr     r1,[r0,#R_NROWS]        ; rows
+        mov     r2,#0                   ; row
+        mov     r3,#0                   ; groups
+        add     r4,r0,#R_PRIOROWS
+        add     r5,r0,#R_PRIODIRTY
+pg_loop
+        cmp     r2,r1
+        bhs     pg_done
+        ldrb    r6,[r4,r2]
+        cmp     r6,#0
+        addeq   r2,r2,#1
+        beq     pg_loop                 ; no priority cell in the row
+        ldrb    r6,[r5,r2]
+        cmp     r6,#0
+        blne    pg_range
+        mov     r7,r2                   ; first row of the group
+        add     lr,r0,#R_PRIOMIN
+        ldrb    r8,[lr,r2]              ; its first column
+        add     lr,r0,#R_PRIOMAX
+        ldrb    r9,[lr,r2]
+        add     r9,r9,#1                ; its last column + 1
+pg_more
+        add     r2,r2,#1
+        cmp     r2,r1
+        bhs     pg_emit
+        ldrb    r6,[r4,r2]
+        cmp     r6,#0
+        beq     pg_emit
+        ldrb    r6,[r5,r2]
+        cmp     r6,#0
+        bne     pg_emit
+        add     lr,r0,#R_PRIOMIN
+        ldrb    r6,[lr,r2]
+        cmp     r6,r8
+        movlo   r8,r6
+        add     lr,r0,#R_PRIOMAX
+        ldrb    r6,[lr,r2]
+        add     r6,r6,#1
+        cmp     r6,r9
+        movhi   r9,r6
+        b       pg_more
+pg_emit
+        add     lr,r0,#R_PGROW0
+        strb    r7,[lr,r3]
+        sub     r6,r2,r7
+        add     lr,r0,#R_PGNROWS
+        strb    r6,[lr,r3]
+        add     lr,r0,#R_PGCOL0
+        strb    r8,[lr,r3]
+        add     lr,r0,#R_PGCOL1
+        strb    r9,[lr,r3]
+        add     r3,r3,#1
+        b       pg_loop
+pg_done
+        str     r3,[r0,#R_PGN]
+        ldmfd   sp!,{r4-r9,pc}
+
+; pg_range: the first and last column of row r2 with a priority cell,
+; from the shadow, into prio_min and prio_max; clears the row's dirty
+; byte. Clobbers r6-r9 and r12.
+pg_range
+        ldr     r6,[r0,#R_SHADOW]
+        add     r6,r6,r2,lsl #6         ; the row's 16 words
+        mov     r7,r6
+        mov     r8,#0x00100000
+        orr     r8,r8,#0x10             ; the bit of both entries
+pgr_lo
+        ldr     r9,[r7],#4
+        tst     r9,r8
+        beq     pgr_lo
+        sub     r7,r7,r6
+        sub     r7,r7,#4
+        mov     r7,r7,lsr #1            ; two entries per word
+        tst     r9,#0x00100000
+        addeq   r7,r7,#1                ; the second entry alone
+        add     r12,r0,#R_PRIOMIN
+        strb    r7,[r12,r2]
+        add     r7,r6,#64
+pgr_hi
+        ldr     r9,[r7,#-4]!
+        tst     r9,r8
+        beq     pgr_hi
+        sub     r7,r7,r6
+        mov     r7,r7,lsr #1
+        tst     r9,#0x10
+        addne   r7,r7,#1                ; the second entry
+        add     r12,r0,#R_PRIOMAX
+        strb    r7,[r12,r2]
+        mov     r9,#0
+        strb    r9,[r5,r2]
+        mov     pc,lr
 
         END

@@ -155,6 +155,11 @@ typedef struct {
      * (first line affected << 16) | (index << 8) | value. */
     uint32  cr_n;                   /* +0x4F84 */
     uint32  cr_log[VDP_CR_LOG];     /* +0x4F88 */
+    /* The sprites on the screen with an opaque pixel, by first row, for
+     * the code drawing the priority layer under them: sprite | x << 8 |
+     * first screen line << 16 | last screen line + 1 << 24. */
+    uint32  spr_order[VDP_SPRITES]; /* +0x5088 */
+    uint32  spr_nord;               /* +0x5188 */
 } vdp_state;
 
 /* Power-on state; lines is VDP_LINES_NTSC or VDP_LINES_PAL. */
@@ -207,7 +212,8 @@ uint32 vdp_palette_bands(const vdp_state *v, uint32 *tops, uint32 *cram, uint32 
 
 /* Evaluates the sprite attribute table for the picture of the frame
  * (spr_* fields): the per-line limit, the overflow and collision flags,
- * which are set in the status and returned. The opaque rows of the
+ * which are set in the status and returned, and the ordered list of the
+ * sprites on the screen with an opaque pixel (spr_order). The opaque rows of the
  * tiles are cached; a written tile is seen through the dirty bytes, and
  * the caller clears spr_tile_ok for the tiles it clears them for. */
 uint32 vdp_sprites(vdp_state *v);

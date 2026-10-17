@@ -21,47 +21,53 @@ S_Y             EQU     16              ; 64 words
 S_VIS           EQU     272             ; 64 words
 S_ROWS          EQU     528             ; 64 words: bit r: row r has an opaque pixel
 S_TROWS         EQU     784             ; 512 bytes: the same per tile
-S_TOK           EQU     1296            ; 512 bytes: cache entry valid
+S_TOK           EQU     1296
+S_ORDER         EQU     0x814           ; 64 words: the sprites on the screen with an
+                                        ; opaque pixel, by first row (see vdp.h)
+S_NORD          EQU     0x914           ; their count            ; 512 bytes: cache entry valid
 
 ST_OVERFLOW     EQU     0x40
 ST_COLLIDE      EQU     0x20
 
 ; Stack frame (lines: up to 240).
-F_DIFF          EQU     0               ; 256 bytes: sprites starting (+1) and
-                                        ; ending (-1) on each line, then the
-                                        ; count of sprites met on each line
-F_RANGE         EQU     256             ; 64 words: first line | last line + 1 << 8
-                                        ; of each sprite on the screen (0: none)
-F_PLANES        EQU     0               ; pass C, over the line counts: 8 x 4
-                                        ; words of bit-sliced counts
+F_PLANES        EQU     0               ; pass C: 8 x 4 words of bit-sliced counts
+                                        ; of the sprites met on each line
 F_M1            EQU     128             ; pass C: a sprite's lines in its second word
 F_FIRST         EQU     132             ; its first line
 F_LOST          EQU     136             ; the lines it loses in its first word
-F_OVER          EQU     512             ; 9 words: lines with more than 8 sprites
-                                        ; (the last one stays clear)
-F_HEAD          EQU     548             ; 240 bytes: first sprite starting on a line
-F_NEXT          EQU     788             ; 64 bytes: next sprite starting on the line
-F_ORDER         EQU     852             ; 64 words: sprites by first line, as
+F_RANGE         EQU     256             ; 64 words: first line | last line + 1 << 8
+                                        ; of each sprite on the screen (0: none)
+F_HEAD          EQU     512             ; 272 bytes: first sprite whose first row is
+                                        ; on line y, at y + 32 (0xFF: none; bit 7:
+                                        ; the sprite has no opaque pixel)
+F_NEXT          EQU     784             ; 64 bytes: next sprite starting on the line
+F_ORDER         EQU     848             ; 64 words: sprites by first row, as
                                         ; sprite | x << 8 | first << 16 | last + 1 << 24
-F_TILE          EQU     1108            ; tile base | 0x10000 for tall sprites
-F_NCHAIN        EQU     1112            ; sprites chained (with an opaque pixel)
-F_ACTIVE        EQU     1116            ; active lines
+                                        ; (bit 7: no opaque pixel; those without
+                                        ; it go to spr_order)
+F_TILE          EQU     1104            ; tile base | 0x10000 for tall sprites
+F_NSORT         EQU     1108            ; sprites on the screen (ordered)
+F_ACTIVE        EQU     1112            ; active lines
 F_SIZE          EQU     1120
 
 ;----------------------------------------------------------------------------
 ; uint32 vdp_sprites(vdp_state *v)
 ;
-; Fills spr_n, spr_h, spr_zoom, spr_partial, spr_y and spr_vis, ORs the
-; sprite flags into the status and returns them. The list ends at the
-; $D0 terminator in the 192-line mode only. A pass over the sprites
-; counts, per line, those that start and end there; the running sum gives
-; the number of sprites on each line. When some line has more than eight,
-; a second pass in table order, over those lines only, marks the lines
-; each sprite loses. Collisions are looked for among the sprites whose
-; boxes overlap: the sprites on the screen are ordered by their first line
-; (a counting sort), each one is compared with those starting before its
-; last line, and when their columns overlap too the opaque pixels of their
-; rows are tested where they meet.
+; Fills spr_n, spr_h, spr_zoom, spr_partial, spr_y, spr_vis, spr_order and
+; spr_nord, ORs the sprite flags into the status and returns them. The list ends at the
+; $D0 terminator in the 192-line mode only. A pass over the sprites gives
+; each its screen lines and the opaque rows of its tiles, and chains the
+; sprites on the screen by first row (a counting sort). In that order a
+; line holds more than eight sprites exactly when some sprite's first
+; screen line is still covered by the sprite eight places before it (the
+; sprites all have the same height), a test over the sprites instead of
+; the lines; when it fires, a second pass in table order, over the lines,
+; marks the lines each sprite loses. The ordered sprites with an opaque
+; pixel are kept in spr_order (the renderer draws the priority layer
+; under them), and collisions are looked for among them: each one is
+; compared with those starting before its last line, and when their
+; columns overlap too the opaque pixels of their rows are tested where
+; they meet.
 ;----------------------------------------------------------------------------
 vdp_sprites
         stmfd   sp!,{r4-r11,lr}
@@ -83,50 +89,54 @@ vdp_sprites
         str     r9,[r6,#S_ZOOM]
         mov     r0,#0
         str     r0,[r6,#S_PARTIAL]
-        mov     r1,#0
-        mov     r2,#0
-        mov     r3,#0
-        mov     r12,sp                  ; diff (active + 1 lines), over: 0
-        ldr     lr,[r11,#V_ACTIVE]
-        add     lr,lr,#4+15
-        mov     lr,lr,lsr #4
-clr_loop
-        stmia   r12!,{r0-r3}
-        subs    lr,lr,#1
-        bne     clr_loop
-        add     r12,sp,#F_OVER
-        stmia   r12!,{r0-r3}
-        stmia   r12!,{r0-r3}
-        str     r0,[r12]
-        ldr     r0,[r11,#V_ACTIVE]
-        str     r0,[sp,#F_ACTIVE]
         mvn     r0,#0
         mvn     r1,#0
         mvn     r2,#0
         mvn     r3,#0
         add     r12,sp,#F_HEAD          ; no sprite starts on any line yet
-        ldr     lr,[sp,#F_ACTIVE]
+        ldr     lr,[r11,#V_ACTIVE]
+        str     lr,[sp,#F_ACTIVE]
+        add     lr,lr,#32
         mov     lr,lr,lsr #4
 hd_clr
         stmia   r12!,{r0-r3}
         subs    lr,lr,#1
         bne     hd_clr
-        ldrb    lr,[r11,#V_REG+6]
-        and     lr,lr,#4
-        mov     lr,lr,lsl #6            ; tile base
+        ldrb    r12,[r11,#V_REG+6]
+        and     r12,r12,#4
+        mov     r12,r12,lsl #6          ; tile base
         ldrb    r0,[r11,#V_REG+1]
         and     r0,r0,#2
-        orr     lr,lr,r0,lsl #15        ; | 0x10000 when tall
-        str     lr,[sp,#F_TILE]
-        ; Pass A, up to the terminator: ranges, the line counts, the
-        ; opaque rows of each sprite, and the sprites on the screen with
-        ; an opaque pixel chained by first line (the others cannot
-        ; collide). The lines each sprite shows (spr_vis) are only written
-        ; when some line holds more than eight sprites: nothing reads them
-        ; otherwise.
+        orr     r12,r12,r0,lsl #15      ; | 0x10000 when tall
+        str     r12,[sp,#F_TILE]        ; r12 = the same, for pass A
+
+        ; TROWS: the opaque rows of tile r2 into $dst, from the cache
+        ; (spr_tile_rows), computed again when the entry is not valid or
+        ; the tile was written (dirty byte). Clobbers lr.
+        MACRO
+        TROWS   $dst
+        add     lr,r6,#S_TOK
+        ldrb    $dst,[lr,r2]
+        add     lr,r11,#V_DIRTY
+        ldrb    lr,[lr,r2]
+        subs    lr,$dst,lr              ; 1: valid and not written since
+        add     $dst,r6,#S_TROWS
+        cmp     lr,#1
+        ldreqb  $dst,[$dst,r2]
+        beq     %F8
+        bl      tile_rows               ; into lr and the cache
+        mov     $dst,lr
+8
+        MEND
+
+        ; Pass A, up to the terminator: the screen line and the range of
+        ; each sprite, the opaque rows of its tiles, and the sprites on the
+        ; screen chained by first row, flagged when they have no opaque
+        ; pixel (they cannot collide). The lines each sprite shows
+        ; (spr_vis) are only written when some line holds more than eight
+        ; sprites: nothing reads them otherwise.
         mov     r4,#0
-        mov     r5,#0                   ; r5 = sprites chained
-        rsb     r12,r8,#256             ; a Y past 256 - h wraps to the top
+        mov     r5,#0                   ; r5 = sprites on the screen
         ldr     r7,[sp,#F_ACTIVE]
         cmp     r7,#192
         orreq   r7,r7,#0xD000           ; r7 = active | terminator << 8
@@ -138,7 +148,8 @@ pa_loop
         cmp     r0,r7,lsr #8
         beq     pa_done
         add     r0,r0,#1
-        cmp     r0,r12
+        rsb     lr,r8,#256
+        cmp     r0,lr
         subgt   r0,r0,#256              ; screen line of the first row
         add     r1,r6,r4,lsl #2
         str     r0,[r1,#S_Y]
@@ -150,104 +161,123 @@ pa_loop
         movgt   r3,lr                   ; last line + 1
         cmp     r2,r3
         movge   r1,#0
-        bge     pa_store
-        ldrb    lr,[sp,r2]
-        add     lr,lr,#1
-        strb    lr,[sp,r2]
-        ldrb    lr,[sp,r3]
-        sub     lr,lr,#1
-        strb    lr,[sp,r3]
+        bge     pa_store                ; off the screen
+        add     r0,r0,#32
         orr     r1,r2,r3,lsl #8
-        stmfd   sp!,{r1,r2,r3,r12,lr}
+        orr     r1,r1,r0,lsl #16        ; the range, with y + 32 above it for now
         add     lr,r10,r4,lsl #1
-        ldrb    r0,[lr,#0x81]
-        ldr     lr,[sp,#20+F_TILE]
-        tst     lr,#0x10000
-        bicne   r0,r0,#1
-        and     lr,lr,#0x100
-        add     r2,r0,lr                ; first tile of the sprite
-        mov     r0,r2
-        bl      tile_rows
-        mov     r3,r0
-        ldr     lr,[sp,#20+F_TILE]
-        tst     lr,#0x10000
+        ldrb    r2,[lr,#0x81]
+        tst     r12,#0x10000
+        bicne   r2,r2,#1
+        and     lr,r12,#0x100
+        add     r2,r2,lr                ; first tile of the sprite
+        TROWS   r3
+        tst     r12,#0x10000
         beq     pa_rows
-        add     r0,r2,#1
-        bic     r0,r0,#0x200            ; the second tile of a tall sprite
-        bl      tile_rows
+        add     r2,r2,#1
+        bic     r2,r2,#0x200            ; the second tile of a tall sprite
+        TROWS   r0
         orr     r3,r3,r0,lsl #8
 pa_rows
         add     lr,r6,r4,lsl #2
         str     r3,[lr,#S_ROWS]
-        mov     r0,r3
-        ldmfd   sp!,{r1,r2,r3,r12,lr}
-        cmp     r0,#0
-        beq     pa_store                ; no opaque pixel: not chained
+        cmp     r3,#0
+        moveq   r3,#0x80                ; no opaque pixel: flagged in the chain
+        movne   r3,#0
+        orr     r3,r3,r4
+        mov     r2,r1,lsr #16           ; y + 32
         add     lr,sp,#F_HEAD
         ldrb    r0,[lr,r2]
-        strb    r4,[lr,r2]              ; the sprite heads the chain of its line
+        strb    r3,[lr,r2]              ; the sprite heads the chain of its row
         add     lr,sp,#F_NEXT
         strb    r0,[lr,r4]
         add     r5,r5,#1
+        mov     r1,r1,lsl #16
+        mov     r1,r1,lsr #16           ; the range alone
 pa_store
         add     lr,sp,#F_RANGE
         str     r1,[lr,r4,lsl #2]
         add     r4,r4,#1
         b       pa_loop
 pa_done
-        mov     r7,r4                   ; r7 = sprites before the terminator
-        str     r7,[r6,#S_N]
-        str     r5,[sp,#F_NCHAIN]
+        str     r4,[r6,#S_N]            ; sprites before the terminator
         mov     r4,#0                   ; r4 = flags
-        cmp     r7,#2
-        blo     done                    ; one sprite at most
-        ; Pass B: the running sum, the lines with more than eight, four
-        ; lines per word of counts; the bit of each line goes to the over
-        ; words as the line's bit walks through r5.
+
+        ; The sprites on the screen by first row, from the chains of pass A
+        ; (each row's chain is in reverse table order, which nothing below
+        ; minds).
+        ldr     r7,[sp,#F_ACTIVE]
+        add     r7,r7,#32               ; r7 = chain bytes
+        mov     r5,#0                   ; r5 = sprites ordered
+        mov     r1,#0                   ; chain byte
+        add     r2,sp,#F_HEAD
+        add     r3,sp,#F_ORDER
         MACRO
-        PBLINE  $shift
-        mov     r12,lr,lsl #$shift
-        add     r0,r0,r12,asr #24
-        cmp     r0,#8
-        orrgt   r6,r6,r5
-        movs    r5,r5,lsl #1
-        strcs   r6,[r8],#4              ; a word of 32 lines is complete
-        movcs   r6,#0
-        movcs   r5,#1
+        CHAIN   $shift                  ; the sprites starting on row r1
+        [ $shift = 0
+        mov     r12,r0
+        |
+        mov     r12,r0,lsr #$shift
+        ]
+        and     r12,r12,#0xFF
+5       cmp     r12,#0xFF
+        beq     %F6
+        and     r6,r12,#0x3F            ; the sprite
+        add     lr,sp,#F_RANGE
+        ldr     lr,[lr,r6,lsl #2]
+        orr     lr,r12,lr,lsl #16       ; sprite (| 0x80) | first << 16 | last + 1 << 24
+        add     r12,r10,r6,lsl #1
+        ldrb    r12,[r12,#0x80]
+        orr     lr,lr,r12,lsl #8        ; | x << 8
+        str     lr,[r3,r5,lsl #2]
+        add     r5,r5,#1
+        add     r12,sp,#F_NEXT
+        ldrb    r12,[r12,r6]
+        b       %B5
+6       add     r1,r1,#1
         MEND
 
-        mov     r0,#0                   ; sprites on the line
-        mov     r3,sp
-        ldr     r2,[sp,#F_ACTIVE]
-        add     r2,sp,r2                ; end of the counts
-        mov     r5,#1
-        mov     r6,#0
-        add     r8,sp,#F_OVER
-pb_loop
-        ldr     lr,[r3],#4
-        PBLINE  0
-        PBLINE  8
-        PBLINE  16
-        PBLINE  24
-        cmp     r3,r2
-        bne     pb_loop
-        str     r6,[r8]                 ; a last word of fewer than 32 lines
+co_oword
+        ldr     r0,[r2],#4              ; four rows of heads
+        cmn     r0,#1
+        addeq   r1,r1,#4
+        beq     co_onext
+        CHAIN   24
+        CHAIN   16
+        CHAIN   8
+        CHAIN   0
+co_onext
+        cmp     r1,r7
+        bne     co_oword
+        str     r5,[sp,#F_NSORT]
         add     r6,r11,#0x4800
         add     r6,r6,#V_SPR-0x4800     ; r6 = &spr_n again
-        add     r12,sp,#F_OVER
-        ldmia   r12,{r0-r3}
-        orr     r0,r0,r1
-        orr     r2,r2,r3
-        orr     r0,r0,r2
-        ldr     r1,[r12,#16]
-        ldr     r2,[r12,#20]
-        ldr     r3,[r12,#24]
-        orr     r1,r1,r2
-        ldr     r2,[r12,#28]
-        orr     r1,r1,r3
-        orr     r1,r1,r2
-        orrs    r0,r0,r1
-        beq     collide                 ; no line holds more than eight
+
+        ; Overflow: the sprites being ordered by first row, nine of them
+        ; share a line exactly when the first screen line of some sprite
+        ; is before the line after the last row of the sprite eight
+        ; places before it.
+        cmp     r5,#8
+        bls     co_sorted               ; eight sprites at most on the screen
+        add     r2,sp,#F_ORDER
+        add     r3,r2,#32               ; sprite i, r2 = sprite i - 8
+        add     r7,r2,r5,lsl #2         ; end
+ov_loop
+        ldr     r0,[r2],#4
+        ldr     r1,[r3],#4
+        and     r0,r0,#0x3F
+        add     r0,r6,r0,lsl #2
+        ldr     r0,[r0,#S_Y]
+        add     r0,r0,r8                ; the line after the last row of i - 8
+        mov     r1,r1,lsl #8
+        mov     r1,r1,lsr #24           ; first screen line of i
+        cmp     r1,r0
+        blt     overflow
+        cmp     r3,r7
+        bne     ov_loop
+        b       co_sorted
+overflow
+        ldr     r7,[r6,#S_N]            ; r7 = sprites before the terminator
         ; Pass C: on the lines with more than eight sprites, in table
         ; order, the ninth and later lose the line.
         orr     r4,r4,#ST_OVERFLOW
@@ -362,56 +392,29 @@ pc_next
 pc_end
         mov     r4,#ST_OVERFLOW         ; the flags, which r4 held
 
-        ; Collisions: the sprites on the screen by first line, from the
-        ; chains of pass A (each line's chain is in reverse table order,
-        ; which the pairs do not mind).
-collide
-        ldr     r5,[sp,#F_NCHAIN]
+        ; The ordered sprites with an opaque pixel, into spr_order (the
+        ; flagged words are dropped, the order kept); collisions are
+        ; looked for among them.
+co_sorted
+        ldr     r5,[sp,#F_NSORT]
+        add     r2,sp,#F_ORDER
+        add     r3,r6,#0x800
+        add     r3,r3,#S_ORDER-0x800
+        add     r7,r2,r5,lsl #2
+        movs    r5,#0                   ; r5 = sprites kept
+        cmp     r2,r7
+        beq     cp_done                 ; no sprite on the screen
+cp_loop
+        ldr     r0,[r2],#4
+        tst     r0,#0x80
+        streq   r0,[r3],#4
+        addeq   r5,r5,#1
+        cmp     r2,r7
+        bne     cp_loop
+cp_done
+        str     r5,[r6,#S_NORD]
         cmp     r5,#2
         blo     done                    ; one sprite with opaque pixels at most
-co_order
-        ldr     r7,[sp,#F_ACTIVE]       ; r7 = active lines
-        mov     r5,#0                   ; r5 = sprites ordered
-        mov     r1,#0                   ; line
-        add     r2,sp,#F_HEAD
-        add     r3,sp,#F_ORDER
-        MACRO
-        CHAIN   $shift                  ; the sprites starting on line r1
-        [ $shift = 0
-        mov     r12,r0
-        |
-        mov     r12,r0,lsr #$shift
-        ]
-        and     r12,r12,#0xFF
-5       cmp     r12,#0xFF
-        beq     %F6
-        add     lr,sp,#F_RANGE
-        ldr     lr,[lr,r12,lsl #2]
-        orr     lr,r12,lr,lsl #16       ; sprite | first << 16 | last + 1 << 24
-        add     r12,r10,r12,lsl #1
-        ldrb    r12,[r12,#0x80]
-        orr     lr,lr,r12,lsl #8        ; | x << 8
-        str     lr,[r3,r5,lsl #2]
-        add     r5,r5,#1
-        add     r12,sp,#F_NEXT
-        and     lr,lr,#0xFF
-        ldrb    r12,[r12,lr]
-        b       %B5
-6       add     r1,r1,#1
-        MEND
-
-co_oword
-        ldr     r0,[r2],#4              ; four lines of heads
-        cmn     r0,#1
-        addeq   r1,r1,#4
-        beq     co_onext
-        CHAIN   24
-        CHAIN   16
-        CHAIN   8
-        CHAIN   0
-co_onext
-        cmp     r1,r7
-        bne     co_oword
         ; Pairs: i against the j after it whose first line is before the
         ; last line of i.
 co_pairs
@@ -423,7 +426,8 @@ co_i
         add     r3,r7,#1
         cmp     r3,r5
         bhs     done
-        add     lr,sp,#F_ORDER
+        add     lr,r6,#0x800
+        add     lr,lr,#S_ORDER-0x800
         ldr     r0,[lr,r7,lsl #2]       ; sprite a: its word
         tst     r4,#ST_OVERFLOW
         beq     co_ishown
@@ -437,7 +441,8 @@ co_ishown
         mov     r1,r1,lsl #16           ; last line + 1 of a << 16
         and     r2,r0,#0xFF00           ; x of a << 8
 co_j
-        add     lr,sp,#F_ORDER
+        add     lr,r6,#0x800
+        add     lr,lr,#S_ORDER-0x800
         ldr     r12,[lr,r3,lsl #2]      ; sprite b: its word
         and     lr,r12,#0xFF0000
         cmp     lr,r1
@@ -610,53 +615,38 @@ pt_none
         mov     r0,#0
         ldmfd   sp!,{r4,r5,r7,r8,pc}
 
-; tile_rows: r0 = tile; returns in r0 the mask of its rows holding an
-; opaque pixel, from the cache (spr_tile_rows), computed again when the
-; entry is not valid or the tile was written (dirty byte). Uses r6
-; (&spr_n) and r11 (v); clobbers r1 and r12 only.
+; tile_rows: r2 = tile; returns in lr the mask of its rows holding an
+; opaque pixel, computed from the video RAM and cached (spr_tile_rows,
+; spr_tile_ok). Uses r6 (&spr_n) and r11 (v); preserves r0-r5 and r12.
 tile_rows
+        stmfd   sp!,{r0-r5,r12,lr}
         add     r1,r6,#S_TOK
-        ldrb    r12,[r1,r0]
-        cmp     r12,#0
-        beq     tr_compute              ; never computed
-        add     r1,r11,#V_DIRTY
-        ldrb    r12,[r1,r0]
-        cmp     r12,#0
-        beq     tr_cached               ; not written since
-tr_compute
-        add     r1,r6,#S_TOK
-        mov     r12,#1
-        strb    r12,[r1,r0]
-        stmfd   sp!,{r2-r5,lr}
+        mov     r0,#1
+        strb    r0,[r1,r2]
         add     r1,r11,#V_VRAM
-        add     r1,r1,r0,lsl #5         ; the eight rows of four planes
-        ldmia   r1!,{r2,r3,r4,r5}
-        mov     r12,#0
-        cmp     r2,#0
-        orrne   r12,r12,#1
+        add     r1,r1,r2,lsl #5         ; the eight rows of four planes
+        ldmia   r1!,{r3,r4,r5,r12}
+        mov     lr,#0
         cmp     r3,#0
-        orrne   r12,r12,#2
+        orrne   lr,lr,#1
         cmp     r4,#0
-        orrne   r12,r12,#4
+        orrne   lr,lr,#2
         cmp     r5,#0
-        orrne   r12,r12,#8
-        ldmia   r1,{r2,r3,r4,r5}
-        cmp     r2,#0
-        orrne   r12,r12,#16
+        orrne   lr,lr,#4
+        cmp     r12,#0
+        orrne   lr,lr,#8
+        ldmia   r1,{r3,r4,r5,r12}
         cmp     r3,#0
-        orrne   r12,r12,#32
+        orrne   lr,lr,#16
         cmp     r4,#0
-        orrne   r12,r12,#64
+        orrne   lr,lr,#32
         cmp     r5,#0
-        orrne   r12,r12,#128
+        orrne   lr,lr,#64
+        cmp     r12,#0
+        orrne   lr,lr,#128
         add     r1,r6,#S_TROWS
-        strb    r12,[r1,r0]
-        mov     r0,r12
-        ldmfd   sp!,{r2-r5,pc}
-tr_cached
-        add     r1,r6,#S_TROWS
-        ldrb    r0,[r1,r0]
-        mov     pc,lr
+        strb    lr,[r1,r2]
+        ldmfd   sp!,{r0-r5,r12,pc}
 
 ; zoom_mask: r0 = 8-bit mask; returns in r0 the 16-bit mask with each bit
 ; doubled. Clobbers r1.

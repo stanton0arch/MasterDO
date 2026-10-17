@@ -31,6 +31,8 @@ CHECK_OFF(prev, offsetof(render_layer, prev) == 44);
 CHECK_OFF(wlist, offsetof(render_layer, wlist) == 48);
 CHECK_OFF(nt_base, offsetof(render_layer, nt_base) == 56);
 CHECK_OFF(prio_rows, offsetof(render_layer, prio_rows) == 68);
+CHECK_OFF(prio_min, offsetof(render_layer, prio_min) == 100);
+CHECK_OFF(prio_max, offsetof(render_layer, prio_max) == 132);
 CHECK_OFF(prio_dirty, offsetof(render_layer, prio_dirty) == 164);
 CHECK_OFF(st_cells, offsetof(render_layer, cells) == 196);
 CHECK_OFF(st_tile_cells, offsetof(render_layer, tile_cells) == 200);
@@ -41,6 +43,7 @@ CHECK_OFF(st_tiles_conv, offsetof(render_layer, tiles_conv) == 204);
 CHECK_OFF(stale, offsetof(render_layer, stale) == 340);
 CHECK_OFF(stale_rows, offsetof(render_layer, stale_rows) == 344);
 CHECK_OFF(shown_rows, offsetof(render_layer, shown_rows) == 348);
+CHECK_OFF(nrows, offsetof(render_layer, nrows) == 352);
 CHECK_OFF(ncells, offsetof(render_layer, ncells) == 356);
 CHECK_OFF(pg_n, offsetof(render_layer, pg_n) == 208);
 CHECK_OFF(pg_row0, offsetof(render_layer, pg_row0) == 212);
@@ -49,6 +52,7 @@ CHECK_OFF(pg_col0, offsetof(render_layer, pg_col0) == 276);
 CHECK_OFF(pg_col1, offsetof(render_layer, pg_col1) == 308);
 CHECK_OFF(sa_end, offsetof(render_sprite_args, end) == 32);
 CHECK_OFF(sa_needed, offsetof(render_sprite_args, needed) == 40);
+CHECK_OFF(sa_height, offsetof(render_sprite_args, height) == 44);
 CHECK_OFF(pa_p, offsetof(render_patch_args, p) == 28);
 CHECK_OFF(pa_height, offsetof(render_patch_args, height) == 32);
 CHECK_OFF(pc_bm_h, offsetof(piece_ctx, bm_h) == 8);
@@ -842,61 +846,6 @@ static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nb, uint32 nnb,
     return nbl;
 }
 
-/* Priority strips of the layer for this update: consecutive rows holding
- * priority cells make one strip, over the columns any of them uses (a
- * few transparent pixels cost less than a cel per row). */
-static void prio_groups(render_layer *l)
-{
-    uint32 rows = l->nrows;
-    uint32 row = 0;
-    uint32 n = 0;
-
-    while (row < rows) {
-        uint32 row0;
-        uint32 c0;
-        uint32 c1;
-
-        if (l->prio_rows[row] == 0) {
-            row++;
-            continue;
-        }
-        if (l->prio_dirty[row]) {
-            const uint8 *sh = l->shadow + row * 64;
-            uint32 lo = 32;
-            uint32 hi = 0;
-            uint32 col;
-
-            for (col = 0; col < 32; col++) {
-                if (sh[2 * col + 1] & 0x10) {
-                    if (col < lo)
-                        lo = col;
-                    hi = col;
-                }
-            }
-            l->prio_min[row] = (uint8)lo;
-            l->prio_max[row] = (uint8)hi;
-            l->prio_dirty[row] = 0;
-        }
-        row0 = row;
-        c0 = l->prio_min[row];
-        c1 = l->prio_max[row] + 1;
-        for (row++; row < rows; row++) {
-            if (l->prio_rows[row] == 0 || l->prio_dirty[row])
-                break;
-            if (l->prio_min[row] < c0)
-                c0 = l->prio_min[row];
-            if (l->prio_max[row] + 1u > c1)
-                c1 = l->prio_max[row] + 1u;
-        }
-        l->pg_row0[n] = (uint8)row0;
-        l->pg_nrows[n] = (uint8)(row - row0);
-        l->pg_col0[n] = (uint8)c0;
-        l->pg_col1[n] = (uint8)c1;
-        n++;
-    }
-    l->pg_n = n;
-}
-
 /* First line band (sorted by their first line, which is also the order
  * of their last lines) ending after line y. */
 static uint32 lband_from(const renderer *r, uint32 y)
@@ -1080,10 +1029,10 @@ static void sprite_tiles(renderer *r, uint32 t, uint32 tall, const uint8 *vram)
 }
 
 /* Sets up the cels of the active sprites (before the $D0 terminator in
- * the 192-line mode) and converts the tiles they miss; returns the count.
- * The usual case, every sprite shown whole, is one cel per sprite set up
- * in assembly. With several palette bands each cel takes the sprite PLUT
- * of the band of its first line. */
+ * the 192-line mode) that reach the screen and converts the tiles they
+ * miss; returns the count. The usual case, every sprite shown whole, is
+ * one cel per sprite set up in assembly. With several palette bands each
+ * cel takes the sprite PLUT of the band of its first line. */
 static uint32 update_sprites(renderer *r, const vdp_state *v)
 {
     const uint8 *vram = v->vram;
@@ -1117,6 +1066,7 @@ static uint32 update_sprites(renderer *r, const vdp_state *v)
     a.need = r->wlist;
     a.tall = tall;
     a.ywrap = 256 - v->spr_h;
+    a.height = r->height;
     if (v->spr_partial) {
         CCB *c;
 
@@ -1129,7 +1079,10 @@ static uint32 update_sprites(renderer *r, const vdp_state *v)
         n = (uint32)(c - &r->cels[CEL_SPRITE0]);
         nn = a.needed;
     } else {
-        nn = render_sprites(sat, n, &r->cels[CEL_SPRITE0], &a);
+        CCB *c = render_sprites(sat, n, &r->cels[CEL_SPRITE0], &a);
+
+        n = (uint32)(c - &r->cels[CEL_SPRITE0]);
+        nn = a.needed;
     }
     for (k = 0; k < nn; k++)
         sprite_tiles(r, r->wlist[k], tall, vram);
@@ -1319,7 +1272,7 @@ void render_update(renderer *r, vdp_state *v)
         render_layer *l = &r->layer[m];
 
         if (l->valid)
-            prio_groups(l);
+            render_prio_groups(l);
         else
             l->pg_n = 0;
         r->st.cells += l->cells;

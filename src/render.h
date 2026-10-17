@@ -287,6 +287,7 @@ typedef struct {
     CCB    *end;            /* render_sprite_runs: cel capacity */
     uint32  dropped;        /* runs beyond it */
     uint32  needed;         /* tiles appended to need */
+    uint32  height;         /* picture lines: sprites off them get no cel */
 } render_sprite_args;
 
 /* Indices of the words of the dirty name table chunks (32 bytes each,
@@ -296,9 +297,10 @@ uint32 render_nt_scan(const uint32 *nt, const uint32 *shadow, const uint32 *mask
                       uint32 *out, uint32 chunks);
 /* Indices of the dirty tiles, which are cleared; returns their count. */
 uint32 render_dirty_scan(uint8 *dirty, uint32 *out);
-/* Source and position of the cels of sprites 0 to n - 1; returns the
- * number of tiles appended to a->need. */
-uint32 render_sprites(const uint8 *sat, uint32 n, CCB *cel, const render_sprite_args *a);
+/* Source and position of one cel per sprite among sprites 0 to n - 1
+ * that reaches the screen, in table order; returns the cel after the last
+ * one, the tiles to convert in a->need (a->needed of them). */
+CCB   *render_sprites(const uint8 *sat, uint32 n, CCB *cel, render_sprite_args *a);
 /* The same from the VDP's evaluation when sprites are hidden on some
  * lines: one cel per run of shown lines; returns the cel after the last
  * one, the tiles to convert in a->need (a->needed of them). */
@@ -319,6 +321,11 @@ typedef struct {
     uint32  height;         /* picture lines */
 } render_patch_args;
 uint32 render_prio_patches(render_patch_args *a);
+
+/* Priority strip groups of a layer (pg_* fields): runs of consecutive
+ * rows holding priority cells, with the union of their column ranges;
+ * the ranges of the rows marked dirty are found again from the shadow. */
+void   render_prio_groups(render_layer *l);
 /* Cells of a layer (render_a.s). Each draws cells into the bitmap (and
  * the priority bitmap for entries with the priority bit), converting the
  * tiles found unconverted through render_tile_conv, stamping the cells
