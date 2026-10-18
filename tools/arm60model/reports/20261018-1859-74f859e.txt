@@ -1,0 +1,218 @@
+Model batch report: 2026-10-18 18:59, commit 74f859e, 15 cartridges, 3000 frames by default, 140 s on 15 jobs
+Times in ms per frame in the model (ARM60 cycle model, DrawCels taken as 3.5 ms); the budget is 16.7 ms. Pictures: cel engine model against the CPU reference view, every 100 frames and at every frame with a scroll or display band.
+
+cartridge          status      emu    upd  total  over%  worst  missed freeze pictures sprites notes
+----------------------------------------------------------------------------------------------------
+alex.sms           ok          2.9    1.1    7.3   0.4%   30.8    0.0%   16.7    40/40 1844/1844 spr>8
+golden_axe.sms     ok          6.1    2.1   11.4   5.7%   48.8    0.7%   50.0    21/21 1636/1636 VRAM reads
+golvellius.sms     ok          3.9    1.3    8.6   3.6%   59.4    1.0%   33.4    34/34 2861/2861 VRAM reads
+micro_machines.sms ok          4.5    3.3   11.1   4.5%  213.2    1.7%  216.9  533/533 2764/2764 spr>8, 224/240 lines, counters, 6 evict
+outrun.sms         ok          8.5    3.8   15.7  43.3%   55.3    6.8%   66.7 2241/2241 2665/2665 line IRQ, spr>8, counters, 3 evict
+phantasy_star.sms  ok          3.1    1.9    8.4  12.1%   37.5    4.0%   33.4    29/29 2674/2674 1 evict
+power_strike.sms   ok          3.4    1.5    8.3   1.9%   41.2    0.0%   33.4    34/34 2954/2954 spr>8, VRAM reads, 2 evict
+road_rash.sms      ok          8.3    3.3   15.0  41.6%  112.7   22.4%  100.1 1551/1551 3092/3092 line IRQ, nt bands, spr>8, VRAM reads, 11 evict
+rtype.sms          ok          3.3    2.8    9.5   3.1%   41.3    0.1%   33.4    39/39 2955/2955 spr>8, VRAM reads
+shinobi.sms        ok          5.6    1.3   10.3   2.0%   47.6    1.0%   33.4    39/39 2936/2936 spr>8, VRAM reads
+sonic2.sms         ok          6.5    2.8   12.8   2.1%   59.8    0.4%   50.0    61/61 3195/3195 spr>8, counters
+sonic_chaos.sms    ok          5.4    3.6   12.5   4.7%   58.2    1.3%   50.0    58/58 3135/3135 spr>8, counters, 6 evict
+space_harrier.sms  ok          4.0    2.2    9.6   6.3%   50.3    0.9%   33.4 2295/2295 2951/2951 line IRQ, spr>8, palette bands
+ys.sms             ok          4.3    1.9    9.5   0.9%   60.3    0.1%   50.0 2178/2178 2442/2442 line IRQ, nt bands, VRAM reads
+zillion.sms        ok          4.3    1.6    9.4   1.6%   60.0    0.0%   33.4    54/54 3650/3650 spr>8, VRAM reads
+
+alex.sms (128 KiB): OK, 2008 frames, 4 s on the PC, pad script 89 entries
+  ROM translation 92 blocks, 908 instructions, 70.1 ms; cartridge RAM 32768 bytes in VRAM; entry counters in VRAM; log arena allocated, pad log allocated
+  emulation 2.9 ms (windows 1.5-6.3), update 1.1 ms (0.4-1.7), total 7.3 ms with 3.5 ms of drawing; 8 over budget (0.4%)
+  screen: real 16700 us per frame, 2 VBLs without a new picture, 0 of them with a picture on the screen (0.0%), 2 long presents; longest on the screen: 16.7 ms before frame 2007, 16.7 ms before frame 2006, 16.7 ms before frame 2005
+  busiest window 1600-1699: emulation 3.5, update 1.6, total 8.6 ms, 0 over budget, Z80 idle 40%; idle over the run 52% (windows 8-72%)
+  worst frames: 30.8 ms at frame 401 (11 blocks, 785 interpreted); 26.0 ms at frame 215 (3 blocks, 632 cells, 22 tiles); 23.9 ms at frame 88 (2 blocks, 592 cells); 8 frames over budget logged
+  per frame: 0.9 IRQ, 0.00 NMI, 0.5 bank switches, 201 VDP data writes, 0 data reads, 29 control writes, 0 status reads, 0 counter reads, 7.8 PSG writes
+  translator: 371 blocks while running (298 at once in 227.0 ms, 32 of them forced, 0 promoted), 9748 interpreted instructions, 0 evictions (0 blocks), 2 busy-wait loops, 463 block descriptors in use at most
+  picture: 13.5 sprite cels, 1.6 pieces, 0.0 priority strips, 0.0 patches, 0.9 tiles, 3.5 cells per frame; 0 frames in scroll bands, 0 in name table bands, 5 partly blanked, 0 bands dropped, 0 short of layers; 13 frames past the sprite limit (0 runs dropped), 13 with overflow, 312 with collision; 170 display changes
+  display: 0 frames of more than 192 lines, 0 frames in palette bands (0 colour writes merged)
+  catch-up with the display off: 3007 cells and 204 tiles ahead in 71 frames (236.1 ms, 26 cut short by the deadline)
+  pictures: 40 compared (25 with the display on), 40 identical, 0 differing; sprite evaluation 1844 frames checked, 0 with differences
+
+golden_axe.sms (512 KiB): OK, 1826 frames, 4 s on the PC, pad script 104 entries
+  ROM translation 94 blocks, 921 instructions, 73.6 ms; cartridge RAM 32768 bytes in VRAM; entry counters in VRAM; log arena allocated, pad log allocated
+  emulation 6.1 ms (windows 3.7-7.0), update 2.1 ms (0.0-2.9), total 11.4 ms with 3.5 ms of drawing; 104 over budget (5.7%)
+  screen: real 16838 us per frame, 17 VBLs without a new picture, 13 of them with a picture on the screen (0.7%), 16 long presents; longest on the screen: 50.0 ms before frame 359, 33.4 ms before frame 1768, 33.4 ms before frame 1592
+  busiest window 400-499: emulation 7.0, update 2.5, total 13.0 ms, 15 over budget, Z80 idle 9%; idle over the run 14% (windows 0-66%)
+  worst frames: 48.8 ms at frame 359 (25 blocks, 1249 interpreted); 38.1 ms at frame 1592 (10 blocks, 49 tiles, 1205 interpreted); 36.0 ms at frame 156 (5 blocks, 768 cells, 134 tiles); 104 frames over budget logged
+  per frame: 0.9 IRQ, 0.00 NMI, 9.3 bank switches, 905 VDP data writes, 1 data reads, 24 control writes, 0 status reads, 0 counter reads, 1.3 PSG writes
+  translator: 580 blocks while running (488 at once in 376.1 ms, 67 of them forced, 17 promoted), 37k interpreted instructions, 0 evictions (0 blocks), 6 busy-wait loops, 674 block descriptors in use at most
+  picture: 15.9 sprite cels, 0.9 pieces, 0.0 priority strips, 0.0 patches, 8.0 tiles, 17.2 cells per frame; 0 frames in scroll bands, 0 in name table bands, 0 partly blanked, 0 bands dropped, 0 short of layers; 0 frames past the sprite limit (0 runs dropped), 0 with overflow, 0 with collision; 192 display changes
+  display: 0 frames of more than 192 lines, 0 frames in palette bands (0 colour writes merged)
+  catch-up with the display off: 7610 cells and 278 tiles ahead in 73 frames (305.4 ms, 59 cut short by the deadline)
+  pictures: 21 compared (20 with the display on), 21 identical, 0 differing; sprite evaluation 1636 frames checked, 0 with differences
+
+golvellius.sms (256 KiB): OK, 3000 frames, 6 s on the PC, pad script 13 entries
+  ROM translation 157 blocks, 2114 instructions, 149.6 ms; cartridge RAM 32768 bytes in VRAM; entry counters in VRAM; log arena allocated, pad log allocated
+  emulation 3.9 ms (windows 1.9-13.0), update 1.3 ms (0.6-2.4), total 8.6 ms with 3.5 ms of drawing; 108 over budget (3.6%)
+  screen: real 16917 us per frame, 42 VBLs without a new picture, 30 of them with a picture on the screen (1.0%), 40 long presents; longest on the screen: 33.4 ms before frame 1973, 33.4 ms before frame 1969, 33.4 ms before frame 1966
+  busiest window 1900-1999: emulation 8.8, update 2.2, total 14.2 ms, 47 over budget, Z80 idle 34%; idle over the run 67% (windows 21-81%)
+  worst frames: 59.4 ms at frame 74 (8 blocks, 768 cells, 266 tiles); 33.7 ms at frame 1938 (1 blocks, 380 cells, 1317 interpreted); 31.1 ms at frame 1175 (531 cells); 108 frames over budget logged
+  per frame: 1.0 IRQ, 0.00 NMI, 1.5 bank switches, 196 VDP data writes, 45 data reads, 20 control writes, 3 status reads, 0 counter reads, 9.8 PSG writes
+  translator: 559 blocks while running (399 at once in 434.5 ms, 22 of them forced, 0 promoted), 34k interpreted instructions, 0 evictions (0 blocks), 3 busy-wait loops, 716 block descriptors in use at most
+  picture: 2.9 sprite cels, 1.7 pieces, 0.0 priority strips, 0.5 patches, 0.4 tiles, 4.1 cells per frame; 0 frames in scroll bands, 0 in name table bands, 0 partly blanked, 0 bands dropped, 0 short of layers; 0 frames past the sprite limit (0 runs dropped), 0 with overflow, 22 with collision; 141 display changes
+  display: 0 frames of more than 192 lines, 0 frames in palette bands (0 colour writes merged)
+  catch-up with the display off: 4433 cells and 210 tiles ahead in 118 frames (235.0 ms, 101 cut short by the deadline)
+  pictures: 34 compared (33 with the display on), 34 identical, 0 differing; sprite evaluation 2861 frames checked, 0 with differences
+
+micro_machines.sms (256 KiB): OK, 2908 frames, 42 s on the PC, pad script 70 entries
+  ROM translation 175 blocks, 2167 instructions, 154.1 ms; cartridge RAM 32768 bytes in VRAM; entry counters in VRAM; log arena allocated, pad log allocated
+  emulation 4.5 ms (windows 1.0-11.4), update 3.3 ms (2.1-4.7), total 11.1 ms with 3.5 ms of drawing; 132 over budget (4.5%)
+  screen: real 17085 us per frame, 70 VBLs without a new picture, 48 of them with a picture on the screen (1.7%), 43 long presents; longest on the screen: 216.9 ms before frame 1867, 66.7 ms before frame 1861, 50.0 ms before frame 1995
+  busiest window 1800-1899: emulation 11.4, update 3.2, total 17.0 ms, 18 over budget, Z80 idle 37%; idle over the run 61% (windows 16-93%)
+  worst frames: 213.2 ms at frame 1867 (246 blocks); 79.9 ms at frame 12 (15 blocks, 768 cells, 116 tiles, 1491 interpreted); 75.1 ms at frame 1859 (12 blocks, 984 cells, 40 tiles, 1828 interpreted); 120 frames over budget logged
+  per frame: 0.9 IRQ, 0.00 NMI, 19.7 bank switches, 140 VDP data writes, 0 data reads, 31 control writes, 0 status reads, 19 counter reads, 8.8 PSG writes
+  translator: 1343 blocks while running (1104 at once in 973.8 ms, 446 of them forced, 83 promoted), 40k interpreted instructions, 6 evictions (526 blocks), 9 busy-wait loops, 1173 block descriptors in use at most
+  picture: 28.1 sprite cels, 2.3 pieces, 0.0 priority strips, 3.7 patches, 1.5 tiles, 9.6 cells per frame; 1 frames in scroll bands, 0 in name table bands, 511 partly blanked, 0 bands dropped, 0 short of layers; 2028 frames past the sprite limit (0 runs dropped), 2028 with overflow, 2737 with collision; 1049 display changes
+  display: 2646 frames of more than 192 lines, 0 frames in palette bands (0 colour writes merged)
+  catch-up with the display off: 8435 cells and 672 tiles ahead in 96 frames (412.0 ms, 68 cut short by the deadline)
+  pictures: 533 compared (530 with the display on), 533 identical, 0 differing; sprite evaluation 2764 frames checked, 0 with differences
+
+outrun.sms (256 KiB): OK, 2761 frames, 140 s on the PC, pad script 60 entries
+  ROM translation 177 blocks, 1914 instructions, 144.5 ms; cartridge RAM 32768 bytes in VRAM; entry counters in VRAM; log arena allocated, pad log allocated
+  emulation 8.5 ms (windows 3.1-15.5), update 3.8 ms (1.3-5.9), total 15.7 ms with 3.5 ms of drawing; 1195 over budget (43.3%)
+  screen: real 17880 us per frame, 198 VBLs without a new picture, 188 of them with a picture on the screen (6.8%), 190 long presents; longest on the screen: 66.7 ms before frame 123, 66.7 ms before frame 40, 50.0 ms before frame 68
+  busiest window 1000-1099: emulation 10.1, update 4.6, total 18.2 ms, 70 over budget, Z80 idle 28%; idle over the run 33% (windows 17-60%)
+  worst frames: 55.3 ms at frame 40 (6 blocks, 1950 interpreted); 46.9 ms at frame 42 (3 blocks, 396 cells, 20 tiles); 43.9 ms at frame 37 (2 blocks, 937 interpreted); 120 frames over budget logged
+  per frame: 52.8 IRQ, 0.00 NMI, 2.3 bank switches, 324 VDP data writes, 0 data reads, 152 control writes, 54 status reads, 79 counter reads, 14.0 PSG writes
+  translator: 644 blocks while running (485 at once in 558.2 ms, 137 of them forced, 40 promoted), 29k interpreted instructions, 3 evictions (136 blocks), 9 busy-wait loops, 712 block descriptors in use at most
+  picture: 21.6 sprite cels, 39.7 pieces, 0.0 priority strips, 1.7 patches, 1.8 tiles, 7.1 cells per frame; 1522 frames in scroll bands, 0 in name table bands, 1 partly blanked, 0 bands dropped, 0 short of layers; 975 frames past the sprite limit (0 runs dropped), 975 with overflow, 305 with collision; 98 display changes
+  display: 0 frames of more than 192 lines, 0 frames in palette bands (0 colour writes merged)
+  catch-up with the display off: 7740 cells and 1045 tiles ahead in 81 frames (360.3 ms, 58 cut short by the deadline)
+  pictures: 2241 compared (2237 with the display on), 2241 identical, 0 differing; sprite evaluation 2665 frames checked, 0 with differences
+
+phantasy_star.sms (512 KiB): OK, 2776 frames, 5 s on the PC, pad script 113 entries
+  ROM translation 382 blocks, 10212 instructions, 754.2 ms; cartridge RAM 32768 bytes in VRAM; entry counters in VRAM; log arena allocated, pad log allocated
+  emulation 3.1 ms (windows 1.1-10.2), update 1.9 ms (0.7-6.4), total 8.4 ms with 3.5 ms of drawing; 336 over budget (12.1%)
+  screen: real 17368 us per frame, 114 VBLs without a new picture, 110 of them with a picture on the screen (4.0%), 114 long presents; longest on the screen: 33.4 ms before frame 2720, 33.4 ms before frame 2717, 33.4 ms before frame 2714
+  busiest window 2000-2099: emulation 10.2, update 6.4, total 20.1 ms, 81 over budget, Z80 idle 8%; idle over the run 70% (windows 8-87%)
+  worst frames: 37.5 ms at frame 1832 (5 blocks, 338 cells, 724 interpreted); 34.3 ms at frame 505 (800 cells); 34.2 ms at frame 498 (800 cells); 120 frames over budget logged
+  per frame: 1.0 IRQ, 0.00 NMI, 2.5 bank switches, 345 VDP data writes, 0 data reads, 45 control writes, 2 status reads, 0 counter reads, 4.0 PSG writes
+  translator: 427 blocks while running (269 at once in 223.3 ms, 11 of them forced, 48 promoted), 12k interpreted instructions, 1 evictions (40 blocks), 10 busy-wait loops, 769 block descriptors in use at most
+  picture: 0.6 sprite cels, 1.2 pieces, 0.0 priority strips, 0.0 patches, 4.6 tiles, 22.7 cells per frame; 0 frames in scroll bands, 0 in name table bands, 0 partly blanked, 0 bands dropped, 0 short of layers; 0 frames past the sprite limit (0 runs dropped), 0 with overflow, 0 with collision; 103 display changes
+  display: 0 frames of more than 192 lines, 0 frames in palette bands (0 colour writes merged)
+  catch-up with the display off: 6858 cells and 777 tiles ahead in 97 frames (303.7 ms, 43 cut short by the deadline)
+  pictures: 29 compared (28 with the display on), 29 identical, 0 differing; sprite evaluation 2674 frames checked, 0 with differences
+
+power_strike.sms (128 KiB): OK, 3000 frames, 6 s on the PC, pad script 37 entries
+  ROM translation 713 blocks, 5258 instructions, 447.7 ms; cartridge RAM 32768 bytes in VRAM; entry counters in VRAM; log arena allocated, pad log allocated
+  emulation 3.4 ms (windows 1.6-6.8), update 1.5 ms (0.6-2.6), total 8.3 ms with 3.5 ms of drawing; 56 over budget (1.9%)
+  screen: real 16739 us per frame, 10 VBLs without a new picture, 1 of them with a picture on the screen (0.0%), 10 long presents; longest on the screen: 33.4 ms before frame 713, 16.7 ms before frame 2999, 16.7 ms before frame 2998
+  busiest window 1500-1599: emulation 5.0, update 2.6, total 11.1 ms, 4 over budget, Z80 idle 33%; idle over the run 59% (windows 33-81%)
+  worst frames: 41.2 ms at frame 27 (4 blocks, 896 cells); 39.8 ms at frame 713 (3 blocks, 557 cells, 1146 data writes); 30.6 ms at frame 3 (emulation 30.6 ms); 56 frames over budget logged
+  per frame: 1.0 IRQ, 0.00 NMI, 2.9 bank switches, 96 VDP data writes, 26 data reads, 9 control writes, 3 status reads, 0 counter reads, 9.9 PSG writes
+  translator: 530 blocks while running (405 at once in 489.6 ms, 22 of them forced, 84 promoted), 11k interpreted instructions, 2 evictions (173 blocks), 2 busy-wait loops, 1197 block descriptors in use at most
+  picture: 15.8 sprite cels, 1.7 pieces, 0.1 priority strips, 0.0 patches, 0.1 tiles, 3.3 cells per frame; 0 frames in scroll bands, 0 in name table bands, 1 partly blanked, 0 bands dropped, 0 short of layers; 729 frames past the sprite limit (0 runs dropped), 729 with overflow, 981 with collision; 47 display changes
+  display: 0 frames of more than 192 lines, 0 frames in palette bands (0 colour writes merged)
+  catch-up with the display off: 260 cells and 3 tiles ahead in 6 frames (27.9 ms, 6 cut short by the deadline)
+  pictures: 34 compared (33 with the display on), 34 identical, 0 differing; sprite evaluation 2954 frames checked, 0 with differences
+
+road_rash.sms (512 KiB): OK, 3105 frames, 102 s on the PC, pad script 102 entries
+  ROM translation 19 blocks, 121 instructions, 10.9 ms; cartridge RAM 32768 bytes in VRAM; entry counters in VRAM; log arena allocated, pad log allocated
+  emulation 8.3 ms (windows 0.4-18.9), update 3.3 ms (0.6-8.4), total 15.0 ms with 3.5 ms of drawing; 1291 over budget (41.6%)
+  screen: real 20435 us per frame, 698 VBLs without a new picture, 697 of them with a picture on the screen (22.4%), 621 long presents; longest on the screen: 100.1 ms before frame 1833, 66.7 ms before frame 2573, 66.7 ms before frame 1835
+  busiest window 2600-2699: emulation 15.9, update 8.2, total 27.6 ms, 100 over budget, Z80 idle 0%; idle over the run 34% (windows 0-98%)
+  worst frames: 112.7 ms at frame 1833 (30 blocks, 896 cells, 69 tiles, 4304 interpreted); 62.4 ms at frame 1836 (15 blocks, 2271 interpreted); 60.3 ms at frame 1832 (20 blocks, 2208 interpreted); 120 frames over budget logged
+  per frame: 32.5 IRQ, 0.00 NMI, 3.8 bank switches, 206 VDP data writes, 15 data reads, 128 control writes, 32 status reads, 0 counter reads, 5.2 PSG writes
+  translator: 1521 blocks while running (1440 at once in 1622.4 ms, 730 of them forced, 383 promoted), 82k interpreted instructions, 11 evictions (799 blocks), 2 busy-wait loops, 854 block descriptors in use at most
+  picture: 10.3 sprite cels, 20.4 pieces, 0.0 priority strips, 1.9 patches, 9.7 tiles, 23.2 cells per frame; 1516 frames in scroll bands, 1271 in name table bands, 1 partly blanked, 0 bands dropped, 0 short of layers; 392 frames past the sprite limit (0 runs dropped), 392 with overflow, 593 with collision; 14 display changes
+  display: 0 frames of more than 192 lines, 0 frames in palette bands (0 colour writes merged)
+  catch-up with the display off: 1568 cells and 2 tiles ahead in 13 frames (61.1 ms, 13 cut short by the deadline)
+  pictures: 1551 compared (1550 with the display on), 1551 identical, 0 differing; sprite evaluation 3092 frames checked, 0 with differences
+
+rtype.sms (512 KiB): OK, 3000 frames, 7 s on the PC, pad script 10 entries
+  ROM translation 749 blocks, 5675 instructions, 478.7 ms; cartridge RAM 32768 bytes in VRAM; entry counters in VRAM; log arena allocated, pad log allocated
+  emulation 3.3 ms (windows 1.3-5.6), update 2.8 ms (0.9-4.8), total 9.5 ms with 3.5 ms of drawing; 92 over budget (3.1%)
+  screen: real 16722 us per frame, 7 VBLs without a new picture, 4 of them with a picture on the screen (0.1%), 7 long presents; longest on the screen: 33.4 ms before frame 2826, 33.4 ms before frame 2823, 33.4 ms before frame 1868
+  busiest window 2500-2599: emulation 5.2, update 4.8, total 13.5 ms, 19 over budget, Z80 idle 36%; idle over the run 62% (windows 35-88%)
+  worst frames: 41.3 ms at frame 2823 (610 cells, 1219 data writes); 40.8 ms at frame 1863 (610 cells, 1219 data writes); 30.6 ms at frame 3 (emulation 30.6 ms); 92 frames over budget logged
+  per frame: 1.0 IRQ, 0.00 NMI, 8.3 bank switches, 167 VDP data writes, 4 data reads, 13 control writes, 3 status reads, 0 counter reads, 9.9 PSG writes
+  translator: 430 blocks while running (303 at once in 288.9 ms, 3 of them forced, 19 promoted), 10k interpreted instructions, 0 evictions (0 blocks), 3 busy-wait loops, 1179 block descriptors in use at most
+  picture: 25.1 sprite cels, 1.9 pieces, 0.0 priority strips, 3.6 patches, 0.5 tiles, 3.3 cells per frame; 0 frames in scroll bands, 0 in name table bands, 2 partly blanked, 0 bands dropped, 0 short of layers; 1505 frames past the sprite limit (0 runs dropped), 1505 with overflow, 1926 with collision; 48 display changes
+  display: 0 frames of more than 192 lines, 0 frames in palette bands (0 colour writes merged)
+  catch-up with the display off: 3594 cells and 73 tiles ahead in 37 frames (201.4 ms, 16 cut short by the deadline)
+  pictures: 39 compared (38 with the display on), 39 identical, 0 differing; sprite evaluation 2955 frames checked, 0 with differences
+
+shinobi.sms (256 KiB): OK, 3000 frames, 6 s on the PC, pad script 27 entries
+  ROM translation 217 blocks, 2856 instructions, 198.4 ms; cartridge RAM 32768 bytes in VRAM; entry counters in VRAM; log arena allocated, pad log allocated
+  emulation 5.6 ms (windows 4.6-7.3), update 1.3 ms (0.6-2.3), total 10.3 ms with 3.5 ms of drawing; 59 over budget (2.0%)
+  screen: real 16850 us per frame, 30 VBLs without a new picture, 29 of them with a picture on the screen (1.0%), 30 long presents; longest on the screen: 33.4 ms before frame 2996, 33.4 ms before frame 2995, 33.4 ms before frame 2967
+  busiest window 2900-2999: emulation 7.3, update 2.1, total 12.9 ms, 13 over budget, Z80 idle 0%; idle over the run 0% (windows 0-0%)
+  worst frames: 47.6 ms at frame 64 (4 blocks, 864 cells); 36.3 ms at frame 2959 (647 cells, 1342 data writes); 36.0 ms at frame 2995 (5 blocks, 397 cells, 73 tiles); 59 frames over budget logged
+  per frame: 0.9 IRQ, 0.00 NMI, 4.8 bank switches, 167 VDP data writes, 0 data reads, 31 control writes, 0 status reads, 0 counter reads, 3.3 PSG writes
+  translator: 512 blocks while running (381 at once in 342.1 ms, 9 of them forced, 73 promoted), 15k interpreted instructions, 0 evictions (0 blocks), 1 busy-wait loops, 728 block descriptors in use at most
+  picture: 10.4 sprite cels, 2.3 pieces, 0.0 priority strips, 0.0 patches, 0.9 tiles, 6.5 cells per frame; 0 frames in scroll bands, 0 in name table bands, 1 partly blanked, 0 bands dropped, 0 short of layers; 81 frames past the sprite limit (0 runs dropped), 81 with overflow, 131 with collision; 65 display changes
+  display: 0 frames of more than 192 lines, 0 frames in palette bands (0 colour writes merged)
+  catch-up with the display off: 928 cells and 2 tiles ahead in 8 frames (37.9 ms, 3 cut short by the deadline)
+  pictures: 39 compared (38 with the display on), 39 identical, 0 differing; sprite evaluation 2936 frames checked, 0 with differences
+
+sonic2.sms (512 KiB): OK, 3214 frames, 10 s on the PC, pad script 93 entries
+  ROM translation 643 blocks, 5973 instructions, 458.7 ms; cartridge RAM 32768 bytes in VRAM; entry counters in VRAM; log arena allocated, pad log allocated
+  emulation 6.5 ms (windows 2.8-8.0), update 2.8 ms (1.8-4.9), total 12.8 ms with 3.5 ms of drawing; 66 over budget (2.1%)
+  screen: real 16823 us per frame, 27 VBLs without a new picture, 14 of them with a picture on the screen (0.4%), 22 long presents; longest on the screen: 50.0 ms before frame 643, 33.4 ms before frame 876, 33.4 ms before frame 870
+  busiest window 200-299: emulation 6.1, update 4.7, total 14.3 ms, 1 over budget, Z80 idle 22%; idle over the run 19% (windows 0-75%)
+  worst frames: 59.8 ms at frame 453 (896 cells, 2160 data writes); 54.4 ms at frame 793 (896 cells); 46.4 ms at frame 643 (652 cells, 1304 data writes); 66 frames over budget logged
+  per frame: 0.9 IRQ, 0.00 NMI, 17.1 bank switches, 335 VDP data writes, 0 data reads, 42 control writes, 1 status reads, 0 counter reads, 6.2 PSG writes
+  translator: 460 blocks while running (385 at once in 264.4 ms, 29 of them forced, 40 promoted), 5551 interpreted instructions, 0 evictions (0 blocks), 3 busy-wait loops, 1103 block descriptors in use at most
+  picture: 20.1 sprite cels, 3.3 pieces, 0.0 priority strips, 3.4 patches, 2.8 tiles, 9.5 cells per frame; 1 frames in scroll bands, 0 in name table bands, 25 partly blanked, 0 bands dropped, 0 short of layers; 891 frames past the sprite limit (0 runs dropped), 891 with overflow, 1075 with collision; 56 display changes
+  display: 0 frames of more than 192 lines, 0 frames in palette bands (0 colour writes merged)
+  catch-up with the display off: 992 cells and 2 tiles ahead in 5 frames (36.4 ms, 5 cut short by the deadline)
+  pictures: 61 compared (61 with the display on), 61 identical, 0 differing; sprite evaluation 3195 frames checked, 0 with differences
+
+sonic_chaos.sms (512 KiB): OK, 3167 frames, 10 s on the PC, pad script 54 entries
+  ROM translation 274 blocks, 7601 instructions, 568.8 ms; cartridge RAM 32768 bytes in VRAM; entry counters in VRAM; log arena allocated, pad log allocated
+  emulation 5.4 ms (windows 1.0-9.3), update 3.6 ms (2.2-5.2), total 12.5 ms with 3.5 ms of drawing; 148 over budget (4.7%)
+  screen: real 16999 us per frame, 60 VBLs without a new picture, 41 of them with a picture on the screen (1.3%), 49 long presents; longest on the screen: 50.0 ms before frame 2729, 50.0 ms before frame 2373, 50.0 ms before frame 2284
+  busiest window 2200-2299: emulation 9.1, update 3.8, total 15.9 ms, 28 over budget, Z80 idle 13%; idle over the run 37% (windows 13-91%)
+  worst frames: 57.9 ms at frame 2271 (4 blocks, 896 cells, 2176 data writes); 49.7 ms at frame 1122 (3 blocks, 896 cells); 45.9 ms at frame 96 (36 blocks); 120 frames over budget logged
+  per frame: 0.9 IRQ, 0.00 NMI, 12.7 bank switches, 312 VDP data writes, 0 data reads, 33 control writes, 1 status reads, 0 counter reads, 4.3 PSG writes
+  translator: 989 blocks while running (773 at once in 565.5 ms, 75 of them forced, 215 promoted), 18k interpreted instructions, 6 evictions (295 blocks), 5 busy-wait loops, 968 block descriptors in use at most
+  picture: 18.3 sprite cels, 2.2 pieces, 0.0 priority strips, 4.4 patches, 2.3 tiles, 14.2 cells per frame; 0 frames in scroll bands, 0 in name table bands, 25 partly blanked, 0 bands dropped, 0 short of layers; 2134 frames past the sprite limit (0 runs dropped), 2134 with overflow, 1107 with collision; 61 display changes
+  display: 0 frames of more than 192 lines, 0 frames in palette bands (0 colour writes merged)
+  catch-up with the display off: 992 cells and 2 tiles ahead in 5 frames (36.4 ms, 5 cut short by the deadline)
+  pictures: 58 compared (58 with the display on), 58 identical, 0 differing; sprite evaluation 3135 frames checked, 0 with differences
+
+space_harrier.sms (256 KiB): OK, 3000 frames, 135 s on the PC, pad script 10 entries
+  ROM translation 93 blocks, 1011 instructions, 77.3 ms; cartridge RAM 32768 bytes in VRAM; entry counters in VRAM; log arena allocated, pad log allocated
+  emulation 4.0 ms (windows 1.2-9.3), update 2.2 ms (0.6-3.2), total 9.6 ms with 3.5 ms of drawing; 188 over budget (6.3%)
+  screen: real 16855 us per frame, 31 VBLs without a new picture, 28 of them with a picture on the screen (0.9%), 30 long presents; longest on the screen: 33.4 ms before frame 2840, 33.4 ms before frame 2834, 33.4 ms before frame 2827
+  busiest window 2200-2299: emulation 9.3, update 2.3, total 15.2 ms, 56 over budget, Z80 idle 13%; idle over the run 47% (windows 0-86%)
+  worst frames: 50.3 ms at frame 35 (4 blocks, 592 cells, 409 tiles); 30.2 ms at frame 720 (5 blocks, 497 cells, 37 tiles, 1758 data writes); 25.1 ms at frame 717 (256 cells, 134 tiles, 613 interpreted, 1066 data writes); 120 frames over budget logged
+  per frame: 1.7 IRQ, 0.00 NMI, 0.9 bank switches, 378 VDP data writes, 0 data reads, 28 control writes, 1 status reads, 0 counter reads, 35.5 PSG writes
+  translator: 418 blocks while running (267 at once in 234.4 ms, 27 of them forced, 0 promoted), 9844 interpreted instructions, 0 evictions (0 blocks), 2 busy-wait loops, 511 block descriptors in use at most
+  picture: 14.0 sprite cels, 2.5 pieces, 0.0 priority strips, 3.3 patches, 1.2 tiles, 10.7 cells per frame; 0 frames in scroll bands, 0 in name table bands, 1 partly blanked, 0 bands dropped, 0 short of layers; 12 frames past the sprite limit (0 runs dropped), 12 with overflow, 1708 with collision; 51 display changes
+  display: 0 frames of more than 192 lines, 2275 frames in palette bands (0 colour writes merged)
+  catch-up with the display off: 3551 cells and 54 tiles ahead in 48 frames (163.4 ms, 32 cut short by the deadline)
+  pictures: 2295 compared (2293 with the display on), 2295 identical, 0 differing; sprite evaluation 2951 frames checked, 0 with differences
+
+ys.sms (256 KiB): OK, 2580 frames, 137 s on the PC, pad script 78 entries
+  ROM translation 172 blocks, 1643 instructions, 131.5 ms; cartridge RAM 32768 bytes in VRAM; entry counters in VRAM; log arena allocated, pad log allocated
+  emulation 4.3 ms (windows 1.4-7.7), update 1.9 ms (0.3-2.5), total 9.5 ms with 3.5 ms of drawing; 22 over budget (0.9%)
+  screen: real 16741 us per frame, 9 VBLs without a new picture, 2 of them with a picture on the screen (0.1%), 7 long presents; longest on the screen: 50.0 ms before frame 380, 16.7 ms before frame 2579, 16.7 ms before frame 2578
+  busiest window 300-399: emulation 7.7, update 1.4, total 11.3 ms, 11 over budget, Z80 idle 43%; idle over the run 49% (windows 29-87%)
+  worst frames: 60.3 ms at frame 367 (1 blocks, 1292 cells); 38.4 ms at frame 380 (11 blocks, 743 interpreted); 29.4 ms at frame 379 (9 blocks, 909 interpreted); 22 frames over budget logged
+  per frame: 6.9 IRQ, 0.00 NMI, 4.7 bank switches, 230 VDP data writes, 0 data reads, 55 control writes, 6 status reads, 0 counter reads, 4.4 PSG writes
+  translator: 495 blocks while running (395 at once in 329.6 ms, 45 of them forced, 9 promoted), 8196 interpreted instructions, 0 evictions (0 blocks), 1 busy-wait loops, 667 block descriptors in use at most
+  picture: 7.3 sprite cels, 6.1 pieces, 0.1 priority strips, 2.2 patches, 0.6 tiles, 5.3 cells per frame; 2172 frames in scroll bands, 2173 in name table bands, 1 partly blanked, 0 bands dropped, 0 short of layers; 0 frames past the sprite limit (0 runs dropped), 0 with overflow, 365 with collision; 141 display changes
+  display: 0 frames of more than 192 lines, 0 frames in palette bands (0 colour writes merged)
+  catch-up with the display off: 7976 cells and 990 tiles ahead in 114 frames (405.4 ms, 92 cut short by the deadline)
+  pictures: 2178 compared (2177 with the display on), 2178 identical, 0 differing; sprite evaluation 2442 frames checked, 0 with differences
+
+zillion.sms (128 KiB): OK, 3773 frames, 8 s on the PC, pad script 145 entries
+  ROM translation 321 blocks, 3845 instructions, 266.9 ms; cartridge RAM 32768 bytes in VRAM; entry counters in VRAM; log arena allocated, pad log allocated
+  emulation 4.3 ms (windows 2.9-7.4), update 1.6 ms (0.7-3.2), total 9.4 ms with 3.5 ms of drawing; 61 over budget (1.6%)
+  screen: real 16749 us per frame, 15 VBLs without a new picture, 1 of them with a picture on the screen (0.0%), 11 long presents; longest on the screen: 33.4 ms before frame 1349, 16.7 ms before frame 3772, 16.7 ms before frame 3771
+  busiest window 1300-1399: emulation 7.4, update 2.6, total 12.9 ms, 19 over budget, Z80 idle 47%; idle over the run 54% (windows 13-74%)
+  worst frames: 60.0 ms at frame 84 (6 blocks, 449 cells, 309 tiles, 1136 data writes); 46.2 ms at frame 139 (4 blocks, 350 cells, 225 tiles); 44.2 ms at frame 1329 (1 blocks, 699 cells, 99 tiles); 61 frames over budget logged
+  per frame: 1.0 IRQ, 0.00 NMI, 5.5 bank switches, 198 VDP data writes, 23 data reads, 10 control writes, 0 status reads, 0 counter reads, 15.5 PSG writes
+  translator: 643 blocks while running (564 at once in 395.9 ms, 54 of them forced, 14 promoted), 12k interpreted instructions, 0 evictions (0 blocks), 3 busy-wait loops, 964 block descriptors in use at most
+  picture: 13.0 sprite cels, 1.6 pieces, 0.0 priority strips, 0.6 patches, 0.8 tiles, 3.1 cells per frame; 0 frames in scroll bands, 0 in name table bands, 5 partly blanked, 0 bands dropped, 0 short of layers; 1334 frames past the sprite limit (0 runs dropped), 1334 with overflow, 370 with collision; 128 display changes
+  display: 0 frames of more than 192 lines, 0 frames in palette bands (0 colour writes merged)
+  catch-up with the display off: 2733 cells and 103 tiles ahead in 24 frames (135.7 ms, 21 cut short by the deadline)
+  pictures: 54 compared (53 with the display on), 54 identical, 0 differing; sprite evaluation 3650 frames checked, 0 with differences
+
+Changes since 20261018-1541-e0949f7.json (commit e0949f7, 2026-10-18 15:41):
+  outrun.sms: frames 2857 -> 2761, times not compared; pictures differing 0/2437 -> 0/2241; pad script or frame count changed
