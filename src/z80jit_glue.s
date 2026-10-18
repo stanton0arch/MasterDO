@@ -111,6 +111,27 @@ PSR_H           EQU     0x10
         ldmfd   sp!,{r3,r10}
         MEND
 
+; Next stretch (stretch_start of z80jit.c): up to the event line, or to
+; the end of the run if it comes first, at most MAX_STRETCH lines; its
+; T-states (228 per line, times 256) added to r8. Uses r0, r1, r12.
+        MACRO
+        STRETCH
+        add     r0,r10,#RUN_END :AND: 0xF00
+        add     r0,r0,#RUN_END :AND: 0xFF
+        ldmia   r0,{r0,r1,r12}          ; run end, line, event line
+        sub     r0,r0,r1                ; lines to the end of the run
+        subs    r12,r12,r1              ; lines to the event
+        cmpne   r12,r0
+        movlo   r0,r12
+        cmp     r0,#MAX_STRETCH
+        movhi   r0,#MAX_STRETCH
+        add     r1,r1,r0
+        str     r1,[r10,#LINE]
+        add     r8,r8,r0,lsl#16         ; 228 = 256 - 32 + 4
+        sub     r8,r8,r0,lsl#13
+        add     r8,r8,r0,lsl#10
+        MEND
+
 ;----------------------------------------------------------------------------
 ; void z80j_run(z80j_ctx *ctx, int32 lines)
 ; Runs the Z80 for the given number of scanlines (at least 1).
@@ -172,30 +193,28 @@ jit_exit
 ; its code, where execution resumes.
 ;----------------------------------------------------------------------------
 z80j_glue_seg_timeout
-        ldmia   lr,{r0-r2}
+        ldmia   lr,{r0-r2}              ; r1 = Z80 address, r2 = code
         add     r8,r8,r0                ; give the segment T-states back
-        str     r2,[r10,#RESUME_HOST]
-        str     r1,[r10,#RESUME_PC]
         ; The usual stretch end, without leaving the generated code: the
         ; machine event (through its assembly handler), a maskable
         ; interrupt in mode 1 (or 0) pushed to writable memory, the next
         ; stretch, then the vector or the interrupted segment. Anything
         ; else (end of the run, no assembly handler or one declining,
-        ; NMI, mode 2, a push to a special page, HALT) takes the C path.
-        ldr     r0,[r10,#LINE]
-        ldr     r12,[r10,#RUN_END]
-        cmp     r0,r12
+        ; NMI, mode 2, a push to a special page or across two pages, HALT)
+        ; takes the C path, which resumes the segment from the context.
+        add     r12,r10,#RUN_END :AND: 0xF00
+        add     r12,r12,#RUN_END :AND: 0xFF
+        ldmia   r12,{r0,r12,lr}         ; run end, line, event line
+        cmp     r12,r0
         beq     seg_slow
-        ldr     r12,[r10,#EVENT_LINE]
-        cmp     r0,r12
+        cmp     r12,lr
         bne     seg_no_event
+        mov     r0,r12                  ; the line, for the handler
         ldr     r12,[r10,#EVENT_A]
         teq     r12,#0
         beq     seg_slow
-        stmfd   sp!,{r1,r2,lr}
         mov     lr,pc
-        mov     pc,r12
-        ldmfd   sp!,{r1,r2,lr}
+        mov     pc,r12                  ; r1-r11 preserved
         teq     r0,#0
         bne     seg_slow                ; the handler declined (nothing changed)
 seg_no_event
@@ -209,20 +228,6 @@ seg_no_event
         ldr     r0,[r10,#IM]
         cmp     r0,#2
         beq     seg_slow
-        ; The stack must be in writable pages
-        mov     r0,r11,lsr#16
-        sub     r0,r0,#2
-        bic     r0,r0,#0x10000          ; new SP
-        mov     r12,r0,lsr#8
-        ldr     r12,[r10,r12,lsl#2]
-        teq     r12,#0
-        beq     seg_slow
-        add     r12,r0,#1
-        bic     r12,r12,#0x10000
-        mov     r12,r12,lsr#8
-        ldr     r12,[r10,r12,lsl#2]
-        teq     r12,#0
-        beq     seg_slow
         ; Remember the interrupted segment for the return (not for RAM
         ; code, whose entry check alone notices a rewrite)
         bl      seg_key                 ; r12 = key of the code at r1, or -1 for RAM
@@ -234,60 +239,44 @@ seg_no_event
         add     r0,r0,lr,lsl#4
         stmia   r0,{r1,r2,r12}
 seg_push
+        ; The return address pushed, both bytes in one writable page
         mov     r0,r11,lsr#16
         sub     r0,r0,#2
-        bic     r0,r0,#0x10000
+        bic     r0,r0,#0x10000          ; new SP
+        mov     r12,r0,lsr#8
+        ldr     r12,[r10,r12,lsl#2]     ; write entry of its page
+        teq     r12,#0
+        beq     seg_slow
+        and     lr,r0,#0xFF
+        teq     lr,#0xFF
+        beq     seg_slow                ; the second byte in the next page
         mov     r11,r0,lsl#16           ; SP -= 2
-        mov     r12,r0,lsr#8
-        ldr     r12,[r10,r12,lsl#2]
-        strb    r1,[r12,r0]             ; low byte of the return address
-        add     r0,r0,#1
-        bic     r0,r0,#0x10000
-        mov     r12,r0,lsr#8
-        ldr     r12,[r10,r12,lsl#2]
+        add     r12,r12,r0
+        strb    r1,[r12]                ; low byte of the return address
         mov     r1,r1,lsr#8
-        strb    r1,[r12,r0]
+        strb    r1,[r12,#1]
         mov     r0,#0
-        str     r0,[r10,#IFF1]
-        str     r0,[r10,#IFF2]
-        str     r0,[r10,#RESUME_HOST]
+        mov     r1,#0
+        add     r12,r10,#IFF1-4
+        stmib   r12,{r0,r1}             ; IFF1, IFF2
         ldr     r0,[r10,#IRQ_COUNT]
         add     r0,r0,#1
         str     r0,[r10,#IRQ_COUNT]
         sub     r8,r8,#13*256           ; the interrupt's T-states
-        bl      seg_stretch
+        STRETCH
         add     r1,r10,#LOOKUP
         mov     r0,#0x38                ; for the miss glue, should the entry be gone
         ldr     pc,[r1,#0x38*4]         ; the vector (the entry checks its bank or bytes)
 seg_resume
-        mov     r0,#0
-        str     r0,[r10,#RESUME_HOST]
-        bl      seg_stretch
+        STRETCH
         mov     pc,r2                   ; the interrupted segment
 seg_slow
+        str     r2,[r10,#RESUME_HOST]
+        str     r1,[r10,#RESUME_PC]
         mov     r0,r1
         bl      jit_save
         callc   z80j_stretch_end
         b       jit_continue
-
-; Next stretch: up to the event line, or to the end of the run if it comes
-; first, at most MAX_STRETCH lines. Uses r0, r1, r12.
-seg_stretch
-        ldr     r0,[r10,#LINE]
-        ldr     r1,[r10,#RUN_END]
-        sub     r1,r1,r0                ; lines to the end of the run
-        ldr     r12,[r10,#EVENT_LINE]
-        subs    r12,r12,r0              ; lines to the event
-        cmpne   r12,r1
-        movlo   r1,r12
-        cmp     r1,#MAX_STRETCH
-        movhi   r1,#MAX_STRETCH
-        add     r0,r0,r1
-        str     r0,[r10,#LINE]
-        mov     r12,#228
-        mul     r1,r12,r1
-        add     r8,r8,r1,lsl#8
-        mov     pc,lr
 
 ; Key of the code at the Z80 address in r1 (jit_block_key): 0 for a fixed
 ; page, (kind << 16) | bank for a paged slot, -1 for RAM. Uses r0, r12.
@@ -547,7 +536,9 @@ z80j_glue_push_slow
 ; (zero outside the block and on the operand bytes the code reads for
 ; itself). Compared word by word with the host memory (RAM is contiguous);
 ; returns after the mask when the code is unchanged, else runs a new
-; translation.
+; translation. A short block checks itself with code emitted after its mask
+; (z80jit_emt.s, eb_ram_inline) and branches here, lr unchanged, only when
+; a word differs: the loop finds the change again and translates.
 ;----------------------------------------------------------------------------
 z80j_glue_verify
         ldmia   lr!,{r0,r1}             ; r0 = Z80 address, r1 = words

@@ -220,6 +220,8 @@ BL_EQ           EQU     0x0B000000
 
 IMM_NONE        EQU     0xFFFFFFFF
 
+RAM_INLINE_WORDS EQU    16              ; RAM blocks up to this size checked inline
+
 ; Stack frame of the main routine.
 F_J             EQU     0
 F_MISS          EQU     4               ; site of the bank check branch
@@ -309,6 +311,25 @@ F_SIZE          EQU     8
         add     $w,$i,$i,lsl #2
         add     $w,$w,$i,lsl #3
         add     $w,$b,$w,lsl #3
+        MEND
+
+; One byte of a word of the inline RAM entry check (eb_ram_inline): r2 =
+; recorded word, r3 = its mask, r12 = register fields; emits BICS of the
+; byte at bit $sh when the mask clears it, else EORS of its value unless
+; it is zero ($rot: rotation field of the immediate). Uses r0, r1.
+        MACRO
+        RIBYTE  $sh,$rot
+        ands    r1,r3,#0xFF:SHL:$sh
+        TMPLC   eq,r0,t_ri_bics
+        moveq   r1,#0xFF
+        TMPLC   ne,r0,t_ri_eors
+        andne   r1,r2,#0xFF:SHL:$sh
+        movne   r1,r1,lsr #$sh
+        teq     r1,#0
+        orrne   r0,r0,r1
+        orrne   r0,r0,#$rot:SHL:8
+        orrne   r0,r0,r12
+        strne   r0,[r5],#4
         MEND
 
 ;----------------------------------------------------------------------------
@@ -639,14 +660,15 @@ t_ldr_r0_g      LDR     r0,[r10]        ; | offset
 t_cmp_r0_imm    CMP     r0,#0           ; | bank
 t_cmp_r0_r1     CMP     r0,r1
 
-; Entry check of a RAM block: BL to the check of the glue, then the first
-; address, the number of host words holding the block (from the one holding
-; its first byte), those words as they are now, and a mask: zero outside
-; the block and on the two operand bytes of each instruction that reads
-; them when it runs.
+; Entry check of a RAM block: a BL, then the first address, the number of
+; host words holding the block (from the one holding its first byte), those
+; words as they are now, and a mask: zero outside the block and on the two
+; operand bytes of each instruction that reads them when it runs. A block
+; of up to RAM_INLINE_WORDS words is checked by code emitted after the mask,
+; which the BL reaches (see eb_ram_inline); a longer one by the loop of the
+; glue (glue.verify), which the BL calls and which returns after the mask.
+; Either way lr points at the address word, as the glue expects it.
 eb_ram_check
-        ldr     r0,[r8,#G_VERIFY]
-        EMITB   r1,r0,BL_AL
         ldr     r6,[r4,#B_INS]
         ldr     r7,[r6,#I_PC]           ; first address
         ldr     r0,[r4,#B_NEXT_PC]
@@ -657,6 +679,17 @@ eb_ram_check
         add     r12,r11,r9
         add     r12,r12,#3
         mov     r12,r12,lsr #2          ; words
+        cmp     r12,#RAM_INLINE_WORDS
+        ldrhi   r0,[r8,#G_VERIFY]
+        bhi     eb_ram_glue
+        mov     r0,r12,lsl #1           ; BL over the data words: 2 n + 3 words on
+        add     r0,r0,#1
+        orr     r0,r0,#BL_AL
+        EMIT    r0
+        b       eb_ram_data
+eb_ram_glue
+        EMITB   r1,r0,BL_AL
+eb_ram_data
         stmia   r5!,{r7,r12}
         mov     r0,r12,lsl #2           ; bytes
         mov     r1,#0                   ; byte index
@@ -744,7 +777,93 @@ eb_ram_dnext
         subs    r1,r1,#1
         bne     eb_ram_dyn
 eb_ram_done
+        ; r7 = first address, r9 = length, r11 = lead bytes
+        add     r11,r11,r9
+        add     r11,r11,#3
+        mov     r11,r11,lsr #2          ; words
+        cmp     r11,#RAM_INLINE_WORDS
+        bhi     eb_body
+
+; The inline check: the host words of the block loaded with LDM, from the
+; read table entry of its page (whatever RAM the page shows), and each
+; compared with its recorded bytes by immediate operations: BICS of the
+; bytes the mask clears, EORS of the others (zero bytes left out, but for
+; the last one, so that the flags always come from a word's last
+; operation); a word differing branches to the glue's check (lr still
+; points at the address word), which finds the change again and has the
+; block translated anew. About 8 cycles per word against 25 in the glue's
+; loop, for the short RAM routines entered on every line by raster effects.
+eb_ram_inline
+        sub     r6,r5,r11,lsl #3        ; the recorded words
+        sub     r9,r5,r11,lsl #2        ; their mask
+        ; LDR r12,[r10,#-4 * (page + 1)]: the read table entry of the page
+        mov     r0,r7,lsr #8
+        add     r0,r0,#1
+        TMPL    r1,t_ri_ldr
+        orr     r0,r1,r0,lsl #2
+        EMIT    r0
+        ; ADD r12,r12,#hi / #lo: the host address of the first word
+        TMPL    r1,t_ri_add
+        ands    r0,r7,#0xFF00
+        orrne   r0,r1,r0,lsr #8
+        orrne   r0,r0,#0xC00            ; rotated right by 24: bits 8-15
+        strne   r0,[r5],#4
+        ands    r0,r7,#0xFC
+        orrne   r0,r1,r0
+        strne   r0,[r5],#4
+eb_ri_group
+        ; LDMIA r12!,{r0-r2} while more than four words are left, then
+        ; LDMIA r12,{...} of the rest, r12 itself taking a fourth one
+        cmp     r11,#4
+        movhi   lr,#3
+        TMPLC   hi,r0,t_ri_ldm3
+        bhi     eb_ri_ldm
+        mov     lr,r11
+        mov     r1,#1
+        mov     r1,r1,lsl r11
+        sub     r1,r1,#1                ; r0 to r(n - 1)
+        cmp     r11,#4
+        biceq   r1,r1,#8                ; r12 instead of r3
+        orreq   r1,r1,#0x1000
+        TMPL    r0,t_ri_ldm
+        orr     r0,r0,r1
+eb_ri_ldm
+        EMIT    r0
+        sub     r11,r11,lr
+        mov     r7,#0                   ; register of the word
+eb_ri_word
+        ldr     r2,[r6],#4              ; the recorded word
+        ldr     r3,[r9],#4              ; its mask
+        cmp     r7,#3
+        moveq   r7,#12
+        orr     r12,r7,r7,lsl #4
+        mov     r12,r12,lsl #12         ; Rn and Rd fields
+        RIBYTE  24,4
+        RIBYTE  16,8
+        RIBYTE  8,12
+        ands    r1,r3,#0xFF             ; the last byte, always
+        TMPLC   eq,r0,t_ri_bics
+        moveq   r1,#0xFF
+        TMPLC   ne,r0,t_ri_eors
+        andne   r1,r2,#0xFF
+        orr     r0,r0,r1
+        orr     r0,r0,r12
+        EMIT    r0
+        ldr     r0,[r8,#G_VERIFY]
+        EMITB   r1,r0,B_NE
+        add     r7,r7,#1
+        subs    lr,lr,#1
+        bne     eb_ri_word
+        teq     r11,#0
+        bne     eb_ri_group
         b       eb_body
+
+t_ri_ldr        DCD     0xE51AC000      ; LDR r12,[r10,#-0] | offset
+t_ri_add        ADD     r12,r12,#0      ; | immediate
+t_ri_ldm3       LDMIA   r12!,{r0-r2}
+t_ri_ldm        DCD     0xE89C0000      ; LDMIA r12,{} | registers
+t_ri_bics       BICS    r0,r0,#0        ; | registers, immediate
+t_ri_eors       EORS    r0,r0,#0        ; | registers, immediate
 
 ;----------------------------------------------------------------------------
 ; Stubs and encodings

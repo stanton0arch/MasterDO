@@ -145,9 +145,10 @@ typedef struct {
 /*
  * Emulated machine: I/O ports, special writes and scanline events. The
  * machine may also give the context an event handler in assembly
- * (ctx->event_a, called by the glue at a stretch end with r10 = global
- * pointer, r0-r2 and r12 free, returning r0 = 0 when it handled the
- * event and nonzero, with nothing changed, when the C callback must).
+ * (ctx->event_a, called by the glue at a stretch end with r0 = ctx->line
+ * and r10 = global pointer, preserving r1-r11, returning r0 = 0 when it
+ * handled the event, with r12 = the new ctx->event_line, and nonzero,
+ * with nothing changed, when the C callback must).
  *
  * Time is counted in scanlines of 228 T-states. The Z80 runs in stretches
  * that end at the start of scanline ctx->line: the next event line or the

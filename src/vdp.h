@@ -99,18 +99,20 @@
  */
 typedef struct {
     uint32  acc;            /* +0x00: the access word (see VDP_ACC_*) */
-    uint32  latch;          /* +0x04: first byte of a control word */
+    uint32  pad1;           /* +0x04 (the first byte of a control word is kept */
+                            /* in bits 0-7 of the address until the second one) */
     uint32  buffer;         /* +0x08: read buffer */
     uint32  cram_dirty;     /* +0x0C: colour RAM written since last cleared */
     uint32  n_data_r;       /* +0x10: data port reads */
     uint32  n_ctrl_w;       /* +0x14: control port writes */
-    uint32  pad0[2];        /* +0x18 */
+    uint32  n_stat_r;       /* +0x18: status reads handled in assembly */
+    uint32  pad0;           /* +0x1C */
     uint8   cram[32];       /* +0x20 */
     uint8   reg[16];        /* +0x40 */
-    uint32  status;         /* VDP_ST_* */
-    uint32  line_flag;      /* line interrupt pending */
-    /* Timing. */
-    z80j_ctx *ctx;
+    uint32  status;         /* +0x50: VDP_ST_* */
+    uint32  line_flag;      /* +0x54: line interrupt pending */
+    /* Timing (the fields the event handler of sms_io.s loads together). */
+    uint32  active;         /* +0x58: active lines: 192, 224 or 240 */
     uint32  lines;          /* lines per frame */
     uint32  vc_jump;        /* last V counter value before the jump back */
     uint32  vc_back;        /* amount the V counter jumps back by */
@@ -120,7 +122,7 @@ typedef struct {
     uint32  lc_val;
     uint32  frames;
     uint8   hc[VDP_LINE_T]; /* +0x7C: H counter for each T-state of a line */
-    uint32  active;         /* +0x160: active lines: 192, 224 or 240 */
+    z80j_ctx *ctx;          /* +0x160 */
     uint32  nt_rows;        /* +0x164: name table rows: 28, or 32 in the extended modes */
     uint32  n_count_r;      /* +0x168: V and H counter reads (handled in assembly) */
     uint8   pad[0x200 - 0x7C - VDP_LINE_T - 12];
@@ -138,7 +140,7 @@ typedef struct {
     uint32  de_n;
     uint32  de_log[VDP_DE_LOG];
     uint32  de_start;       /* display enabled at the start of the frame */
-    uint32  n_stat_r;       /* status reads handled in assembly */
+    uint32  pad3;
     /* Sprite evaluation of the frame (vdp_sprites). */
     uint32  spr_n;          /* sprites before the terminator */
     uint32  spr_h;          /* lines per sprite: 8, 16 or 32 */

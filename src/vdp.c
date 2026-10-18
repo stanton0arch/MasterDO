@@ -10,7 +10,7 @@
 /* Offsets used by sms_io.s. */
 #define CHECK_OFF(name, cond) typedef char check_##name[(cond) ? 1 : -1]
 CHECK_OFF(acc, offsetof(vdp_state, acc) == 0x00);
-CHECK_OFF(latch, offsetof(vdp_state, latch) == 0x04);
+CHECK_OFF(buffer_after_pad, offsetof(vdp_state, pad1) == 0x04);
 CHECK_OFF(buffer, offsetof(vdp_state, buffer) == 0x08);
 CHECK_OFF(cram_dirty, offsetof(vdp_state, cram_dirty) == 0x0C);
 CHECK_OFF(n_data_r, offsetof(vdp_state, n_data_r) == 0x10);
@@ -23,7 +23,8 @@ CHECK_OFF(frame_base, offsetof(vdp_state, frame_base) == 0x68);
 CHECK_OFF(lc_k, offsetof(vdp_state, lc_k) == 0x70);
 CHECK_OFF(lc_val, offsetof(vdp_state, lc_val) == 0x74);
 CHECK_OFF(nt_n, offsetof(vdp_state, nt_n) == 0x4804);
-CHECK_OFF(n_stat_r, offsetof(vdp_state, n_stat_r) == 0x4870);
+CHECK_OFF(n_stat_r, offsetof(vdp_state, n_stat_r) == 0x18);
+CHECK_OFF(spr_n_after_pad, offsetof(vdp_state, pad3) == 0x4870);
 CHECK_OFF(spr_n, offsetof(vdp_state, spr_n) == 0x4874);
 CHECK_OFF(spr_y, offsetof(vdp_state, spr_y) == 0x4884);
 CHECK_OFF(spr_vis, offsetof(vdp_state, spr_vis) == 0x4984);
@@ -31,7 +32,8 @@ CHECK_OFF(spr_rows, offsetof(vdp_state, spr_rows) == 0x4A84);
 CHECK_OFF(spr_tile_rows, offsetof(vdp_state, spr_tile_rows) == 0x4B84);
 CHECK_OFF(spr_tile_ok, offsetof(vdp_state, spr_tile_ok) == 0x4D84);
 CHECK_OFF(hc, offsetof(vdp_state, hc) == 0x7C);
-CHECK_OFF(active, offsetof(vdp_state, active) == 0x160);
+CHECK_OFF(active, offsetof(vdp_state, active) == 0x58);
+CHECK_OFF(vbl_done, offsetof(vdp_state, vbl_done) == 0x6C);
 CHECK_OFF(nt_rows, offsetof(vdp_state, nt_rows) == 0x164);
 CHECK_OFF(n_count_r, offsetof(vdp_state, n_count_r) == 0x168);
 CHECK_OFF(lines, offsetof(vdp_state, lines) == 0x5C);
@@ -183,7 +185,6 @@ void vdp_reset(vdp_state *v)
     memset(v->reg, 0, sizeof(v->reg));
     memcpy(v->reg, vdp_power_on, sizeof(vdp_power_on));
     v->acc = 0;
-    v->latch = 0;
     v->buffer = 0;
     v->status = 0;
     v->line_flag = 0;
@@ -370,23 +371,25 @@ uint32 vdp_control_write(vdp_state *v, uint32 value, uint32 left)
 {
     uint32 code;
     uint32 addr;
+    uint32 latch;
 
     v->n_ctrl_w++;
     if (!(v->acc & VDP_PENDING)) {
-        v->latch = value;
         v->acc = (v->acc & ~(0xFFu << VDP_ACC_ADDR_SHIFT)) | (value << VDP_ACC_ADDR_SHIFT) |
                  VDP_PENDING | VDP_ACC_SLOW;
         return 0;
     }
+    /* The first byte is still in bits 0-7 of the address. */
+    latch = (v->acc >> VDP_ACC_ADDR_SHIFT) & 0xFFu;
     code = value >> 6;
-    addr = ((value & 0x3F) << 8) | v->latch;
+    addr = ((value & 0x3F) << 8) | latch;
     v->acc = (v->acc & VDP_ACC_DW_MASK) | (code << VDP_ACC_CODE_SHIFT) |
              (addr << VDP_ACC_ADDR_SHIFT) | (code == 3 ? VDP_ACC_SLOW : 0);
     if (code == 0) {
         v->buffer = v->vram[addr];
         v->acc += 1u << VDP_ACC_ADDR_SHIFT;
     } else if (code == 2) {
-        return vdp_reg_write(v, value & 0x0F, v->latch, left);
+        return vdp_reg_write(v, value & 0x0F, latch, left);
     }
     return 0;
 }

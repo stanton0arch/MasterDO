@@ -9,7 +9,7 @@
 ; vdp_state fields (vdp.h; offsets checked in vdp.c).
 V_REG           EQU     0x40
 V_STATUS        EQU     0x50
-V_ACTIVE        EQU     0x160           ; active lines: 192, 224 or 240
+V_ACTIVE        EQU     0x58           ; active lines: 192, 224 or 240
 V_DIRTY         EQU     0x200
 V_VRAM          EQU     0x400
 V_SPR           EQU     0x4874          ; spr_n, then the fields below

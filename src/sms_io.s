@@ -36,11 +36,11 @@ VDP_OFFSET      EQU     0x44000         ; the vdp_state: SMS_VDP_OFFSET of sms.h
 
 ; vdp_state fields.
 V_ACC           EQU     0x00
-V_LATCH         EQU     0x04
 V_BUFFER        EQU     0x08
 V_CRAMDIRTY     EQU     0x0C
 V_NDATAR        EQU     0x10
 V_NCTRLW        EQU     0x14
+V_NSTATR        EQU     0x18
 V_CRAM          EQU     0x20
 V_REG           EQU     0x40
 V_STATUS        EQU     0x50
@@ -53,13 +53,12 @@ V_VBLDONE       EQU     0x6C
 V_LCK           EQU     0x70
 V_LCVAL         EQU     0x74
 V_HC            EQU     0x7C
-V_ACTIVE        EQU     0x160
+V_ACTIVE        EQU     0x58
 V_NCOUNTR       EQU     0x168
 V_DIRTY         EQU     0x200
 V_VRAM          EQU     0x400
 V_HSN           EQU     0x4400          ; the logs lie past the video RAM
 V_NTN           EQU     0x4804
-V_NSTATR        EQU     0x4870
 V_CRN           EQU     0x4F84          ; the colour RAM log follows its count
 VDP_HS_LOG      EQU     256
 VDP_NT_LOG      EQU     16
@@ -219,13 +218,14 @@ stat_clear
         str     r2,[r12,#V_STATUS]
         str     r2,[r12,#V_LINEFLAG]
         str     r2,[r10,#IRQ_LINE]
-        ldr     r2,[r12,#V_ACC]
-        UNPEND  r2
-        str     r2,[r12,#V_ACC]
-        add     r2,r12,#0x4800
-        ldr     r1,[r2,#V_NSTATR-0x4800]
+        ldr     r1,[r12,#V_NSTATR]
         add     r1,r1,#1
-        str     r1,[r2,#V_NSTATR-0x4800]
+        str     r1,[r12,#V_NSTATR]
+        ldr     r2,[r12,#V_ACC]
+        tst     r2,#ACC_PENDING
+        moveq   pc,lr
+        UNPEND  r2                      ; a pending control word ends
+        str     r2,[r12,#V_ACC]
         mov     pc,lr
 stat_lc
         ldr     r0,[r10,#LINE]
@@ -327,10 +327,12 @@ sms_vdp_hc_r
 
 ;----------------------------------------------------------------------------
 ; OUT to the control port. In: r0 = value, r1 = port, r2 = T-states left.
-; The first byte of a control word sets bits 0-7 of the address; the second
-; one sets the code and bits 8-13, and a read code loads the read buffer.
-; Register writes go to the machine's C handler (vdp_control_write), which
-; may raise the interrupt line or move the next event.
+; The first byte of a control word sets bits 0-7 of the address (where the
+; second byte finds it); the second one sets the code and bits 8-13, and a
+; read code loads the read buffer. Register writes go to the machine's C
+; handler (vdp_control_write), which may raise the interrupt line or move
+; the next event, but for the registers raster effects write on every
+; line (ctrl_reg8 and the next ones).
 ;----------------------------------------------------------------------------
 sms_vdp_ctrl_w
         VDP
@@ -338,149 +340,168 @@ sms_vdp_ctrl_w
         ldr     r1,[r12,#V_ACC]
         tst     r1,#ACC_PENDING
         bne     ctrl_second
-        str     r0,[r12,#V_LATCH]
-        bic     r1,r1,#0x03FC0000       ; bits 0-7 of the address
+        bic     r1,r1,#0x03FC0000       ; bits 0-7 of the address: the byte
         orr     r1,r1,r0,lsl#18
         orr     r1,r1,#ACC_PENDING+ACC_SLOW
         str     r1,[r12,#V_ACC]
-        b       ctrl_count
-ctrl_second
-        mov     r1,r0,lsr#6             ; code
-        cmp     r1,#2
-        bne     ctrl_data
-        and     r1,r0,#0x0F
-        cmp     r1,#8
-        beq     ctrl_reg8
-        cmp     r1,#10
-        beq     ctrl_reg10
-        cmp     r1,#2
-        beq     ctrl_reg2
-        mov     r1,#0xBF
-        b       z80j_port_out_c         ; register write (r0, r2 unchanged)
-ctrl_data                               ; r1 = code 0, 1 or 3
-        ldr     r2,[r12,#V_LATCH]
-        and     r0,r0,#0x3F
-        orr     r2,r2,r0,lsl#8          ; the address
-        ldr     r0,[r12,#V_ACC]
-        mov     r0,r0,lsl#18            ; the count kept, the pending mark ended
-        mov     r0,r0,lsr#18
-        orr     r0,r0,r1,lsl#14
-        cmp     r1,#3
-        orreq   r0,r0,#ACC_SLOW         ; colour RAM writes take the slow path
-        teq     r1,#0
-        bne     ctrl_addr
-        add     r1,r12,#V_VRAM          ; read code: read ahead
-        ldrb    r1,[r1,r2]
-        str     r1,[r12,#V_BUFFER]
-        add     r2,r2,#1                ; (0x4000 wraps to 0 in the word)
-ctrl_addr
-        orr     r0,r0,r2,lsl#18
-        str     r0,[r12,#V_ACC]
 ctrl_count
         ldr     r1,[r12,#V_NCTRLW]
         add     r1,r1,#1
         str     r1,[r12,#V_NCTRLW]
         mov     r0,#0
         mov     pc,lr
+ctrl_second                             ; r1 = access word, the first byte in bits 18-25
+        cmp     r0,#0x88
+        beq     ctrl_reg8
+        tst     r0,#0x40
+        bne     ctrl_data
+        tst     r0,#0x80
+        beq     ctrl_data
+        cmp     r0,#0x8A
+        beq     ctrl_reg10
+        cmp     r0,#0x82
+        beq     ctrl_reg2
+        mov     r1,#0xBF
+        b       z80j_port_out_c         ; other register writes (r0, r2 unchanged)
+ctrl_data                               ; codes 0, 1 and 3
+        bic     r1,r1,#0xFC000000       ; address bits 8-13
+        bic     r1,r1,#0x0003C000       ; code, pending and slow marks
+        orr     r1,r1,r0,lsl#26         ; address bits 8-13 from the byte
+        and     r0,r0,#0xC0
+        orr     r1,r1,r0,lsl#8          ; the code
+        cmp     r0,#0xC0
+        orreq   r1,r1,#ACC_SLOW         ; colour RAM writes take the slow path
+        teq     r0,#0
+        bne     ctrl_addr
+        mov     r0,r1,lsr#18            ; read code: read ahead
+        add     r2,r12,#V_VRAM
+        ldrb    r0,[r2,r0]
+        str     r0,[r12,#V_BUFFER]
+        add     r1,r1,#ACC_ADDR1        ; (0x4000 wraps to 0 in the word)
+ctrl_addr
+        str     r1,[r12,#V_ACC]
+        b       ctrl_count
 
 ; Registers written by raster effects on every line, handled here as
 ; vdp_reg_write does: the horizontal scroll (8) and the name table base
 ; (2) are recorded with the first line they affect, the line counter
 ; reload (10) brings the lazy counter up to date first. A write that ends
 ; the previous frame (negative time), or a counter update that crosses
-; an underflow, takes the C path.
-; r1 = register (2, 8 or 10), r2 = T-states left; r0 is free.
-ctrl_reg8
-ctrl_reg2
-ctrl_reg10
-        str     r1,[sp,#-4]!
+; an underflow, takes the C path with the value and the time unchanged.
+; Only the second bytes $82, $88 and $8A come here (address bits 12-13
+; clear).
+
+; r1 := the line of the access (lines done before it, N set if negative):
+; the lines at the stretch end less ceil(left / 228), computed as
+; (ceil(left / 4) + 56) / 57 by a multiplication (exact within a frame).
+; r2 (T-states left) is kept, r0 lost.
+        MACRO
+        ACCLINE
+        add     r0,r2,#0x300
+        mov     r0,r0,lsr#10
+        add     r0,r0,#56
+        mov     r1,#0x8F00
+        orr     r1,r1,#0xB9
+        mul     r0,r1,r0                ; lines back << 21
         ldr     r1,[r10,#LINE]
+        sub     r1,r1,r0,lsr#21
         ldr     r0,[r12,#V_FRAMEBASE]
-        sub     r1,r1,r0
-        mov     r0,#228
-        mul     r1,r0,r1                ; T-states of the frame at the stretch end
-        subs    r1,r1,r2,asr#8          ; T-state of the access
-        bmi     ctrl_reg_slow
-        mov     r1,r1,lsr#2             ; line = (t / 4) * 36793 >> 21
-        mov     r0,#0x8F00
-        orr     r0,r0,#0xB9
-        mul     r1,r0,r1
-        mov     r1,r1,lsr#21            ; lines done (the access is on this line)
-        ldr     r0,[sp]
-        cmp     r0,#10
-        beq     ctrl_lc
-        add     r1,r1,#1                ; shows from the next line on
-        ldr     r2,[r12,#V_ACTIVE]
-        cmp     r1,r2
-        bhs     ctrl_reg_store
-        cmp     r0,#8
-        bne     ctrl_log2
-        add     r2,r12,#V_HSN
+        subs    r1,r1,r0
+        MEND
+
+; Register $n := the first byte (left in r2), the address := ($n << 8) |
+; that byte, code 2, the data writes of the frame kept (r0 lost).
+        MACRO
+        REGSTORE $n
+        ldr     r0,[r12,#V_ACC]
+        mov     r2,r0,lsl#6
+        mov     r2,r2,lsr#24            ; the first byte
+        strb    r2,[r12,#V_REG+$n]
+        mov     r0,r0,lsl#18
+        mov     r0,r0,lsr#18
+        orr     r0,r0,#0x8000
+        orr     r0,r0,r2,lsl#18
+        orr     r0,r0,#$n:SHL:26
+        str     r0,[r12,#V_ACC]
+        MEND
+
+; Appends (r1 << 8) | r2 to the log at $off of the vdp_state ($max
+; entries, its count first) when the line r1 is in the active display.
+        MACRO
+        RASTERLOG $off,$max
+        ldr     r0,[r12,#V_ACTIVE]
+        cmp     r1,r0
+        bhs     ctrl_count
+        orr     r1,r2,r1,lsl#8
+        add     r2,r12,#$off :AND: 0xFF00
+        add     r2,r2,#$off :AND: 0xFF
         ldr     r0,[r2]
-        cmp     r0,#VDP_HS_LOG
-        bhs     ctrl_reg_restore
-        b       ctrl_log
-ctrl_log2
-        add     r2,r12,#0x4800
-        add     r2,r2,#V_NTN-0x4800
-        ldr     r0,[r2]
-        cmp     r0,#VDP_NT_LOG
-        bhs     ctrl_reg_restore
-ctrl_log
+        cmp     r0,#$max
+        bhs     ctrl_count
         add     r0,r0,#1
-        str     r0,[r2]
-        add     r2,r2,r0,lsl#2          ; entry r0 - 1 of the log (its count is just below it)
-        ldr     r0,[r12,#V_LATCH]
-        orr     r1,r0,r1,lsl#8
+        str     r0,[r2],r0,lsl#2        ; to the new entry (the count is just below the log)
         str     r1,[r2]
-ctrl_reg_restore
-        ldr     r0,[sp]
-ctrl_reg_store
-        ; r0 = register: reg[r0] = latch, address = (r0 << 8) | latch, code 2
-        ldr     r2,[r12,#V_LATCH]
-        add     r1,r12,#V_REG
-        strb    r2,[r1,r0]
-        orr     r2,r2,r0,lsl#8
-        ldr     r1,[r12,#V_ACC]
-        mov     r1,r1,lsl#18            ; the count kept
-        mov     r1,r1,lsr#18
-        orr     r1,r1,#0x8000           ; code 2
-        orr     r1,r1,r2,lsl#18
-        str     r1,[r12,#V_ACC]
-        add     sp,sp,#4
         b       ctrl_count
-; Line counter: lc_sync(k) with k = lines done (r1), in its simple case.
-; lc_k in r0 afterwards; the register is free again once the fallback is
-; ruled out.
-ctrl_lc
+        MEND
+
+ctrl_reg8
+        ACCLINE
+        bmi     ctrl_slow8
+        REGSTORE 8
+        add     r1,r1,#1                ; shows from the next line on
+        RASTERLOG V_HSN,VDP_HS_LOG
+ctrl_slow8
+        mov     r0,#0x88
+        mov     r1,#0xBF
+        b       z80j_port_out_c
+
+ctrl_reg2
+        ACCLINE
+        bmi     ctrl_slow2
+        REGSTORE 2
+        add     r1,r1,#1
+        RASTERLOG V_NTN,VDP_NT_LOG
+ctrl_slow2
+        mov     r0,#0x82
+        mov     r1,#0xBF
+        b       z80j_port_out_c
+
+; Line counter: lc_sync(k) of vdp.c with k = the lines done (r1), in its
+; simple case, before the register changes.
+ctrl_reg10
+        ACCLINE
+        bmi     ctrl_slow10
+        str     r3,[sp,#-4]!
         ldr     r0,[r12,#V_LCK]
         cmp     r1,r0
-        bls     ctrl_lc_store           ; k <= lc_k: nothing to do
-        ldr     r2,[r12,#V_ACTIVE]      ; a = active lines
-        cmp     r0,r2
+        bls     ctrl_lc_done            ; k <= lc_k: nothing to do
+        ldr     r3,[r12,#V_ACTIVE]      ; a = active lines
+        cmp     r0,r3
         bhi     ctrl_lc_tail            ; lc_k > a: no countdown
-        cmp     r1,r2
-        addhi   r2,r2,#1
-        movls   r2,r1                   ; end = min(k, a + 1)
-        sub     r2,r2,r0                ; n = end - lc_k
+        cmp     r1,r3
+        addhi   r3,r3,#1
+        movls   r3,r1                   ; end = min(k, a + 1)
+        sub     r3,r3,r0                ; n = end - lc_k
         ldr     r0,[r12,#V_LCVAL]
-        cmp     r2,r0
-        bhi     ctrl_reg_slow           ; underflow since the last update: C
-        sub     r0,r0,r2
+        cmp     r3,r0
+        bhi     ctrl_lc_slow            ; underflow since the last update: C
+        sub     r0,r0,r3
         str     r0,[r12,#V_LCVAL]
 ctrl_lc_tail
-        ldr     r2,[r12,#V_ACTIVE]
-        add     r2,r2,#1
-        cmp     r1,r2
+        ldr     r3,[r12,#V_ACTIVE]
+        add     r3,r3,#1
+        cmp     r1,r3
         ldrhib  r0,[r12,#V_REG+10]      ; past line a + 1 the counter reloads
         strhi   r0,[r12,#V_LCVAL]
         str     r1,[r12,#V_LCK]
-ctrl_lc_store
-        mov     r0,#10
-        b       ctrl_reg_store
-ctrl_reg_slow
-        ldr     r0,[sp],#4
-        orr     r0,r0,#0x80             ; the second byte: 0x80 | register
+ctrl_lc_done
+        ldr     r3,[sp],#4
+        REGSTORE 10
+        b       ctrl_count
+ctrl_lc_slow
+        ldr     r3,[sp],#4
+ctrl_slow10
+        mov     r0,#0x8A
         mov     r1,#0xBF
         b       z80j_port_out_c
 
@@ -758,104 +779,90 @@ wm_slow_put
 
 ;----------------------------------------------------------------------------
 ; Machine event at the end of a stretch (ctx->event_a): vdp_event in
-; assembly. In: r10 = global pointer; r0-r2 and r12 free. Out: r0 = 0 when
-; handled, 1 when the C callback must run instead (the line counter
-; crossed an underflow with lines left over, which needs a division):
-; nothing is changed in that case.
+; assembly. In: r0 = ctx->line, r10 = global pointer. Preserves r1-r11.
+; Out: r0 = 0 when handled, with r12 = the new ctx->event_line; r0 = 1 when
+; the C callback must run instead (the line counter crossed an underflow
+; with lines left over, which needs a division): nothing is changed in
+; that case. The timing fields are loaded together (frame base, VBlank
+; done, line counter), registers 0-3 as one word.
 ;----------------------------------------------------------------------------
 sms_vdp_event_a
         VDP
-        stmfd   sp!,{r3,r4,r5}
-        ldr     r3,[r12,#V_ACTIVE]      ; r3 = a, active lines
-        ldr     r0,[r10,#LINE]
-        ldr     r1,[r12,#V_FRAMEBASE]
+        stmfd   sp!,{r1-r7}
+        add     r1,r12,#V_FRAMEBASE
+        ldmia   r1,{r1-r4}              ; frame base, VBlank done, lc_k, lc_val
+        ldr     r5,[r12,#V_ACTIVE]      ; a, active lines
         sub     r0,r0,r1                ; k = line of the frame
         ; lc_sync(k)
-        ldr     r1,[r12,#V_LCK]
-        cmp     r0,r1
-        bls     ev_synced               ; k <= lc_k
-        cmp     r1,r3
-        bhi     ev_tail                 ; lc_k > a: no countdown
         cmp     r0,r3
-        addhi   r2,r3,#1
-        movls   r2,r0                   ; end = min(k, a + 1)
-        sub     r2,r2,r1                ; n = end - lc_k
-        ldr     r4,[r12,#V_LCVAL]
-        cmp     r2,r4
-        bls     ev_count                ; no underflow
-        add     r5,r4,#1
-        cmp     r2,r5
+        bls     ev_synced               ; k <= lc_k
+        cmp     r3,r5
+        bhi     ev_tail                 ; lc_k > a: no countdown
+        cmp     r0,r5
+        addhi   r6,r5,#1
+        movls   r6,r0                   ; end = min(k, a + 1)
+        sub     r6,r6,r3                ; n = end - lc_k
+        subs    r4,r4,r6
+        bcs     ev_tail                 ; no underflow
+        cmn     r4,#1
         bne     ev_fallback             ; underflow with lines left over
         ldrb    r4,[r12,#V_REG+10]      ; underflow on the last line: reload
-        mov     r5,#1
-        str     r5,[r12,#V_LINEFLAG]
-        b       ev_store
-ev_count
-        sub     r4,r4,r2
-ev_store
-        str     r4,[r12,#V_LCVAL]
+        mov     r6,#1
+        str     r6,[r12,#V_LINEFLAG]
 ev_tail
-        add     r2,r3,#1
-        cmp     r0,r2
+        add     r6,r5,#1
+        cmp     r0,r6
         ldrhib  r4,[r12,#V_REG+10]      ; past line a + 1 the counter reloads
-        strhi   r4,[r12,#V_LCVAL]
-        str     r0,[r12,#V_LCK]
+        mov     r3,r0                   ; lc_k = k
+        add     r6,r12,#V_LCK
+        stmia   r6,{r3,r4}
 ev_synced
         ; VBlank flag at the end of the line after the active display
-        cmp     r0,r3
+        cmp     r0,r5
         bls     ev_irq
-        ldr     r1,[r12,#V_VBLDONE]
-        teq     r1,#0
+        teq     r2,#0
         bne     ev_irq
-        mov     r1,#1
-        str     r1,[r12,#V_VBLDONE]
-        ldr     r1,[r12,#V_STATUS]
-        orr     r1,r1,#0x80
-        str     r1,[r12,#V_STATUS]
+        mov     r2,#1
+        str     r2,[r12,#V_VBLDONE]
+        ldr     r6,[r12,#V_STATUS]
+        orr     r6,r6,#0x80
+        str     r6,[r12,#V_STATUS]
 ev_irq
-        ; interrupt line = (VBlank flag and R1 bit 5) or (line flag and R0 bit 4)
-        mov     r4,#0
-        ldr     r1,[r12,#V_STATUS]
-        tst     r1,#0x80
-        ldrneb  r2,[r12,#V_REG+1]
-        tstne   r2,#0x20
-        movne   r4,#1
-        ldr     r1,[r12,#V_LINEFLAG]
-        teq     r1,#0
-        ldrneb  r2,[r12,#V_REG]
-        tstne   r2,#0x10
-        movne   r4,#1
-        str     r4,[r10,#IRQ_LINE]
+        ; interrupt line = (VBlank flag and R1 bit 5) or (line flag and R0
+        ; bit 4); registers 0-3 in one big-endian word: R0 in bits 24-31,
+        ; R1 in bits 16-23
+        ldr     r0,[r12,#V_REG]
+        add     r6,r12,#V_STATUS
+        ldmia   r6,{r6,r7}              ; status, line flag
+        ands    r6,r0,r6,lsl#14         ; status bit 7 against R1 bit 5
+        andeqs  r6,r0,r7,lsl#28         ; line flag against R0 bit 4
+        movne   r6,#1
+        str     r6,[r10,#IRQ_LINE]
         ; next event: VBlank, or the next counter underflow while line
         ; interrupts are enabled, else the end of the frame
-        ldr     r1,[r12,#V_LINES]
-        ldr     r2,[r12,#V_VBLDONE]
+        ldr     r6,[r12,#V_LINES]
         teq     r2,#0
-        addeq   r1,r3,#1
-        ldrb    r2,[r12,#V_REG]
-        tst     r2,#0x10
+        addeq   r6,r5,#1
+        tst     r0,#0x10000000
         beq     ev_sched
-        ldr     r2,[r12,#V_LCK]
-        cmp     r2,r3
+        cmp     r3,r5
         bhi     ev_sched
-        ldr     r4,[r12,#V_LCVAL]
-        add     r2,r2,r4
-        add     r2,r2,#1                ; underflow line
-        add     r4,r3,#1
-        cmp     r2,r4
+        add     r7,r3,r4
+        add     r7,r7,#1                ; underflow line
+        add     r2,r5,#1
+        cmp     r7,r2
         bhi     ev_sched
-        cmp     r2,r1
-        movlo   r1,r2
+        cmp     r7,r6
+        movlo   r6,r7
 ev_sched
-        ldr     r2,[r12,#V_FRAMEBASE]
-        add     r1,r1,r2
-        str     r1,[r10,#EVENT_LINE]
+        add     r12,r6,r1
+        str     r12,[r10,#EVENT_LINE]
         mov     r0,#0
-        ldmfd   sp!,{r3,r4,r5}
+        ldmfd   sp!,{r1-r7}
         mov     pc,lr
 ev_fallback
         mov     r0,#1
-        ldmfd   sp!,{r3,r4,r5}
+        ldmfd   sp!,{r1-r7}
         mov     pc,lr
 
         END

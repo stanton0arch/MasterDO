@@ -19,6 +19,7 @@
 /* ARM condition codes. */
 #define C_EQ 0x0u
 #define C_NE 0x1u
+#define RAM_INLINE_WORDS 16u   /* z80jit_emt.s */
 #define C_CS 0x2u
 #define C_CC 0x3u
 #define C_MI 0x4u
@@ -2142,9 +2143,16 @@ static void ref_emit_block_code(jit_block_ctx *b)
         uint32 w = 0;
         uint32 k2;
         uint32 *mask;
-        ref_emit_b(j, C_AL, 1, j->glue.verify);
+        uint32 *bytes;
+        uint32 inl = nwords <= RAM_INLINE_WORDS;
+
+        if (inl)
+            emit(j, 0xEB000000u | (2 * nwords + 1));   /* BL over the data words */
+        else
+            ref_emit_b(j, C_AL, 1, j->glue.verify);
         emit(j, ins[0].pc);
         emit(j, nwords);
+        bytes = j->cur;
         for (k2 = 0; k2 < nwords * 4; k2++) {
             uint32 v = 0;
 
@@ -2173,6 +2181,48 @@ static void ref_emit_block_code(jit_block_ctx *b)
                 for (k2 = off + lead; k2 < off + lead + 2; k2++) {
                     if (k2 - lead < len)
                         mask[k2 >> 2] &= ~(0xFFu << (24 - 8 * (k2 & 3)));
+                }
+            }
+        }
+        /* The inline check of a short block: the words loaded with LDM
+         * from the read table entry of the page, each compared with BICS
+         * of its masked bytes and EORS of the others (zero bytes left out
+         * but for the last), then BNE to the glue's check. */
+        if (inl) {
+            uint32 pc0 = ins[0].pc;
+            uint32 left = nwords;
+
+            emit(j, 0xE51AC000u | (((pc0 >> 8) + 1) << 2));     /* LDR r12,[r10,#-4(page+1)] */
+            if (pc0 & 0xFF00u)
+                emit(j, 0xE28CCC00u | ((pc0 >> 8) & 0xFFu));    /* ADD r12,r12,#hi */
+            if (pc0 & 0xFCu)
+                emit(j, 0xE28CC000u | (pc0 & 0xFCu));           /* ADD r12,r12,#lo */
+            while (left != 0) {
+                uint32 g = left > 4 ? 3 : left;
+                uint32 r;
+
+                if (left > 4)
+                    emit(j, 0xE8BC0007u);                       /* LDMIA r12!,{r0-r2} */
+                else
+                    emit(j, 0xE89C0000u | (g == 4 ? 0x1007u : (1u << g) - 1));
+                left -= g;
+                for (r = 0; r < g; r++) {
+                    uint32 e = *bytes++;
+                    uint32 m = *mask++;
+                    uint32 reg = r == 3 ? 12 : r;
+                    uint32 regs = (reg << 16) | (reg << 12);
+                    int32 k3;
+
+                    for (k3 = 3; k3 >= 0; k3--) {
+                        uint32 sh = 8 * (uint32)k3;
+                        uint32 rot = ((16 - 4 * (uint32)k3) & 15) << 8;
+
+                        if (((m >> sh) & 0xFFu) == 0)
+                            emit(j, 0xE3D00000u | regs | rot | 0xFFu);  /* BICS */
+                        else if (((e >> sh) & 0xFFu) != 0 || k3 == 0)
+                            emit(j, 0xE2300000u | regs | rot | ((e >> sh) & 0xFFu));  /* EORS */
+                    }
+                    ref_emit_b(j, C_NE, 0, j->glue.verify);
                 }
             }
         }

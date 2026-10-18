@@ -543,8 +543,8 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: sprite evaluation without a per-line pass, priority patches over the "
-           "ordered sprites, no cel for sprites off the screen\n");
+    printf("masterdo: line interrupt path: inline entry check of short RAM blocks, "
+           "leaner control port, stretch end and VDP event\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);

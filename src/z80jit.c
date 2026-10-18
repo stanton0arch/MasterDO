@@ -1483,10 +1483,11 @@ uint32 z80j_hot(z80j_state *j)
 }
 
 /* Does the RAM block still describe the code at its address? Its entry
- * check holds the address, the length and the bytes it was made from. */
-/* The entry check of a RAM block, as z80j_glue_verify makes it: the host
- * words from the one holding the first byte of the block, against the
- * bytes and the mask recorded after the call. */
+ * check holds the address, the length and the bytes it was made from:
+ * the host words from the one holding the first byte of the block,
+ * against the bytes and the mask recorded after the BL, as the glue's
+ * loop (z80j_glue_verify) and the inline check of short blocks compare
+ * them. */
 static uint32 block_bytes_match(const z80j_ctx *ctx, const z80j_block *blk)
 {
     const uint32 *h = blk->entry;
