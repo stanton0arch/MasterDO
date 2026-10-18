@@ -17,6 +17,9 @@
 #define CHECK_OFF(name, cond) typedef char check_##name[(cond) ? 1 : -1]
 CHECK_OFF(ctx_size, sizeof(z80j_ctx) == SMS_VDP_OFFSET);
 CHECK_OFF(vdp_first, offsetof(sms_machine, vdp) == 0);
+CHECK_OFF(psg_reg, offsetof(sms_machine, psg_reg) == SMS_PSG_REG);
+CHECK_OFF(psg_latch, offsetof(sms_machine, psg_latch) == SMS_PSG_REG - 4);
+CHECK_OFF(psg_w, offsetof(sms_machine, io.psg_w) == SMS_PSG_W);
 
 /* Port index: address bits 7 and 6, then bit 0. */
 #define PORT_KIND(p) ((((p) >> 5) & 6) | ((p) & 1))
@@ -165,8 +168,9 @@ void sms_reset(sms_machine *s)
 }
 
 /* Port handlers: the C callbacks above, except for the VDP data port,
- * the status read, the control port and the V and H counter reads,
- * handled in assembly (the C callbacks remain their slow paths). */
+ * the status read, the control port, the V and H counter reads and the
+ * PSG writes, handled in assembly (the C callbacks remain their slow
+ * paths). */
 static void sms_ports(sms_machine *s)
 {
     z80j_ctx *ctx = s->ctx;
@@ -185,8 +189,10 @@ static void sms_ports(sms_machine *s)
             s->port_out[p] = JIT_ADDR(sms_vdp_ctrl_w);
         } else if (PORT_KIND(p) == 2) {
             s->port_in[p] = JIT_ADDR(sms_vdp_vc_r);
+            s->port_out[p] = JIT_ADDR(sms_psg_w);
         } else if (PORT_KIND(p) == 3) {
             s->port_in[p] = JIT_ADDR(sms_vdp_hc_r);
+            s->port_out[p] = JIT_ADDR(sms_psg_w);
         }
     }
     ctx->port_in = JIT_ADDR(s->port_in);

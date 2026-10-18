@@ -93,5 +93,10 @@ void sms_vdp_vc_r(void);
 void sms_vdp_hc_r(void);
 void sms_vdp_ctrl_w(void);
 void sms_vdp_data_wn(void);
+void sms_psg_w(void);
+
+/* Offsets of the PSG fields from the machine, for sms_psg_w (sms_io.s). */
+#define SMS_PSG_REG     0x5200
+#define SMS_PSG_W       0x5228
 
 #endif /* SMS_H */

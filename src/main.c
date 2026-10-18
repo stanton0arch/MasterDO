@@ -543,7 +543,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: background pieces of every line band in one assembly pass\n");
+    printf("masterdo: V counter reads, PSG writes and the state hash in assembly, scroll line bands in one pass, leaner sprite ordering\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);

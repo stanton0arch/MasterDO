@@ -530,4 +530,7 @@ void   z80j_default_glue(z80j_glue *glue);
 /* Stores value in count words, count a multiple of 4 (z80jit_glue.s). */
 void   z80j_fill_words(uint32 *dst, uint32 count, uint32 value);
 
+/* h * 31 + w[k] over count words, count a multiple of 8 (z80jit_glue.s). */
+uint32 z80j_hash_words(uint32 h, const uint32 *w, uint32 count);
+
 #endif /* Z80JIT_H */

@@ -377,6 +377,11 @@ typedef struct {
     uint16 *pluts;          /* PLUT sets of the palette bands */
 } render_band_args;
 uint32 render_band_pieces(render_band_args *a, const uint32 *lb);
+/* The line bands of the usual frame (the display on, one name table, one
+ * palette band) straight from the log of the horizontal scroll writes, as
+ * vdp_bands and line_bands make them; hl = picture height | layer << 24
+ * (render_a.s). Returns the words written to out | the bands << 16. */
+uint32 render_scroll_lbands(const uint32 *log, uint32 n, uint32 top, uint32 hl, uint32 *out);
 /* Converts tile t (flip: mirrored horizontally) from the VDP's four bit
  * planes to 8 bpp rows into the layer's stores (render_a.s). */
 void   render_tile_conv(render_layer *l, uint32 t, uint32 flip, const uint8 *vram);

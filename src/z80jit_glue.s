@@ -32,6 +32,7 @@
         EXPORT  z80j_port_out_c
         EXPORT  z80j_port_outn_loop
         EXPORT  z80j_fill_words
+        EXPORT  z80j_hash_words
         EXPORT  z80j_glue_write
         EXPORT  z80j_write_generic
         EXPORT  z80j_write_result
@@ -590,6 +591,33 @@ fill_4
         tst     r1,#4
         stmneia r0!,{r2-r5}
         ldmfd   sp!,{r4-r9,pc}
+
+;----------------------------------------------------------------------------
+; uint32 z80j_hash_words(uint32 h, const uint32 *w, uint32 count)
+; h = h * 31 + w[k] over count words (a multiple of 8), eight at a time.
+;----------------------------------------------------------------------------
+        MACRO
+        HASHW   $r
+        rsb     r0,r0,r0,lsl #5
+        add     r0,r0,$r
+        MEND
+
+z80j_hash_words
+        stmfd   sp!,{r4-r10,lr}
+        add     r2,r1,r2,lsl #2         ; the end
+hash_8
+        ldmia   r1!,{r3-r10}
+        HASHW   r3
+        HASHW   r4
+        HASHW   r5
+        HASHW   r6
+        HASHW   r7
+        HASHW   r8
+        HASHW   r9
+        HASHW   r10
+        cmp     r1,r2
+        blo     hash_8
+        ldmfd   sp!,{r4-r10,pc}
 
 ;----------------------------------------------------------------------------
 ; Block copies of LDIR (z80j_glue_ldir, upwards) and LDDR (z80j_glue_lddr,

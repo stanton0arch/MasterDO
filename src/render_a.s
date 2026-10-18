@@ -14,6 +14,7 @@
         EXPORT  render_tile_conv
         EXPORT  render_rect_pieces
         EXPORT  render_band_pieces
+        EXPORT  render_scroll_lbands
         EXPORT  render_sprite_runs
         EXPORT  render_prio_patches
         EXPORT  render_prio_groups
@@ -1070,6 +1071,90 @@ rp_mod
 rp_done
         mov     r0,r7
         ldmfd   sp!,{r1,r4-r11,pc}
+
+;----------------------------------------------------------------------------
+; uint32 render_scroll_lbands(const uint32 *log, uint32 n, uint32 top,
+;                             uint32 hl, uint32 *out)
+;
+; The line bands of the usual frame (the display on, one name table, one
+; palette band) straight from the n writes to the horizontal scroll
+; recorded at log (line << 8 | value), as vdp_bands and line_bands make
+; them one after the other: top is the value of the first band; a write on
+; the first line of the last band replaces its value, and merges the band
+; with the one before it when they become equal; a write of another value
+; on a later line starts a band. hl is the picture height | the layer bit
+; << 24. A band is written once it can no longer change (one band behind
+; the log), as ya | yb << 8 | value << 16 | layer << 24, those starting at
+; or below the picture height dropped and the others cut there. Returns
+; the words written | the number of bands << 16.
+;----------------------------------------------------------------------------
+        MACRO
+        SLEMIT  $t,$e,$v                ; the band $t to $e (cut at h), value $v
+        cmp     $t,r10
+        bhs     %F1
+        cmp     $e,r10
+        movls   r7,$e
+        movhi   r7,r10
+        orr     r7,$t,r7,lsl #8
+        orr     r7,r7,$v,lsl #16
+        orr     r7,r7,r3
+        str     r7,[r8],#4
+1
+        MEND
+
+render_scroll_lbands
+        stmfd   sp!,{r4-r11,lr}
+        ldr     r8,[sp,#36]             ; out
+        mov     r11,r8
+        and     r10,r3,#0xFF            ; h
+        and     r3,r3,#0xFF000000       ; the layer bit
+        add     r1,r0,r1,lsl #2         ; the end of the log
+        and     r2,r2,#0xFF             ; v1: the value of the last band
+        mov     r4,#0                   ; t1: its first line
+        mvn     r5,#0                   ; t0: the band before it (-1: none to write)
+        mov     r6,#0                   ; v0: its value
+        mov     r9,#1                   ; bands
+sl_loop
+        cmp     r0,r1
+        beq     sl_end
+        ldr     r12,[r0],#4
+        mov     lr,r12,lsr #8           ; line
+        and     r12,r12,#0xFF           ; value
+        cmp     lr,r4
+        beq     sl_same
+        bcc     sl_loop                 ; before the last band (the lines only grow)
+        cmp     r12,r2
+        beq     sl_loop                 ; the same value: no new band
+        cmp     r5,#0
+        blt     sl_shift
+        SLEMIT  r5,r4,r6                ; the band before the last is final
+sl_shift
+        mov     r5,r4
+        mov     r6,r2
+        mov     r4,lr
+        mov     r2,r12
+        add     r9,r9,#1
+        b       sl_loop
+sl_same
+        mov     r2,r12
+        cmp     r5,#0
+        blt     sl_loop
+        cmp     r2,r6
+        bne     sl_loop
+        mov     r4,r5                   ; merged with the band before it; the one
+        mvn     r5,#0                   ; before that is written already
+        sub     r9,r9,#1
+        b       sl_loop
+sl_end
+        cmp     r5,#0
+        blt     sl_last
+        SLEMIT  r5,r4,r6
+sl_last
+        SLEMIT  r4,r10,r2
+        sub     r0,r8,r11
+        mov     r0,r0,lsr #2
+        orr     r0,r0,r9,lsl #16
+        ldmfd   sp!,{r4-r11,pc}
 
 ;----------------------------------------------------------------------------
 ; uint32 render_band_pieces(render_band_args *a, const uint32 *lb)

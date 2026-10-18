@@ -912,11 +912,10 @@ uint32 game_state_hash(const game *g)
 {
     const z80j_ctx *c = g->ctx;
     const uint32 *w = (const uint32 *)c->mram;
-    uint32 h = 0;
+    uint32 h;
     uint32 k;
 
-    for (k = 0; k < 0x2000 / 4; k++)
-        h = h * 31 + w[k];
+    h = z80j_hash_words(0, w, 0x2000 / 4);
     for (k = 0; k < 8; k++)
         h = h * 31 + c->regs[k];
     h = h * 31 + c->ix + c->iy * 7 + c->bc2 * 11 + c->de2 * 13 + c->hl2 * 17 +

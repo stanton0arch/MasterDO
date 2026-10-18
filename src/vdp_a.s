@@ -115,14 +115,13 @@ hd_clr
         ; the tile was written (dirty byte). Clobbers lr.
         MACRO
         TROWS   $dst
-        add     lr,r6,#S_TOK
-        ldrb    $dst,[lr,r2]
-        add     lr,r11,#V_DIRTY
-        ldrb    lr,[lr,r2]
-        subs    lr,$dst,lr              ; 1: valid and not written since
-        add     $dst,r6,#S_TROWS
-        cmp     lr,#1
-        ldreqb  $dst,[$dst,r2]
+        add     lr,r11,r2
+        ldrb    lr,[lr,#V_DIRTY]
+        add     $dst,r6,r2
+        cmp     lr,#0                   ; not written since
+        ldreqb  lr,[$dst,#S_TOK]
+        cmpeq   lr,#1                   ; and the entry valid
+        ldreqb  $dst,[$dst,#S_TROWS]
         beq     %F8
         bl      tile_rows               ; into lr and the cache
         mov     $dst,lr
@@ -132,11 +131,12 @@ hd_clr
         ; Pass A, up to the terminator: the screen line and the range of
         ; each sprite, the opaque rows of its tiles, and the sprites on the
         ; screen chained by first row, flagged when they have no opaque
-        ; pixel (they cannot collide). The lines each sprite shows
-        ; (spr_vis) are only written when some line holds more than eight
-        ; sprites: nothing reads them otherwise.
+        ; pixel (they cannot collide), with a bit for each group of 16
+        ; rows holding a chain. The lines each sprite shows (spr_vis) are
+        ; only written when some line holds more than eight sprites:
+        ; nothing reads them otherwise.
         mov     r4,#0
-        mov     r5,#0                   ; r5 = sprites on the screen
+        mov     r5,#0                   ; r5 = groups of 16 rows with a chain
         ldr     r7,[sp,#F_ACTIVE]
         cmp     r7,#192
         orreq   r7,r7,#0xD000           ; r7 = active | terminator << 8
@@ -191,7 +191,9 @@ pa_rows
         strb    r3,[lr,r2]              ; the sprite heads the chain of its row
         add     lr,sp,#F_NEXT
         strb    r0,[lr,r4]
-        add     r5,r5,#1
+        mov     r0,r2,lsr #4
+        mov     lr,#1
+        orr     r5,r5,lr,lsl r0         ; the group of the row holds a chain
         mov     r1,r1,lsl #16
         mov     r1,r1,lsr #16           ; the range alone
 pa_store
@@ -205,11 +207,9 @@ pa_done
 
         ; The sprites on the screen by first row, from the chains of pass A
         ; (each row's chain is in reverse table order, which nothing below
-        ; minds).
-        ldr     r7,[sp,#F_ACTIVE]
-        add     r7,r7,#32               ; r7 = chain bytes
+        ; minds), read in the groups of 16 rows that hold one.
+        mov     r7,r5                   ; r7 = groups left
         mov     r5,#0                   ; r5 = sprites ordered
-        mov     r1,#0                   ; chain byte
         add     r2,sp,#F_HEAD
         add     r3,sp,#F_ORDER
         MACRO
@@ -234,21 +234,30 @@ pa_done
         add     r12,sp,#F_NEXT
         ldrb    r12,[r12,r6]
         b       %B5
-6       add     r1,r1,#1
+6
         MEND
 
+co_group
+        movs    r7,r7,lsr #1            ; C: the group holds a chain
+        bcs     co_gwords
+        add     r2,r2,#16
+        bne     co_group                ; Z: no group left
+        b       co_gdone
+co_gwords
+        add     r1,r2,#16               ; the end of the group
 co_oword
         ldr     r0,[r2],#4              ; four rows of heads
         cmn     r0,#1
-        addeq   r1,r1,#4
         beq     co_onext
         CHAIN   24
         CHAIN   16
         CHAIN   8
         CHAIN   0
 co_onext
-        cmp     r1,r7
+        cmp     r2,r1
         bne     co_oword
+        b       co_group
+co_gdone
         str     r5,[sp,#F_NSORT]
         add     r6,r11,#0x4800
         add     r6,r6,#V_SPR-0x4800     ; r6 = &spr_n again
@@ -415,70 +424,101 @@ cp_done
         str     r5,[r6,#S_NORD]
         cmp     r5,#2
         blo     done                    ; one sprite with opaque pixels at most
-        ; Pairs: i against the j after it whose first line is before the
-        ; last line of i.
-co_pairs
-        mov     r0,#8
-        mov     r8,r0,lsl r9
-        mov     r8,r8,lsl #8            ; r8 = sprite width << 8
-        mov     r7,#0                   ; i
-co_i
-        add     r3,r7,#1
-        cmp     r3,r5
-        bhs     done
-        add     lr,r6,#0x800
-        add     lr,lr,#S_ORDER-0x800
-        ldr     r0,[lr,r7,lsl #2]       ; sprite a: its word
-        tst     r4,#ST_OVERFLOW
-        beq     co_ishown
+        ; Pairs: a against each b after it whose first line is before the
+        ; last line of a. The columns meet when dx = x of b - x of a is
+        ; within a sprite width w either way: with K = (w << 8) - 0x80,
+        ; when (dx << 8) + K - 0x80 is below 2K (unsigned), which the x of
+        ; a, kept less K - 0x80, gives with one compare.
+        MACRO
+$l      NEAR    $next                   ; lr = (dx << 8) + K - 0x80, r12 = b
+$l      stmfd   sp!,{r0-r3}
+        and     r0,r0,#0xFF
+        and     r1,r12,#0xFF
+        sub     r2,lr,r8
+        add     r2,r2,#0x80
+        mov     r2,r2,asr #8            ; dx
+        bl      pair_test
+        movs    r12,r0
+        ldmfd   sp!,{r0-r3}
+        beq     $next
+        orr     r4,r4,#ST_COLLIDE
+        b       done
+        MEND
+
+        MACRO
+        PAIRA   $vis,$next              ; a: r1 = last line + 1 << 16, r2 = x
+        ldr     r0,[r7],#4
+        [ $vis = 1
         and     r12,r0,#0xFF
         add     r12,r6,r12,lsl #2
         ldr     r12,[r12,#S_VIS]
         cmp     r12,#0
-        beq     co_inext                ; hidden on every line
-co_ishown
+        beq     $next                   ; hidden on every line
+        ]
         mov     r1,r0,lsr #24
-        mov     r1,r1,lsl #16           ; last line + 1 of a << 16
-        and     r2,r0,#0xFF00           ; x of a << 8
+        mov     r1,r1,lsl #16
+        and     r2,r0,#0xFF00
+        sub     r2,r2,r8
+        add     r2,r2,#0x80
+        MEND
+
+co_pairs
+        mov     r0,#8
+        mov     r8,r0,lsl r9
+        mov     r8,r8,lsl #8
+        sub     r8,r8,#0x80             ; r8 = K
+        add     r7,r6,#0x800
+        add     r7,r7,#S_ORDER-0x800    ; r7 = a
+        add     r5,r7,r5,lsl #2         ; r5 = the end of the list
+        tst     r4,#ST_OVERFLOW
+        bne     cv_i                    ; some sprites lose lines
+co_i
+        add     r3,r7,#4                ; r3 = b
+        cmp     r3,r5
+        bhs     done
+        PAIRA   0,co_i
 co_j
-        add     lr,r6,#0x800
-        add     lr,lr,#S_ORDER-0x800
-        ldr     r12,[lr,r3,lsl #2]      ; sprite b: its word
+        ldr     r12,[r3],#4
         and     lr,r12,#0xFF0000
         cmp     lr,r1
-        bhs     co_inext                ; b starts after a ends, so do the rest
-        tst     r4,#ST_OVERFLOW
-        beq     co_jshown
-        and     lr,r12,#0xFF
-        add     lr,r6,lr,lsl #2
-        ldr     lr,[lr,#S_VIS]
-        cmp     lr,#0
-        beq     co_jnext
-co_jshown
+        bhs     co_i                    ; b starts after a ends, so do the rest
         and     lr,r12,#0xFF00
-        sub     lr,lr,r2                ; dx << 8
-        cmp     lr,r8
-        bge     co_jnext
-        cmn     lr,r8
-        ble     co_jnext
-        stmfd   sp!,{r0-r3}
-        and     r0,r0,#0xFF
-        and     r1,r12,#0xFF
-        mov     r2,lr,asr #8
-        bl      pair_test
-        movs    r12,r0
-        ldmfd   sp!,{r0-r3}
-        bne     co_hit
+        sub     lr,lr,r2
+        cmp     lr,r8,lsl #1
+        blo     co_near
 co_jnext
-        add     r3,r3,#1
         cmp     r3,r5
-        blo     co_j
-co_inext
-        add     r7,r7,#1
+        bne     co_j
         b       co_i
-co_hit
-        orr     r4,r4,#ST_COLLIDE
-        b       done
+co_near NEAR    co_jnext
+
+        ; The same where some sprites lose lines: those hidden on every
+        ; line are left out.
+cv_i
+        add     r3,r7,#4
+        cmp     r3,r5
+        bhs     done
+        PAIRA   1,cv_i
+cv_j
+        ldr     r12,[r3],#4
+        and     lr,r12,#0xFF0000
+        cmp     lr,r1
+        bhs     cv_i
+        and     lr,r12,#0xFF00
+        sub     lr,lr,r2
+        cmp     lr,r8,lsl #1
+        bhs     cv_jnext
+        and     r0,r12,#0xFF
+        add     r0,r6,r0,lsl #2
+        ldr     r0,[r0,#S_VIS]
+        cmp     r0,#0
+        ldrne   r0,[r7,#-4]             ; a again
+        bne     cv_near
+cv_jnext
+        cmp     r3,r5
+        bne     cv_j
+        b       cv_i
+cv_near NEAR    cv_jnext
 
 done
         ldr     r0,[r11,#V_STATUS]

@@ -1,7 +1,7 @@
 ; sms_io.s - port handlers of the Master System in assembly, for the hot
 ; paths: VDP data port writes and reads, VDP control port writes, status
-; and counter reads, and runs of OUTI / OUTD to the data port (the usual
-; way to upload tiles).
+; and counter reads, runs of OUTI / OUTD to the data port (the usual way
+; to upload tiles), and PSG writes.
 ;
 ; The handlers follow the port handler conventions of z80jit.h: called by
 ; the generated code with r10 = global pointer, arguments in r0-r2, r7 =
@@ -23,6 +23,7 @@
         EXPORT  sms_vdp_event_a
         EXPORT  sms_vdp_vc_r
         EXPORT  sms_vdp_hc_r
+        EXPORT  sms_psg_w
 
         IMPORT  z80j_port_out_c
         IMPORT  z80j_port_in_c
@@ -63,6 +64,10 @@ V_CRN           EQU     0x4F84          ; the colour RAM log follows its count
 VDP_HS_LOG      EQU     256
 VDP_NT_LOG      EQU     16
 VDP_CR_LOG      EQU     64
+
+; Machine fields past the vdp_state (sms_machine, sms.h; checked in sms.c).
+M_PSGREG        EQU     0x5200          ; psg_reg[8], psg_latch just below
+M_PSGW          EQU     0x5228          ; io.psg_w
 
 ; The access word (vdp.h): the address in bits 18-31, the code in bits
 ; 14-15, the pending and slow marks, the data port writes of the frame in
@@ -302,14 +307,31 @@ stat_lc_slow
         subhs   r2,r2,r0
         MEND
 
+; The V counter only needs the line: the lines at the stretch end less
+; ceil(left / 228), computed as (ceil(left / 4) + 56) / 57 by one
+; multiplication (exact within a frame), as the control port does; the
+; line count and the jump of the display mode come with one LDM.
 sms_vdp_vc_r
+        add     r0,r2,#0x300
+        mov     r0,r0,lsr#10
+        add     r0,r0,#56
+        mov     r1,#0x8F00
+        orr     r1,r1,#0xB9
+        mul     r2,r1,r0                ; lines back << 21
+        ldr     r0,[r10,#LINE]
+        sub     r0,r0,r2,lsr#21         ; the line of the access
         VDP
-        BEAM
-        ldr     r1,[r12,#V_VCJUMP]
-        cmp     r2,r1
-        ldrhi   r1,[r12,#V_VCBACK]
-        subhi   r2,r2,r1
-        and     r0,r2,#0xFF
+        ldr     r1,[r12,#V_FRAMEBASE]
+        subs    r0,r0,r1                ; from the start of the frame
+        add     r12,r12,#V_LINES
+        ldmia   r12,{r1,r2,r12}         ; lines, vc_jump, vc_back
+        addmi   r0,r0,r1                ; an access that ends the previous frame
+        cmp     r0,r1
+        subhs   r0,r0,r1
+        cmp     r0,r2
+        subhi   r0,r0,r12
+        and     r0,r0,#0xFF
+        VDP
         ldr     r1,[r12,#V_NCOUNTR]
         add     r1,r1,#1
         str     r1,[r12,#V_NCOUNTR]
@@ -323,6 +345,45 @@ sms_vdp_hc_r
         ldr     r1,[r12,#V_NCOUNTR]
         add     r1,r1,#1
         str     r1,[r12,#V_NCOUNTR]
+        mov     pc,lr
+
+;----------------------------------------------------------------------------
+; OUT to the PSG (ports $40-$7F), as psg_write of sms.c: a latch byte (bit
+; 7 set) selects a register and gives its low 4 bits; a data byte gives the
+; high 6 bits of a tone register, or the whole value of the others (the
+; volumes and the noise register take 4 bits).
+;----------------------------------------------------------------------------
+sms_psg_w
+        VDPR    r12
+        add     r12,r12,#M_PSGREG
+        ldr     r1,[r12,#M_PSGW-M_PSGREG]
+        add     r1,r1,#1
+        str     r1,[r12,#M_PSGW-M_PSGREG]
+        and     r0,r0,#0xFF
+        tst     r0,#0x80
+        movne   r1,r0,lsr#4
+        andne   r1,r1,#7
+        strne   r1,[r12,#-4]            ; the latch
+        ldreq   r1,[r12,#-4]
+        tst     r1,#1
+        bne     psg_4bits               ; a volume
+        cmp     r1,#6
+        beq     psg_4bits               ; the noise register
+        ldr     r2,[r12,r1,lsl#2]       ; a tone period: 10 bits
+        tst     r0,#0x80
+        bicne   r2,r2,#0x0F
+        andne   r0,r0,#0x0F
+        andeq   r2,r2,#0x0F
+        andeq   r0,r0,#0x3F
+        moveq   r0,r0,lsl#4
+        orr     r0,r0,r2
+        str     r0,[r12,r1,lsl#2]
+        mov     r0,#0
+        mov     pc,lr
+psg_4bits
+        and     r0,r0,#0x0F
+        str     r0,[r12,r1,lsl#2]
+        mov     r0,#0
         mov     pc,lr
 
 ;----------------------------------------------------------------------------

@@ -767,11 +767,12 @@ static uint32 pband_of(const renderer *r, uint32 y)
  * (r->lbands, with the scroll, the layer of their table and their
  * palette band); the other lines get a backdrop rectangle. Also notes the
  * rows each layer shows. Returns the number of backdrop rectangles and,
- * in *any_on, whether any line is displayed. The band tables were filled
- * by the caller (r->tops... with nb, nnb and ndb bands, r->ptops with
- * r->npb).
+ * in *any_on, whether any line is displayed. The name table, display and
+ * palette band tables were filled by the caller (r->ntops and r->dtops
+ * with nnb and ndb bands, r->ptops with r->npb); the scroll bands come
+ * from the log here.
  */
-static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nb, uint32 nnb, uint32 ndb,
+static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nnb, uint32 ndb,
                          uint32 *any_on)
 {
     uint32 vs = v->reg[9];
@@ -780,13 +781,12 @@ static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nb, uint32 nnb,
     uint32 nbl = 0;
     uint32 nl = 0;
     uint32 on = 0;
+    uint32 nb;
     uint32 j;
     uint32 k;
     uint32 m;
     uint32 q;
 
-    if (nb > 1)
-        r->st.bands++;
     if (ndb > 1)
         r->st.dbands++;
     if (nnb > 1)
@@ -795,21 +795,16 @@ static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nb, uint32 nnb,
         r->layer[m].shown_rows = 0;
     if (ndb == 1 && r->dons[0] && nnb == 1 && r->npb == 1) {
         /* The usual case: the display on, one name table and one palette
-         * for the whole picture. The line bands are the scroll bands, and
-         * together they show the rows of the lines 0 to h - 1. */
+         * for the whole picture. The line bands are the scroll bands, made
+         * from the log in one pass, and together they show the rows of the
+         * lines 0 to h - 1. */
         render_layer *l = r->nlayer[0];
         uint32 lw = (l == &r->layer[0]) ? 0 : (uint32)1 << 24;
 
-        for (k = 0; k < nb; k++) {
-            uint32 ya = r->tops[k];
-            uint32 yb = (k + 1 < nb) ? r->tops[k + 1] : h;
-
-            if (ya >= h)
-                break;
-            if (yb > h)
-                yb = h;
-            r->lbands[nl++] = ya | (yb << 8) | ((r->hss[k] & 0xFF) << 16) | lw;
-        }
+        k = render_scroll_lbands(v->hs_log, v->hs_n, v->reg[8], h | lw, r->lbands);
+        if ((k >> 16) > 1)
+            r->st.bands++;
+        nl = k & 0xFFFF;
         l->shown_rows = rows_of(0, h, vs, l->nrows);
         if (vsi)
             l->shown_rows |= rows_of(0, h, 0, l->nrows);
@@ -817,6 +812,9 @@ static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nb, uint32 nnb,
         *any_on = 1;
         return 0;
     }
+    nb = vdp_bands(v->hs_log, v->hs_n, v->reg[8], r->tops, r->hss);
+    if (nb > 1)
+        r->st.bands++;
     for (j = 0; j < ndb; j++) {
         uint32 da = r->dtops[j];
         uint32 db = (j + 1 < ndb) ? r->dtops[j + 1] : h;
@@ -1193,7 +1191,6 @@ void render_update(renderer *r, vdp_state *v)
     uint32 n0;
     uint32 c1;
     uint32 n1;
-    uint32 nb;
     uint32 nnb;
     uint32 ndb;
     uint32 nd;
@@ -1224,9 +1221,8 @@ void render_update(renderer *r, vdp_state *v)
      * bands, which also say which rows each layer shows. */
     nnb = vdp_bands(v->nt_log, v->nt_n, v->reg[2], r->ntops, r->nvals);
     assign_layers(r, v, nnb);
-    nb = vdp_bands(v->hs_log, v->hs_n, v->reg[8], r->tops, r->hss);
     ndb = vdp_bands(v->de_log, v->de_n, v->de_start, r->dtops, r->dons);
-    nbl = line_bands(r, v, nb, nnb, ndb, &any_on);
+    nbl = line_bands(r, v, nnb, ndb, &any_on);
     if (!any_on) {
         r->display_on = 0;
         return;
