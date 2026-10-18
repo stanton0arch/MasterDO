@@ -57,6 +57,14 @@ CHECK_OFF(pa_p, offsetof(render_patch_args, p) == 28);
 CHECK_OFF(pa_height, offsetof(render_patch_args, height) == 32);
 CHECK_OFF(pc_bm_h, offsetof(piece_ctx, bm_h) == 8);
 CHECK_OFF(pc_plut, offsetof(piece_ctx, plut) == 12);
+CHECK_OFF(ba_bm, offsetof(render_band_args, bm) == 16);
+CHECK_OFF(ba_pluts, offsetof(render_band_args, pluts) == 24);
+CHECK_OFF(ccb_next, offsetof(CCB, ccb_NextPtr) == 4);
+CHECK_OFF(ccb_source, offsetof(CCB, ccb_SourcePtr) == 8);
+CHECK_OFF(ccb_xpos, offsetof(CCB, ccb_XPos) == 16);
+CHECK_OFF(ccb_ypos, offsetof(CCB, ccb_YPos) == 20);
+CHECK_OFF(ccb_size, sizeof(CCB) == 68);
+CHECK_OFF(plut_set, RENDER_PLUT_SET == 96);     /* render_band_pieces: 192 bytes a set */
 CHECK_OFF(two_layers, RENDER_LAYERS == 2);      /* render_update handles both by name */
 
 #define BM_PITCH        RENDER_W            /* bytes per bitmap row */
@@ -575,8 +583,8 @@ static void update_palettes(renderer *r, vdp_state *v)
  * the PLUT of the piece context. The source starts on a word boundary:
  * the piece may begin up to 3 pixels left of sa, where it is either
  * clipped or covered by the piece drawn after (or shows the right pixels
- * of the transparent priority layer). Beyond the capacity the piece is
- * dropped and counted. */
+ * of the transparent priority layer). The cel is chained to the cel after
+ * it. Beyond the capacity the piece is dropped and counted. */
 #define EMIT_PIECE(r, p, bm, sy, h, src_y, hs, sa, sb) do { \
         uint32 c0_ = ((sa) - (hs)) & 255; \
         uint32 ca_ = c0_ & ~3u; \
@@ -585,6 +593,7 @@ static void update_palettes(renderer *r, vdp_state *v)
             (r)->st.dropped++; \
         } else { \
             (p)->c = cc_ + 1; \
+            cc_->ccb_NextPtr = cc_ + 1; \
             cc_->ccb_SourcePtr = (CelData *)((bm) + (src_y) * BM_PITCH + ca_); \
             cc_->ccb_PLUTPtr = (p)->plut; \
             cc_->ccb_XPos = (Coord)((int32)((sa) - (c0_ - ca_)) << 16); \
@@ -606,8 +615,9 @@ static void update_palettes(renderer *r, vdp_state *v)
  * lines before 16) unscrolled horizontally, bit 7 keeps the right 64
  * columns unscrolled vertically: each makes a window of its own, the
  * right columns first. On a band neither bit splits (LB_WINDOWS) the
- * callers use render_rect_pieces (render_a.s), which does the same with
- * one window.
+ * strips use render_rect_pieces (render_a.s), which does the same with
+ * one window, and the background render_band_pieces, which does it for
+ * every such band in one pass.
  */
 #define LB_WINDOWS(reg0, lb) (((reg0) & 0x80) || (((reg0) & 0x40) && ((lb) & 0xFF) < 16))
 
@@ -783,6 +793,30 @@ static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nb, uint32 nnb,
         r->st.ntbands++;
     for (m = 0; m < RENDER_LAYERS; m++)
         r->layer[m].shown_rows = 0;
+    if (ndb == 1 && r->dons[0] && nnb == 1 && r->npb == 1) {
+        /* The usual case: the display on, one name table and one palette
+         * for the whole picture. The line bands are the scroll bands, and
+         * together they show the rows of the lines 0 to h - 1. */
+        render_layer *l = r->nlayer[0];
+        uint32 lw = (l == &r->layer[0]) ? 0 : (uint32)1 << 24;
+
+        for (k = 0; k < nb; k++) {
+            uint32 ya = r->tops[k];
+            uint32 yb = (k + 1 < nb) ? r->tops[k + 1] : h;
+
+            if (ya >= h)
+                break;
+            if (yb > h)
+                yb = h;
+            r->lbands[nl++] = ya | (yb << 8) | ((r->hss[k] & 0xFF) << 16) | lw;
+        }
+        l->shown_rows = rows_of(0, h, vs, l->nrows);
+        if (vsi)
+            l->shown_rows |= rows_of(0, h, 0, l->nrows);
+        r->nlb = nl;
+        *any_on = 1;
+        return 0;
+    }
     for (j = 0; j < ndb; j++) {
         uint32 da = r->dtops[j];
         uint32 db = (j + 1 < ndb) ? r->dtops[j + 1] : h;
@@ -940,19 +974,52 @@ static uint32 update_pieces(renderer *r, const vdp_state *v, uint32 *nprio, uint
     pb.c = &r->cels[0];
     pb.end = &r->cels[RENDER_MAX_PIECES];
     pb.bm_h = r->bm_h;
-    for (k = 0; k < r->nlb; k++) {
-        uint32 lb = r->lbands[k];
-        const uint8 *bm = r->layer[(lb >> 24) & 1].bitmap;
+    if (reg0 & 0x80) {
+        /* The right columns unscrolled vertically: a window on every band. */
+        for (k = 0; k < r->nlb; k++) {
+            uint32 lb = r->lbands[k];
 
-        pb.plut = r->pluts + (lb >> 25) * RENDER_PLUT_SET;
-        if (LB_WINDOWS(reg0, lb))
-            rect_pieces(r, &pb, bm, 0, RENDER_W, 0, r->bm_h, lb, reg0, vs);
-        else
-            r->st.dropped += render_rect_pieces(&pb, bm, 0, RENDER_W, 0, r->bm_h, lb, vs);
+            pb.plut = r->pluts + (lb >> 25) * RENDER_PLUT_SET;
+            rect_pieces(r, &pb, r->layer[(lb >> 24) & 1].bitmap, 0, RENDER_W, 0, r->bm_h, lb,
+                        reg0, vs);
+        }
+    } else {
+        render_band_args ba;
+        uint32 parts[2 * 16 + 1];
+        uint32 n = 0;
+
+        ba.c = pb.c;
+        ba.end = pb.end;
+        ba.bm_h = r->bm_h;
+        ba.vs = vs;
+        ba.bm[0] = r->layer[0].bitmap;
+        ba.bm[1] = r->layer[1].bitmap;
+        ba.pluts = r->pluts;
+        k = 0;
+        if (reg0 & 0x40) {
+            /* Rows 0-1 unscrolled horizontally: the bands reaching the
+             * lines before 16 are cut there, the part above them shown
+             * with no scroll, as rect_pieces does. */
+            for (; k < r->nlb && (r->lbands[k] & 0xFF) < 16; k++) {
+                uint32 lb = r->lbands[k];
+                uint32 yb = (lb >> 8) & 0xFF;
+
+                if (yb > 16) {
+                    parts[n++] = (lb & 0xFF0000FFu) | (16 << 8);
+                    parts[n++] = (lb & 0xFFFF0000u) | 16 | (yb << 8);
+                } else {
+                    parts[n++] = lb & 0xFF00FFFFu;
+                }
+            }
+            parts[n] = 0xFFFFFFFFu;
+            if (n != 0)
+                r->st.dropped += render_band_pieces(&ba, parts);
+        }
+        r->lbands[r->nlb] = 0xFFFFFFFFu;
+        r->st.dropped += render_band_pieces(&ba, &r->lbands[k]);
+        pb.c = ba.c;
     }
     np = (uint32)(pb.c - &r->cels[0]);
-    for (k = 1; k < np; k++)
-        r->cels[k - 1].ccb_NextPtr = &r->cels[k];
 
     pp.c = &r->cels[CEL_PRIO0];
     pp.end = &r->cels[CEL_DBLANK0];

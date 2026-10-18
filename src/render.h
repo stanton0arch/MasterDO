@@ -249,7 +249,8 @@ typedef struct {
     uint32  spr_bands;      /* the sprite cels take the PLUTs of their band */
     /* Line bands of the update: the scroll bands crossed with the name
      * table bands, the palette bands and the lines with the display on,
-     * as ya | yb << 8 | hs << 16 | layer << 24 | palette band << 25. */
+     * as ya | yb << 8 | hs << 16 | layer << 24 | palette band << 25, with
+     * room for the end mark render_band_pieces reads them up to. */
     uint32  lbands[VDP_HS_LOG + VDP_NT_LOG + VDP_DE_LOG + VDP_PAL_BANDS + 4];
     uint32  nlb;
     render_stats st;
@@ -361,6 +362,21 @@ typedef struct piece_ctx_s {
 } piece_ctx;
 uint32 render_rect_pieces(piece_ctx *p, const uint8 *bm, uint32 bx0, uint32 bx1,
                           uint32 by0, uint32 by1, uint32 lb, uint32 vs);
+/* The background pieces of line bands that no scroll inhibit window
+ * splits, read from lb up to a word of all ones, in one pass: per band
+ * what render_rect_pieces makes of the whole bitmap of its layer, with
+ * the PLUT of its palette band; each cel is chained to the cel after it
+ * (render_a.s). CONTRACT: matches the BA_* equates. Returns the number of
+ * pieces dropped for lack of cels. */
+typedef struct {
+    CCB    *c;              /* next cel (updated) */
+    CCB    *end;            /* capacity */
+    uint32  bm_h;           /* bitmap lines: the vertical wrap */
+    uint32  vs;             /* vertical scroll */
+    const uint8 *bm[RENDER_LAYERS];     /* bitmap of each layer */
+    uint16 *pluts;          /* PLUT sets of the palette bands */
+} render_band_args;
+uint32 render_band_pieces(render_band_args *a, const uint32 *lb);
 /* Converts tile t (flip: mirrored horizontally) from the VDP's four bit
  * planes to 8 bpp rows into the layer's stores (render_a.s). */
 void   render_tile_conv(render_layer *l, uint32 t, uint32 flip, const uint8 *vram);

@@ -8,7 +8,7 @@
  * pictures every n frames, 3 frame from which the profile counts, 17 write
  * only the pictures at multiples of n and the first 17 of the others that
  * differ, 18 log the writes made during the active display of every
- * frame. The pad
+ * frame, 15 a hash of the cel chain of every frame. The pad
  * is scripted by the host (sim_pad). At the end, the code buffer is dumped
  * for anacode.py and hotblocks.py.
  *
@@ -713,6 +713,26 @@ void hmain(void)
                        (unsigned long)(s->evict_ahead - s0.evict_ahead),
                        (unsigned long)(s->evict_us - s0.evict_us));
             }
+        }
+        if (sim_arg(15) && render_display_on(g.rd)) {
+            /* -celhash: a hash of the cel chain of the frame (every field
+             * the cel engine reads), to compare the cels two builds make of
+             * the same machine state frame by frame. */
+            const CCB *c;
+            uint32 h = 0;
+            uint32 n = 0;
+
+            for (c = render_chain(g.rd); c != NULL; c = c->ccb_NextPtr) {
+                const uint32 *w = (const uint32 *)c;
+                uint32 k;
+
+                for (k = 0; k < sizeof(CCB) / 4; k++)
+                    if (k != 1)     /* the next pointer: the chain order is hashed */
+                        h = (h ^ w[k]) * 16777619u;
+                n++;
+            }
+            printf("Cels: frame %lu: %lu cels, hash %08lx\n", (unsigned long)(f + 1),
+                   (unsigned long)n, (unsigned long)h);
         }
         if (sim_arg(13))
             check_blocks(f);

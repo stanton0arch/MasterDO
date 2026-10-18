@@ -543,8 +543,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: background pieces of the bands past line 16 in assembly under the "
-           "horizontal scroll inhibit\n");
+    printf("masterdo: background pieces of every line band in one assembly pass\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);

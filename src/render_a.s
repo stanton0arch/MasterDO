@@ -13,6 +13,7 @@
         EXPORT  render_rebuild_cells_part
         EXPORT  render_tile_conv
         EXPORT  render_rect_pieces
+        EXPORT  render_band_pieces
         EXPORT  render_sprite_runs
         EXPORT  render_prio_patches
         EXPORT  render_prio_groups
@@ -1069,6 +1070,156 @@ rp_mod
 rp_done
         mov     r0,r7
         ldmfd   sp!,{r1,r4-r11,pc}
+
+;----------------------------------------------------------------------------
+; uint32 render_band_pieces(render_band_args *a, const uint32 *lb)
+;
+; The background pieces of the line bands at lb (ya | yb << 8 | hs << 16 |
+; layer << 24 | palette band << 25), read up to a word of all ones, appended
+; at a->c: for each band what render_rect_pieces makes of the whole bitmap
+; of its layer, with the PLUT of its palette band (looked up again only when
+; the layer or the palette band changes from one band to the next). The
+; lines at and below the screen line s0 that shows bitmap row 0 come before
+; those above it, and each part is the piece from screen column hs, then
+; the piece wrapped to the left edge (its first pixels, before the word
+; boundary of the source, clipped). Each cel is chained to the cel after
+; it. Returns the number of pieces dropped for lack of cels.
+;----------------------------------------------------------------------------
+BA_C            EQU     0
+BA_END          EQU     4
+BA_BMH          EQU     8
+BA_BM0          EQU     16
+BA_PLUTS        EQU     24
+
+        MACRO
+$l      BPIECES                         ; source row r2, y r5, PRE0 r6, hs lr
+        cmp     r0,r8
+        beq     $l.full
+        mov     r4,lr,lsl #16           ; x: the piece from column hs
+        rsb     r7,lr,#255              ; its width - 1
+        orr     r7,r7,#0x3E0000
+        orr     r7,r7,#0x1000           ; PRE1: 64 - 2 words per row, width - 1
+        add     r1,r0,#CCB_SIZE
+        stmib   r0,{r1-r5}              ; next cel, source, PLUT, x, y
+        add     r1,r0,#CCB_PRE0-4
+        stmib   r1,{r6,r7}              ; PRE0, PRE1
+        add     r0,r0,#CCB_SIZE
+        cmp     lr,#0
+        beq     $l.end                  ; nothing wrapped
+        cmp     r0,r8
+        beq     $l.fullb
+        rsb     r1,lr,#256              ; bitmap column at screen column 0
+        and     r7,r1,#3                ; pixels before its word boundary
+        sub     r1,r1,r7
+        add     r2,r2,r1
+        rsb     r4,r7,#0
+        mov     r4,r4,lsl #16           ; x
+        add     r7,r7,lr
+        sub     r7,r7,#1                ; width - 1: columns 0 to hs - 1 and those pixels
+        orr     r7,r7,#0x3E0000
+        orr     r7,r7,#0x1000
+        add     r1,r0,#CCB_SIZE
+        stmib   r0,{r1-r5}
+        add     r1,r0,#CCB_PRE0-4
+        stmib   r1,{r6,r7}
+        add     r0,r0,#CCB_SIZE
+$l.end
+        MEND
+
+        MACRO
+$l      BPFULL                          ; no cel left for the pieces of $l
+$l.full
+        ldr     r1,[sp]
+        add     r1,r1,#1
+        cmp     lr,#0
+        addne   r1,r1,#1                ; the wrapped piece too
+        str     r1,[sp]
+        b       $l.end
+$l.fullb
+        ldr     r1,[sp]
+        add     r1,r1,#1
+        str     r1,[sp]
+        b       $l.end
+        MEND
+
+render_band_pieces
+        stmfd   sp!,{r0,r4-r11,lr}
+        mov     r9,r1                   ; line bands
+        ldmia   r0,{r0,r8,r10,r11}      ; next cel, capacity, bitmap lines, vs
+        rsb     r11,r11,r10,lsl #1      ; s0: the screen line of bitmap row 0
+bp_mod
+        cmp     r11,r10
+        subhs   r11,r11,r10
+        bhs     bp_mod
+        mov     r6,#0                   ; pieces dropped
+        mov     r7,#0x100               ; no layer and palette band yet
+        stmfd   sp!,{r6,r7}             ; then a at [sp, #8]
+bp_band
+        ldr     r4,[r9],#4
+        ldr     r7,[sp,#4]
+        cmp     r7,r4,lsr #24
+        bne     bp_key                  ; another layer or palette band, or the end
+bp_go
+        mov     lr,r4,lsr #16
+        and     lr,lr,#0xFF             ; hs
+        mov     r6,r4,lsr #8
+        and     r6,r6,#0xFF             ; yb
+        and     r5,r4,#0xFF             ; ya
+        cmp     r6,r11
+        bls     bp_up                   ; the band ends at or above line s0
+        cmp     r5,r11
+        movlo   r5,r11                  ; its lines from s0 at the earliest
+        sub     r6,r6,r5
+        add     r2,r10,r5,lsl #8        ; show bitmap rows from line - s0
+        mov     r5,r5,lsl #16           ; y
+        sub     r6,r6,#1
+        mov     r6,r6,lsl #6
+        orr     r6,r6,#5                ; PRE0: lines - 1, 8 bpp
+bplo    BPIECES
+        ldrb    r5,[r9,#-1]             ; ya again (the low byte: big endian)
+        cmp     r5,r11
+        bhs     bp_band                 ; no line above s0
+        sub     r6,r11,r5               ; lines ya to s0 - 1
+        b       bp_up1
+bp_up
+        sub     r6,r6,r5                ; lines ya to yb - 1
+bp_up1
+        add     r2,r12,r5,lsl #8        ; show bitmap rows from line + bm_h - s0
+        mov     r5,r5,lsl #16
+        sub     r6,r6,#1
+        mov     r6,r6,lsl #6
+        orr     r6,r6,#5
+bphi    BPIECES
+        b       bp_band
+
+bp_key
+        mov     r7,r4,lsr #24
+        cmp     r7,#0xFF
+        beq     bp_done
+        str     r7,[sp,#4]
+        ldr     r6,[sp,#8]              ; a
+        and     r1,r7,#1
+        add     r1,r6,r1,lsl #2
+        ldr     r1,[r1,#BA_BM0]         ; bitmap of the layer
+        ldr     r3,[r6,#BA_PLUTS]
+        mov     r7,r7,lsr #1            ; palette band
+        add     r7,r7,r7,lsl #1
+        add     r3,r3,r7,lsl #6         ; its PLUTs: 96 entries of 2 bytes
+        sub     r10,r1,r11,lsl #8       ; bitmap row 0 less s0 rows
+        ldr     r7,[r6,#BA_BMH]
+        sub     r7,r7,r11
+        add     r12,r1,r7,lsl #8        ; bitmap row bm_h - s0
+        b       bp_go
+
+bplo    BPFULL
+bphi    BPFULL
+
+bp_done
+        ldr     r6,[sp,#8]
+        str     r0,[r6,#BA_C]
+        ldr     r0,[sp]
+        add     sp,sp,#12
+        ldmfd   sp!,{r4-r11,pc}
 
 ;----------------------------------------------------------------------------
 ; CCB *render_sprite_runs(const uint8 *sat, const vdp_state *v, CCB *cel,
