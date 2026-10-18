@@ -956,8 +956,9 @@ rb_done
 ;                           uint32 bx1, uint32 by0, uint32 by1, uint32 lb,
 ;                           uint32 vs)
 ;
-; The usual case of rect_pieces (render.c): no scroll inhibit, the whole
-; width for window. The rectangle of bitmap columns bx0 to bx1 - 1 and
+; The usual case of rect_pieces (render.c): a band the scroll inhibit bits
+; do not split (register 0 bit 7 clear, bit 6 clear or the band below line
+; 16), the whole width for window. The rectangle of bitmap columns bx0 to bx1 - 1 and
 ; rows by0 to by1 - 1 is shown on the lines of line band lb (ya | yb << 8
 ; | hs << 16) as pieces appended to p (next cel, capacity, bitmap lines
 ; for the vertical wrap, PLUT of the pieces), split at the row and column

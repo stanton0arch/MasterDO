@@ -350,8 +350,8 @@ uint32 render_tile_cells_part(render_layer *l, const uint8 *vram, uint32 t, uint
                               uint32 budget);
 uint32 render_rebuild_cells_part(render_layer *l, const uint8 *vram, uint32 from,
                                  uint32 budget);
-/* Pieces of a bitmap rectangle on a line band in the usual case (no
- * scroll inhibit); see render.c, rect_pieces. CONTRACT: the PC_*
+/* Pieces of a bitmap rectangle on a line band that the scroll inhibit
+ * bits do not split; see render.c, rect_pieces. CONTRACT: the PC_*
  * equates of render_a.s. */
 typedef struct piece_ctx_s {
     CCB    *c;              /* next cel */

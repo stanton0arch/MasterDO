@@ -605,9 +605,12 @@ static void update_palettes(renderer *r, vdp_state *v)
  * left part covers its overdraw. Register 0 bit 6 keeps rows 0-1 (the
  * lines before 16) unscrolled horizontally, bit 7 keeps the right 64
  * columns unscrolled vertically: each makes a window of its own, the
- * right columns first. Without those bits the callers use
- * render_rect_pieces (render_a.s), which does the same with one window.
+ * right columns first. On a band neither bit splits (LB_WINDOWS) the
+ * callers use render_rect_pieces (render_a.s), which does the same with
+ * one window.
  */
+#define LB_WINDOWS(reg0, lb) (((reg0) & 0x80) || (((reg0) & 0x40) && ((lb) & 0xFF) < 16))
+
 static void rect_pieces(renderer *r, piece_ctx *p, const uint8 *bm, uint32 bx0, uint32 bx1,
                         uint32 by0, uint32 by1, uint32 lb, uint32 reg0, uint32 vs)
 {
@@ -907,7 +910,7 @@ static void group_strips(renderer *r, piece_ctx *p, uint32 m, const uint8 *bm, u
                 lz = gb;
             lb = (lb & 0xFFFF0000u) | la | (lz << 8);
             p->plut = r->pluts + (lb >> 25) * RENDER_PLUT_SET + 64;
-            if (reg0 & 0xC0)
+            if (LB_WINDOWS(reg0, lb))
                 rect_pieces(r, p, bm, bx0, bx1, by0, by1, lb, reg0, vs);
             else
                 r->st.dropped += render_rect_pieces(p, bm, bx0, bx1, by0, by1, lb, vs);
@@ -942,7 +945,7 @@ static uint32 update_pieces(renderer *r, const vdp_state *v, uint32 *nprio, uint
         const uint8 *bm = r->layer[(lb >> 24) & 1].bitmap;
 
         pb.plut = r->pluts + (lb >> 25) * RENDER_PLUT_SET;
-        if (reg0 & 0xC0)
+        if (LB_WINDOWS(reg0, lb))
             rect_pieces(r, &pb, bm, 0, RENDER_W, 0, r->bm_h, lb, reg0, vs);
         else
             r->st.dropped += render_rect_pieces(&pb, bm, 0, RENDER_W, 0, r->bm_h, lb, vs);
