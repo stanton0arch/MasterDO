@@ -255,6 +255,9 @@ static void ref_analyse(z80j_state *j, jit_block_ctx *bc, jit_insn *ins, int32 n
         }
     }
 
+    /* Groups of port outputs (shared with the assembly passes, which call
+     * it when the block holds at least two outputs). */
+    jit_out_groups(j, ins, n);
 }
 
 static uint32 seed = 777;
@@ -398,6 +401,36 @@ void ana_gen_code(const z80j_ctx *c, uint32 pc, uint32 len)
             default: b[0] = 0xDB; b[1] = 0x7E; b[2] = 0xFE; b[3] = (uint8)(r >> 8); b[4] = 0x38; b[5] = 0xFA; nb = 6; break;
             }
             break;
+        case 20: case 21: {                     /* port outputs with instructions between them */
+            uint8 gb[24];
+            uint32 m = 2 + (r & 7);
+            uint32 q;
+
+            nb = 0;
+            for (q = 0; q < m && nb < 20; q++) {
+                uint32 t = rnd();
+
+                switch (t & 15) {
+                case 0: case 1: case 2: gb[nb++] = 0xED; gb[nb++] = 0xA3; break;  /* OUTI */
+                case 3: gb[nb++] = 0xED; gb[nb++] = 0xAB; break;                   /* OUTD */
+                case 4: case 5: gb[nb++] = 0xD3; gb[nb++] = 0xBE; break;           /* OUT ($BE),A */
+                case 6: gb[nb++] = 0xD3; gb[nb++] = (t & 0x10) ? 0xBC : 0x7F; break;
+                case 7: gb[nb++] = 0x7E; break;                                    /* LD A,(HL) */
+                case 8: gb[nb++] = 0xB6; break;                                    /* OR (HL) */
+                case 9: gb[nb++] = 0x04; break;                                    /* INC B */
+                case 10: gb[nb++] = 0x2B; break;                                   /* DEC HL */
+                case 11: gb[nb++] = 0xF5; gb[nb++] = 0xF1; break;                  /* PUSH AF, POP AF */
+                case 12: gb[nb++] = 0xCB; gb[nb++] = (uint8)(0x40 | ((t >> 4) & 0x3F)); break;
+                case 13: gb[nb++] = (t & 0x10) ? 0x0E : 0x3E; gb[nb++] = (uint8)(t >> 8); break;
+                case 14: gb[nb++] = (t & 0x10) ? 0xFB : 0x77; break;               /* EI, LD (HL),A */
+                default: gb[nb++] = (t & 0x10) ? 0xC5 : 0xC1; break;               /* PUSH BC, POP BC */
+                }
+            }
+            for (q = 0; q < nb; q++)
+                *host_of(c, pc + at + q) = gb[q];
+            at += nb;
+            continue;
+        }
         case 17:                                /* LD r,n, LD rr,nn */
             if (r & 1) {
                 b[0] = (uint8)(0x06 | (((r >> 1) & 7) << 3));
@@ -436,6 +469,7 @@ void ana_test(void)
     uint32 nfused = 0;
     uint32 nruns = 0;
     uint32 nloops = 0;
+    uint32 ngroups = 0;
     uint32 ninternal = 0;
     uint32 nscans = 0;
     uint32 v;
@@ -449,6 +483,8 @@ void ana_test(void)
     z80j_default_glue(&glue);
     z80j_init(j, c, code, 1024, 1, 0, descs, 4, 0, 0, &glue);
     z80j_set_line_port(j, 0x7E);
+    for (v = 0x80; v < 0xC0; v += 2)
+        z80j_set_buffer_port(j, v);
 
     /* Pages: 0-3F fixed, 40-7F slot 1, 80-BF slot 2, C0-FF RAM with E0-FF
      * mirroring C0-DF; layouts changing per round. */
@@ -551,8 +587,12 @@ void ana_test(void)
 
                 if (ra[k].internal >= 0)
                     ninternal++;
-                if (ra[k].run != 0 && ra[k].run != RUN_PART && ra[k].run != RUN_LOOP)
-                    nruns++;
+                if (ra[k].run != 0 && ra[k].run != RUN_PART && ra[k].run != RUN_LOOP) {
+                    if ((ra[k].run & RUN_GRP) == 0)
+                        nruns++;
+                    else if (ra[k].run & RUN_GRP_LAST)
+                        ngroups++;
+                }
                 if (ra[k].run == RUN_LOOP)
                     nloops++;
                 for (w = 14; w < 25; w++) {
@@ -576,9 +616,10 @@ void ana_test(void)
     }
     printf("Analysis test: %lu blocks, %lu instructions, %lu internal targets, %lu busy-wait "
            "loops (%lu waiting for a line), %lu fused tests, %lu output runs, %lu output loops, "
-           "%lu flag scans from the cache; %lu differences\n",
+           "%lu output groups, %lu flag scans from the cache; %lu differences\n",
            (unsigned long)blocks, (unsigned long)insns, (unsigned long)ninternal,
            (unsigned long)nbusy, (unsigned long)nline, (unsigned long)nfused,
-           (unsigned long)nruns, (unsigned long)nloops, (unsigned long)nscans,
+           (unsigned long)nruns, (unsigned long)nloops, (unsigned long)ngroups,
+           (unsigned long)nscans,
            (unsigned long)bad);
 }

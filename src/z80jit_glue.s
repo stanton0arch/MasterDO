@@ -31,6 +31,7 @@
         EXPORT  z80j_port_in_c
         EXPORT  z80j_port_out_c
         EXPORT  z80j_port_outn_loop
+        EXPORT  z80j_glue_out_split
         EXPORT  z80j_fill_words
         EXPORT  z80j_hash_words
         EXPORT  z80j_glue_write
@@ -39,6 +40,7 @@
         EXPORT  z80j_glue_verify
         EXPORT  z80j_glue_daa
         EXPORT  z80j_glue_push_slow
+        EXPORT  z80j_glue_pop_af
         EXPORT  z80j_glue_ldir
         EXPORT  z80j_glue_lddr
 
@@ -87,6 +89,7 @@ IDLE            EQU     0x498
 PORT_IN         EQU     0x49C
 PORT_OUT        EQU     0x4A0
 PORT_OUTN       EQU     0x4A4
+OBUF_OFF        EQU     0xD00           ; obuf: bytes of a buffered run
 WRITE_A         EQU     0x4AC
 PZST            EQU     0x600
 
@@ -421,8 +424,11 @@ z80j_port_out_c
 ; end of the run, r7 = HL. The n-th byte from the end goes out 16 (n - 1)
 ; T-states earlier. A mixed run (r0 = Z80J_RUN_MIXED | mask << 13 | count
 ; << 8 | byte, see z80jit.h) has r2 = T-states left at the end of its first
-; element; each element takes 16 (OUTI) or 12 (OUT (C),r) T-states. The
-; handlers' results are OR-ed: nonzero leaves the block after the run.
+; element; each element takes 16 (OUTI) or 12 (OUT (C),r) T-states. A
+; buffered run (r0 = Z80J_RUN_BUF | count << 8 | byte) has r2 = T-states
+; left at the end of its last element and the others in ctx->obuf, each
+; with its time. The handlers' results are OR-ed: nonzero leaves the block
+; after the run.
 z80j_port_outn_loop
         stmfd   sp!,{r3-r9,lr}
         mov     r3,r7                   ; source address (bits 16-31)
@@ -431,6 +437,8 @@ z80j_port_outn_loop
         mov     r8,r2
         cmp     r0,#0x40000000          ; OUTD runs are negative
         bge     outm_entry
+        cmp     r0,#0x2000
+        bge     outb_entry
         mov     r5,#0x10000             ; step
         movs    r4,r0                   ; bytes left
         rsbmi   r4,r4,#0
@@ -479,6 +487,78 @@ outm_out
         bne     outm_loop
         mov     r0,r9
         ldmfd   sp!,{r3-r9,pc}
+outb_entry
+        mov     r4,r0,lsr#8
+        and     r4,r4,#0x1F
+        sub     r4,r4,#1                ; elements before the last
+        add     r5,r10,#OBUF_OFF
+        mov     r7,r0
+outb_loop
+        ldr     r0,[r5],#4
+        and     r2,r0,#0xFF00
+        add     r2,r8,r2                ; T-states left at this byte
+        and     r0,r0,#0xFF
+        mov     r1,r6
+        ldr     r12,[r10,#PORT_OUT]
+        mov     lr,pc
+        ldr     pc,[r12,r6,lsl#2]
+        orr     r9,r9,r0
+        subs    r4,r4,#1
+        bne     outb_loop
+        and     r0,r7,#0xFF
+        mov     r1,r6
+        mov     r2,r8
+        ldr     r12,[r10,#PORT_OUT]
+        mov     lr,pc
+        ldr     pc,[r12,r6,lsl#2]
+        orr     r0,r9,r0
+        ldmfd   sp!,{r3-r9,pc}
+
+;----------------------------------------------------------------------------
+; Buffered run whose outputs go to two ports (z80jit_emt.s, e_grp_out), when
+; port C is not the constant port: r0 and r2 as for a buffered run, r1 =
+; port C, r12 = the constant port. An element with Z80J_OBUF_N (the last
+; one: Z80J_RUN_BUF_N in r0) goes to the constant port, the others to port
+; C, each through its port's output handler with its own time; the results
+; are OR-ed (nonzero: leave the block). Returns past the call of the run
+; handler that follows the call.
+;----------------------------------------------------------------------------
+z80j_glue_out_split
+        stmfd   sp!,{r3-r9,r11,lr}
+        mov     r11,#0                  ; results
+        mov     r6,r1                   ; port C
+        mov     r7,r12                  ; the constant port
+        mov     r8,r2
+        mov     r9,r0
+        mov     r4,r0,lsr#8
+        and     r4,r4,#0x1F
+        sub     r4,r4,#1                ; elements before the last
+        add     r5,r10,#OBUF_OFF
+split_loop
+        ldr     r3,[r5],#4
+        and     r2,r3,#0xFF00
+        add     r2,r8,r2                ; T-states left at this byte
+        and     r0,r3,#0xFF
+        tst     r3,#0x10000             ; Z80J_OBUF_N
+        moveq   r1,r6
+        movne   r1,r7
+        ldr     r12,[r10,#PORT_OUT]
+        mov     lr,pc
+        ldr     pc,[r12,r1,lsl#2]
+        orr     r11,r11,r0
+        subs    r4,r4,#1
+        bne     split_loop
+        and     r0,r9,#0xFF
+        tst     r9,#0x4000              ; Z80J_RUN_BUF_N
+        moveq   r1,r6
+        movne   r1,r7
+        mov     r2,r8
+        ldr     r12,[r10,#PORT_OUT]
+        mov     lr,pc
+        ldr     pc,[r12,r1,lsl#2]
+        orr     r0,r11,r0
+        ldmfd   sp!,{r3-r9,r11,lr}
+        add     pc,lr,#4
 
 ;----------------------------------------------------------------------------
 ; Write to a special page. In: r0 = value, r12 = Z80 address (bits 16-31),
@@ -522,13 +602,33 @@ write_leave
 
 ;----------------------------------------------------------------------------
 ; Push to a special page. In: r0 = 16-bit value, r11 = SP (bits 16-31).
+; Returns r1 = 0, which the inline push never leaves (r1 is the host address
+; of the bytes there): code emitted right after a push can tell the two
+; paths apart.
 ;----------------------------------------------------------------------------
 z80j_glue_push_slow
         stmfd   sp!,{lr}
         mov     r2,r0
         mov     r1,r11
         callc   z80j_push_slow
+        mov     r1,#0
         ldmfd   sp!,{pc}
+
+;----------------------------------------------------------------------------
+; POP AF right after a PUSH AF whose bytes went through the special write
+; path: A and F read back from SP as the inline pop reads them (the caller
+; moves SP). Uses r0-r2, r12.
+;----------------------------------------------------------------------------
+z80j_glue_pop_af
+        mvn     r0,r11,lsr #24
+        ldr     r1,[r10,r0,lsl #2]
+        ldrb    r2,[r1,r11,lsr #16]
+        add     r12,r11,#0x10000
+        ldrb    r1,[r1,r12,lsr #16]
+        add     r0,r10,#0x800           ; F -> internal flags (ctx->fdec)
+        ldrb    r3,[r0,r2]
+        mov     r4,r1,lsl #24
+        mov     pc,lr
 
 ;----------------------------------------------------------------------------
 ; Entry of a block translated from RAM: called by "bl", followed by its Z80

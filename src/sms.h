@@ -24,6 +24,10 @@
  * boundaries (for the translator's line-wait loops). */
 #define SMS_PORT_VCOUNTER(p) (((p) & 0xC1u) == 0x40u)
 
+/* VDP data port writes: their handler never leaves the block and their
+ * run handler takes the buffered runs (z80j_set_buffer_port). */
+#define SMS_PORT_DATA(p) (((p) & 0xC1u) == 0x80u)
+
 /* Buttons of pad 1 (sms_frame argument). */
 #define SMS_PAD_UP     0x01
 #define SMS_PAD_DOWN   0x02

@@ -65,6 +65,7 @@
 #define Z80J_FDEC_OFF  0x0800
 #define Z80J_MRAM_OFF  0x1000
 #define Z80J_MARK_CHUNKS 256   /* run marks of the code buffer (z80j_state) */
+#define Z80J_OBUF_WORDS 16     /* Z80J_RUN_MAX */
 #define Z80J_TAB_OFF   0x4000
 
 typedef struct z80j_machine z80j_machine;
@@ -136,7 +137,8 @@ typedef struct {
     uint8  fdec[256];       /* +0x800: Z80 F -> internal flags */
     uint32 chunk_mark[Z80J_MARK_CHUNKS];  /* +0x900: set by the code of each chunk */
                             /* of the code buffer when it runs (see z80j_state) */
-    uint8  pad1[Z80J_MRAM_OFF - 0x900 - 4 * Z80J_MARK_CHUNKS];
+    uint32 obuf[Z80J_OBUF_WORDS];   /* +0xD00: bytes of a buffered run (see below) */
+    uint8  pad1[Z80J_MRAM_OFF - 0x900 - 4 * Z80J_MARK_CHUNKS - 4 * Z80J_OBUF_WORDS];
     uint8  mram[0x2000];    /* +0x1000: machine RAM near the global pointer */
     uint8  pad2[Z80J_TAB_OFF - Z80J_MRAM_OFF - 0x2000];
     uint32 lookup[0x10000]; /* +0x4000: code to run for each Z80 address */
@@ -181,6 +183,13 @@ typedef struct {
  *        T-states left at the end of the first element; element k is the
  *        byte when bit k of the mask is set (an OUT (C),r, 12 T-states),
  *        else the next byte read from HL upwards (an OUTI, 16 T-states)
+ *   buffered run (port outputs of a segment with other instructions
+ *        between them, see z80j_set_buffer_port): r0 = Z80J_RUN_BUF |
+ *        count << 8 | byte of the last element, with count from 2 to
+ *        Z80J_RUN_MAX, r2 = the T-states left at the end of the last
+ *        element; the count - 1 elements before it are the words of
+ *        ctx->obuf, each the byte | d << 8, d being the T-states from the
+ *        end of that element to the end of the last one
  * r10 is the global pointer; r3-r11 must be preserved, r0-r2, r12 and lr
  * may be lost. The tables start with the generic handlers of the glue,
  * which call the machine's C callbacks below; a machine may put its own
@@ -188,6 +197,9 @@ typedef struct {
  */
 #define Z80J_PORTS 256
 #define Z80J_RUN_MIXED  0x40000000u
+#define Z80J_RUN_BUF    0x2000u
+#define Z80J_RUN_BUF_N  0x4000u     /* z80j_glue_out_split: the last element */
+#define Z80J_OBUF_N     0x10000u    /* goes to the constant port (in r12) */
 #define Z80J_RUN_MAX    16
 
 /*
@@ -409,6 +421,7 @@ typedef struct {
     z80j_block *zone_head[JIT_MAX_ZONES];   /* the blocks of each zone, chained by znext */
     uint32      evict_est_us;               /* running average of the cost of an eviction */
     uint32      evict_ahead_wait;           /* frame from which an eviction ahead is tried again */
+    uint32      buf_ports[8];   /* bitmap of the ports set by z80j_set_buffer_port */
 } z80j_state;
 
 /* Memory for max_blocks block descriptors, and for a link log of
@@ -433,6 +446,18 @@ void   z80j_reset(z80j_ctx *ctx);
  * whose read has no side effect (a V counter): a busy-wait loop may read
  * it with IN A,(n), and goes by idle up to the next line boundary. */
 void   z80j_set_line_port(z80j_state *j, uint32 port);
+
+/* Declares an output port whose output handler never asks to leave the
+ * block and whose run handler takes the buffered form (see the port
+ * handlers): OUT (n),A to it, and OUTI / OUTD, inside one segment and
+ * with only register operations, memory reads and pushes between them,
+ * have their bytes stored in ctx->obuf and sent in one call of the run
+ * handler at the last one. Outputs through C with OUT (n),A to a
+ * declared port in one group go through z80j_glue_out_split when C is
+ * not that port when they run. Declaring one also says that the machine's
+ * port writes do not change what the Z80 reads from memory, since the
+ * memory reads between the outputs of a group run before them. */
+void   z80j_set_buffer_port(z80j_state *j, uint32 port);
 
 /* Forgets every translation. */
 void   z80j_flush(z80j_state *j);
@@ -509,6 +534,8 @@ void   z80j_glue_abort(void);
 void   z80j_glue_io_in(void);
 void   z80j_glue_io_out(void);
 void   z80j_glue_io_outn(void);
+void   z80j_glue_out_split(void);   /* buffered run whose ports differ */
+void   z80j_glue_pop_af(void);      /* POP AF after a push to a special page */
 void   z80j_glue_interp(void);
 
 /* Generic port handlers (machine C callbacks), for the port tables. */

@@ -24,6 +24,8 @@
         EXPORT  jit_emit_block
         IMPORT  jit_link_host
         IMPORT  jit_link_stub
+        IMPORT  z80j_glue_out_split
+        IMPORT  z80j_glue_pop_af
 
 ; jit_insn (z80jit_int.h; offsets checked in z80jit.c).
 I_PC            EQU     0
@@ -118,6 +120,7 @@ G_LDDR          EQU     60
 C_WTAB          EQU     0x400
 C_PORT_IN       EQU     0x89C
 C_PORT_OUT      EQU     0x8A0
+C_PORT_OUTN     EQU     0x8A4
 C_PAGE_KIND     EQU     0x900
 GOFF_IY         EQU     0x424
 GOFF_BC2        EQU     0x430
@@ -136,12 +139,21 @@ PZST_OFF        EQU     0x600
 FENC_OFF        EQU     0x700
 FDEC_OFF        EQU     0x800
 TAB_OFF         EQU     0x4000
+OBUF_OFF        EQU     0xD00           ; ctx->obuf
 PAGE_RFIXED     EQU     0x40
 PAGE_WFIXED     EQU     0x80
 
 RUN_PART        EQU     0xFFFFFFFF
 RUN_LOOP        EQU     0xFFFFFFFE
 RUN_MIXED       EQU     0x40000000
+RUN_GRP         EQU     0x80000000      ; an element of a group of outputs
+RUN_GRP_LAST    EQU     0x40000000      ; (z80jit_int.h)
+RUN_GRP_N       EQU     0x04000000
+RUN_GRP_HASN    EQU     0x02000000
+RUN_GRP_HASC    EQU     0x01000000
+RUN_BUF_HI      EQU     0x20            ; Z80J_RUN_BUF >> 8
+RUN_BUF_N_HI    EQU     0x40            ; Z80J_RUN_BUF_N >> 8
+OBUF_N          EQU     0x10000         ; Z80J_OBUF_N
 
 K_JRCC          EQU     1
 K_CALLCC        EQU     3
@@ -217,6 +229,7 @@ B_EQ            EQU     0x0A000000
 B_MI            EQU     0x4A000000
 B_CC            EQU     0x3A000000
 BL_EQ           EQU     0x0B000000
+BL_NE           EQU     0x1B000000
 
 IMM_NONE        EQU     0xFFFFFFFF
 
@@ -2730,6 +2743,7 @@ t_add_hl_n      DCD     0xE2877800      ; ADD r7,r7,#nmem << 16
 t2_mov_r1_imm   MOV     r1,#0           ; | immediate
 t2_mov_r0_imm   MOV     r0,#0           ; | immediate
 t2_mov_r0_lsr24 MOV     r0,r0,LSR #24   ; | register
+t2_orrcc_h      ORRCC   r3,r3,#PSR_H
 
 emit_ed
         ldr     r0,[r6,#I_RUN]
@@ -2739,8 +2753,59 @@ emit_ed
         beq     eed_plain
         cmp     r0,#RUN_PART
         beq     eb_done                 ; a part of a run: nothing
+        tst     r0,#RUN_GRP
+        bne     eed_grp
         bl      e_out_run
         b       eb_done
+eed_grp
+        ; OUTI / OUTD in a group of outputs (jit_out_groups): the byte is
+        ; stored, or the group sent at the last one; B, HL and the flags
+        ; as for a single OUTI. Right after an instruction that left the
+        ; byte at (HL) in r0 of the generated code without changing HL
+        ; (LD r,(HL) to A, B, C, D or E; AND, XOR or OR (HL)), with no
+        ; cycle check or interrupt check between them, that byte is taken
+        ; instead of a second read.
+        cmp     r7,#0
+        beq     eg_read
+        ldr     r0,[r6,#I_SEG_START]
+        sub     r12,r6,#I_SIZE          ; the previous instruction
+        ldr     r1,[r12,#I_PRE]
+        ldr     r2,[r12,#I_IRQ_CHECK]
+        orr     r0,r0,r1
+        orrs    r0,r0,r2
+        bne     eg_read
+        ldr     r0,[r12,#I_OP]
+        mov     r1,r0,lsr #3
+        and     r1,r1,#7                ; y
+        and     r2,r0,#0xC7
+        cmp     r2,#0x46
+        moveq   r2,#0x8F                ; LD r,(HL): B, C, D, E, A
+        beq     eg_y
+        cmp     r2,#0x86
+        bne     eg_read
+        mov     r2,#0x70                ; AND, XOR, OR (HL)
+eg_y
+        mov     r0,r2,lsr r1
+        tst     r0,#1
+        bne     eg_kept
+eg_read
+        mov     r0,#RHL
+        bl      e_read
+eg_kept
+        TMPL    r0,t_sub_b
+        EMIT    r0
+        bl      e_grp_out
+        tst     r9,#0x08                ; OUTD
+        TMPLC   eq,r0,t_inc_hl
+        TMPLC   ne,r0,t_dec_hl
+        EMIT    r0
+        tst     r11,#EF_LIVE
+        beq     eb_done
+        adr     r12,t_io_flags
+        ldmia   r12,{r0,r1,r2,r3}
+        stmia   r5!,{r0,r1,r2,r3}
+        b       eb_done
+
 eed_loop
         ; The JR NZ / JP NZ that follows closes the loop: the fast path
         ; goes past it (patched by the block loop).
@@ -2828,7 +2893,7 @@ eed_sbcadc                              ; SBC / ADC HL,rr
         adr     r12,t_sbc_hl + 16
         ldmia   r12,{r0-r3,r12}         ; SBCS MRS MOV EOR CMP
         stmia   r5!,{r0-r3,r12}
-        TMPL    r0,t_orrcc_h
+        TMPL    r0,t2_orrcc_h
         EMIT    r0
         FULLF   r0,r1
         b       eb_done
@@ -3707,6 +3772,34 @@ m_call_cc                               ; CALL cc,nn
         b       eb_done
 
 m_pop                                   ; POP rr
+        ; POP AF right after PUSH AF, with no cycle check or interrupt check
+        ; between them, gives A and F their own values back: only SP moves,
+        ; unless the push went through the special write path (r1 = 0 then,
+        ; see z80j_glue_push_slow), where the bytes are read back as stored.
+        and     r0,r9,#0x30
+        cmp     r0,#0x30
+        bne     m_pop_read
+        cmp     r7,#0
+        beq     m_pop_read
+        ldr     r0,[r6,#I_SEG_START]
+        ldr     r1,[r6,#I_PRE]
+        sub     r12,r6,#I_SIZE          ; the previous instruction
+        ldr     r2,[r12,#I_PRE]
+        orr     r0,r0,r1
+        ldr     r1,[r12,#I_IRQ_CHECK]
+        orr     r0,r0,r2
+        orrs    r0,r0,r1
+        bne     m_pop_read
+        ldr     r0,[r12,#I_OP]
+        cmp     r0,#0xF5
+        bne     m_pop_read
+        adr     r12,t_pop_kept
+        ldmia   r12,{r0,r1,r2}
+        str     r0,[r5],#4
+        EMITB   r0,r1,BL_EQ
+        str     r2,[r5],#4
+        b       eb_done
+m_pop_read
         bl      e_pop
         and     r0,r9,#0x30
         cmp     r0,#0x30
@@ -3747,6 +3840,9 @@ t_pop_iy        MOV     r0,r2,LSL #16
 t_pop_af        DCD     0xE28A0C08      ; ADD r0,r10,#FDEC_OFF (the rotation of the C emitter)
                 LDRB    r3,[r0,r2]
                 MOV     r4,r1,LSL #24
+t_pop_kept      TEQ     r1,#0
+                DCD     z80j_glue_pop_af
+                ADD     r11,r11,#0x20000
 
 m_ret                                   ; RET
         bl      e_pop
@@ -3807,6 +3903,9 @@ m_jp_static
         b       m_jr_out
 
 m_out_n                                 ; OUT (n),A
+        ldr     r0,[r6,#I_RUN]
+        cmp     r0,#0
+        bne     mon_grp
         ldr     r1,[r6,#I_N]
         and     r1,r1,#0xFF
         TMPL    r0,t4_mov_r1_imm
@@ -3818,6 +3917,11 @@ m_out_n                                 ; OUT (n),A
         bl      e_port_handler
         EMITB   r1,r0,BL_AL
         bl      e_leave_check
+        b       eb_done
+mon_grp                                 ; in a group of outputs (jit_out_groups)
+        TMPL    r0,t_mov_r0_a24
+        EMIT    r0
+        bl      e_grp_out
         b       eb_done
 
 m_in_n                                  ; IN A,(n)
@@ -3837,14 +3941,104 @@ m_in_n                                  ; IN A,(n)
 ; e_port_handler: r0 = 0 for the input table, 4 for the output table ->
 ; r0 = the handler of the port of the instruction's operand.
 e_port_handler
-        GETCTX  r1
-        add     r1,r1,#C_PORT_IN :AND: 0xF00
-        add     r1,r1,#C_PORT_IN :AND: 0xFF
-        ldr     r1,[r1,r0]              ; the table
-        ldr     r0,[r6,#I_N]
-        and     r0,r0,#0xFF
-        ldr     r0,[r1,r0,lsl #2]
+        ldr     r1,[r6,#I_N]
+        and     r1,r1,#0xFF
+; e_port_table: the same for the port r1, r0 = 0, 4 or 8 for the input,
+; output or run table.
+e_port_table
+        GETCTX  r2
+        add     r2,r2,#C_PORT_IN :AND: 0xF00
+        add     r2,r2,#C_PORT_IN :AND: 0xFF
+        ldr     r2,[r2,r0]              ; the table
+        ldr     r0,[r2,r1,lsl #2]
         mov     pc,lr
+
+; e_grp_out: emits what an output of a group does with its byte, in r0 of
+; the generated code (see jit_out_groups and Z80J_RUN_BUF in z80jit.h).
+; Before the last one: ORR r0,r0,#d << 8 (and #Z80J_OBUF_N for an output
+; to the constant port of a group that also outputs through C), then STR
+; r0,[r10,#OBUF_OFF + 4 k]. The last one: ORR r0,r0,#(Z80J_RUN_BUF |
+; count << 8) (and #Z80J_RUN_BUF_N for OUT (n),A), r2 = the T-states left
+; after it, then the call of the run handler: through port C (BL io_outn),
+; of the constant port n (MOV r1,#n, BL port_outn[n]), or of both (port C,
+; then CMP r1,#n, MOVNE r12,#n, BLNE z80j_glue_out_split, which returns
+; past BL port_outn[n] when C is not n). The constant port is a buffer port,
+; whose handlers never ask to leave the block; port C is only known when
+; the code runs, so a group with outputs through C ends with the leave
+; check of its last instruction.
+e_grp_out
+        stmfd   sp!,{lr}
+        ldr     r2,[r6,#I_RUN]
+        tst     r2,#RUN_GRP_LAST
+        bne     ego_last
+        mov     r1,r2,lsr #16
+        and     r1,r1,#0xFF             ; d
+        TMPL    r0,t_orr_r0_hi
+        orr     r0,r0,r1
+        EMIT    r0
+        tst     r2,#RUN_GRP_N
+        TMPLC   ne,r0,t_orr_r0_obufn
+        strne   r0,[r5],#4
+        and     r1,r2,#0x0F             ; k
+        TMPL    r0,t_str_obuf
+        add     r0,r0,r1,lsl #2
+        EMIT    r0
+        ldmfd   sp!,{pc}
+ego_last
+        mov     r1,r2,lsr #8
+        and     r1,r1,#0x1F             ; count
+        orr     r1,r1,#RUN_BUF_HI
+        ldr     r0,[r6,#I_PRE]
+        cmp     r0,#0                   ; OUT (n),A
+        orreq   r1,r1,#RUN_BUF_N_HI
+        TMPL    r0,t_orr_r0_hi
+        orr     r0,r0,r1
+        EMIT    r0
+        tst     r2,#RUN_GRP_HASC
+        beq     ego_n
+        bl      e_port_c
+        bl      e_time_left
+        ldr     r2,[r6,#I_RUN]
+        tst     r2,#RUN_GRP_HASN
+        ldreq   r0,[r8,#G_IO_OUTN]
+        beq     ego_call
+        mov     r1,r2,lsr #16
+        and     r1,r1,#0xFF             ; n
+        TMPL    r0,t_cmp_r1_imm
+        orr     r0,r0,r1
+        TMPL    r2,t_movne_r12_imm
+        orr     r2,r2,r1
+        stmia   r5!,{r0,r2}
+        ldr     r0,ego_split
+        EMITB   r2,r0,BL_NE
+        b       ego_handler
+ego_n
+        ldr     r1,[r6,#I_RUN]
+        mov     r1,r1,lsr #16
+        and     r1,r1,#0xFF             ; n
+        TMPL    r0,t_mov_r1_imm_g
+        orr     r0,r0,r1
+        EMIT    r0
+        bl      e_time_left
+        ldr     r1,[r6,#I_RUN]
+        mov     r1,r1,lsr #16
+        and     r1,r1,#0xFF
+ego_handler
+        mov     r0,#C_PORT_OUTN - C_PORT_IN
+        bl      e_port_table
+ego_call
+        EMITB   r1,r0,BL_AL
+        ldr     r2,[r6,#I_RUN]
+        tst     r2,#RUN_GRP_HASC
+        blne    e_leave_check
+        ldmfd   sp!,{pc}
+ego_split       DCD     z80j_glue_out_split
+t_orr_r0_hi     DCD     0xE3800C00      ; ORR r0,r0,#byte << 8 (rotation 12) | byte
+t_orr_r0_obufn  ORR     r0,r0,#OBUF_N
+t_str_obuf      STR     r0,[r10,#OBUF_OFF]      ; + 4 k
+t_cmp_r1_imm    CMP     r1,#0           ; | port
+t_movne_r12_imm MOVNE   r12,#0          ; | port
+t_mov_r1_imm_g  MOV     r1,#0           ; | port
 
 m_ex_sp                                 ; EX (SP),HL
         mov     r0,#RSP

@@ -2,10 +2,12 @@
 ; translate_block): the jump targets inside the block, the busy-wait
 ; loops, the segments and their T-states, the runs of port outputs and the
 ; output loops, the flag liveness and the flag tests fused with their
-; jump. They read and write the instruction records (jit_insn,
-; z80jit_int.h) in three walks: one forward for the internal targets, one
-; forward for the segments and the runs, one backward for the T-states
-; left in a segment, the liveness and the fusion.
+; jump, and the groups of port outputs sent in one call. They read and
+; write the instruction records (jit_insn, z80jit_int.h) in three walks:
+; one forward for the internal targets, one forward for the segments and
+; the runs, one backward for the T-states left in a segment, the liveness
+; and the fusion; the groups are then made by jit_out_groups (C) when the
+; block holds at least two port outputs.
 
         AREA    |C$$code|, CODE, READONLY
 
@@ -13,6 +15,7 @@
         IMPORT  jit_dec_tab
         IMPORT  jit_busy_loop
         IMPORT  jit_flags_needed
+        IMPORT  jit_out_groups
 
 ; jit_insn (z80jit_int.h; offsets checked in z80jit.c).
 I_PRE           EQU     8
@@ -85,7 +88,8 @@ F_NBACK         EQU     32              ; jumps back found by the first pass
 F_BACK          EQU     36              ; head index | index << 8 of each
 F_TARGETS       EQU     36 + 4 * MAX_INSNS      ; next static exit to report (0: none asked)
 F_TEND          EQU     F_TARGETS + 4           ; end of the room for them
-F_SIZE          EQU     F_TEND + 4
+F_NOUT          EQU     F_TEND + 4              ; OUTI, OUTD and OUT (n),A met
+F_SIZE          EQU     F_NOUT + 4
 
 ; Reports the static exit $v (a Z80 address) when exits are asked for and
 ; there is room left. Uses r12, lr.
@@ -127,6 +131,7 @@ jit_analyse_block
         str     r1,[sp,#F_BUSY]
         str     r1,[sp,#F_LINE]
         str     r1,[sp,#F_FUSED]
+        str     r1,[sp,#F_NOUT]
         ldr     r1,[r0,#A_TARGETS]
         ldr     r2,[r0,#A_MAX_TARGETS]
         add     r2,r1,r2,lsl #2
@@ -319,9 +324,15 @@ p2_noseg
         cmp     r3,#0
         bne     p2_open
 p2_newrun
-        ldr     r12,[r0,#I_PRE]
+        add     r12,r0,#I_PRE
+        ldmia   r12,{r12,lr}            ; pre, op
         cmp     r12,#PRE_ED
         beq     p2_ed
+        teq     lr,#0xD3                ; OUT (n),A: counted for the groups
+        teqeq   r12,#0
+        ldreq   r12,[sp,#F_NOUT]
+        addeq   r12,r12,#1
+        streq   r12,[sp,#F_NOUT]
 p2_next
         bic     r2,r2,#1
         tst     r2,#4
@@ -420,6 +431,10 @@ p2_ed
         bl      run_elem
         cmp     r11,#0
         beq     p2_next
+        cmp     r11,#1                  ; OUTI, OUTD: counted for the groups
+        ldreq   r12,[sp,#F_NOUT]
+        addeq   r12,r12,#1
+        streq   r12,[sp,#F_NOUT]
         mov     r3,r0
         cmp     r11,#2
         orreq   r6,r6,#0x100            ; mask bit of the first element
@@ -536,6 +551,16 @@ p3_store
         sub     r5,r5,#I_SIZE
         cmp     r5,r4
         bhs     p3_loop
+
+; The groups of port outputs (they need the T-states after each one).
+        ldr     r0,[sp,#F_NOUT]
+        cmp     r0,#2
+        blo     p4_done
+        ldr     r0,[sp,#F_J]
+        ldr     r1,[sp,#F_ARGS]
+        ldmia   r1,{r1,r2}              ; ins, n
+        bl      jit_out_groups
+p4_done
 
         ldr     r0,[sp,#F_ARGS]
         ldr     r1,[sp,#F_BUSY]

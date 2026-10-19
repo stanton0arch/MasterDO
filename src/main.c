@@ -543,7 +543,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: V counter reads, PSG writes and the state hash in assembly, scroll line bands in one pass, leaner sprite ordering\n");
+    printf("masterdo: port outputs of a segment buffered and sent in one call\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);

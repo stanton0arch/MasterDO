@@ -410,6 +410,8 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
     for (k = 0; k < Z80J_PORTS; k++) {
         if (SMS_PORT_VCOUNTER(k))
             z80j_set_line_port(&g->jit, k);
+        if (SMS_PORT_DATA(k))
+            z80j_set_buffer_port(&g->jit, k);
     }
     printf("Cartridge RAM: %lu bytes in %s; entry counters in %s; log arena %s, pad log %s\n",
            (unsigned long)g->cart_ram_size,

@@ -1401,6 +1401,94 @@ static void emit_out_run(jit_block_ctx *b, jit_insn *in)
     emit_leave_check(b, last);
 }
 
+/* What a port output of a group (jit_out_groups) does with its byte, in
+ * r0: stored in ctx->obuf with its time, or, at the last one, the group
+ * sent through the run handler of port C, of the constant port, or of
+ * both (z80j_glue_out_split when C is not the constant port). */
+static void emit_grp_out(jit_block_ctx *b, const jit_insn *in)
+{
+    z80j_state *j = b->j;
+    uint32 w = in->run;
+    uint32 n = (w >> 16) & 0xFFu;
+
+    if ((w & RUN_GRP_LAST) == 0) {
+        dp_i(j, C_AL, OP_ORR, 0, R0, R0, n << 8);
+        if (w & RUN_GRP_N)
+            dp_i(j, C_AL, OP_ORR, 0, R0, R0, Z80J_OBUF_N);
+        str_g(j, R0, GOFF(obuf) + 4 * (int32)(w & 15u));
+        return;
+    }
+    dp_i(j, C_AL, OP_ORR, 0, R0, R0, Z80J_RUN_BUF | (((w >> 8) & 0x1Fu) << 8) |
+                                     (in->pre == PRE_NONE ? Z80J_RUN_BUF_N : 0));
+    if ((w & RUN_GRP_HASC) == 0) {
+        dp_i(j, C_AL, OP_MOV, 0, R1, 0, n);
+        time_left(j, in);
+        ref_emit_b(j, C_AL, 1, port_handler(j->ctx->port_outn, n));
+        return;
+    }
+    port_c(j);
+    time_left(j, in);
+    if ((w & RUN_GRP_HASN) == 0) {
+        ref_emit_b(j, C_AL, 1, j->glue.io_outn);
+    } else {
+        cmp_i(j, C_AL, OP_CMP, R1, n);
+        dp_i(j, C_NE, OP_MOV, 0, RAD, 0, n);
+        ref_emit_b(j, C_NE, 1, JIT_ADDR(z80j_glue_out_split));
+        ref_emit_b(j, C_AL, 1, port_handler(j->ctx->port_outn, n));
+    }
+    emit_leave_check(b, in);
+}
+
+/* OUTI / OUTD in a group of outputs: B, HL and the flags as for a single
+ * one. */
+/* An OUTI or OUTD right after an instruction that left the byte at (HL)
+ * in r0 of the generated code without changing HL (LD r,(HL) to A, B, C,
+ * D or E; AND, XOR or OR (HL)), with no cycle check or interrupt check
+ * between them, takes that byte instead of a second read. */
+static uint32 hl_byte_kept(const jit_insn *in, int32 index)
+{
+    const jit_insn *p = in - 1;
+    uint32 y;
+
+    if (index == 0 || in->seg_start || p->pre != PRE_NONE || p->irq_check)
+        return 0;
+    y = (p->op >> 3) & 7u;
+    if ((p->op & 0xC7u) == 0x46u)
+        return (0x8Fu >> y) & 1u;
+    if ((p->op & 0xC7u) == 0x86u)
+        return (0x70u >> y) & 1u;
+    return 0;
+}
+
+/* POP AF right after PUSH AF, with no cycle check or interrupt check
+ * between them, gives A and F their own values back: only SP moves, unless
+ * the push went through the special write path (r1 = 0 then, see
+ * z80j_glue_push_slow), where the bytes are read back as stored. */
+static uint32 af_kept(const jit_insn *in, int32 index)
+{
+    const jit_insn *p = in - 1;
+
+    return index != 0 && !in->seg_start && in->pre == PRE_NONE &&
+           p->pre == PRE_NONE && p->op == 0xF5u && !p->irq_check;
+}
+
+static void emit_grp_outi(jit_block_ctx *b, jit_insn *in, int32 index)
+{
+    z80j_state *j = b->j;
+
+    if (!hl_byte_kept(in, index))
+        emit_read(j, RHL);
+    dp_i(j, C_AL, OP_SUB, 0, RBC, RBC, 0x01000000u);
+    emit_grp_out(b, in);
+    dp_i(j, C_AL, in->op == 0xAB ? OP_SUB : OP_ADD, 0, RHL, RHL, 0x00010000u);
+    if (flags_live(in)) {
+        dp_i(j, C_AL, OP_BIC, 0, RF, RF, PSR_Z);
+        dp_i(j, C_AL, OP_ORR, 0, RF, RF, PSR_n);
+        cmp_i(j, C_AL, OP_TST, RBC, 0xFF000000u);
+        dp_i(j, C_EQ, OP_ORR, 0, RF, RF, PSR_Z);
+    }
+}
+
 static void emit_ed(jit_block_ctx *b, jit_insn *in, int32 index)
 {
     z80j_state *j = b->j;
@@ -1423,7 +1511,9 @@ static void emit_ed(jit_block_ctx *b, jit_insn *in, int32 index)
         return;
     }
     if (in->run != 0) {
-        if (in->run != RUN_PART)
+        if (in->run != RUN_PART && (in->run & RUN_GRP))
+            emit_grp_outi(b, in, index);
+        else if (in->run != RUN_PART)
             emit_out_run(b, in);
         return;
     }
@@ -1923,6 +2013,12 @@ static void emit_main(jit_block_ctx *b, jit_insn *in, int32 index)
             break;
         case 1:
             if (q == 0) {                           /* POP */
+                if (p == 3 && af_kept(in, index)) {
+                    cmp_i(j, C_AL, OP_TEQ, R1, 0);
+                    ref_emit_b(j, C_EQ, 1, JIT_ADDR(z80j_glue_pop_af));
+                    dp_i(j, C_AL, OP_ADD, 0, RSP, RSP, 0x00020000u);
+                    break;
+                }
                 emit_pop(j);
                 if (p == 3) {                       /* AF */
                     dp_i(j, C_AL, OP_ADD, 0, R0, RG, Z80J_FDEC_OFF);
@@ -1975,6 +2071,11 @@ static void emit_main(jit_block_ctx *b, jit_insn *in, int32 index)
                 }
                 break;
             case 2:                                 /* OUT (n),A */
+                if (in->run != 0) {                 /* in a group of outputs */
+                    mov_r(j, R0, RA, SH_LSR, 24);
+                    emit_grp_out(b, in);
+                    break;
+                }
                 dp_i(j, C_AL, OP_MOV, 0, R1, 0, in->n & 0xFFu);
                 mov_r(j, R0, RA, SH_LSR, 24);
                 time_left(j, in);
@@ -2395,6 +2496,8 @@ void emit_test(void)
     z80j_default_glue(&glue);
     z80j_init(j, c, code, CODE_WORDS, 1, 0, descs, 4, 0, 0, &glue);
     z80j_set_line_port(j, 0x7E);
+    for (v = 0x80; v < 0xC0; v += 2)
+        z80j_set_buffer_port(j, v);
 
     /* Pages: 0-3F fixed, 40-7F slot 1, 80-BF slot 2, C0-FF RAM with E0-FF
      * mirroring C0-DF; the RAM and the fixed pages have fixed mappings

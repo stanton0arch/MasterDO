@@ -32,6 +32,7 @@
 IRQ_LINE        EQU     0x454
 LINE            EQU     0x460
 EVENT_LINE      EQU     0x464
+OBUF_OFF        EQU     0xD00           ; ctx->obuf (buffered runs, z80jit.h)
 VDP_OFFSET      EQU     0x44000         ; the vdp_state: SMS_VDP_OFFSET of sms.h from the
                                         ; context, less the read table below the global pointer
 
@@ -576,6 +577,8 @@ ctrl_slow10
 sms_vdp_data_wn
         cmp     r0,#0x40000000          ; OUTD runs are negative
         bge     data_wm                 ; mixed run (OUTI and OUT (C),r)
+        cmp     r0,#0x2000
+        bge     data_wb                 ; buffered run (Z80J_RUN_BUF)
         VDP
         ldr     r1,[r12,#V_ACC]
         tst     r1,#ACC_SLOW
@@ -737,6 +740,108 @@ wn_slow_loop
         bne     wn_slow_loop
         mov     r0,#0
         ldmfd   sp!,{r3-r9,pc}
+
+; Buffered run: r0 = Z80J_RUN_BUF | count << 8 | byte of the last element
+; (see z80jit.h), r2 = T-states left at the end of the last one, the
+; elements before it in ctx->obuf (byte | d << 8, d the T-states from that
+; element to the end of the last one). The usual write goes to video RAM
+; with the access word advanced in a register; with colour RAM or a
+; control word pending, each byte goes through the byte handler with its
+; own time.
+data_wb
+        VDP
+        ldr     r1,[r12,#V_ACC]
+        tst     r1,#ACC_SLOW
+        bne     wb_slow
+        stmfd   sp!,{r3,lr}
+        and     r3,r0,#0x1F00           ; count << 8
+        add     r1,r1,r3,lsr#8          ; counted as writes
+        add     lr,r1,r3,lsl#10         ; the address past the last element
+        str     lr,[r12,#V_ACC]
+        sub     r1,lr,#ACC_ADDR1        ; the last element (addresses wrap by themselves)
+        add     r2,r12,#V_VRAM
+        strb    r0,[r2,r1,lsr#18]
+        and     r0,r0,#0xFF
+        str     r0,[r12,#V_BUFFER]      ; the last byte written: read buffer
+        add     lr,r12,#V_DIRTY
+        mov     r0,#1
+        strb    r0,[lr,r1,lsr#23]       ; its tile written
+        ; The elements before it, from the last one down: element k is
+        ; obuf[k], the slots of elements count - 1 to 14 skipped. At most 16
+        ; bytes cover at most two tiles: those of the first and last bytes.
+        rsb     r3,r3,#0x1000           ; (16 - count) << 8
+        add     r3,r3,r3,lsl#1          ; times the 12 bytes of a slot
+        add     pc,pc,r3,lsr#6
+        mov     r0,r0                   ; (not executed)
+        sub     r1,r1,#ACC_ADDR1
+        ldr     r0,[r10,#OBUF_OFF+56]
+        strb    r0,[r2,r1,lsr#18]
+        sub     r1,r1,#ACC_ADDR1
+        ldr     r0,[r10,#OBUF_OFF+52]
+        strb    r0,[r2,r1,lsr#18]
+        sub     r1,r1,#ACC_ADDR1
+        ldr     r0,[r10,#OBUF_OFF+48]
+        strb    r0,[r2,r1,lsr#18]
+        sub     r1,r1,#ACC_ADDR1
+        ldr     r0,[r10,#OBUF_OFF+44]
+        strb    r0,[r2,r1,lsr#18]
+        sub     r1,r1,#ACC_ADDR1
+        ldr     r0,[r10,#OBUF_OFF+40]
+        strb    r0,[r2,r1,lsr#18]
+        sub     r1,r1,#ACC_ADDR1
+        ldr     r0,[r10,#OBUF_OFF+36]
+        strb    r0,[r2,r1,lsr#18]
+        sub     r1,r1,#ACC_ADDR1
+        ldr     r0,[r10,#OBUF_OFF+32]
+        strb    r0,[r2,r1,lsr#18]
+        sub     r1,r1,#ACC_ADDR1
+        ldr     r0,[r10,#OBUF_OFF+28]
+        strb    r0,[r2,r1,lsr#18]
+        sub     r1,r1,#ACC_ADDR1
+        ldr     r0,[r10,#OBUF_OFF+24]
+        strb    r0,[r2,r1,lsr#18]
+        sub     r1,r1,#ACC_ADDR1
+        ldr     r0,[r10,#OBUF_OFF+20]
+        strb    r0,[r2,r1,lsr#18]
+        sub     r1,r1,#ACC_ADDR1
+        ldr     r0,[r10,#OBUF_OFF+16]
+        strb    r0,[r2,r1,lsr#18]
+        sub     r1,r1,#ACC_ADDR1
+        ldr     r0,[r10,#OBUF_OFF+12]
+        strb    r0,[r2,r1,lsr#18]
+        sub     r1,r1,#ACC_ADDR1
+        ldr     r0,[r10,#OBUF_OFF+8]
+        strb    r0,[r2,r1,lsr#18]
+        sub     r1,r1,#ACC_ADDR1
+        ldr     r0,[r10,#OBUF_OFF+4]
+        strb    r0,[r2,r1,lsr#18]
+        sub     r1,r1,#ACC_ADDR1
+        ldr     r0,[r10,#OBUF_OFF+0]
+        strb    r0,[r2,r1,lsr#18]
+        mov     r0,#1
+        strb    r0,[lr,r1,lsr#23]       ; the tile of the first byte
+        mov     r0,#0
+        ldmfd   sp!,{r3,pc}
+wb_slow
+        stmfd   sp!,{r3-r6,lr}
+        mov     r3,r0,lsr#8
+        and     r3,r3,#0x1F
+        sub     r3,r3,#1                ; elements before the last
+        add     r4,r10,#OBUF_OFF
+        mov     r5,r0
+        mov     r6,r2
+wbs_loop
+        ldr     r0,[r4],#4
+        and     r2,r0,#0xFF00
+        add     r2,r6,r2                ; T-states left at this byte
+        bl      sms_vdp_data_w
+        subs    r3,r3,#1
+        bne     wbs_loop
+        mov     r0,r5
+        mov     r2,r6
+        bl      sms_vdp_data_w
+        mov     r0,#0
+        ldmfd   sp!,{r3-r6,pc}
 
 ; Mixed run: r0 = Z80J_RUN_MIXED | mask << 13 | count << 8 | byte (see
 ; z80jit.h), r2 = T-states left at the end of the first element. Element k

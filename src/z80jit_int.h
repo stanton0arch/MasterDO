@@ -114,7 +114,7 @@ typedef struct {
     uint32  run;            /* first of a run of port outputs: its length, */
                             /* the mask of its OUT (C),r elements << 8 and */
                             /* the opcode of OUT (C),r << 24; RUN_PART for */
-                            /* the others */
+                            /* the others; RUN_LOOP; or RUN_GRP (below) */
     uint32  seg_start;      /* a cycle check precedes the instruction */
     uint32  fused;          /* FU_* valid in the ARM flags for the next jump */
     uint32  dyn;            /* JP / CALL in RAM: the target is read from */
@@ -181,6 +181,18 @@ typedef struct {
 
 #define RUN_PART   0xFFFFFFFFu
 #define RUN_LOOP   0xFFFFFFFEu  /* OUTI / OUTD closed by JR NZ or JP NZ back to it */
+/* Element of a group of port outputs sent in one call (jit_out_groups):
+ * RUN_GRP | d << 16 | k, with RUN_GRP_N when it goes to the constant port
+ * of a group that also has outputs through C; the last one RUN_GRP |
+ * RUN_GRP_LAST | n << 16 | count << 8, with RUN_GRP_HASC and RUN_GRP_HASN
+ * for the kinds of port its group uses. k is the word of ctx->obuf, d the
+ * T-states from the end of the element to the end of the last one, n the
+ * constant port. */
+#define RUN_GRP      0x80000000u
+#define RUN_GRP_LAST 0x40000000u
+#define RUN_GRP_N    0x04000000u
+#define RUN_GRP_HASN 0x02000000u
+#define RUN_GRP_HASC 0x01000000u
 
 #define MAX_INSNS  64
 #define MAX_STUBS  (4 * MAX_INSNS)
@@ -249,6 +261,8 @@ uint32 jit_flags_needed(jit_block_ctx *b, uint32 pc);
 /* Whether the loop from ins[h] to the jump back ins[e] waits for an
  * interrupt (1) or for a line (2); 0 when it may do something else. */
 int32  jit_busy_loop(const z80j_state *j, const jit_insn *ins, int32 n, int32 h, int32 e);
+/* Marks the groups of port outputs of the block sent in one call. */
+void   jit_out_groups(const z80j_state *j, jit_insn *ins, int32 n);
 
 /* z80jit_emit.c */
 uint32 arm_branch(uint32 cond, uint32 link, uint32 from, uint32 to);

@@ -35,6 +35,8 @@ CHECK_OFF(idle, GOFF(idle) == 0x498);
 CHECK_OFF(port_in, GOFF(port_in) == 0x49C);
 CHECK_OFF(port_out, GOFF(port_out) == 0x4A0);
 CHECK_OFF(port_outn, GOFF(port_outn) == 0x4A4);
+CHECK_OFF(obuf, GOFF(obuf) == 0xD00);
+CHECK_OFF(obuf_words, Z80J_OBUF_WORDS == Z80J_RUN_MAX);
 CHECK_OFF(mdata, GOFF(mdata) == 0x4A8);
 CHECK_OFF(write_a, GOFF(write_a) == 0x4AC);
 CHECK_OFF(wdata, GOFF(wdata) == 0x4B0);
@@ -780,6 +782,143 @@ int32 jit_busy_loop(const z80j_state *j, const jit_insn *ins, int32 n, int32 h, 
     return (exposed & written) == 0 ? kind : 0;
 }
 
+/*
+ * An instruction allowed between two port outputs of a group: it neither
+ * transfers control, accesses a port, writes memory (a push aside: its
+ * slow path never leaves the block), changes the interrupt state nor
+ * writes C, the port of OUTI. Unprefixed and CB instructions only.
+ */
+static int32 grp_between(const jit_insn *in)
+{
+    uint32 op = in->op;
+    uint32 x = op >> 6;
+    uint32 y = (op >> 3) & 7;
+    uint32 z = op & 7;
+
+    if (in->kind != 0 || in->irq_check)
+        return 0;
+    if (in->pre == PRE_CB)
+        return x == 1 || (!in->mem && z != 1);      /* BIT; no write of (HL) or C */
+    if (in->pre != PRE_NONE)
+        return 0;
+    switch (x) {
+    case 0:
+        switch (z) {
+        case 1:
+        case 3:
+            return y >= 2;                          /* not LD BC,nn, INC / DEC BC */
+        case 2:
+            return y & 1;                           /* loads, not stores */
+        case 4:
+        case 5:
+        case 6:
+            return y != 6 && y != 1;                /* not (HL), not C */
+        default:
+            return 1;
+        }
+    case 1:
+        return op != 0x76 && y != 6 && y != 1;      /* not HALT, stores, LD C,r */
+    case 2:
+        return 1;
+    default:
+        switch (z) {
+        case 1:
+            return (y & 1) ? (y == 7) : (y != 0);   /* LD SP,HL; POP but BC */
+        case 3:
+            return y == 5 || y == 6;                /* EX DE,HL, DI */
+        case 5:
+            return (y & 1) == 0;                    /* PUSH */
+        case 6:
+            return 1;
+        default:
+            return 0;
+        }
+    }
+}
+
+/* Writes the run words of a group of ne elements (see RUN_GRP), when it
+ * has at least two. */
+static void grp_close(jit_insn *ins, const int32 *el, int32 ne, uint32 has, uint32 port)
+{
+    jit_insn *last = &ins[el[ne - 1]];
+    int32 k;
+
+    if (ne < 2)
+        return;
+    for (k = 0; k < ne - 1; k++) {
+        jit_insn *e = &ins[el[k]];
+        uint32 w = RUN_GRP | ((e->t_after - last->t_after) << 16) | (uint32)k;
+
+        if (e->pre == PRE_NONE && (has & RUN_GRP_HASC))
+            w |= RUN_GRP_N;
+        e->run = w;
+    }
+    last->run = RUN_GRP | RUN_GRP_LAST | has | (port << 16) | ((uint32)ne << 8);
+}
+
+/*
+ * Groups of port outputs sent in one call: inside a segment, OUTI and
+ * OUTD that are not in a run or a loop, and OUT (n),A to a port declared
+ * by z80j_set_buffer_port (one such port per group), with only the
+ * instructions grp_between allows between them, at most Z80J_RUN_MAX of
+ * them; an element with an interrupt check ends its group. Only when the
+ * machine declared a buffer port, which also says that its port writes do
+ * not change what the Z80 reads from memory. Nothing between
+ * the first and the last element can leave the block, so the bytes of the
+ * elements before the last one are stored in ctx->obuf and the last one
+ * sends them all through the run handler (see emit_ed and m_out_n). The
+ * time of each byte is kept: d, the T-states between the element and the
+ * last one. Called by z80jit_ana.s after the other passes when the block
+ * holds at least two outputs.
+ */
+void jit_out_groups(const z80j_state *j, jit_insn *ins, int32 n)
+{
+    int32 el[Z80J_RUN_MAX];
+    int32 ne = 0;
+    uint32 port = 0;
+    uint32 has = 0;
+    int32 i;
+
+    for (i = 0; i < 8 && j->buf_ports[i] == 0; i++)
+        ;
+    if (i == 8)
+        return;                                     /* the machine declared none */
+    for (i = 0; i < n; i++) {
+        jit_insn *in = &ins[i];
+        uint32 kind = 0;                            /* 1 through C, 2 constant port */
+
+        if (in->pre == PRE_ED && (in->op == 0xA3 || in->op == 0xAB) && in->run == 0)
+            kind = 1;
+        else if (in->pre == PRE_NONE && in->op == 0xD3 &&
+                 (j->buf_ports[(in->n & 0xFFu) >> 5] >> (in->n & 31u)) & 1u)
+            kind = 2;
+        /* The open group ends before this instruction. */
+        if (ne != 0 && (in->seg_start || ne == Z80J_RUN_MAX ||
+                        (kind == 0 && !grp_between(in)) ||
+                        (kind == 2 && (has & RUN_GRP_HASN) && (in->n & 0xFFu) != port))) {
+            grp_close(ins, el, ne, has, port);
+            ne = 0;
+            has = 0;
+        }
+        if (kind == 0)
+            continue;
+        el[ne++] = i;
+        if (kind == 1) {
+            has |= RUN_GRP_HASC;
+        } else {
+            has |= RUN_GRP_HASN;
+            port = in->n & 0xFFu;
+        }
+        if (in->irq_check) {                        /* the last of its group */
+            grp_close(ins, el, ne, has, port);
+            ne = 0;
+            has = 0;
+        }
+    }
+    if (ne != 0)
+        grp_close(ins, el, ne, has, port);
+}
+
 /*--------------------------------------------------------------------------
  * Block management
  *------------------------------------------------------------------------*/
@@ -1410,6 +1549,11 @@ void z80j_set_interp(z80j_state *j, uint8 *hot, uint32 queue_at, uint32 sync_at)
 void z80j_set_line_port(z80j_state *j, uint32 port)
 {
     j->line_ports[(port & 0xFFu) >> 5] |= (uint32)1 << (port & 31u);
+}
+
+void z80j_set_buffer_port(z80j_state *j, uint32 port)
+{
+    j->buf_ports[(port & 0xFFu) >> 5] |= (uint32)1 << (port & 31u);
 }
 
 void z80j_set_force(z80j_state *j, uint32 force_at)
