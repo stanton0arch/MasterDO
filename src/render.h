@@ -155,13 +155,19 @@ typedef struct render_layer_s {
     uint8  *prio_bm;        /* same, priority cells only */
     uint32 *xtab;           /* expansion tables (2 x 256 words) (shared) */
     uint8  *shadow;         /* name table bytes as drawn (64 per row) */
-    uint8  *stamp;          /* update in which each cell was last drawn */
+    /* Per cell: the update in which it was last drawn (stamps are even,
+     * 0 to RENDER_STAMP_LAST), RENDER_STALE when it waits for a redraw
+     * (see stale_rows), or RENDER_NEUTRAL, which no stamp equals. */
+    uint8  *stamp;
     uint32  stamp_now;
-    /* Cells using each tile, as doubly linked lists (RENDER_NT_CELLS_MAX
-     * means none), so that a written tile only redraws its cells. */
-    uint32 *next;           /* ncells */
+    /* Cells using each tile, as lists (RENDER_NT_CELLS_MAX ends a list),
+     * so that a written tile only redraws its cells. Each cell has a node
+     * of two words: the next cell of its list, and the address of the
+     * word holding the cell (the head of its tile, or the node of the
+     * cell before it), so that a cell leaves its list without looking at
+     * its tile. The VDP_TILES heads lie right before the nodes. */
+    uint32 *node;           /* cap_cells x 2 */
     uint32 *head;           /* VDP_TILES */
-    uint32 *prev;
     uint32 *wlist;          /* work list: changed words, tiles to convert (shared) */
     uint32 *dlist;          /* dirty tiles of the update (shared) */
     uint32  nt_base;        /* VRAM address of the name table drawn */
@@ -183,9 +189,8 @@ typedef struct render_layer_s {
     uint8   pg_col1[RENDER_NT_ROWS_MAX];    /* last column + 1 */
     /* Cells of a written tile are only redrawn in the rows the picture
      * shows (shown_rows, bit per name table row, from the bands of the
-     * update); the others are left stale and redrawn when their row is
-     * shown again. */
-    uint8  *stale;          /* ncells: cell waiting for a redraw */
+     * update); the others are left stale (their stamp RENDER_STALE) and
+     * redrawn when their row is shown again. */
     uint32  stale_rows;     /* rows holding stale cells */
     uint32  shown_rows;     /* rows shown by the update */
     /* Size of the table drawn: 28 or 32 rows. */
@@ -208,6 +213,9 @@ typedef struct render_layer_s {
 } render_layer;
 
 #define RENDER_NO_TILE  0xFFFFFFFFu
+#define RENDER_STALE    0xFF        /* stamp of a cell waiting for a redraw */
+#define RENDER_NEUTRAL  0xFE        /* stamp of a cell drawn in no recent update */
+#define RENDER_STAMP_LAST 0xFC      /* the last stamp before the wrap */
 
 typedef struct {
     render_layer layer[RENDER_LAYERS];
@@ -331,14 +339,18 @@ void   render_prio_groups(render_layer *l);
  * the priority bitmap for entries with the priority bit), converting the
  * tiles found unconverted through render_tile_conv, stamping the cells
  * drawn and counting them.
- * render_entries: the n name table words listed in l->wlist, copied to
- * the shadow; each entry that differs is re-linked in the cell list of
- * its tile, its priority bookkeeping done, and drawn. render_tile_cells:
+ * render_entries: the n name table words listed in l->wlist (which has
+ * room for an end mark after them), copied to the shadow; each entry
+ * that differs is re-linked in the cell list of its tile, its priority
+ * bookkeeping done, and drawn. render_tile_cells:
  * the cells of tile t not stamped in this update, those of the rows
  * not shown left stale. render_stale_cells: the stale cells of the rows
  * shown. render_rebuild_cells: every cell from the shadow, linked into
  * lists that must be empty. */
 void   render_entries(render_layer *l, const uint8 *vram, uint32 n);
+/* ORs RENDER_NEUTRAL into every byte of nwords words of stamps (a multiple
+ * of 8): the wrap of the update stamps (render_a.s). */
+void   render_stamp_wrap(uint8 *stamp, uint32 nwords);
 void   render_tile_cells(render_layer *l, const uint8 *vram, uint32 t);
 void   render_stale_cells(render_layer *l, const uint8 *vram);
 void   render_rebuild_cells(render_layer *l, const uint8 *vram);

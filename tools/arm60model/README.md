@@ -88,9 +88,13 @@ prints, for every frame that has some, the writes made during the
 active display (scroll, name table, display enable, colours) with the
 first line they affect (`Raster:` lines). `-celhash` prints a hash of the
 cel chain of every frame with the display on (`Cels:` lines: every field of
-every cel, in the order of the chain), to compare the cels two builds make
-of the same machine state frame by frame (with `-interp`, so that the
-translation decisions cannot change the course of the game). The harness also checks the assembly sprite
+every cel, in the order of the chain, the source and PLUT pointers taken as
+offsets into the renderer's buffers so that two builds allocating them
+elsewhere compare; then a hash of the picture the chain draws through the
+software cel engine, which compares the pixels of the bitmaps it shows), to
+compare the cels two builds make of the same machine state frame by frame
+(with `-interp`, so that the translation decisions cannot change the course
+of the game). The harness also checks the assembly sprite
 evaluation of every frame against a C reference and reports the frames
 with differences (`Sprites:` lines).
 

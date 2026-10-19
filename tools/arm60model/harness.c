@@ -200,6 +200,25 @@ static void prio_mask(const vdp_state *v)
 /* Compares the cel picture with the reference; 000 and 001 are the same
  * black. Returns the number of differing pixels, and in *outside those
  * that are not under a priority tile pixel. */
+/* -celhash: a pointer into one of the renderer's buffers as the buffer's
+ * number and the offset in it; other values unchanged. */
+static uint32 buf_offset(const renderer *rd, uint32 v)
+{
+    uint32 base[6], size[6];
+    uint32 k;
+
+    base[0] = (uint32)rd->tiles;      size[0] = VDP_TILES * 64;
+    base[1] = (uint32)rd->tiles_f;    size[1] = VDP_TILES * 64;
+    base[2] = (uint32)rd->bm_pool[0]; size[2] = 2 * RENDER_BM_BYTES;
+    base[3] = (uint32)rd->bm_pool[1]; size[3] = 2 * RENDER_BM_BYTES;
+    base[4] = (uint32)rd->pluts;      size[4] = VDP_PAL_BANDS * RENDER_PLUT_SET * 2;
+    base[5] = (uint32)rd->blank;      size[5] = 16;
+    for (k = 0; k < 6; k++)
+        if (v - base[k] < size[k])
+            return ((k + 1) << 24) | (v - base[k]);
+    return v;
+}
+
 static uint32 compare(uint32 *outside)
 {
     uint32 n = 0;
@@ -717,22 +736,42 @@ void hmain(void)
         if (sim_arg(15) && render_display_on(g.rd)) {
             /* -celhash: a hash of the cel chain of the frame (every field
              * the cel engine reads), to compare the cels two builds make of
-             * the same machine state frame by frame. */
+             * the same machine state frame by frame. The source and PLUT
+             * pointers are hashed as offsets into the renderer's buffers,
+             * so that two builds allocating them elsewhere compare. A hash
+             * of the picture the chain draws (the software cel engine)
+             * compares the pixels of the bitmaps it shows. */
+            const renderer *rd = g.rd;
             const CCB *c;
             uint32 h = 0;
+            uint32 hp = 0;
             uint32 n = 0;
 
-            for (c = render_chain(g.rd); c != NULL; c = c->ccb_NextPtr) {
+            for (c = render_chain(rd); c != NULL; c = c->ccb_NextPtr) {
                 const uint32 *w = (const uint32 *)c;
                 uint32 k;
 
-                for (k = 0; k < sizeof(CCB) / 4; k++)
-                    if (k != 1)     /* the next pointer: the chain order is hashed */
-                        h = (h ^ w[k]) * 16777619u;
+                for (k = 0; k < sizeof(CCB) / 4; k++) {
+                    uint32 v = w[k];
+
+                    if (k == 1)     /* the next pointer: the chain order is hashed */
+                        continue;
+                    if (k == 2 || k == 3)
+                        v = buf_offset(rd, v);
+                    h = (h ^ v) * 16777619u;
+                }
                 n++;
             }
-            printf("Cels: frame %lu: %lu cels, hash %08lx\n", (unsigned long)(f + 1),
-                   (unsigned long)n, (unsigned long)h);
+            pic_h = g.sms->vdp.active;
+            compose(render_chain(rd), render_backdrop(rd));
+            {
+                uint32 k;
+
+                for (k = 0; k < (pic_h / 2) * 256; k++)
+                    hp = (hp ^ fb2[k]) * 16777619u;
+            }
+            printf("Cels: frame %lu: %lu cels, hash %08lx, picture %08lx\n", (unsigned long)(f + 1),
+                   (unsigned long)n, (unsigned long)h, (unsigned long)hp);
         }
         if (sim_arg(13))
             check_blocks(f);

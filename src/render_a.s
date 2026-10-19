@@ -21,8 +21,9 @@
         EXPORT  cell_draw
         EXPORT  cell_conv
         EXPORT  conv_rows
-        EXPORT  cell_change
         EXPORT  cd_prio
+        EXPORT  re_prio
+        EXPORT  render_stamp_wrap
 
 ; CCB fields (graphics.h).
 CCB_SOURCE      EQU     8
@@ -43,28 +44,26 @@ R_XTAB          EQU     20
 R_SHADOW        EQU     24
 R_STAMP         EQU     28
 R_STAMPNOW      EQU     32
-R_NEXT          EQU     36
+R_NODE          EQU     36
 R_HEAD          EQU     40
-R_PREV          EQU     44
-R_WLIST         EQU     48
-R_NTBASE        EQU     56
-R_PRIOROWS      EQU     68
-R_PRIOMIN       EQU     100
-R_PRIOMAX       EQU     132
-R_PRIODIRTY     EQU     164
-R_PGN           EQU     208
-R_PGROW0        EQU     212
-R_PGNROWS       EQU     244
-R_PGCOL0        EQU     276
-R_PGCOL1        EQU     308
-R_STCELLS       EQU     196
-R_STTILECELLS   EQU     200
-R_STTILESCONV   EQU     204
-R_STALE         EQU     340
-R_STALEROWS     EQU     344
-R_SHOWNROWS     EQU     348
-R_NROWS         EQU     352
-R_NCELLS        EQU     356
+R_WLIST         EQU     44
+R_NTBASE        EQU     52
+R_PRIOROWS      EQU     64
+R_PRIOMIN       EQU     96
+R_PRIOMAX       EQU     128
+R_PRIODIRTY     EQU     160
+R_PGN           EQU     204
+R_PGROW0        EQU     208
+R_PGNROWS       EQU     240
+R_PGCOL0        EQU     272
+R_PGCOL1        EQU     304
+R_STCELLS       EQU     192
+R_STTILECELLS   EQU     196
+R_STTILESCONV   EQU     200
+R_STALEROWS     EQU     336
+R_SHOWNROWS     EQU     340
+R_NROWS         EQU     344
+R_NCELLS        EQU     348
 
 ; piece_ctx fields (render.h).
 PC_C            EQU     0
@@ -308,6 +307,7 @@ spr_done
 ; bit, the store present) touches no memory but the rows.
 ;----------------------------------------------------------------------------
 NONE            EQU     1024            ; end of a cell list
+STALE           EQU     0xFF            ; stamp of a stale cell (RENDER_STALE)
 CELL_ROW        EQU     256             ; bytes per bitmap row
 
         MACRO
@@ -327,17 +327,28 @@ CELL_ROW        EQU     256             ; bytes per bitmap row
         add     $d,$d,$t,lsl #3
         MEND
 
-; One row of a copy: r2 = source (the next row up or down), r3 =
-; destination (the next row follows), r12 = palette bits; ROWCOPYP steps
-; its source by lr and writes the priority bitmap (r8) as well.
+; One row of a copy: r2 = source (the row, left past it by the load: the
+; next row up or down), r3 = destination (the next row follows unless it
+; is the last), r12 = palette bits (ROWCOPYC only); ROWCOPYP steps its
+; source by lr and writes the priority bitmap (r8) as well.
         MACRO
-        ROWCOPY $step
-        ldmia   r2,{r0,r1}
+        ROWCOPY $ld,$last
+        $ld     r2!,{r0,r1}
+        stmia   r3,{r0,r1}
+        IF "$last" = ""
+        add     r3,r3,#CELL_ROW
+        ENDIF
+        MEND
+
+        MACRO
+        ROWCOPYC $ld,$last
+        $ld     r2!,{r0,r1}
         orr     r0,r0,r12
         orr     r1,r1,r12
-        $step   r2,r2,#8
         stmia   r3,{r0,r1}
+        IF "$last" = ""
         add     r3,r3,#CELL_ROW
+        ENDIF
         MEND
 
         MACRO
@@ -369,28 +380,55 @@ cell_draw
         bne     cd_prio
         ldr     r12,[r9,#R_BITMAP]
         add     r3,r3,r12
-        PALBITS r12,r1
+        tst     r1,#0x800
+        bne     cd_pal
         tst     r1,#0x400
         bne     cd_down
-        ROWCOPY add
-        ROWCOPY add
-        ROWCOPY add
-        ROWCOPY add
-        ROWCOPY add
-        ROWCOPY add
-        ROWCOPY add
-        ROWCOPY add
+        ROWCOPY ldmia
+        ROWCOPY ldmia
+        ROWCOPY ldmia
+        ROWCOPY ldmia
+        ROWCOPY ldmia
+        ROWCOPY ldmia
+        ROWCOPY ldmia
+        ROWCOPY ldmia,last
         mov     pc,lr
 cd_down                                 ; vertical flip: last source row first
-        add     r2,r2,#56
-        ROWCOPY sub
-        ROWCOPY sub
-        ROWCOPY sub
-        ROWCOPY sub
-        ROWCOPY sub
-        ROWCOPY sub
-        ROWCOPY sub
-        ROWCOPY sub
+        add     r2,r2,#60
+        ROWCOPY ldmda
+        ROWCOPY ldmda
+        ROWCOPY ldmda
+        ROWCOPY ldmda
+        ROWCOPY ldmda
+        ROWCOPY ldmda
+        ROWCOPY ldmda
+        ROWCOPY ldmda,last
+        mov     pc,lr
+cd_pal                                  ; the palette bit OR-ed into every pixel
+        mov     r12,#0x10
+        orr     r12,r12,r12,lsl #8
+        orr     r12,r12,r12,lsl #16
+        tst     r1,#0x400
+        bne     cd_pal_down
+        ROWCOPYC ldmia
+        ROWCOPYC ldmia
+        ROWCOPYC ldmia
+        ROWCOPYC ldmia
+        ROWCOPYC ldmia
+        ROWCOPYC ldmia
+        ROWCOPYC ldmia
+        ROWCOPYC ldmia,last
+        mov     pc,lr
+cd_pal_down
+        add     r2,r2,#60
+        ROWCOPYC ldmda
+        ROWCOPYC ldmda
+        ROWCOPYC ldmda
+        ROWCOPYC ldmda
+        ROWCOPYC ldmda
+        ROWCOPYC ldmda
+        ROWCOPYC ldmda
+        ROWCOPYC ldmda,last
         mov     pc,lr
 cd_prio
         stmfd   sp!,{r8,lr}
@@ -430,42 +468,51 @@ cd_prio
 ; the store and draws the cell from the rows on the way. render_tile_conv
 ; (C entry) converts into the store only.
 ;
-; conv_rows: r4 = planar rows, r9 = table, r2 = store rows; r10 says what
-; else the rows go to (1: the cell at r3 and the priority bitmap at r8,
-; 2: the cell only, 0: nothing), r12 = the step between cell rows, lr =
-; palette bits; r11 = rows left. The conditional stores read the flags
-; of the compare of r10 made in each row.
+; The row loops: r4 = planar rows, up to r10, r9 = table, r11 = 0x0F0F0F0F,
+; r2 = store rows, r3 = cell rows (stepped by r12), lr = palette bits.
+; conv_cell (the cell only) takes two rows per pass; conv_rows writes the
+; priority bitmap at r8 as well, or nothing but the store when r3 is 0.
 ;----------------------------------------------------------------------------
         MACRO
-        CONVROW $h,$l                   ; $h = word of pixels 0-3, $l = pixels 4-7
-        ldr     r5,[r4],#4              ; p0 p1 p2 p3, p0 in the top byte
-        and     r6,r5,#0xF0000000
-        and     r7,r5,#0x00F00000
-        orr     r6,r7,r6,lsr #4         ; high nibbles of p0 and p1, at bits 20-27
-        ldr     $h,[r9,r6,lsr #18]
-        and     r6,r5,#0x0F000000
-        and     r7,r5,#0x000F0000
-        orr     r6,r7,r6,lsr #4         ; low nibbles of p0 and p1, at bits 16-23
-        ldr     $l,[r9,r6,lsr #14]
-        and     r6,r5,#0xF000
-        and     r7,r5,#0xF0
-        orr     r6,r7,r6,lsr #4         ; high nibbles of p2 and p3, at bits 4-11
-        ldr     r7,[r9,r6,lsr #2]
+        CONVPIX $h,$l,$s                ; $h = word of pixels 0-3, $l = pixels 4-7 of planar row $s
+        and     r6,r11,$s,lsr #4        ; the high nibbles of p0-p3 (p0 in the top byte)
+        orr     r6,r6,r6,lsr #4         ; pairs: p0:p1 in bits 16-23, p2:p3 in bits 0-7
+        and     r7,r6,#0xFF0000
+        ldr     $h,[r9,r7,lsr #14]
+        and     r7,r6,#0xFF
+        ldr     r7,[r9,r7,lsl #2]
         orr     $h,$h,r7,lsl #2
-        and     r6,r5,#0x0F00
-        and     r7,r5,#0x0F
-        orr     r6,r7,r6,lsr #4         ; low nibbles of p2 and p3, at bits 0-7
-        ldr     r7,[r9,r6,lsl #2]
+        and     r6,r11,$s               ; the low nibbles
+        orr     r6,r6,r6,lsr #4
+        and     r7,r6,#0xFF0000
+        ldr     $l,[r9,r7,lsr #14]
+        and     r7,r6,#0xFF
+        ldr     r7,[r9,r7,lsl #2]
         orr     $l,$l,r7,lsl #2
+        MEND
+
+        MACRO
+        CELLROW                         ; the row r0, r1 into the store and the cell
         stmia   r2!,{r0,r1}
-        cmp     r10,#1
         orr     r0,r0,lr
         orr     r1,r1,lr
-        stmcsia r3,{r0,r1}
-        addcs   r3,r3,r12
-        stmeqia r8,{r0,r1}
-        addeq   r8,r8,r12
-        subs    r11,r11,#1
+        stmia   r3,{r0,r1}
+        add     r3,r3,r12
+        MEND
+
+        MACRO
+        CONVROW $h,$l
+        ldr     r5,[r4],#4
+        CONVPIX $h,$l,r5
+        stmia   r2!,{r0,r1}
+        teq     r3,#0
+        orrne   r0,r0,lr
+        orrne   r1,r1,lr
+        stmneia r3,{r0,r1}
+        addne   r3,r3,r12
+        stmneia r8,{r0,r1}
+        addne   r8,r8,r12
+        cmp     r4,r10
         MEND
 
 cell_conv
@@ -480,6 +527,7 @@ cell_conv
         add     r4,r4,#1
         str     r4,[r9,#R_STTILESCONV]
         add     r4,r10,lr,lsl #5        ; planar rows
+        add     r10,r4,#32              ; their end
         ldr     r5,[r9,#R_XTAB]
         cmp     r12,#2
         addeq   r5,r5,#1024             ; the mirrored table
@@ -490,15 +538,37 @@ cell_conv
         add     r8,r8,r6
         mov     r9,r5
         PALBITS lr,r1
+        mov     r11,#0x0F
+        orr     r11,r11,r11,lsl #8
+        orr     r11,r11,r11,lsl #16
         mov     r12,#CELL_ROW
         tst     r1,#0x400
         addne   r3,r3,#7*CELL_ROW       ; vertical flip: the cell's last row first
         addne   r8,r8,#7*CELL_ROW
         rsbne   r12,r12,#0
         tst     r1,#0x1000
-        moveq   r10,#2                  ; the cell only
-        movne   r10,#1                  ; the cell and the priority bitmap
-        mov     r11,#8
+        bne     cv_prio
+        tst     r1,#0x200
+        bne     conv_cell_m
+conv_cell
+        ldmia   r4!,{r5,r8}             ; two planar rows
+        CONVPIX r0,r1,r5
+        CELLROW
+        CONVPIX r0,r1,r8
+        CELLROW
+        cmp     r4,r10
+        bne     conv_cell
+        b       conv_done
+conv_cell_m
+        ldmia   r4!,{r5,r8}
+        CONVPIX r1,r0,r5
+        CELLROW
+        CONVPIX r1,r0,r8
+        CELLROW
+        cmp     r4,r10
+        bne     conv_cell_m
+        b       conv_done
+cv_prio                                 ; the cell and the priority bitmap
         tst     r1,#0x200
         bne     conv_rows_m
 conv_rows
@@ -540,50 +610,113 @@ render_tile_conv
         addne   r5,r5,#1024
         add     r2,r2,lr,lsl #6         ; store rows
         add     r4,r3,lr,lsl #5         ; planar rows
+        add     r10,r4,#32              ; their end
         mov     r9,r5
-        mov     r10,#0                  ; the store only
-        mov     r11,#8
+        mov     r3,#0                   ; the store only
+        mov     r11,#0x0F
+        orr     r11,r11,r11,lsl #8
+        orr     r11,r11,r11,lsl #16
         teq     r6,#0
         beq     conv_rows
         b       conv_rows_m
 
 ;----------------------------------------------------------------------------
-; cell_change: cell r0 goes from entry r2 to entry r1: re-linked in the
-; cell list of its tile when the tile changed, the priority count of its
-; row and the row's dirty flag updated when the priority bit changed (the
-; cell cleared in the priority bitmap when the bit went away), no longer
-; stale, then drawn. Preserves r4-r9 and r11 like cell_draw.
+; void render_entries(render_layer *l, const uint8 *vram, uint32 n)
+;
+; For each of the n name table word indices in l->wlist (an end mark is
+; written after them): each of the word's two entries that differs from
+; the shadow has its cell moved to the list of its new tile when the tile
+; changed, its priority bookkeeping done when the priority bit changed,
+; stamped (which ends a stale state) and drawn; the word is then copied
+; to the shadow. The changes are tested on the word as it lies in memory:
+; an entry's low byte holds tile bits 0-7, its high byte tile bit 8 and
+; the priority bit (bit 4).
 ;----------------------------------------------------------------------------
-cell_change
-        stmfd   sp!,{r0,r1,r2,lr}       ; cell, new entry, old entry
-        eor     r3,r1,r2
-        movs    r12,r3,lsl #23          ; tile bits 0-8 differ?
-        beq     cc_prio
-        stmfd   sp!,{r4,r5}
-        bic     r2,r2,#0xFE00           ; old tile
-        bic     r1,r1,#0xFE00           ; new tile
-        add     r4,r9,#R_NEXT
-        ldmia   r4,{r4,r12,lr}          ; next, head, prev (in register order)
-        ldr     r5,[lr,r0,lsl #2]       ; p = prev[cell]
-        ldr     r3,[r4,r0,lsl #2]       ; n = next[cell]
-        cmp     r5,#NONE
-        streq   r3,[r12,r2,lsl #2]      ; head[old] = n
-        strne   r3,[r4,r5,lsl #2]       ; next[p] = n
-        cmp     r3,#NONE
-        strne   r5,[lr,r3,lsl #2]       ; prev[n] = p
-        ldr     r3,[r12,r1,lsl #2]      ; h = head[new]
-        mov     r5,#NONE
-        str     r5,[lr,r0,lsl #2]       ; prev[cell] = NONE
-        str     r3,[r4,r0,lsl #2]       ; next[cell] = h
-        cmp     r3,#NONE
-        strne   r0,[lr,r3,lsl #2]       ; prev[h] = cell
-        str     r0,[r12,r1,lsl #2]      ; head[new] = cell
-        ldmfd   sp!,{r4,r5}
-        ldmib   sp,{r1,r2}              ; the entries again
-        eor     r3,r1,r2
-cc_prio
-        tst     r3,#0x1000
-        beq     cc_draw
+HEAD_BYTES      EQU     2048            ; the heads of the cell lists, before the nodes
+
+        MACRO
+        ENTRYCELL $tlo,$thi,$pr         ; cell r0 takes entry r1; r2 = bits of the word that changed
+        tst     r2,#$pr
+        blne    re_prio
+        ands    r3,r2,#$thi             ; tile changed?
+        tsteq   r2,#$tlo
+        beq     %F1
+        ldr     lr,[r9,#R_NODE]         ; the cell leaves the list of its old tile
+        add     r3,lr,r0,lsl #3         ; its node
+        ldmia   r3,{r2,r12}             ; next cell, the word holding the cell
+        str     r2,[r12]
+        cmp     r2,#NONE
+        addne   r2,lr,r2,lsl #3
+        strne   r12,[r2,#4]             ; the next cell is now held there
+        bic     r2,r1,#0xFE00           ; and goes first in the list of its new tile
+        add     r12,lr,r2,lsl #2
+        sub     r12,r12,#HEAD_BYTES     ; the head of the tile
+        ldr     r2,[r12]
+        str     r0,[r12]
+        stmia   r3,{r2,r12}
+        cmp     r2,#NONE
+        addne   r2,lr,r2,lsl #3
+        strne   r3,[r2,#4]              ; the former first cell is held by the node
+1
+        strb    r8,[r7,r0]              ; stamped
+        add     r8,r8,#256              ; counted
+        MEND
+
+render_entries
+        stmfd   sp!,{r4-r11,lr}
+        mov     r9,r0
+        mov     r10,r1
+        ldr     r4,[r9,#R_WLIST]
+        mvn     r0,#0
+        str     r0,[r4,r2,lsl #2]       ; end mark
+        ldr     r5,[r9,#R_NTBASE]
+        add     r5,r10,r5               ; name table
+        add     r6,r9,#R_SHADOW
+        ldmia   r6,{r6,r7,r8}           ; shadow, stamps, stamp of the update (cells drawn above it)
+re_loop
+        ldr     r11,[r4],#4
+        movs    r11,r11,lsl #2          ; byte offset of the word; the end mark is negative
+        bmi     re_done
+        ldr     r1,[r5,r11]             ; new word
+        ldr     r2,[r6,r11]             ; old word
+        eor     r2,r2,r1
+        movs    r3,r2,lsr #16           ; first entry changed?
+        beq     re_second
+        mov     r0,r11,lsr #1           ; its cell
+        mov     r3,r1,lsr #24           ; the entry, low byte first
+        and     r12,r1,#0x00FF0000
+        orr     r1,r3,r12,lsr #8
+        ENTRYCELL 0x10000,0xFF000000,0x100000
+        bl      cell_draw
+        ldr     r1,[r5,r11]             ; the word again
+        ldr     r2,[r6,r11]
+        eor     r2,r2,r1
+re_second
+        str     r1,[r6,r11]             ; the word, as drawn
+        movs    r3,r2,lsl #16           ; second entry changed?
+        beq     re_loop
+        mov     r0,r11,lsr #1
+        add     r0,r0,#1                ; its cell
+        and     r3,r1,#0xFF00
+        and     r12,r1,#0xFF
+        mov     r3,r3,lsr #8
+        orr     r1,r3,r12,lsl #8
+        ENTRYCELL 1,0xFF00,0x10
+        adr     lr,re_loop
+        b       cell_draw
+re_done
+        mov     r8,r8,lsr #8
+        ldr     r0,[r9,#R_STCELLS]
+        add     r0,r0,r8
+        str     r0,[r9,#R_STCELLS]
+        ldmfd   sp!,{r4-r11,pc}
+
+; re_prio: cell r0 took entry r1, whose priority bit changed: the count of
+; priority cells of its row and the row's dirty flag updated, the cell
+; cleared in the priority bitmap when the bit went away. Preserves r0-r2
+; and r4-r11.
+re_prio
+        stmfd   sp!,{r1,r2,lr}
         mov     r2,r0,lsr #5            ; row
         add     r3,r9,#R_PRIOROWS
         ldrb    r12,[r3,r2]
@@ -595,7 +728,7 @@ cc_prio
         mov     r12,#1
         strb    r12,[r3,r2]
         tst     r1,#0x1000
-        bne     cc_draw
+        ldmnefd sp!,{r1,r2,pc}
         CELLOFF r2,r0,r3                ; the bit went away: clear the cell
         ldr     r3,[r9,#R_PRIOBM]
         add     r3,r3,r2
@@ -616,81 +749,33 @@ cc_prio
         stmia   r3,{r1,r2}
         add     r3,r3,#CELL_ROW
         stmia   r3,{r1,r2}
-cc_draw
-        ldr     r3,[r9,#R_STALE]        ; drawn below: no longer stale
-        mov     r12,#0
-        strb    r12,[r3,r0]
-        ldmfd   sp!,{r0,r1,r2,lr}
-        b       cell_draw
+        ldmfd   sp!,{r1,r2,pc}
 
 ;----------------------------------------------------------------------------
-; void render_entries(render_layer *l, const uint8 *vram, uint32 n)
+; void render_stamp_wrap(uint8 *stamp, uint32 nwords)
 ;
-; For each of the n name table word indices in l->wlist: the word is
-; copied to the shadow and each of its two entries that differs from the
-; shadow is stamped and goes through cell_change.
+; ORs 0xFE into every byte of the nwords words of stamps (a multiple of 8):
+; the stamps become RENDER_NEUTRAL, the stale cells stay RENDER_STALE.
 ;----------------------------------------------------------------------------
-render_entries
-        stmfd   sp!,{r4-r11,lr}
-        mov     r9,r0
-        mov     r10,r1
-        ldr     r11,[r9,#R_WLIST]
-        add     r0,r11,r2,lsl #2
-        str     r0,[sp,#-4]!            ; end of the list
-        ldr     r5,[r9,#R_NTBASE]
-        add     r5,r10,r5               ; name table
-        ldr     r6,[r9,#R_SHADOW]
-        ldr     r7,[r9,#R_STAMP]
-        ldr     r8,[r9,#R_STAMPNOW]
-        mov     r4,#0                   ; cells drawn
-re_loop
-        ldr     r0,[sp]
-        cmp     r11,r0
-        beq     re_done
-        ldr     r0,[r11],#4             ; word index
-        ldr     r1,[r5,r0,lsl #2]       ; new word
-        ldr     r2,[r6,r0,lsl #2]       ; old word
-        str     r1,[r6,r0,lsl #2]
-        mov     r0,r0,lsl #1            ; first cell of the word
-        mov     r3,r1,lsr #24           ; first entry: low byte first
-        and     r12,r1,#0x00FF0000
-        orr     r3,r3,r12,lsr #8
-        mov     r12,r2,lsr #24
-        and     lr,r2,#0x00FF0000
-        orr     r12,r12,lr,lsr #8
-        cmp     r3,r12
-        beq     re_second
-        stmfd   sp!,{r0,r1,r2}
-        strb    r8,[r7,r0]              ; stamped
-        add     r4,r4,#1
-        mov     r1,r3
-        mov     r2,r12
-        bl      cell_change
-        ldmfd   sp!,{r0,r1,r2}
-re_second
-        and     r3,r1,#0xFF00           ; second entry
-        and     r12,r1,#0xFF
-        mov     r3,r3,lsr #8
-        orr     r3,r3,r12,lsl #8
-        and     r12,r2,#0xFF00
-        and     lr,r2,#0xFF
-        mov     r12,r12,lsr #8
-        orr     r12,r12,lr,lsl #8
-        cmp     r3,r12
-        beq     re_loop
-        add     r0,r0,#1
-        strb    r8,[r7,r0]
-        add     r4,r4,#1
-        mov     r1,r3
-        mov     r2,r12
-        bl      cell_change
-        b       re_loop
-re_done
-        add     sp,sp,#4
-        ldr     r0,[r9,#R_STCELLS]
-        add     r0,r0,r4
-        str     r0,[r9,#R_STCELLS]
-        ldmfd   sp!,{r4-r11,pc}
+render_stamp_wrap
+        stmfd   sp!,{r4-r9,lr}
+        mov     r12,#0xFE
+        orr     r12,r12,r12,lsl #8
+        orr     r12,r12,r12,lsl #16
+sw_loop
+        ldmia   r0,{r2-r9}
+        orr     r2,r2,r12
+        orr     r3,r3,r12
+        orr     r4,r4,r12
+        orr     r5,r5,r12
+        orr     r6,r6,r12
+        orr     r7,r7,r12
+        orr     r8,r8,r12
+        orr     r9,r9,r12
+        stmia   r0!,{r2-r9}
+        subs    r1,r1,#8
+        bhi     sw_loop
+        ldmfd   sp!,{r4-r9,pc}
 
 ;----------------------------------------------------------------------------
 ; void render_tile_cells(render_layer *l, const uint8 *vram, uint32 t)
@@ -702,10 +787,10 @@ re_done
 ;----------------------------------------------------------------------------
         MACRO
         LEAVESTALE                      ; cell r11 of row r1: stale until its row is shown
-        ldr     r0,[r9,#R_STALE]
-        mov     r2,#1
-        strb    r2,[r0,r11]
+        mov     r0,#STALE
+        strb    r0,[r5,r11]
         ldr     r0,[r9,#R_STALEROWS]
+        mov     r2,#1
         orr     r0,r0,r2,lsl r1
         str     r0,[r9,#R_STALEROWS]
         MEND
@@ -725,7 +810,7 @@ render_tile_cells
         ldr     r4,[r9,#R_HEAD]
         ldr     r11,[r4,r2,lsl #2]      ; first cell of the list
         add     r4,r9,#R_SHADOW
-        ldmia   r4,{r4,r5,r6,r7}        ; shadow, stamp, stamp_now, next
+        ldmia   r4,{r4,r5,r6,r7}        ; shadow, stamps, stamp_now, nodes
         ldr     r0,[r9,#R_SHOWNROWS]
         str     r0,[sp,#-4]!
         mov     r8,#0                   ; cells drawn
@@ -749,7 +834,7 @@ tc_draw
         add     r8,r8,#1
         bl      cell_draw
 tc_next
-        ldr     r11,[r7,r11,lsl #2]
+        ldr     r11,[r7,r11,lsl #3]
         b       tc_loop
 tc_done
         add     sp,sp,#4
@@ -781,7 +866,7 @@ render_tile_cells_part
         ldreq   r11,[r4,r2,lsl #2]      ; from the head of the list
         movne   r11,r3
         add     r4,r9,#R_SHADOW
-        ldmia   r4,{r4,r5,r6,r7}        ; shadow, stamp, stamp_now, next
+        ldmia   r4,{r4,r5,r6,r7}        ; shadow, stamps, stamp_now, nodes
         ldr     r1,[r9,#R_SHOWNROWS]
         stmfd   sp!,{r0,r1}             ; budget, rows shown
         mov     r8,#0                   ; cells drawn
@@ -804,16 +889,13 @@ tp_draw
         beq     tp_done
         sub     r0,r0,#1
         str     r0,[sp]
-        ldr     r0,[r9,#R_STALE]
-        mov     r1,#0
-        strb    r1,[r0,r11]
         CELLENTRY
         mov     r0,r11
         strb    r6,[r5,r11]             ; stamped
         add     r8,r8,#1
         bl      cell_draw
 tp_next
-        ldr     r11,[r7,r11,lsl #2]
+        ldr     r11,[r7,r11,lsl #3]
         b       tp_loop
 tp_done
         add     sp,sp,#8
@@ -842,21 +924,15 @@ render_stale_cells
         bic     r0,r0,r1
         str     r0,[r9,#R_STALEROWS]
         add     r4,r9,#R_SHADOW
-        ldmia   r4,{r4,r5,r6}           ; shadow, stamp, stamp_now
-        ldr     r7,[r9,#R_STALE]
+        ldmia   r4,{r4,r5,r6}           ; shadow, stamps, stamp_now
         mov     r8,#0                   ; cell
 sc_rows
         movs    r11,r11,lsr #1
         bcc     sc_skip_row
 sc_cells
-        ldrb    r0,[r7,r8]
-        teq     r0,#0
-        beq     sc_next_cell
-        mov     r0,#0
-        strb    r0,[r7,r8]
         ldrb    r0,[r5,r8]
-        cmp     r0,r6
-        beq     sc_next_cell            ; drawn in this update already
+        teq     r0,#STALE
+        bne     sc_next_cell
         add     r1,r4,r8,lsl #1
         ldrb    r0,[r1]
         ldrb    r1,[r1,#1]
@@ -912,22 +988,22 @@ render_rebuild_cells_part
         bhs     rb_done
         stmfd   sp!,{r2,r3}             ; first cell, last cell + 1
         add     r4,r9,#R_SHADOW
-        ldmia   r4,{r4,r5,r6}           ; shadow, stamp, stamp_now
+        ldmia   r4,{r4,r5,r6,r7}        ; shadow, stamps, stamp_now, nodes
 rb_loop
         add     r1,r4,r11,lsl #1
         ldrb    r0,[r1]
         ldrb    r1,[r1,#1]
         orr     r1,r0,r1,lsl #8         ; entry
         bic     r2,r1,#0xFE00           ; tile
-        add     r7,r9,#R_NEXT
-        ldmia   r7,{r7,r8,r12}          ; next, head, prev
-        ldr     r3,[r8,r2,lsl #2]       ; h = head[tile]
-        mov     r0,#NONE
-        str     r0,[r12,r11,lsl #2]     ; prev[cell] = NONE
-        str     r3,[r7,r11,lsl #2]      ; next[cell] = h
+        add     r12,r7,r2,lsl #2
+        sub     r12,r12,#HEAD_BYTES     ; its head
+        ldr     r3,[r12]                ; the cell goes first in its list
+        str     r11,[r12]
+        add     r0,r7,r11,lsl #3        ; node of the cell
+        stmia   r0,{r3,r12}
         cmp     r3,#NONE
-        strne   r11,[r12,r3,lsl #2]     ; prev[h] = cell
-        str     r11,[r8,r2,lsl #2]      ; head[tile] = cell
+        addne   r3,r7,r3,lsl #3
+        strne   r0,[r3,#4]              ; the former first cell is held by the node
         tst     r1,#0x1000
         beq     rb_draw
         mov     r2,r11,lsr #5           ; a priority cell: counted in its row

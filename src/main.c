@@ -543,7 +543,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: port outputs of a segment buffered and sent in one call\n");
+    printf("masterdo: changed name table entries in one pass, cell lists of two-word nodes, leaner cell copy and tile conversion\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);

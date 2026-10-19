@@ -25,31 +25,30 @@ CHECK_OFF(xtab, offsetof(render_layer, xtab) == 20);
 CHECK_OFF(shadow, offsetof(render_layer, shadow) == 24);
 CHECK_OFF(stamp, offsetof(render_layer, stamp) == 28);
 CHECK_OFF(stamp_now, offsetof(render_layer, stamp_now) == 32);
-CHECK_OFF(next, offsetof(render_layer, next) == 36);
+CHECK_OFF(node, offsetof(render_layer, node) == 36);
 CHECK_OFF(head, offsetof(render_layer, head) == 40);
-CHECK_OFF(prev, offsetof(render_layer, prev) == 44);
-CHECK_OFF(wlist, offsetof(render_layer, wlist) == 48);
-CHECK_OFF(nt_base, offsetof(render_layer, nt_base) == 56);
-CHECK_OFF(prio_rows, offsetof(render_layer, prio_rows) == 68);
-CHECK_OFF(prio_min, offsetof(render_layer, prio_min) == 100);
-CHECK_OFF(prio_max, offsetof(render_layer, prio_max) == 132);
-CHECK_OFF(prio_dirty, offsetof(render_layer, prio_dirty) == 164);
-CHECK_OFF(st_cells, offsetof(render_layer, cells) == 196);
-CHECK_OFF(st_tile_cells, offsetof(render_layer, tile_cells) == 200);
+CHECK_OFF(wlist, offsetof(render_layer, wlist) == 44);
+CHECK_OFF(nt_base, offsetof(render_layer, nt_base) == 52);
+CHECK_OFF(prio_rows, offsetof(render_layer, prio_rows) == 64);
+CHECK_OFF(prio_min, offsetof(render_layer, prio_min) == 96);
+CHECK_OFF(prio_max, offsetof(render_layer, prio_max) == 128);
+CHECK_OFF(prio_dirty, offsetof(render_layer, prio_dirty) == 160);
+CHECK_OFF(st_cells, offsetof(render_layer, cells) == 192);
+CHECK_OFF(st_tile_cells, offsetof(render_layer, tile_cells) == 196);
 CHECK_OFF(ccb_plut, offsetof(CCB, ccb_PLUTPtr) == 12);
 CHECK_OFF(ccb_pre0, offsetof(CCB, ccb_PRE0) == 52);
 CHECK_OFF(ccb_pre1, offsetof(CCB, ccb_PRE1) == 56);
-CHECK_OFF(st_tiles_conv, offsetof(render_layer, tiles_conv) == 204);
-CHECK_OFF(stale, offsetof(render_layer, stale) == 340);
-CHECK_OFF(stale_rows, offsetof(render_layer, stale_rows) == 344);
-CHECK_OFF(shown_rows, offsetof(render_layer, shown_rows) == 348);
-CHECK_OFF(nrows, offsetof(render_layer, nrows) == 352);
-CHECK_OFF(ncells, offsetof(render_layer, ncells) == 356);
-CHECK_OFF(pg_n, offsetof(render_layer, pg_n) == 208);
-CHECK_OFF(pg_row0, offsetof(render_layer, pg_row0) == 212);
-CHECK_OFF(pg_nrows, offsetof(render_layer, pg_nrows) == 244);
-CHECK_OFF(pg_col0, offsetof(render_layer, pg_col0) == 276);
-CHECK_OFF(pg_col1, offsetof(render_layer, pg_col1) == 308);
+CHECK_OFF(st_tiles_conv, offsetof(render_layer, tiles_conv) == 200);
+CHECK_OFF(stale_rows, offsetof(render_layer, stale_rows) == 336);
+CHECK_OFF(shown_rows, offsetof(render_layer, shown_rows) == 340);
+CHECK_OFF(nrows, offsetof(render_layer, nrows) == 344);
+CHECK_OFF(ncells, offsetof(render_layer, ncells) == 348);
+CHECK_OFF(pg_n, offsetof(render_layer, pg_n) == 204);
+CHECK_OFF(pg_row0, offsetof(render_layer, pg_row0) == 208);
+CHECK_OFF(pg_nrows, offsetof(render_layer, pg_nrows) == 240);
+CHECK_OFF(pg_col0, offsetof(render_layer, pg_col0) == 272);
+CHECK_OFF(pg_col1, offsetof(render_layer, pg_col1) == 304);
+CHECK_OFF(stamps, RENDER_STALE == 0xFF && RENDER_NEUTRAL == 0xFE && RENDER_STAMP_LAST == 0xFC);
 CHECK_OFF(sa_end, offsetof(render_sprite_args, end) == 32);
 CHECK_OFF(sa_needed, offsetof(render_sprite_args, needed) == 40);
 CHECK_OFF(sa_height, offsetof(render_sprite_args, height) == 44);
@@ -71,7 +70,8 @@ CHECK_OFF(two_layers, RENDER_LAYERS == 2);      /* render_update handles both by
 #define BM_WORDS        (RENDER_W / 4)      /* words per bitmap row */
 #define POOL_BYTES      (2 * RENDER_BM_BYTES)   /* a bitmap block: two usual bitmaps */
 #define TILE_WORDS      16                  /* 8 rows x 2 words */
-#define WLIST_WORDS     VDP_TILES           /* the largest work list */
+#define WLIST_WORDS     (VDP_TILES + 1)     /* the largest work list, or an end mark */
+#define HEAD_BYTES      (VDP_TILES * 4)     /* the heads of the cell lists, before the nodes */
 #define NONE            RENDER_NT_CELLS_MAX /* end of a cell list */
 
 /* Index of the lowest set bit of a nonzero word. */
@@ -176,11 +176,8 @@ static void layer_free(render_layer *l)
 {
     uint32 n = l->cap_cells;
 
-    if (l->stale != NULL) FreeMem(l->stale, (int32)n);
     if (l->stamp != NULL) FreeMem(l->stamp, (int32)n);
-    if (l->prev != NULL) FreeMem(l->prev, (int32)(n * 4));
-    if (l->next != NULL) FreeMem(l->next, (int32)(n * 4));
-    if (l->head != NULL) FreeMem(l->head, VDP_TILES * 4);
+    if (l->head != NULL) FreeMem(l->head, (int32)(HEAD_BYTES + n * 8));
     if (l->shadow != NULL) FreeMem(l->shadow, (int32)(n * 2));
     memset(l, 0, sizeof(*l));
 }
@@ -213,19 +210,18 @@ static int32 layer_init(renderer *r, render_layer *l, uint32 cap)
 {
     l->cap_cells = cap;
     l->shadow = (uint8 *)AllocMem((int32)(cap * 2), PLAIN_MEM);
-    l->head = (uint32 *)AllocMem(VDP_TILES * 4, PLAIN_MEM);
-    l->next = (uint32 *)AllocMem((int32)(cap * 4), PLAIN_MEM);
-    l->prev = (uint32 *)AllocMem((int32)(cap * 4), PLAIN_MEM);
+    l->head = (uint32 *)AllocMem((int32)(HEAD_BYTES + cap * 8), PLAIN_MEM);
+    l->node = (l->head != NULL) ? l->head + VDP_TILES : NULL;
     l->stamp = (uint8 *)AllocMem((int32)cap, PLAIN_MEM);
-    l->stale = (uint8 *)AllocMem((int32)cap, PLAIN_MEM);
+    if (l->stamp != NULL)
+        memset(l->stamp, RENDER_NEUTRAL, (size_t)cap);
     l->tiles = r->tiles;
     l->tiles_f = r->tiles_f;
     l->t_ok = r->t_ok;
     l->wlist = r->wlist;
     l->dlist = r->dlist;
     l->xtab = r->xtab;
-    return (l->shadow == NULL || l->head == NULL || l->next == NULL || l->prev == NULL ||
-            l->stamp == NULL || l->stale == NULL) ? -1 : 0;
+    return (l->shadow == NULL || l->head == NULL || l->stamp == NULL) ? -1 : 0;
 }
 
 /*
@@ -391,13 +387,26 @@ static void rebuild_start(render_layer *l, const uint8 *vram)
     memset(l->prio_bm, 0, (size_t)(l->nrows * 8 * BM_PITCH));
     memset(l->prio_rows, 0, sizeof(l->prio_rows));
     memset(l->prio_dirty, 1, sizeof(l->prio_dirty));
-    memset(l->stale, 0, (size_t)l->ncells);
+    memset(l->stamp, RENDER_NEUTRAL, (size_t)l->cap_cells);
     l->stale_rows = 0;
     l->pend_tile = RENDER_NO_TILE;
     l->nt_pend[0] = l->nt_pend[1] = 0;
     memset(l->tile_pend, 0, sizeof(l->tile_pend));
     for (i = 0; i < VDP_TILES; i++)
         l->head[i] = NONE;
+}
+
+/* The stamp of a new update of the layer. Stamps are even, so that at
+ * the wrap one OR per word turns every stamp into RENDER_NEUTRAL and
+ * keeps the stale cells (RENDER_STALE): a cell drawn in an old update
+ * never looks drawn in this one. */
+static void next_stamp(render_layer *l)
+{
+    l->stamp_now += 2;
+    if (l->stamp_now > RENDER_STAMP_LAST) {
+        l->stamp_now = 0;
+        render_stamp_wrap(l->stamp, l->cap_cells / 4);
+    }
 }
 
 /* A rebuild begun ahead (render_catch_up) goes on from the table as it
@@ -1236,15 +1245,9 @@ void render_update(renderer *r, vdp_state *v)
         r->st.collisions++;
 
     /* Each cell is drawn at most once per update: the stamp of the
-     * update marks the cells drawn (a wrap makes a cell drawn 256
-     * updates ago look drawn now, which only costs a redraw). */
-    for (m = 0; m < RENDER_LAYERS; m++) {
-        render_layer *l = &r->layer[m];
-
-        l->stamp_now = (l->stamp_now + 1) & 0xFF;
-        if (l->stamp_now == 0)
-            memset(l->stamp, 0xFF, (size_t)l->cap_cells);
-    }
+     * update marks the cells drawn. */
+    for (m = 0; m < RENDER_LAYERS; m++)
+        next_stamp(&r->layer[m]);
 
     /* Written tiles: forget their conversions and note the name table
      * chunks among them, for each layer; with them, the work the
@@ -1498,9 +1501,7 @@ uint32 render_catch_up(renderer *r, vdp_state *v, uint32 (*now)(void), uint32 de
     for (m = 0; m < RENDER_LAYERS; m++) {
         render_layer *l = &r->layer[m];
 
-        l->stamp_now = (l->stamp_now + 1) & 0xFF;
-        if (l->stamp_now == 0)
-            memset(l->stamp, 0xFF, (size_t)l->cap_cells);
+        next_stamp(l);
         /* The rows of the last picture decide what is drawn first and
          * which cells of the written tiles are left stale; before the
          * first picture every row counts (the next update sets them
