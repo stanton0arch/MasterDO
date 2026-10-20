@@ -85,6 +85,20 @@
  * with the display on. The sprites, the bands, the pieces and the
  * palettes belong to the frame that shows the picture and are not
  * touched.
+ *
+ * Repeated pictures: a game often leaves its picture as it is for a few
+ * frames (menus, pauses in the action, the frames in which it prepares
+ * its next picture out of sight). Such a frame would draw exactly what
+ * the previous one drew. render_update() tells it apart without looking
+ * at the pixels: every write into what the cels show is counted (cells
+ * drawn into the bitmaps, tile conversions, PLUT rebuilds, which only
+ * happen when the colours change, backdrop changes, rebuilds), so equal
+ * counters mean equal sources; the palette bands past the first, rebuilt
+ * at every update, are compared by their colours, and the cel chain by a
+ * signature of the fields the renderer changes from frame to frame
+ * (render_chain_sig). When render_repeated() is set the caller may show
+ * the screen holding the previous picture once more instead of drawing
+ * the same picture into another screen.
  */
 
 #include "types.h"
@@ -139,6 +153,7 @@ typedef struct {
     uint32 ahead_calls;     /* catch-up calls that found work */
     uint32 ahead_cut;       /* of which stopped by their deadline */
     uint32 ahead_us;        /* time they took */
+    uint32 repeats;         /* pictures identical to the previous one */
 } render_stats;
 
 /*
@@ -261,6 +276,20 @@ typedef struct {
      * room for the end mark render_band_pieces reads them up to. */
     uint32  lbands[VDP_HS_LOG + VDP_NT_LOG + VDP_DE_LOG + VDP_PAL_BANDS + 4];
     uint32  nlb;
+    /* The picture of the previous update (repeated pictures): the pixel
+     * work counters, the display, the height, the backdrop, the palette
+     * bands and the signature of the chain with the colours of the bands
+     * past the first. */
+    uint32  pic_valid;
+    uint32  pic_gen;
+    uint32  pic_on;
+    uint32  pic_height;
+    uint32  pic_backdrop;
+    uint32  pic_npb;
+    uint32  pic_sig;
+    uint32  repeat;         /* the last update repeats the picture before it */
+    uint32  cram0[8];       /* colours of the first palette band's PLUTs */
+    uint32  cram0_ok;
     render_stats st;
 } renderer;
 
@@ -271,8 +300,14 @@ void  render_free(renderer *r);
 void  render_reset(renderer *r);
 
 /* Brings the bitmaps, the pieces and the sprite cels up to date with the
- * VDP; clears the VDP's dirty flags. */
+ * VDP; clears the VDP's dirty flags; tells whether the picture is the
+ * previous one (render_repeated()). */
 void  render_update(renderer *r, vdp_state *v);
+
+/* Signature of the cel chain from c, followed through the next pointers up
+ * to NULL, seeded with seed (render_a.s): the source, PLUT, position, steps
+ * and preamble words of every cel. */
+uint32 render_chain_sig(const CCB *c, uint32 seed);
 
 /* Spare time of a frame with the display off: converts the written tiles
  * and redraws the changed cells and the cells of the written tiles into
@@ -402,5 +437,10 @@ void   render_tile_conv(render_layer *l, uint32 t, uint32 flip, const uint8 *vra
 #define render_backdrop(r)  ((r)->backdrop)
 #define render_display_on(r) ((r)->display_on)
 #define render_height(r)    ((r)->height)
+/* The picture of the last update is identical to the one before it. */
+#define render_repeated(r)  ((r)->repeat)
+/* The screens no longer hold the previous picture (a pause screen, a failed
+ * draw): the next update is not taken as a repeat. */
+#define render_forget_picture(r) ((r)->pic_valid = 0)
 
 #endif /* RENDER_H_INCLUDED */

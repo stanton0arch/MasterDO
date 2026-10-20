@@ -50,6 +50,14 @@ static bench_cpu_result bres;
 static uint32 fb[256 * (VDP_ACTIVE_MAX / 2)];
 static uint32 fb2[256 * (VDP_ACTIVE_MAX / 2)];
 static uint32 pic_h;            /* lines of the pictures compared */
+/* -celhash: the hashes of the previous frame's cels and picture, to check
+ * that a picture the renderer takes as repeated is the previous one. */
+static uint32 rep_prev_ok;
+static uint32 rep_prev_h;
+static uint32 rep_prev_hp;
+static uint32 rep_count;
+static uint32 rep_checked;
+static uint32 rep_errors;
 static uint32 prev_on;          /* display on at the previous frame */
 
 /* LRFORM pixel access. */
@@ -706,8 +714,10 @@ void hmain(void)
                 break;
             /* A DrawCels of 3.5 ms is added to the frame time, as on
              * the console, before the spare time is used (none with the
-             * display off: nothing is drawn). */
-            draw = render_display_on(g.rd) ? 3500 : 0;
+             * display off, and none for a picture identical to the
+             * previous one, which is shown again: nothing is drawn). */
+            draw = (render_display_on(g.rd) && !render_repeated(g.rd)) ? 3500 : 0;
+            rep_count += render_repeated(g.rd);
             game_frame_done(&g, draw);
             game_spare_time(&g, t0 - draw, t0 - draw + PLAT_NTSC_FRAME_US);
             if (sim_arg(19)) {
@@ -717,7 +727,7 @@ void hmain(void)
 
                 printf("Frame: %lu emu %lu upd %lu draw %lu spare %lu sync %lu sync_us %lu "
                        "forced %lu refused %lu spare_blocks %lu insns %lu shown %lu "
-                       "dataw %lu dirty %lu evict %lu evict_ahead %lu evict_us %lu\n",
+                       "dataw %lu dirty %lu evict %lu evict_ahead %lu evict_us %lu repeat %lu\n",
                        (unsigned long)f, (unsigned long)g.last_us, (unsigned long)g.last_upd_us,
                        (unsigned long)draw, (unsigned long)g.last_spare_us,
                        (unsigned long)(s->sync - s0.sync), (unsigned long)(s->sync_us - s0.sync_us),
@@ -730,7 +740,8 @@ void hmain(void)
                        (unsigned long)count_dirty(&g.sms->vdp),
                        (unsigned long)(s->evictions - s0.evictions),
                        (unsigned long)(s->evict_ahead - s0.evict_ahead),
-                       (unsigned long)(s->evict_us - s0.evict_us));
+                       (unsigned long)(s->evict_us - s0.evict_us),
+                       (unsigned long)render_repeated(g.rd));
             }
         }
         if (sim_arg(15) && render_display_on(g.rd)) {
@@ -772,6 +783,19 @@ void hmain(void)
             }
             printf("Cels: frame %lu: %lu cels, hash %08lx, picture %08lx\n", (unsigned long)(f + 1),
                    (unsigned long)n, (unsigned long)h, (unsigned long)hp);
+            if (render_repeated(rd)) {
+                rep_checked++;
+                if (!rep_prev_ok || h != rep_prev_h || hp != rep_prev_hp) {
+                    rep_errors++;
+                    printf("Repeat: frame %lu: taken as repeated, but the %s differs from the previous frame's\n",
+                           (unsigned long)(f + 1), !rep_prev_ok ? "display" : (hp != rep_prev_hp ? "picture" : "cel chain"));
+                }
+            }
+            rep_prev_ok = 1;
+            rep_prev_h = h;
+            rep_prev_hp = hp;
+        } else if (sim_arg(15)) {
+            rep_prev_ok = 0;
         }
         if (sim_arg(13))
             check_blocks(f);
@@ -928,5 +952,7 @@ void hmain(void)
     printf("Sprites: %lu frames checked, %lu with differences, %lu with overflow, %lu with collision\n",
            (unsigned long)sprite_checks, (unsigned long)sprite_errors,
            (unsigned long)sprite_flag_frames[0], (unsigned long)sprite_flag_frames[1]);
+    printf("Repeats: %lu pictures shown again, %lu checked against the previous picture, %lu differing\n",
+           (unsigned long)rep_count, (unsigned long)rep_checked, (unsigned long)rep_errors);
     sim_codedump((uint32)g.jit.code, (uint32)g.jit.code_end, (uint32)g.jit.blocks, g.jit.nblocks);
 }

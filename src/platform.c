@@ -50,12 +50,16 @@ static void presenter_main(void)
             break;
         while (p->q_head != p->q_tail) {
             int32 screen = p->queue[p->q_head & (PLAT_QUEUE_LEN - 1)];
-            Err err = DisplayScreen(p->sc.sc_ScreenItems[screen], 0);
             uint32 now;
 
-            if (err < 0 && p->errors++ == 0)
-                printf("WARNING: DisplayScreen failed in the presenter thread (0x%lx)\n",
-                       (unsigned long)err);
+            /* A screen queued again stays on display. */
+            if (screen != p->displayed) {
+                Err err = DisplayScreen(p->sc.sc_ScreenItems[screen], 0);
+
+                if (err < 0 && p->errors++ == 0)
+                    printf("WARNING: DisplayScreen failed in the presenter thread (0x%lx)\n",
+                           (unsigned long)err);
+            }
             WaitVBL(ior, 1);
             now = plat_usec_now();
             if (p->presented != 0 && now - p->shown_us >= PLAT_LONG_US) {
@@ -426,6 +430,12 @@ void plat_present(platform *p)
     p->back = (p->back + 1) % p->num_screens;
 }
 
+void plat_present_again(platform *p)
+{
+    if (p->vbl_ior >= 0)
+        WaitVBL(p->vbl_ior, 1);
+}
+
 int32 plat_has_presenter(const platform *p)
 {
     return p->thread >= 0;
@@ -438,27 +448,47 @@ void plat_queue(platform *p)
     SendSignal(p->thread_task, (uint32)p->thread_sig);
 }
 
-int32 plat_free_screen(const platform *p)
+/* The last queued screen, or the one on display when the queue is empty:
+ * both hold the last picture (the thread only pops the head). */
+void plat_queue_again(platform *p)
+{
+    uint32 tail = p->q_tail;
+    int32 s = (p->q_head != tail) ? p->queue[(tail - 1) & (PLAT_QUEUE_LEN - 1)]
+                                  : p->displayed;
+
+    p->queue[tail & (PLAT_QUEUE_LEN - 1)] = s;
+    p->q_tail = tail + 1;
+    SendSignal(p->thread_task, (uint32)p->thread_sig);
+}
+
+/* A free screen when no more than num_screens - 2 entries are pending:
+ * without screens queued again, the first implies the second. */
+static int32 find_free(const platform *p)
 {
     int32 s;
 
+    if (p->q_tail - p->q_head > (uint32)(p->num_screens - 2))
+        return -1;
     for (s = 0; s < p->num_screens; s++) {
         if (screen_free(p, s))
-            return 1;
+            return s;
     }
-    return 0;
+    return -1;
+}
+
+int32 plat_free_screen(const platform *p)
+{
+    return find_free(p) >= 0;
 }
 
 void plat_next_screen(platform *p)
 {
     for (;;) {
-        int32 s;
+        int32 s = find_free(p);
 
-        for (s = 0; s < p->num_screens; s++) {
-            if (screen_free(p, s)) {
-                p->back = s;
-                return;
-            }
+        if (s >= 0) {
+            p->back = s;
+            return;
         }
         WaitSignal((uint32)p->free_sig);
     }

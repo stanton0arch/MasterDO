@@ -368,6 +368,9 @@ void render_reset(renderer *r)
     r->display_on = 0;
     r->chain = &r->cels[CEL_TERM];
     r->last_cel = &r->cels[CEL_TERM];
+    r->pic_valid = 0;
+    r->repeat = 0;
+    r->cram0_ok = 0;
     memset(r->t_ok, 0, VDP_TILES);
     memset(&r->st, 0, sizeof(r->st));
 }
@@ -556,8 +559,9 @@ static void band_pluts(uint16 *set, const uint8 *cram)
 }
 
 /* The palette bands of the frame and their PLUTs: the first band's when
- * the colour RAM changed, the others' (colour writes during the active
- * display) every frame that has them. */
+ * the colour RAM was written with other colours than those of its PLUTs
+ * (games often write the same colours every frame), the others' (colour
+ * writes during the active display) every frame that has them. */
 static void update_palettes(renderer *r, vdp_state *v)
 {
     uint32 merged;
@@ -566,8 +570,15 @@ static void update_palettes(renderer *r, vdp_state *v)
     r->npb = vdp_palette_bands(v, r->ptops, r->pcram, &merged);
     if (v->cram_dirty) {
         v->cram_dirty = 0;
-        band_pluts(r->pluts, (const uint8 *)r->pcram);
-        r->st.palettes++;
+        for (k = 0; k < 8 && r->cram0[k] == r->pcram[k]; k++)
+            ;
+        if (k < 8 || !r->cram0_ok) {
+            for (k = 0; k < 8; k++)
+                r->cram0[k] = r->pcram[k];
+            r->cram0_ok = 1;
+            band_pluts(r->pluts, (const uint8 *)r->pcram);
+            r->st.palettes++;
+        }
     }
     for (k = 1; k < r->npb; k++)
         band_pluts(r->pluts + k * RENDER_PLUT_SET, (const uint8 *)(r->pcram + 8 * k));
@@ -1192,7 +1203,7 @@ static uint32 update_sprites(renderer *r, const vdp_state *v)
  * Frame update
  *------------------------------------------------------------------------*/
 
-void render_update(renderer *r, vdp_state *v)
+static void update_picture(renderer *r, vdp_state *v)
 {
     const uint8 *vram = v->vram;
     uint32 nt_mask[RENDER_LAYERS][2];
@@ -1383,6 +1394,57 @@ void render_update(renderer *r, vdp_state *v)
     last->ccb_Flags |= CCB_LAST;
     r->last_cel = last;
     r->chain = &r->cels[0];
+}
+
+/* Is the picture just built the previous one? See "Repeated pictures" in
+ * render.h. The counters only grow, so their sum is unchanged exactly
+ * when none of them moved. With the display off the picture is the
+ * backdrop alone. A signature can only collide when the chain changed
+ * in more than one cel while no pixel did. The signature is taken at
+ * every update with the display on (about 38 ARM cycles per cel): a
+ * frame repeats the one before it only if that one's signature is known,
+ * and taking it only near earlier repeats missed the repeats of games
+ * that change their picture every other frame. */
+static void decide_repeat(renderer *r)
+{
+    uint32 gen = r->st.cells + r->st.tiles + r->st.palettes + r->st.backdrops +
+                 r->st.rebuilds;
+    uint32 sig = 0;
+    uint32 same;
+
+    if (r->display_on) {
+        uint32 k;
+
+        for (k = 8; k < r->npb * 8; k++) {
+            sig ^= r->pcram[k];
+            sig += sig << 10;
+            sig ^= sig >> 6;
+        }
+        sig = render_chain_sig(r->chain, sig);
+        same = r->pic_valid && r->pic_on && gen == r->pic_gen && sig == r->pic_sig &&
+               r->npb == r->pic_npb;
+    } else {
+        same = r->pic_valid && !r->pic_on;
+    }
+    same = same && r->height == r->pic_height && r->backdrop == r->pic_backdrop;
+    r->repeat = same;
+    if (same) {
+        r->st.repeats++;
+        return;
+    }
+    r->pic_valid = 1;
+    r->pic_gen = gen;
+    r->pic_on = r->display_on;
+    r->pic_height = r->height;
+    r->pic_backdrop = r->backdrop;
+    r->pic_npb = r->npb;
+    r->pic_sig = sig;
+}
+
+void render_update(renderer *r, vdp_state *v)
+{
+    update_picture(r, v);
+    decide_repeat(r);
 }
 
 /*--------------------------------------------------------------------------

@@ -189,6 +189,8 @@ static uint32 draw_picture(platform *p, app_state *st)
     err = DrawCels(plat_bitmap(p, p->back), render_chain(g.rd));
     dt = plat_usec_now() - t0;
     if (err < 0) {
+        /* The screen may hold part of a picture: it is not shown again. */
+        render_forget_picture(g.rd);
         game_note_draw_error(&g);
         if (st->draw_errors++ < DRAW_ERR_LOGS)
             printf("Picture: frame %lu: DrawCels returned an error (0x%lx) after %lu us, "
@@ -280,11 +282,13 @@ static void run_game(platform *p, app_state *st)
     reset_borders(st);
     st->draw_errors = 0;
     set_picture(p, st, render_height(g.rd));
+    render_forget_picture(g.rd);
     for (;;) {
         uint32 t0 = plat_usec_now();
         uint32 held = plat_pad_state();
         uint32 pressed = held & ~prev;
         uint32 draw_us;
+        uint32 again;
         uint32 now;
 
         game_pad_time(&g, plat_usec_now() - t0);
@@ -300,6 +304,7 @@ static void run_game(platform *p, app_state *st)
                 break;
             reset_borders(st);
             set_picture(p, st, st->pic_h);
+            render_forget_picture(g.rd);
             shown = plat_usec_now();
             longs = p->long_presents;
             continue;
@@ -310,6 +315,7 @@ static void run_game(platform *p, app_state *st)
             queued = plat_has_presenter(p) && !st->direct;
             printf("Present: frame %lu: %s\n", (unsigned long)g.frame,
                    queued ? "queued (presenter thread)" : "direct (present, then wait for the VBL)");
+            render_forget_picture(g.rd);
             shown = plat_usec_now();
             longs = p->long_presents;
         }
@@ -327,11 +333,15 @@ static void run_game(platform *p, app_state *st)
             set_picture(p, st, render_height(g.rd));
             reset_borders(st);
         }
-        draw_us = draw_picture(p, st);
+        /* A picture identical to the previous one is not drawn: the screen
+         * holding it is shown once more. */
+        again = render_repeated(g.rd);
+        draw_us = again ? 0 : draw_picture(p, st);
         game_frame_done(&g, draw_us);
         if (queued && p->errors != 0) {
             /* The thread cannot show the screens: back to the direct mode. */
             plat_drain(p);
+            render_forget_picture(g.rd);
             queued = 0;
             st->direct = 1;
             printf("Present: frame %lu: the presenter thread fails, direct mode\n",
@@ -343,7 +353,10 @@ static void run_game(platform *p, app_state *st)
             /* The finished screen goes to the presenter at once. When
              * no screen is free the main task would wait for the next
              * VBL anyway: that time goes to translation. */
-            plat_queue(p);
+            if (again)
+                plat_queue_again(p);
+            else
+                plat_queue(p);
             if (!plat_free_screen(p)) {
                 uint32 vbl = plat_next_vbl_us(p);
 
@@ -358,7 +371,10 @@ static void run_game(platform *p, app_state *st)
             }
         } else {
             game_spare_time(&g, t0, t0 + p->frame_us);
-            plat_present(p);
+            if (again)
+                plat_present_again(p);
+            else
+                plat_present(p);
             now = plat_usec_now();
             if (now - shown >= PLAT_LONG_US)
                 game_note_long_vbl(&g, now - shown);
@@ -543,7 +559,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: changed name table entries in one pass, cell lists of two-word nodes, leaner cell copy and tile conversion\n");
+    printf("masterdo: a picture identical to the previous one shown again instead of drawn\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);

@@ -12,7 +12,9 @@
  * frame that runs past its vertical blank is absorbed by the screen still
  * queued instead of being shown late. plat_next_screen() gives the main
  * task a screen to draw into, waiting for one when both others are
- * displayed or queued.
+ * displayed or queued. A picture identical to the previous one is not
+ * drawn again: the screen holding it is queued once more (plat_queue_again)
+ * or kept on display for one more vertical blank (plat_present_again).
  */
 
 #include "types.h"
@@ -84,6 +86,9 @@ void   plat_text(const platform *p, int32 screen, int32 x, int32 y,
 /* Shows the back screen, waits for the next vertical blank, then takes
  * another screen as the back screen (the queue must be empty). */
 void   plat_present(platform *p);
+/* Keeps the screen on display for one more vertical blank (the back
+ * screen stays the back screen). */
+void   plat_present_again(platform *p);
 void   plat_wait_vbl(const platform *p);
 
 /* Queued presentation (the presenter thread; plat_has_presenter() tells
@@ -92,9 +97,14 @@ void   plat_wait_vbl(const platform *p);
  * for one when none is free; plat_free_screen() tells whether one is free
  * now; plat_next_vbl_us() estimates the clock value of the next vertical
  * blank from the last presentation; plat_drain() waits until every queued
- * screen has been shown (before plat_present() is used again). */
+ * screen has been shown (before plat_present() is used again).
+ * plat_queue_again() queues the screen of the last queued picture once
+ * more, the back screen staying free; since such entries take no screen,
+ * the main task also waits while more than PLAT_NUM_SCREENS - 2 entries
+ * are pending, which paces it as the screens do. */
 int32  plat_has_presenter(const platform *p);
 void   plat_queue(platform *p);
+void   plat_queue_again(platform *p);
 void   plat_next_screen(platform *p);
 int32  plat_free_screen(const platform *p);
 uint32 plat_next_vbl_us(const platform *p);

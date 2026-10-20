@@ -24,6 +24,7 @@
         EXPORT  cd_prio
         EXPORT  re_prio
         EXPORT  render_stamp_wrap
+        EXPORT  render_chain_sig
 
 ; CCB fields (graphics.h).
 CCB_SOURCE      EQU     8
@@ -1941,5 +1942,41 @@ pgr_hi
         mov     r9,#0
         strb    r9,[r5,r2]
         mov     pc,lr
+
+; uint32 render_chain_sig(const CCB *c, uint32 seed): signature of the cel
+; chain from c (r0), followed through the next pointers up to NULL. Per
+; cel the fields the renderer changes from frame to frame (source, PLUT,
+; position, the horizontal step, the vertical step, the two preamble
+; words; the flags only move CCB_LAST to the end of the chain) are mixed
+; into one word c by additions and exclusive ors at different rotations,
+; folded into the signature h by h ^= c, h += h << 10, h ^= h >> 6. Each
+; step is a bijection of h, so a chain whose words differ for one cel
+; always gets another signature; the shift down keeps two cels changed
+; alike (sprites moving together) from cancelling, which a fold by
+; multiplication alone does not (h * 33 never moves a change in the top
+; bits down). About 38 cycles per cel.
+render_chain_sig
+        stmfd   sp!,{r4-r11,lr}
+        movs    r0,r0
+        beq     rcs_done
+rcs_loop
+        ldmib   r0,{r2-r10}             ; next, source, PLUT, x, y, HDX, HDY, VDX, VDY
+        add     r12,r0,#CCB_PRE0
+        ldmia   r12,{r11,r12}           ; PRE0, PRE1
+        eor     r3,r3,r4,ror #7
+        add     r3,r3,r5,ror #13
+        eor     r3,r3,r6,ror #19
+        add     r3,r3,r7,ror #3
+        eor     r3,r3,r10,ror #23
+        add     r3,r3,r11,ror #29
+        eor     r3,r3,r12,ror #17
+        eor     r1,r1,r3
+        add     r1,r1,r1,lsl #10
+        eor     r1,r1,r1,lsr #6
+        movs    r0,r2
+        bne     rcs_loop
+rcs_done
+        mov     r0,r1
+        ldmfd   sp!,{r4-r11,pc}
 
         END
