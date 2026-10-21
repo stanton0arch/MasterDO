@@ -352,14 +352,14 @@ def make_sheets(workdir, dump_every, differing):
     regular = [v for v in views if int(os.path.basename(v)[5:11]) % dump_every == 0]
     if regular:
         per_row = 8
-        tw, th = 128, 120               # half size of the tallest picture (240 lines)
+        tw, th = 128, 120               # half size of the largest picture (256 x 240)
         rows = (len(regular) + per_row - 1) // per_row
         sheet = Image.new("RGB", (per_row * tw, rows * (th + 12)), (32, 32, 32))
         draw = ImageDraw.Draw(sheet)
         for i, v in enumerate(regular):
             try:
                 im = Image.open(v)
-                im = im.resize((tw, im.height // 2))
+                im = im.resize((im.width // 2, im.height // 2))
             except OSError:
                 continue
             x = (i % per_row) * tw
@@ -377,10 +377,10 @@ def make_sheets(workdir, dump_every, differing):
         except OSError:
             continue
         d = ImageChops.difference(a, b)
-        out = Image.new("RGB", (256 * 3 + 8, a.height), (32, 32, 32))
+        out = Image.new("RGB", (a.width * 3 + 8, a.height), (32, 32, 32))
         out.paste(a, (0, 0))
-        out.paste(b, (260, 0))
-        out.paste(d.point(lambda x: 255 if x else 0), (520, 0))
+        out.paste(b, (a.width + 4, 0))
+        out.paste(d.point(lambda x: 255 if x else 0), (2 * a.width + 8, 0))
         out.save(os.path.join(workdir, "diff_%s.png" % os.path.basename(v)[5:11]))
 
 # ---------------------------------------------------------------- running
@@ -658,6 +658,9 @@ def main():
     ap.add_argument("-label", default="", help="a note written in the report header")
     ap.add_argument("-simargs", default="", help="extra options for sim (policy overrides)")
     args = ap.parse_args()
+    for k in ("roms", "panel", "out", "reports", "against"):
+        if getattr(args, k):
+            setattr(args, k, os.path.abspath(getattr(args, k)))     # the runs work elsewhere
 
     for f in ("sim", "sim.bin", "sim.sym"):
         if not os.path.exists(os.path.join(HERE, f)):

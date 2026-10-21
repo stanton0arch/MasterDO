@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <strings.h>
 #include <stdarg.h>
 #include <signal.h>
 
@@ -43,7 +44,7 @@ static uint64_t cS, cN, cI;
 static uint64_t ninsn;
 static uint32_t heap = HEAP_BASE;
 static uint32_t rom_size;
-static uint32_t args[24] = { 0, 0, 0, 0xFFFFFFFFu };
+static uint32_t args[32] = { 0, 0, 0, 0xFFFFFFFFu };
 static int done;
 
 /* Profile: cycles (x100) per instruction word of the image. */
@@ -321,7 +322,7 @@ static void do_swi(uint32_t n)
     case 5: r[0] = ROM_ADDR; break;
     case 6: r[0] = rom_size; break;
     case 7: do_dump(r[0], r[1], r[2], r[3]); break;
-    case 8: r[0] = r[0] < 24 ? args[r[0]] : 0; break;
+    case 8: r[0] = r[0] < 32 ? args[r[0]] : 0; break;
     case 9: r[0] = pad_at(r[0]); break;
     case 10: {
         uint32_t id = r[0] & 15;
@@ -641,6 +642,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-dump") && i + 1 < argc) args[2] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-from") && i + 1 < argc) args[3] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-interp")) args[4] = 1;
+        else if (!strcmp(argv[i], "-gg")) args[24] = 1;
+        else if (!strcmp(argv[i], "-sms")) args[24] = 2;
         else if (!strcmp(argv[i], "-seed")) args[11] = 1;
         else if (!strcmp(argv[i], "-check")) args[13] = 1;
         else if (!strcmp(argv[i], "-hash")) args[14] = 100;
@@ -677,6 +680,16 @@ int main(int argc, char **argv)
     img_end = LOAD_ADDR + ((n + 3) & ~3);
     prof = calloc((img_end - LOAD_ADDR) / 4 + 1, sizeof(double));
     pcount = calloc((img_end - LOAD_ADDR) / 4 + 1, sizeof(uint32_t));
+    if (romp && args[24] == 0) {
+        /* The Game Gear mode for a .gg image, as the console's loader
+         * decides it from the file name (-gg or -sms force it). */
+        size_t l = strlen(romp);
+
+        if (l > 3 && !strcasecmp(romp + l - 3, ".gg"))
+            args[24] = 1;
+    }
+    if (args[24] == 2)
+        args[24] = 0;
     if (romp) {
         f = fopen(romp, "rb");
         if (!f) { perror(romp); return 1; }

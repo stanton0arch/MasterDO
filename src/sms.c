@@ -79,10 +79,28 @@ static void sdsc_write(sms_machine *s, uint32 c)
         s->sdsc[s->sdsc_len++] = (char)c;
 }
 
+/* Game Gear registers, ports $00-$06. */
+static uint32 gg_in(sms_machine *s, uint32 port)
+{
+    s->io.other++;
+    if (port == 0)
+        return (s->gg_start ? 0 : 0x80) | (s->gg_japan ? 0 : 0x40);
+    return s->gg_port[port];
+}
+
+static void gg_out(sms_machine *s, uint32 port, uint32 value)
+{
+    s->io.other++;
+    if (port != 0 && port != 4)         /* $00 and $04 are read only */
+        s->gg_port[port] = value;
+}
+
 static uint32 sms_in(z80j_machine *m, uint32 port, uint32 left)
 {
     sms_machine *s = SMS_OF(m);
 
+    if (s->gg && (port & 0xFF) < 7)
+        return gg_in(s, port & 0xFF);
     switch (PORT_KIND(port)) {
     case 2:
         s->io.counter_r++;
@@ -113,6 +131,10 @@ static uint32 sms_out(z80j_machine *m, uint32 port, uint32 value, uint32 left)
     uint32 r;
 
     value &= 0xFF;
+    if (s->gg && (port & 0xFF) < 7) {
+        gg_out(s, port & 0xFF, value);
+        return 0;
+    }
     switch (PORT_KIND(port)) {
     case 0:
         s->io.other++;
@@ -147,9 +169,13 @@ static void sms_event(z80j_machine *m)
     vdp_event(&SMS_OF(m)->vdp);
 }
 
+/* Ports $00-$06 of the Game Gear at power-on. */
+static const uint8 gg_power_on[7] = { 0xC0, 0x7F, 0xFF, 0x00, 0xFF, 0x00, 0xFF };
+
 void sms_reset(sms_machine *s)
 {
     z80j_ctx *ctx = s->ctx;
+    uint32 r;
 
     sms_mem_reset(&s->mem);
     memset(ctx->mram, 0, sizeof(ctx->mram));
@@ -163,6 +189,9 @@ void sms_reset(sms_machine *s)
     s->psg_reg[1] = s->psg_reg[3] = s->psg_reg[5] = s->psg_reg[7] = 0x0F;
     memset(&s->io, 0, sizeof(s->io));
     s->sdsc_len = 0;
+    for (r = 0; r < 7; r++)
+        s->gg_port[r] = gg_power_on[r];
+    s->gg_start = 0;
     z80j_reset(ctx);
     vdp_reset(&s->vdp);
 }
@@ -202,11 +231,28 @@ static void sms_ports(sms_machine *s)
     ctx->event_a = JIT_ADDR(sms_vdp_event_a);
 }
 
+uint32 sms_rom_region(const uint8 *rom, uint32 rom_size)
+{
+    static const uint32 at[3] = { 0x7FF0, 0x3FF0, 0x1FF0 };
+    uint32 k;
+
+    for (k = 0; k < 3; k++) {
+        const uint8 *h = rom + at[k];
+
+        if (at[k] + 16 <= rom_size && memcmp(h, "TMR SEGA", 8) == 0)
+            return (uint32)h[0x0F] >> 4;
+    }
+    return 0;
+}
+
 void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
-              uint32 lines, uint8 *cart_ram, uint32 cart_ram_size)
+              uint32 lines, uint8 *cart_ram, uint32 cart_ram_size, uint32 gg)
 {
     memset(s, 0, sizeof(*s));
     s->ctx = ctx;
+    s->gg = gg != 0;
+    s->gg_japan = sms_rom_region(rom, rom_size) == 5;
+    s->vdp.gg = s->gg;
     sms_mem_init(&s->mem, ctx, rom, rom_size, cart_ram, cart_ram_size);
     s->mem.m.in = sms_in;
     s->mem.m.out = sms_out;
@@ -219,7 +265,9 @@ void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
 void sms_frame(sms_machine *s, uint32 pad, uint32 pause)
 {
     s->pad = pad;
-    if (pause)
+    if (s->gg)
+        s->gg_start = pause;
+    else if (pause)
         s->ctx->nmi = 1;
     vdp_frame_begin(&s->vdp);
     z80j_run(s->ctx, (int32)s->vdp.lines);

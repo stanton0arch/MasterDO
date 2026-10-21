@@ -38,11 +38,13 @@ VDP_OFFSET      EQU     0x44000         ; the vdp_state: SMS_VDP_OFFSET of sms.h
 
 ; vdp_state fields.
 V_ACC           EQU     0x00
+V_GGLATCH       EQU     0x04
 V_BUFFER        EQU     0x08
 V_CRAMDIRTY     EQU     0x0C
 V_NDATAR        EQU     0x10
 V_NCTRLW        EQU     0x14
 V_NSTATR        EQU     0x18
+V_GG            EQU     0x1C
 V_CRAM          EQU     0x20
 V_REG           EQU     0x40
 V_STATUS        EQU     0x50
@@ -57,6 +59,7 @@ V_LCVAL         EQU     0x74
 V_HC            EQU     0x7C
 V_ACTIVE        EQU     0x58
 V_NCOUNTR       EQU     0x168
+V_GGCRAM        EQU     0x16C
 V_DIRTY         EQU     0x200
 V_VRAM          EQU     0x400
 V_HSN           EQU     0x4400          ; the logs lie past the video RAM
@@ -65,6 +68,7 @@ V_CRN           EQU     0x4F84          ; the colour RAM log follows its count
 VDP_HS_LOG      EQU     256
 VDP_NT_LOG      EQU     16
 VDP_CR_LOG      EQU     64
+VDP_GG_CRAM     EQU     64
 
 ; Machine fields past the vdp_state (sms_machine, sms.h; checked in sms.c).
 M_PSGREG        EQU     0x5200          ; psg_reg[8], psg_latch just below
@@ -110,6 +114,41 @@ ACC_SLOW        EQU     0x20000
         str     $t,[$s,#V_ACC]
         MEND
 
+; A colour written during the active display: r4 := the line it shows
+; from (the next one), r2 := the address of the free log entry less
+; V_CRN - 0x4F00, the count advanced; to cram_done when the write is past
+; the active display or the log is full. In: r2 = T-states left, r12 =
+; the vdp_state; r1 clobbered.
+        MACRO
+        CRLOG
+        ldr     r4,[r12,#V_VBLDONE]     ; past the active display: not recorded
+        teq     r4,#0
+        bne     cram_done
+        ldr     r4,[r10,#LINE]
+        ldr     r1,[r12,#V_FRAMEBASE]
+        sub     r4,r4,r1
+        mov     r1,#228
+        mul     r4,r1,r4                ; T-states of the frame at the stretch end
+        subs    r4,r4,r2,asr#8          ; T-state of the access
+        bmi     cram_done               ; it ends the previous frame
+        mov     r4,r4,lsr#2             ; line = (t / 4) * 36793 >> 21
+        mov     r1,#0x8F00
+        orr     r1,r1,#0xB9
+        mul     r4,r1,r4
+        mov     r4,r4,lsr#21
+        add     r4,r4,#1                ; shows from the next line on
+        ldr     r1,[r12,#V_ACTIVE]
+        cmp     r4,r1
+        bhs     cram_done
+        add     r2,r12,#0x4F00
+        ldr     r1,[r2,#V_CRN-0x4F00]
+        cmp     r1,#VDP_CR_LOG
+        bhs     cram_done
+        add     r1,r1,#1
+        str     r1,[r2,#V_CRN-0x4F00]
+        add     r2,r2,r1,lsl#2          ; entry r1 - 1 of the log
+        MEND
+
 ;----------------------------------------------------------------------------
 ; OUT to the data port. In: r0 = value, r2 = T-states left. Out: r0 = 0
 ; (stay in the block). Codes 0 to 2 write video RAM (and mark the tile
@@ -144,45 +183,42 @@ data_w_slow                             ; code 3, or a control word pending
         UNPEND  r1
         beq     data_w_vram             ; a pending control word ended: video RAM
         stmfd   sp!,{r1,r3,r4}
-        and     r0,r0,#0x3F
+        ldr     r4,[r12,#V_GG]
         mov     r3,r1,lsr#18
+        teq     r4,#0
+        bne     data_w_gg
+        and     r0,r0,#0x3F
         and     r3,r3,#31               ; colour index
         add     r4,r3,r12
         strb    r0,[r4,#V_CRAM]         ; colour RAM
         mov     r4,#1
         str     r4,[r12,#V_CRAMDIRTY]
-        ldr     r4,[r12,#V_VBLDONE]     ; past the active display: not recorded
-        teq     r4,#0
-        bne     cram_done
-        ldr     r4,[r10,#LINE]
-        ldr     r1,[r12,#V_FRAMEBASE]
-        sub     r4,r4,r1
-        mov     r1,#228
-        mul     r4,r1,r4                ; T-states of the frame at the stretch end
-        subs    r4,r4,r2,asr#8          ; T-state of the access
-        bmi     cram_done               ; it ends the previous frame
-        mov     r4,r4,lsr#2             ; line = (t / 4) * 36793 >> 21
-        mov     r1,#0x8F00
-        orr     r1,r1,#0xB9
-        mul     r4,r1,r4
-        mov     r4,r4,lsr#21
-        add     r4,r4,#1                ; shows from the next line on
-        ldr     r1,[r12,#V_ACTIVE]
-        cmp     r4,r1
-        bhs     cram_done
-        add     r2,r12,#0x4F00
-        ldr     r1,[r2,#V_CRN-0x4F00]
-        cmp     r1,#VDP_CR_LOG
-        bhs     cram_done
-        add     r1,r1,#1
-        str     r1,[r2,#V_CRN-0x4F00]
-        add     r2,r2,r1,lsl#2          ; entry r1 - 1 of the log
+        CRLOG
         orr     r0,r0,r3,lsl#8
         orr     r0,r0,r4,lsl#16
         str     r0,[r2,#V_CRN-0x4F00]
 cram_done
         ldmfd   sp!,{r1,r3,r4}
         b       data_w_next
+data_w_gg                               ; Game Gear: colours of 12 bits, two bytes each
+        and     r3,r3,#VDP_GG_CRAM-1    ; colour RAM byte address
+        tst     r3,#1
+        streqb  r0,[r12,#V_GGLATCH]     ; an even address is latched
+        beq     cram_done
+        and     r0,r0,#0x0F             ; an odd one writes the colour
+        add     r4,r3,r12
+        strb    r0,[r4,#V_GGCRAM]       ; ----BBBB
+        ldrb    r1,[r12,#V_GGLATCH]
+        strb    r1,[r4,#V_GGCRAM-1]     ; GGGGRRRR
+        orr     r0,r1,r0,lsl#8          ; the 12-bit colour
+        mov     r4,#1
+        str     r4,[r12,#V_CRAMDIRTY]
+        mov     r3,r3,lsr#1             ; colour index
+        orr     r0,r0,r3,lsl#12
+        CRLOG
+        orr     r0,r0,r4,lsl#20
+        str     r0,[r2,#V_CRN-0x4F00]
+        b       cram_done
 
 ;----------------------------------------------------------------------------
 ; IN from the data port: returns the read buffer, which is then loaded from

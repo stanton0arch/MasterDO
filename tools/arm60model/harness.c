@@ -49,7 +49,10 @@ static game g;
 static bench_cpu_result bres;
 static uint32 fb[256 * (VDP_ACTIVE_MAX / 2)];
 static uint32 fb2[256 * (VDP_ACTIVE_MAX / 2)];
+static uint32 pic_w = 256;      /* pixels of a line of the pictures compared */
 static uint32 pic_h;            /* lines of the pictures compared */
+static uint32 win_x;            /* the window compared in the picture (Game Gear: the LCD) */
+static uint32 win_y;
 /* -celhash: the hashes of the previous frame's cels and picture, to check
  * that a picture the renderer takes as repeated is the previous one. */
 static uint32 rep_prev_ok;
@@ -60,10 +63,35 @@ static uint32 rep_checked;
 static uint32 rep_errors;
 static uint32 prev_on;          /* display on at the previous frame */
 
+/* The part of the picture compared: the window the screen shows. */
+static void set_window(const vdp_state *v)
+{
+    pic_w = vdp_win_w(v);
+    pic_h = vdp_win_h(v);
+    win_x = vdp_win_x(v);
+    win_y = vdp_win_y(v);
+}
+
+/* A colour write of the frame's log: the colour and its value (6 bits, or
+ * 12 bits on the Game Gear) with the line it shows from, as "colour=value@line"
+ * or, with as_line set, "line L colour=value". */
+static void print_colour_write(const vdp_state *v, uint32 e, uint32 as_line)
+{
+    uint32 line = v->gg ? e >> 20 : e >> 16;
+    uint32 colour = v->gg ? (e >> 12) & 31 : (e >> 8) & 31;
+    uint32 value = v->gg ? e & 0xFFF : e & 0x3F;
+
+    if (as_line)
+        printf(" line %lu", (unsigned long)line);
+    printf(v->gg ? " %02lx=%03lx" : " %02lx=%02lx", (unsigned long)colour, (unsigned long)value);
+    if (!as_line)
+        printf("@%lu", (unsigned long)line);
+}
+
 /* LRFORM pixel access. */
 static void put_pixel(uint32 *f, int32 x, int32 y, uint32 c)
 {
-    uint32 *w = f + (y >> 1) * 256 + x;
+    uint32 *w = f + (y >> 1) * pic_w + x;
 
     if (y & 1)
         *w = (*w & 0xFFFF0000u) | c;
@@ -73,7 +101,7 @@ static void put_pixel(uint32 *f, int32 x, int32 y, uint32 c)
 
 static uint32 get_pixel(const uint32 *f, int32 x, int32 y)
 {
-    uint32 w = f[(y >> 1) * 256 + x];
+    uint32 w = f[(y >> 1) * pic_w + x];
 
     return (y & 1) ? (w & 0xFFFF) : (w >> 16);
 }
@@ -81,14 +109,14 @@ static uint32 get_pixel(const uint32 *f, int32 x, int32 y)
 /* Software model of the CEL engine for the cels the renderer builds:
  * 8 bpp coded and 16 bpp uncoded sources, unit steps (VDY may stretch
  * rows), absolute pointers, transparency of 000 without CCB_BGND, clip to
- * the 256 x pic_h window. */
+ * the pic_w x pic_h window. */
 static void compose(const CCB *c, uint32 backdrop)
 {
     int32 x;
     int32 y;
 
     for (y = 0; y < (int32)pic_h; y++)
-        for (x = 0; x < 256; x++)
+        for (x = 0; x < (int32)pic_w; x++)
             put_pixel(fb2, x, y, backdrop);
 
     for (; c != NULL; c = c->ccb_NextPtr) {
@@ -146,7 +174,7 @@ static void compose(const CCB *c, uint32 backdrop)
                     for (t = 0; t < xstretch; t++) {
                         int32 px = x0 + (int32)k * xstretch + t;
 
-                        if (px >= 0 && px < 256 && py >= 0 && py < (int32)pic_h)
+                        if (px >= 0 && px < (int32)pic_w && py >= 0 && py < (int32)pic_h)
                             put_pixel(fb2, px, py, v);
                     }
                 }
@@ -170,7 +198,7 @@ static void prio_mask(const vdp_state *v)
     uint32 y;
 
     memset(prio, 0, sizeof(prio));
-    for (y = 0; y < pic_h; y++) {
+    for (y = 0; y < v->active; y++) {
         uint32 hs = (y < 16 && (v->reg[0] & 0x40)) ? 0 : v->reg[8];
         uint32 col;
 
@@ -235,13 +263,13 @@ static uint32 compare(uint32 *outside)
 
     *outside = 0;
     for (y = 0; y < (int32)pic_h; y++) {
-        for (x = 0; x < 256; x++) {
+        for (x = 0; x < (int32)pic_w; x++) {
             uint32 a = get_pixel(fb, x, y);
             uint32 b = get_pixel(fb2, x, y);
 
             if (a != b && (a | b) != 1) {
                 n++;
-                if (!prio[y][x])
+                if (!prio[y + win_y][x + win_x])
                     (*outside)++;
             }
         }
@@ -675,7 +703,7 @@ void hmain(void)
         return;
     if (sim_arg(12))
         game_hot_zones = sim_arg(12);   /* -hotzones n */
-    if (game_init(&g, rom, size) != 0)
+    if (game_init(&g, rom, size, sim_arg(24)) != 0)    /* -gg: the Game Gear mode */
         return;
     if (sim_arg(4)) {
         /* -interp: nothing is translated, everything is interpreted. */
@@ -717,6 +745,11 @@ void hmain(void)
              * display off, and none for a picture identical to the
              * previous one, which is shown again: nothing is drawn). */
             draw = (render_display_on(g.rd) && !render_repeated(g.rd)) ? 3500 : 0;
+            /* The Game Gear's LCD window is drawn alone: the 3.5 ms
+             * scaled by its pixels, an estimate until measured on the
+             * console. */
+            if (g.sms->gg)
+                draw = draw * (render_win_w(g.rd) * render_win_h(g.rd)) / (256 * 192);
             rep_count += render_repeated(g.rd);
             game_frame_done(&g, draw);
             game_spare_time(&g, t0 - draw, t0 - draw + PLAT_NTSC_FRAME_US);
@@ -773,12 +806,12 @@ void hmain(void)
                 }
                 n++;
             }
-            pic_h = g.sms->vdp.active;
+            set_window(&g.sms->vdp);
             compose(render_chain(rd), render_backdrop(rd));
             {
                 uint32 k;
 
-                for (k = 0; k < (pic_h / 2) * 256; k++)
+                for (k = 0; k < (pic_h / 2) * pic_w; k++)
                     hp = (hp ^ fb2[k]) * 16777619u;
             }
             printf("Cels: frame %lu: %lu cels, hash %08lx, picture %08lx\n", (unsigned long)(f + 1),
@@ -847,8 +880,7 @@ void hmain(void)
                            (unsigned long)(v->de_log[k] >> 8));
                 printf(", colours:");
                 for (k = 0; k < v->cr_n; k++)
-                    printf(" %02lx=%02lx@%lu", (unsigned long)((v->cr_log[k] >> 8) & 31),
-                           (unsigned long)(v->cr_log[k] & 0x3F), (unsigned long)(v->cr_log[k] >> 16));
+                    print_colour_write(v, v->cr_log[k], 0);
                 printf("\n");
             }
         }
@@ -873,15 +905,20 @@ void hmain(void)
             printf("Palette: frame %lu: %lu lines, %lu colour writes", (unsigned long)(f + 1),
                    (unsigned long)v->active, (unsigned long)v->cr_n);
             for (k = 0; k < v->cr_n; k++)
-                printf(" line %lu %02lx=%02lx", (unsigned long)(v->cr_log[k] >> 16),
-                       (unsigned long)((v->cr_log[k] >> 8) & 31), (unsigned long)(v->cr_log[k] & 0x3F));
+                print_colour_write(v, v->cr_log[k], 1);
+            printf(", palette bands from lines");
+            for (k = 0; k < g.rd->npb; k++)
+                printf(" %lu", (unsigned long)g.rd->ptops[k]);
             printf("\n");
             for (c = render_chain(g.rd); c != NULL; c = c->ccb_NextPtr) {
-                printf("Cel: frame %lu: at %ld,%ld size %lu x %lu bpp %lu%s%s\n",
+                printf("Cel: frame %lu: at %ld,%ld size %lu x %lu bpp %lu source %08lx plut %08lx%s%s\n",
                        (unsigned long)(f + 1), (long)(c->ccb_XPos >> 16),
                        (long)(c->ccb_YPos >> 16), (unsigned long)((c->ccb_PRE1 & 0x7FF) + 1),
                        (unsigned long)(((c->ccb_PRE0 >> PRE0_VCNT_SHIFT) & 0x3FF) + 1),
-                       (unsigned long)(c->ccb_PRE0 & 7), (c->ccb_Flags & CCB_BGND) ? " opaque" : "",
+                       (unsigned long)(c->ccb_PRE0 & 7),
+                       (unsigned long)buf_offset(g.rd, (uint32)c->ccb_SourcePtr),
+                       (unsigned long)buf_offset(g.rd, (uint32)c->ccb_PLUTPtr),
+                       (c->ccb_Flags & CCB_BGND) ? " opaque" : "",
                        (c->ccb_Flags & CCB_LAST) ? " last" : "");
                 if (c->ccb_Flags & CCB_LAST)
                     break;
@@ -917,9 +954,9 @@ void hmain(void)
                            (render_display_on(g.rd) && !prev_on))) {
             const vdp_state *v = &g.sms->vdp;
 
-            pic_h = v->active;
+            set_window(v);
             sim_mark(1);
-            dbgview_draw(v, fb, 256, 0, 0);
+            dbgview_draw(v, fb, (int32)pic_w, 0, 0);
             sim_mark(2);
             if (render_display_on(g.rd))
                 compose(render_chain(g.rd), render_backdrop(g.rd));
@@ -935,8 +972,8 @@ void hmain(void)
                 (ndiff != 0 && diff_written < dump_diff)) {
                 if (dump_diff && (f + 1) % dump_every != 0)
                     diff_written++;
-                sim_dump(fb, 256, pic_h, f + 1);
-                sim_dump(fb2, 256, pic_h, 500000 + f + 1);
+                sim_dump(fb, pic_w, pic_h, f + 1);
+                sim_dump(fb2, pic_w, pic_h, 500000 + f + 1);
             }
             printf("Compare: frame %lu: %lu pixels differ, %lu outside priority tiles, "
                    "display %s, %lu sprites, "

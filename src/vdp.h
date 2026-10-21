@@ -40,6 +40,14 @@
  * they affect, like the register writes, so that the picture can change
  * its palette from that line on (a horizon drawn in another colour).
  *
+ * Game Gear mode (gg set by the machine): the colour RAM holds 32
+ * colours of 12 bits (64 bytes, gg_cram: an even byte GGGGRRRR, an odd
+ * byte ----BBBB). A data port write to an even colour RAM address is
+ * latched; a write to an odd address stores the latched byte and its own
+ * low nibble, so that a colour changes in one go. The rest of the chip is
+ * the Master System's; the LCD shows a 160 x 144 window of the picture
+ * (VDP_GG_*), which the renderer cuts out.
+ *
  * Sprites: the sprite attribute table is evaluated once per frame by
  * vdp_sprites(), as the hardware does line by line: the first eight
  * sprites of the table covering a line are displayed, the ninth sets the
@@ -65,6 +73,14 @@
 #define VDP_DE_LOG      8           /* display enable changes recorded per frame */
 #define VDP_CR_LOG      64          /* colour RAM writes recorded per frame */
 #define VDP_PAL_BANDS   8           /* palettes of a picture (vdp_palette_bands) */
+#define VDP_PAL_WORDS   16          /* words of a band's colours: 8, or 16 in Game
+                                       Gear mode (vdp_pal_words) */
+#define VDP_GG_CRAM     64          /* bytes of the Game Gear colour RAM */
+/* The LCD window of the Game Gear: 160 x 144 pixels, 6 cells from the
+ * left and right of the 256-pixel picture and centred vertically. */
+#define VDP_GG_W        160
+#define VDP_GG_H        144
+#define VDP_GG_X        48
 #define VDP_SPRITES     64
 
 /* Status flags. */
@@ -99,14 +115,14 @@
  */
 typedef struct {
     uint32  acc;            /* +0x00: the access word (see VDP_ACC_*) */
-    uint32  pad1;           /* +0x04 (the first byte of a control word is kept */
-                            /* in bits 0-7 of the address until the second one) */
+    uint8   gg_latch;       /* +0x04: Game Gear: the even byte of a colour */
+    uint8   pad1[3];
     uint32  buffer;         /* +0x08: read buffer */
     uint32  cram_dirty;     /* +0x0C: colour RAM written since last cleared */
     uint32  n_data_r;       /* +0x10: data port reads */
     uint32  n_ctrl_w;       /* +0x14: control port writes */
     uint32  n_stat_r;       /* +0x18: status reads handled in assembly */
-    uint32  pad0;           /* +0x1C */
+    uint32  gg;             /* +0x1C: Game Gear mode (set by the machine) */
     uint8   cram[32];       /* +0x20 */
     uint8   reg[16];        /* +0x40 */
     uint32  status;         /* +0x50: VDP_ST_* */
@@ -125,7 +141,8 @@ typedef struct {
     z80j_ctx *ctx;          /* +0x160 */
     uint32  nt_rows;        /* +0x164: name table rows: 28, or 32 in the extended modes */
     uint32  n_count_r;      /* +0x168: V and H counter reads (handled in assembly) */
-    uint8   pad[0x200 - 0x7C - VDP_LINE_T - 12];
+    uint8   gg_cram[VDP_GG_CRAM];   /* +0x16C: Game Gear colour RAM */
+    uint8   pad[0x200 - 0x7C - VDP_LINE_T - 12 - VDP_GG_CRAM];
     uint8   dirty[VDP_TILES];       /* +0x200: nonzero: tile written */
     uint8   vram[VDP_VRAM_SIZE];    /* +0x400 */
     /* Writes to register 8 during the active display of the current
@@ -154,7 +171,8 @@ typedef struct {
     uint8   spr_tile_rows[VDP_TILES];   /* the same per tile, cached */
     uint8   spr_tile_ok[VDP_TILES];     /* the cache entry is valid */
     /* Colour RAM writes during the active display of the current frame:
-     * (first line affected << 16) | (index << 8) | value. */
+     * (first line affected << 16) | (index << 8) | value; in Game Gear
+     * mode (first line affected << 20) | (colour << 12) | 12-bit value. */
     uint32  cr_n;                   /* +0x4F84 */
     uint32  cr_log[VDP_CR_LOG];     /* +0x4F88 */
     /* The sprites on the screen with an opaque pixel, by first row, for
@@ -208,8 +226,19 @@ uint32 vdp_hcounter(const vdp_state *v, uint32 left);
  * applies the colour RAM writes recorded during the active display from
  * the line they affect. Bands whose colours do not change merge; writes
  * beyond VDP_PAL_BANDS bands go to the last one. tops[k] is the first
- * line of band k and the bytes of cram + 8 * k its 32 colours. Returns
- * the band count; *merged counts the writes moved to an earlier line. */
+ * line of band k and the bytes of cram + vdp_pal_words(v) * k its 32
+ * colours (cram holds VDP_PAL_BANDS * VDP_PAL_WORDS words): the colour
+ * RAM's 32 bytes, or in Game Gear mode its 64. Returns the band count;
+ * *merged counts the writes moved to an earlier line. */
+#define vdp_pal_words(v)    ((v)->gg ? 16u : 8u)
+
+/* The part of the picture that is shown: the whole 256 x active picture,
+ * or in Game Gear mode the LCD window, centred vertically (lines 24 to
+ * 167 of the 192-line mode). */
+#define vdp_win_x(v)        ((v)->gg ? (uint32)VDP_GG_X : 0u)
+#define vdp_win_y(v)        ((v)->gg ? ((v)->active - VDP_GG_H) / 2 : 0u)
+#define vdp_win_w(v)        ((v)->gg ? (uint32)VDP_GG_W : 256u)
+#define vdp_win_h(v)        ((v)->gg ? (uint32)VDP_GG_H : (v)->active)
 uint32 vdp_palette_bands(const vdp_state *v, uint32 *tops, uint32 *cram, uint32 *merged);
 
 /* Evaluates the sprite attribute table for the picture of the frame

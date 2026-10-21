@@ -10,7 +10,9 @@
 /* Offsets used by sms_io.s. */
 #define CHECK_OFF(name, cond) typedef char check_##name[(cond) ? 1 : -1]
 CHECK_OFF(acc, offsetof(vdp_state, acc) == 0x00);
-CHECK_OFF(buffer_after_pad, offsetof(vdp_state, pad1) == 0x04);
+CHECK_OFF(gg_latch, offsetof(vdp_state, gg_latch) == 0x04);
+CHECK_OFF(gg, offsetof(vdp_state, gg) == 0x1C);
+CHECK_OFF(gg_cram, offsetof(vdp_state, gg_cram) == 0x16C);
 CHECK_OFF(buffer, offsetof(vdp_state, buffer) == 0x08);
 CHECK_OFF(cram_dirty, offsetof(vdp_state, cram_dirty) == 0x0C);
 CHECK_OFF(n_data_r, offsetof(vdp_state, n_data_r) == 0x10);
@@ -181,6 +183,8 @@ void vdp_reset(vdp_state *v)
 {
     memset(v->vram, 0, sizeof(v->vram));
     memset(v->cram, 0, sizeof(v->cram));
+    memset(v->gg_cram, 0, sizeof(v->gg_cram));
+    v->gg_latch = 0;
     memset(v->spr_tile_ok, 0, sizeof(v->spr_tile_ok));
     memset(v->reg, 0, sizeof(v->reg));
     memcpy(v->reg, vdp_power_on, sizeof(vdp_power_on));
@@ -292,10 +296,26 @@ void vdp_data_write(vdp_state *v, uint32 value, uint32 left)
         uint32 hpos;
         uint32 line = vdp_beam(v, left, &hpos) + 1;
 
-        v->cram[a & 31] = (uint8)(value & 0x3F);
-        v->cram_dirty = 1;
-        if (line < v->active && v->cr_n < VDP_CR_LOG)
-            v->cr_log[v->cr_n++] = (line << 16) | ((a & 31) << 8) | (value & 0x3F);
+        if (v->gg) {
+            /* Game Gear: an even address latches, an odd one writes the
+             * colour (the latched byte and its own low nibble). */
+            a &= VDP_GG_CRAM - 1;
+            if (!(a & 1)) {
+                v->gg_latch = (uint8)value;
+            } else {
+                v->gg_cram[a - 1] = v->gg_latch;
+                v->gg_cram[a] = (uint8)(value & 0x0F);
+                v->cram_dirty = 1;
+                if (line < v->active && v->cr_n < VDP_CR_LOG)
+                    v->cr_log[v->cr_n++] = (line << 20) | ((a >> 1) << 12) |
+                                           ((value & 0x0F) << 8) | v->gg_latch;
+            }
+        } else {
+            v->cram[a & 31] = (uint8)(value & 0x3F);
+            v->cram_dirty = 1;
+            if (line < v->active && v->cr_n < VDP_CR_LOG)
+                v->cr_log[v->cr_n++] = (line << 16) | ((a & 31) << 8) | (value & 0x3F);
+        }
     } else {
         v->vram[a] = (uint8)value;
         v->dirty[a >> 5] = 1;
@@ -450,11 +470,53 @@ static uint32 cram_same(const uint32 *a, const uint32 *b)
             (a[4] ^ b[4]) | (a[5] ^ b[5]) | (a[6] ^ b[6]) | (a[7] ^ b[7])) == 0;
 }
 
+/* The same for the 64 bytes of the Game Gear colour RAM (16 words). The
+ * log entries are (line << 20) | (colour << 12) | 12-bit value, the two
+ * bytes of the colour stored as in the colour RAM. */
+static uint32 gg_palette_bands(const vdp_state *v, uint32 *tops, uint32 *cram, uint32 *merged)
+{
+    uint32 nb = 1;
+    uint32 k;
+
+    *merged = 0;
+    tops[0] = 0;
+    cram_copy(cram, (const uint32 *)v->gg_cram);
+    cram_copy(cram + 8, (const uint32 *)v->gg_cram + 8);
+    for (k = 0; k < v->cr_n; k++) {
+        uint32 e = v->cr_log[k];
+        uint32 line = e >> 20;
+        uint8 *c;
+
+        if (line > tops[nb - 1]) {
+            if (nb > 1 && cram_same(cram + 16 * (nb - 1), cram + 16 * (nb - 2)) &&
+                cram_same(cram + 16 * (nb - 1) + 8, cram + 16 * (nb - 2) + 8))
+                nb--;
+            if (nb < VDP_PAL_BANDS) {
+                cram_copy(cram + 16 * nb, cram + 16 * (nb - 1));
+                cram_copy(cram + 16 * nb + 8, cram + 16 * (nb - 1) + 8);
+                tops[nb] = line;
+                nb++;
+            } else {
+                (*merged)++;
+            }
+        }
+        c = (uint8 *)(cram + 16 * (nb - 1)) + ((e >> 11) & 0x3E);
+        c[0] = (uint8)e;
+        c[1] = (uint8)((e >> 8) & 0x0F);
+    }
+    if (nb > 1 && cram_same(cram + 16 * (nb - 1), cram + 16 * (nb - 2)) &&
+        cram_same(cram + 16 * (nb - 1) + 8, cram + 16 * (nb - 2) + 8))
+        nb--;
+    return nb;
+}
+
 uint32 vdp_palette_bands(const vdp_state *v, uint32 *tops, uint32 *cram, uint32 *merged)
 {
     uint32 nb = 1;
     uint32 k;
 
+    if (v->gg)
+        return gg_palette_bands(v, tops, cram, merged);
     *merged = 0;
     tops[0] = 0;
     cram_copy(cram, (const uint32 *)v->cram);

@@ -13,6 +13,14 @@
  *   $C0-$FF  read: I/O port A/B (even), port B / misc (odd); write: none,
  *            except $FD, the data port of the SDSC debug console used by
  *            test programs: its text goes to the debug log
+ *
+ * Game Gear mode: the same machine with the colour RAM of 12-bit colours
+ * (vdp.h) and the registers of ports $00-$06 (initial state C0 7F FF 00
+ * FF 00 FF): $00 reads the START button (bit 7, 0 when pressed), the
+ * region (bit 6: 0 Japan, 1 overseas) and the TV system (bit 5: 0 NTSC);
+ * $01-$05 are the EXT connector and the serial port, stored and read
+ * back (nothing is connected); $06 distributes the four PSG channels to
+ * the left and right outputs. START is a button there, not the PAUSE NMI.
  */
 
 #include "types.h"
@@ -64,6 +72,10 @@ typedef struct {
     sms_io_stats io;
     char         sdsc[80];  /* SDSC debug console line being written */
     uint32       sdsc_len;
+    uint32       gg;        /* Game Gear mode */
+    uint32       gg_japan;  /* region reported by port $00: Japan */
+    uint32       gg_start;  /* START held */
+    uint32       gg_port[7];/* ports $00-$06 ($06: PSG stereo distribution) */
     /* Port handlers of the translator (z80jit.h). */
     uint32       port_in[Z80J_PORTS];
     uint32       port_out[Z80J_PORTS];
@@ -76,16 +88,23 @@ typedef struct {
  * pointer, 0x400 into the context). */
 #define SMS_VDP_OFFSET  0x44400
 
+/* Region code of the cartridge header ("TMR SEGA" at $7FF0, $3FF0 or
+ * $1FF0, the high nibble of its byte $0F): 3 and 4 Master System, 5, 6
+ * and 7 Game Gear (Japan, export, international); 0 without a header. */
+uint32 sms_rom_region(const uint8 *rom, uint32 rom_size);
+#define SMS_REGION_GG(r)    ((r) >= 5 && (r) <= 7)
+
 /* Sets up the machine on ctx for a cartridge image, then resets it;
- * lines is VDP_LINES_NTSC or VDP_LINES_PAL. */
+ * lines is VDP_LINES_NTSC or VDP_LINES_PAL; gg selects the Game Gear
+ * mode. */
 void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
-              uint32 lines, uint8 *cart_ram, uint32 cart_ram_size);
+              uint32 lines, uint8 *cart_ram, uint32 cart_ram_size, uint32 gg);
 
 /* Power-on state, as the BIOS leaves it for the cartridge. */
 void sms_reset(sms_machine *s);
 
 /* Runs one frame with the buttons held (SMS_PAD_*); pause presses the
- * PAUSE button (NMI). */
+ * PAUSE button (NMI), or in Game Gear mode is the START button held. */
 void sms_frame(sms_machine *s, uint32 pad, uint32 pause);
 
 /* Port handlers in assembly (sms_io.s). */

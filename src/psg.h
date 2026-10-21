@@ -20,6 +20,10 @@
  * sixteenth duty at a sixteenth of that rate. Volume: 2 dB per attenuation
  * step, 15 is silence.
  *
+ * Stereo: the Game Gear's port $06 sends each channel to the left and
+ * right outputs or not; a disabled side gets a mixer gain of 0 (the
+ * Master System passes $FF: every channel on both sides).
+ *
  * Limitations: a register is sent as it stands at the end of the frame,
  * so writes made several times within a frame (sample playback through
  * the volume registers, envelopes stepped faster than the frame) collapse
@@ -46,6 +50,9 @@ typedef struct {
     Item   freq[PSG_VOICES];/* Frequency knobs */
     int32  amp_val[PSG_VOICES];     /* values the knobs hold */
     uint32 period[PSG_VOICES];      /* period the frequency knob was set from */
+    Item   gain_l[PSG_VOICES];      /* mixer gain knobs, left and right */
+    Item   gain_r[PSG_VOICES];
+    uint32 stereo;          /* distribution the gains were set from (port $06) */
     uint32 tweaks;          /* knob tweaks sent since the voices were opened */
     int32  amplitude;       /* DSP amplitude allocated */
 } psg_dsp;
@@ -56,8 +63,10 @@ Err    psg_open(psg_dsp *d);
 void   psg_close(psg_dsp *d);
 
 /* Sends the PSG registers (tone 0, volume 0, ... noise, volume 3, as
- * sms_machine keeps them) to the voices; returns the knob tweaks made. */
-uint32 psg_update(psg_dsp *d, const uint32 reg[8], uint32 clock);
+ * sms_machine keeps them) and the stereo distribution (the bits of the
+ * Game Gear's port $06: noise, tone 2, 1, 0 left, then the same right;
+ * $FF for both sides) to the voices; returns the knob tweaks made. */
+uint32 psg_update(psg_dsp *d, const uint32 reg[8], uint32 clock, uint32 stereo);
 
 /* Silences every voice (pause, menus). */
 void   psg_mute(psg_dsp *d);

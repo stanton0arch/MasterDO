@@ -18,11 +18,12 @@
 #define DBGVIEW_WIDTH  256
 #define DBGVIEW_HEIGHT_MAX VDP_ACTIVE_MAX   /* the picture has v->active lines */
 
-/* The 256 x v->active picture at (x0, y0) of a frame buffer width pixels
- * wide. */
+/* The part of the picture shown, vdp_win_w(v) x vdp_win_h(v) (the
+ * 256 x v->active picture, or the LCD window of the Game Gear), at
+ * (x0, y0) of a frame buffer width pixels wide. */
 void dbgview_draw(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 y0);
 
-/* Lines first to first + count - 1 of the picture only (first even). */
+/* Lines first to first + count - 1 of that part only (first even). */
 void dbgview_lines(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 y0,
                    uint32 first, uint32 count);
 

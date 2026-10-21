@@ -338,7 +338,7 @@ void game_free(game *g)
     g->cart_ram = NULL;
 }
 
-Err game_init(game *g, const uint8 *rom, uint32 rom_size)
+Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
 {
     z80j_glue glue;
     uint32 k;
@@ -406,7 +406,7 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
      * nothing is recorded. */
     g->log = (uint32 *)AllocMem(GAME_LOG_WORDS * 4, MEMTYPE_DRAM);
     g->pad_log = (uint32 *)AllocMem(GAME_PAD_LOGS * 4, MEMTYPE_DRAM);
-    sms_init(g->sms, g->ctx, rom, rom_size, VDP_LINES_NTSC, g->cart_ram, g->cart_ram_size);
+    sms_init(g->sms, g->ctx, rom, rom_size, VDP_LINES_NTSC, g->cart_ram, g->cart_ram_size, gg);
     for (k = 0; k < Z80J_PORTS; k++) {
         if (SMS_PORT_VCOUNTER(k))
             z80j_set_line_port(&g->jit, k);
@@ -422,6 +422,12 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size)
     printf("Mapper: %s\n", g->sms->mem.mapper == SMS_MAPPER_CODEMASTERS ?
            "Codemasters (header at $7FE0; slots paged by writes to $0000, $4000, $8000)" :
            "Sega (paging registers at $FFFC-$FFFF)");
+    if (gg)
+        printf("Machine: Game Gear (12-bit colours, %ux%u LCD window, ports $00-$06, "
+               "%s region, START on port $00, PSG stereo)\n", VDP_GG_W, VDP_GG_H,
+               g->sms->gg_japan ? "Japan" : "overseas");
+    else
+        printf("Machine: Master System\n");
     game_reset(g);
     return 0;
 }
@@ -513,6 +519,7 @@ void game_reset(game *g)
 {
     sms_reset(g->sms);
     render_reset(g->rd);
+    render_set_window(g->rd, &g->sms->vdp);
     g->status = 0;
     g->stop_pc = 0;
     g->frame = 0;
@@ -640,7 +647,8 @@ int32 game_frame(game *g, uint32 pad, uint32 pause)
         uint32 t2;
 
         psg_update(g->snd, g->sms->psg_reg,
-                   g->sms->vdp.lines == VDP_LINES_PAL ? PSG_CLOCK_PAL : PSG_CLOCK_NTSC);
+                   g->sms->vdp.lines == VDP_LINES_PAL ? PSG_CLOCK_PAL : PSG_CLOCK_NTSC,
+                   g->sms->gg_port[6]);
         t2 = plat_usec_now();
         g->last_snd_us = t2 - t1;
         t1 = t2;
@@ -928,6 +936,11 @@ uint32 game_state_hash(const game *g)
         h = h * 31 + g->sms->vdp.cram[k];
     for (k = 0; k < 4; k++)
         h = h * 31 + g->sms->mem.reg[k];
+    if (g->sms->gg) {
+        h = z80j_hash_words(h, (const uint32 *)g->sms->vdp.gg_cram, VDP_GG_CRAM / 4);
+        for (k = 0; k < 7; k++)
+            h = h * 31 + g->sms->gg_port[k];
+    }
     return h;
 }
 

@@ -92,7 +92,8 @@ static uint32 lowest_bit(uint32 w)
 #define CEL_BLANK       (CEL_DBLANK0 + RENDER_MAX_DBLANK)
 #define CEL_TERM        (CEL_BLANK + 1)
 #define CEL_SPRITE0     (CEL_BLANK + 2)
-#define N_CELS          (CEL_SPRITE0 + RENDER_SPRITE_CELS)
+#define CEL_WBLANK      (CEL_SPRITE0 + RENDER_SPRITE_CELS)  /* render_blank_window() */
+#define N_CELS          (CEL_WBLANK + 1)
 
 #define CEL_MEM         (MEMTYPE_DRAM | MEMTYPE_CEL | MEMTYPE_FILL)
 #define VCEL_MEM        (MEMTYPE_VRAM | MEMTYPE_CEL | MEMTYPE_FILL)
@@ -150,6 +151,19 @@ static uint32 sms_rgb(uint32 c)
 /* The same for the 64 colours, built once (words: the ARM60 has no
  * halfword loads). */
 static uint32 rgb_tab[64];
+
+/* A 4-bit component of a Game Gear colour widened to 5 bits. */
+static const uint8 gg_level[16] = {
+    0, 2, 4, 6, 8, 10, 12, 14, 17, 19, 21, 23, 25, 27, 29, 31
+};
+
+/* Game Gear colour (the two bytes of its colour RAM: GGGGRRRR, then
+ * ----BBBB) to 3DO RGB 5:5:5. */
+static uint32 gg_rgb(const uint8 *c)
+{
+    return ((uint32)gg_level[c[0] & 15] << 10) | ((uint32)gg_level[c[0] >> 4] << 5) |
+           (uint32)gg_level[c[1] & 15];
+}
 
 static void init_cel(CCB *c, uint32 flags)
 {
@@ -267,6 +281,27 @@ static void set_mode(renderer *r, uint32 height, uint32 force)
     }
 }
 
+void render_set_window(renderer *r, const vdp_state *v)
+{
+    uint32 w = vdp_win_w(v);
+    uint32 h = vdp_win_h(v);
+
+    if (r->gg != v->gg)
+        r->cram0_ok = 0;                /* another colour format */
+    r->gg = v->gg;
+    r->pal_words = vdp_pal_words(v);
+    r->win_x = vdp_win_x(v);
+    r->win_y = vdp_win_y(v);
+    if (w != r->win_w || h != r->win_h) {
+        CCB *c = &r->cels[CEL_WBLANK];
+
+        r->win_w = w;
+        r->win_h = h;
+        c->ccb_HDX = (int32)((w / 8) << 20);
+        c->ccb_VDY = (int32)(h << 16);
+    }
+}
+
 Err render_init(renderer *r)
 {
     CCB *c;
@@ -347,6 +382,15 @@ Err render_init(renderer *r)
         c->ccb_PRE1 = ((2 - PRE1_WOFFSET_PREFETCH) << PRE1_WOFFSET10_SHIFT) |
                       ((8 - PRE1_TLHPCNT_PREFETCH) << PRE1_TLHPCNT_SHIFT) | PRE1_TLLSB_PDC0;
     }
+    /* The window of the backdrop colour (render_blank_window), stretched
+     * to the window by set_window. */
+    c = &r->cels[CEL_WBLANK];
+    init_cel(c, BASE_FLAGS | CCB_BGND | CCB_LAST);
+    c->ccb_SourcePtr = (CelData *)r->blank;
+    c->ccb_PRE0 = ((1 - PRE0_VCNT_PREFETCH) << PRE0_VCNT_SHIFT) | PRE0_LINEAR | PRE0_BPP_16;
+    c->ccb_PRE1 = ((4 - PRE1_WOFFSET_PREFETCH) << PRE1_WOFFSET10_SHIFT) |
+                  ((8 - PRE1_TLHPCNT_PREFETCH) << PRE1_TLHPCNT_SHIFT) | PRE1_TLLSB_PDC0;
+    r->wblank = CEL_WBLANK;
     render_reset(r);
     return 0;
 }
@@ -356,11 +400,20 @@ void render_reset(renderer *r)
     uint32 k;
 
     set_mode(r, RENDER_H, 1);
+    r->gg = 0;
+    r->pal_words = 8;
+    r->win_x = r->win_y = 0;
+    r->win_w = RENDER_W;
+    r->win_h = RENDER_H;
+    r->cels[CEL_WBLANK].ccb_HDX = (int32)((RENDER_W / 8) << 20);
+    r->cels[CEL_WBLANK].ccb_VDY = (int32)(RENDER_H << 16);
     for (k = 0; k < RENDER_LAYERS; k++)
         r->layer[k].stamp_now = 0;
     r->update = 0;
     r->spr_mode = 0xFFFFFFFFu;
     r->spr_runs = 0;
+    for (k = 0; k < RENDER_SPRITE_CELS; k++)
+        r->cels[CEL_SPRITE0 + k].ccb_PLUTPtr = r->pluts + 32;
     r->spr_bands = 0;
     r->n_sprites = 0;
     r->npb = 1;
@@ -534,7 +587,7 @@ static void assign_layers(renderer *r, const vdp_state *v, uint32 nnb)
  * (colour 0 transparent (000), black elsewhere made opaque (001)) and
  * priority strips (colour 0 of both palettes transparent, black elsewhere
  * opaque: the cel engine tests the colour the PLUT gives, not the index). */
-static void band_pluts(uint16 *set, const uint8 *cram)
+static void band_pluts(uint16 *set, const uint8 *cram, uint32 gg)
 {
     /* Two entries per word store, the first in the high half (big
      * endian): the ARM60 has no halfword stores. */
@@ -544,10 +597,20 @@ static void band_pluts(uint16 *set, const uint8 *cram)
     uint32 k;
 
     for (k = 0; k < 32; k += 2) {
-        uint32 c0 = rgb_tab[cram[k] & 63];
-        uint32 c1 = rgb_tab[cram[k + 1] & 63];
-        uint32 o0 = c0 ? c0 : 1;        /* black made opaque */
-        uint32 o1 = c1 ? c1 : 1;
+        uint32 c0;
+        uint32 c1;
+        uint32 o0;
+        uint32 o1;
+
+        if (gg) {
+            c0 = gg_rgb(cram + 2 * k);
+            c1 = gg_rgb(cram + 2 * k + 2);
+        } else {
+            c0 = rgb_tab[cram[k] & 63];
+            c1 = rgb_tab[cram[k + 1] & 63];
+        }
+        o0 = c0 ? c0 : 1;               /* black made opaque */
+        o1 = c1 ? c1 : 1;
 
         bg[k >> 1] = (c0 << 16) | c1;
         if ((k & 15) == 0)
@@ -567,25 +630,31 @@ static void update_palettes(renderer *r, vdp_state *v)
     uint32 merged;
     uint32 k;
 
+    uint32 nw = r->pal_words;
+    uint32 gg = r->gg;
+
     r->npb = vdp_palette_bands(v, r->ptops, r->pcram, &merged);
     if (v->cram_dirty) {
         v->cram_dirty = 0;
-        for (k = 0; k < 8 && r->cram0[k] == r->pcram[k]; k++)
+        for (k = 0; k < nw && r->cram0[k] == r->pcram[k]; k++)
             ;
-        if (k < 8 || !r->cram0_ok) {
-            for (k = 0; k < 8; k++)
+        if (k < nw || !r->cram0_ok) {
+            for (k = 0; k < nw; k++)
                 r->cram0[k] = r->pcram[k];
             r->cram0_ok = 1;
-            band_pluts(r->pluts, (const uint8 *)r->pcram);
+            band_pluts(r->pluts, (const uint8 *)r->pcram, gg);
             r->st.palettes++;
         }
     }
     for (k = 1; k < r->npb; k++)
-        band_pluts(r->pluts + k * RENDER_PLUT_SET, (const uint8 *)(r->pcram + 8 * k));
+        band_pluts(r->pluts + k * RENDER_PLUT_SET, (const uint8 *)(r->pcram + nw * k), gg);
     if (r->npb > 1)
         r->st.pbands++;
     r->st.pmerged += merged;
-    k = rgb_tab[((const uint8 *)r->pcram)[16 + (v->reg[7] & 15)] & 63];
+    if (gg)
+        k = gg_rgb((const uint8 *)r->pcram + 2 * (16 + (v->reg[7] & 15)));
+    else
+        k = rgb_tab[((const uint8 *)r->pcram)[16 + (v->reg[7] & 15)] & 63];
     if (k != r->backdrop) {
         r->backdrop = k;
         r->st.backdrops++;
@@ -798,6 +867,8 @@ static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nnb, uint32 ndb
     uint32 vs = v->reg[9];
     uint32 vsi = (uint32)v->reg[0] & 0x80;
     uint32 h = r->height;
+    uint32 wa = r->win_y;               /* the lines shown: the window's */
+    uint32 wb = r->win_y + r->win_h;
     uint32 nbl = 0;
     uint32 nl = 0;
     uint32 on = 0;
@@ -825,9 +896,9 @@ static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nnb, uint32 ndb
         if ((k >> 16) > 1)
             r->st.bands++;
         nl = k & 0xFFFF;
-        l->shown_rows = rows_of(0, h, vs, l->nrows);
+        l->shown_rows = rows_of(wa, wb, vs, l->nrows);
         if (vsi)
-            l->shown_rows |= rows_of(0, h, 0, l->nrows);
+            l->shown_rows |= rows_of(wa, wb, 0, l->nrows);
         r->nlb = nl;
         *any_on = 1;
         return 0;
@@ -888,9 +959,15 @@ static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nnb, uint32 ndb
                                           (li << 24) | (q << 25);
                     }
                 }
-                l->shown_rows |= rows_of(ya, yb, vs, l->nrows);
-                if (vsi)
-                    l->shown_rows |= rows_of(ya, yb, 0, l->nrows);
+                if (ya < wa)
+                    ya = wa;
+                if (yb > wb)
+                    yb = wb;
+                if (ya < yb) {
+                    l->shown_rows |= rows_of(ya, yb, vs, l->nrows);
+                    if (vsi)
+                        l->shown_rows |= rows_of(ya, yb, 0, l->nrows);
+                }
             }
         }
     }
@@ -1174,14 +1251,13 @@ static uint32 update_sprites(renderer *r, const vdp_state *v)
     }
     for (k = 0; k < nn; k++)
         sprite_tiles(r, r->wlist[k], tall, vram);
-    if (r->npb > 1 || r->spr_bands) {
+    if (r->npb > 1) {
         uint16 *spl[VDP_PAL_BANDS];
         int32 top[VDP_PAL_BANDS + 1];
         uint32 npb = r->npb;
         CCB *c = &r->cels[CEL_SPRITE0];
         uint32 q;
 
-        r->spr_bands = (npb > 1);
         for (q = 0; q < npb; q++) {
             spl[q] = r->pluts + q * RENDER_PLUT_SET + 32;
             top[q] = (int32)r->ptops[q];
@@ -1194,6 +1270,15 @@ static uint32 update_sprites(renderer *r, const vdp_state *v)
                 ;
             c->ccb_PLUTPtr = spl[q];
         }
+        if (n > r->spr_bands)
+            r->spr_bands = n;
+    } else if (r->spr_bands) {
+        /* One palette again: every cel given another band's PLUT returns
+         * to the first band's, those past this frame's sprites included,
+         * which the sprites of the next frames reuse. */
+        for (k = 0; k < r->spr_bands; k++)
+            r->cels[CEL_SPRITE0 + k].ccb_PLUTPtr = r->pluts + 32;
+        r->spr_bands = 0;
     }
     r->st.sprites += n;
     return n;
@@ -1202,6 +1287,50 @@ static uint32 update_sprites(renderer *r, const vdp_state *v)
 /*--------------------------------------------------------------------------
  * Frame update
  *------------------------------------------------------------------------*/
+
+/* The line bands cut to the lines of the window (Game Gear mode): the
+ * pieces, the strips and the patches are only made for those lines. */
+static void window_bands(renderer *r)
+{
+    uint32 y0 = r->win_y;
+    uint32 y1 = r->win_y + r->win_h;
+    uint32 n = 0;
+    uint32 k;
+
+    for (k = 0; k < r->nlb; k++) {
+        uint32 lb = r->lbands[k];
+        uint32 ya = lb & 0xFF;
+        uint32 yb = (lb >> 8) & 0xFF;
+
+        if (yb <= y0 || ya >= y1)
+            continue;
+        if (ya < y0)
+            ya = y0;
+        if (yb > y1)
+            yb = y1;
+        r->lbands[n++] = (lb & 0xFFFF0000u) | ya | (yb << 8);
+    }
+    r->nlb = n;
+}
+
+/* The cels of the chain moved from picture coordinates to those of the
+ * window. The backdrop rectangles of the lines with the display off keep
+ * their column from one frame to the next, so it is set again first; the
+ * other cels are positioned anew at every update. */
+static void window_offset(renderer *r, uint32 nbl)
+{
+    Coord dx = (Coord)(r->win_x << 16);
+    Coord dy = (Coord)(r->win_y << 16);
+    CCB *c;
+    uint32 k;
+
+    for (k = 0; k < nbl; k++)
+        r->cels[CEL_DBLANK0 + k].ccb_XPos = 0;
+    for (c = r->chain; c != NULL; c = c->ccb_NextPtr) {
+        c->ccb_XPos -= dx;
+        c->ccb_YPos -= dy;
+    }
+}
 
 static void update_picture(renderer *r, vdp_state *v)
 {
@@ -1226,6 +1355,7 @@ static void update_picture(renderer *r, vdp_state *v)
 
     /* The display height decides the rows of the name table bitmaps. */
     set_mode(r, v->active, 0);
+    render_set_window(r, v);
     if (r->height > RENDER_H)
         r->st.tall++;
     update_palettes(r, v);
@@ -1243,7 +1373,9 @@ static void update_picture(renderer *r, vdp_state *v)
     assign_layers(r, v, nnb);
     ndb = vdp_bands(v->de_log, v->de_n, v->de_start, r->dtops, r->dons);
     nbl = line_bands(r, v, nnb, ndb, &any_on);
-    if (!any_on) {
+    if (r->win_h != r->height)
+        window_bands(r);
+    if (!any_on || r->nlb == 0) {
         r->display_on = 0;
         return;
     }
@@ -1385,7 +1517,7 @@ static void update_picture(renderer *r, vdp_state *v)
         last->ccb_NextPtr = &r->cels[CEL_DBLANK0];
         last = &r->cels[CEL_DBLANK0 + nbl - 1];
     }
-    if (v->reg[0] & 0x20) {
+    if ((v->reg[0] & 0x20) && r->win_x < 8) {
         last->ccb_NextPtr = &r->cels[CEL_BLANK];
         last = &r->cels[CEL_BLANK];
     }
@@ -1394,6 +1526,8 @@ static void update_picture(renderer *r, vdp_state *v)
     last->ccb_Flags |= CCB_LAST;
     r->last_cel = last;
     r->chain = &r->cels[0];
+    if ((r->win_x | r->win_y) != 0)
+        window_offset(r, nbl);
 }
 
 /* Is the picture just built the previous one? See "Repeated pictures" in
@@ -1415,7 +1549,7 @@ static void decide_repeat(renderer *r)
     if (r->display_on) {
         uint32 k;
 
-        for (k = 8; k < r->npb * 8; k++) {
+        for (k = r->pal_words; k < r->npb * r->pal_words; k++) {
             sig ^= r->pcram[k];
             sig += sig << 10;
             sig ^= sig >> 6;

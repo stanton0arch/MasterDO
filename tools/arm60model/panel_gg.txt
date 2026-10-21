@@ -1,0 +1,30 @@
+# Panel of the batch runner for the Game Gear images of takeme/roms/gg, in
+# the format of panel.txt (run with -roms takeme/roms/gg -panel this file
+# -reports reports/gg). In the pad scripts, 100 is START, held on port $00
+# as long as the bit is set.
+#
+# The scripts aim at reaching the game itself, then at simple inputs that
+# keep it busy. The cartridges cover the Game Gear's own mechanisms (the
+# 12-bit colour RAM, the LCD window, START on port $00, the PSG stereo
+# register) with games of different kinds: platform games with fast
+# scrolling and many sprites (Sonic Triple Trouble, Tails Adventures,
+# Shinobi II), a vertical shooter (Power Strike II), fighting games with
+# large sprites (Fatal Fury, Arena), role-playing games with cartridge RAM
+# and dialogue boxes (Defenders of Oasis, Sylvan Tale), a sports game with
+# a scrolling pitch (Sensible Soccer). Virtua Fighter Animation, a 1 MiB
+# image, does not load (images up to 512 KiB fit).
+#
+# Written by hand from the contact sheets: Sensible Soccer's script stops in
+# its menus (the team list); a play recorded on the console (the `Pad
+# script:` line of a log) is the way to reach a match.
+#
+# cartridge                 frames  pad script
+arena.gg                    4200    300:100,306:0,600:100,606:0,900:100,906:0,1200:100,1206:0,1500:8,1700:18,1710:8,1900:28,1910:8,2100:18,2110:8,2300:28,2310:8,2500:4,2700:14,2710:4,2900:0,3100:8,3200:18,3210:8,3300:28,3310:8,3400:4,3500:14,3510:4,3600:1,3700:11,3710:1,3800:2,3900:12,3910:2,4000:8,4100:0
+defenders_of_oasis.gg       3000    300:100,306:0,600:100,606:0,900:100,906:0,1200:100,1206:0,1500:8,1700:18,1710:8,1900:28,1910:8,2100:18,2110:8,2300:28,2310:8,2500:4,2700:14,2710:4,2900:0
+fatal_fury.gg               4500    300:100,306:0,600:100,606:0,900:100,906:0,1200:100,1206:0,1500:8,1700:18,1710:8,1900:28,1910:8,2100:18,2110:8,2300:28,2310:8,2500:4,2700:14,2710:4,2900:0,3100:8,3150:18,3160:8,3200:28,3210:8,3250:4,3300:14,3310:4,3350:28,3360:8,3400:18,3410:8,3500:1,3510:0,3600:8,3650:18,3660:8,3700:28,3710:8,3750:4,3800:14,3810:4,3850:28,3860:8,3900:18,3910:8,4000:1,4010:0,4100:8,4150:18,4160:8,4200:28,4210:8,4300:14,4310:4,4400:0
+power_strike2.gg            3600    300:100,306:0,600:100,606:0,900:100,906:0,1100:14,1300:18,1500:14,1700:19,1900:1a,2100:18,2300:14,2500:15,2700:16,2900:18,3100:14,3300:18,3500:10
+sensible_soccer.gg          3600    300:100,306:0,600:100,606:0,900:100,906:0,1200:100,1206:0,1500:8,1700:18,1710:8,1900:28,1910:8,2100:18,2110:8,2300:1,2306:0,2330:10,2336:0,2500:8,2700:18,2710:8,2900:4,3100:14,3110:4,3300:1,3500:0
+shinobi2.gg                 3600    300:100,306:0,600:100,606:0,900:100,906:0,1200:100,1206:0,1400:100,1406:0,1600:100,1606:0,1800:10,1806:0,2000:100,2006:0,2200:8,2300:18,2310:8,2400:28,2410:8,2500:18,2510:8,2600:28,2610:8,2700:4,2800:18,2810:8,2900:28,2910:8,3000:18,3010:8,3200:28,3210:8,3400:0
+sonic_triple_trouble.gg     3000    300:100,306:0,600:100,606:0,900:100,906:0,1200:100,1206:0,1500:8,1700:18,1710:8,1900:28,1910:8,2100:18,2110:8,2300:28,2310:8,2500:4,2700:14,2710:4,2900:0
+sylvan_tale.gg              3000    300:100,306:0,600:100,606:0,900:100,906:0,1200:100,1206:0,1500:8,1700:18,1710:8,1900:28,1910:8,2100:18,2110:8,2300:28,2310:8,2500:4,2700:14,2710:4,2900:0
+tails_adventures.gg         3600    300:100,306:0,600:100,606:0,900:100,906:0,1100:1,1106:0,1150:100,1156:0,1300:100,1306:0,1500:8,1700:18,1710:8,1900:28,1910:8,2100:18,2110:8,2300:28,2310:8,2500:4,2700:14,2710:4,2900:8,3100:18,3110:8,3300:28,3310:8,3500:0

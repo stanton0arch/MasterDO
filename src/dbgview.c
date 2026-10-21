@@ -66,6 +66,17 @@ static uint32 sms_rgb(uint32 c)
            (uint32)level[(c >> 4) & 3];
 }
 
+/* Game Gear colour (GGGGRRRR, then ----BBBB) to 3DO RGB 5:5:5, each
+ * component widened from 4 to 5 bits. */
+static uint32 gg_rgb(const uint8 *c)
+{
+    uint32 r = c[0] & 15;
+    uint32 g = c[0] >> 4;
+    uint32 b = c[1] & 15;
+
+    return (((r << 1) | (r >> 3)) << 10) | (((g << 1) | (g >> 3)) << 5) | ((b << 1) | (b >> 3));
+}
+
 /* Row r of the tile of name table entry e, pixel k in nibble 7 - k. */
 static uint32 tile_row(const uint8 *vram, uint32 e, uint32 r)
 {
@@ -279,7 +290,8 @@ void dbgview_lines(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 
     static uint32 dtops[VDP_DE_LOG + 1];
     static uint32 dons[VDP_DE_LOG + 1];
     static uint32 ptops[VDP_PAL_BANDS];
-    static uint32 pcram[VDP_PAL_BANDS * 8];
+    static uint32 pcram[VDP_PAL_BANDS * VDP_PAL_WORDS];
+    static uint32 row[DBGVIEW_WIDTH];
     static uint32 pals[VDP_PAL_BANDS][32];
     static uint32 borders[VDP_PAL_BANDS];
     sprite list[MAX_SPRITES];
@@ -289,6 +301,10 @@ void dbgview_lines(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 
     uint32 npb;
     uint32 merged;
     uint32 nspr;
+    uint32 wx = vdp_win_x(v);
+    uint32 wy = vdp_win_y(v);
+    uint32 ww = vdp_win_w(v);
+    uint32 wh = vdp_win_h(v);
     uint32 y;
     uint32 k;
     uint32 q;
@@ -297,8 +313,10 @@ void dbgview_lines(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 
         init_tables();
     npb = vdp_palette_bands(v, ptops, pcram, &merged);
     for (q = 0; q < npb; q++) {
+        const uint8 *c = (const uint8 *)(pcram + vdp_pal_words(v) * q);
+
         for (k = 0; k < 32; k++)
-            pals[q][k] = sms_rgb(((const uint8 *)(pcram + 8 * q))[k]);
+            pals[q][k] = v->gg ? gg_rgb(c + 2 * k) : sms_rgb(c[k]);
         borders[q] = pals[q][16 + (v->reg[7] & 15)];
         borders[q] |= borders[q] << 16;
     }
@@ -309,8 +327,12 @@ void dbgview_lines(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 
     nnb = vdp_bands(v->nt_log, v->nt_n, v->reg[2], ntops, nvals);
     ndb = vdp_bands(v->de_log, v->de_n, v->de_start, dtops, dons);
 
-    for (y = first & ~1u; y < first + count && y < v->active; y += 2) {
-        uint32 *d = fb + ((uint32)(y0 + (int32)y) >> 1) * (uint32)width + (uint32)x0;
+    /* The lines of the window; with a window narrower than the picture
+     * (Game Gear) each pair is drawn whole into a row of its own, then
+     * the window's columns are copied. */
+    for (y = wy + (first & ~1u); y < wy + first + count && y < wy + wh; y += 2) {
+        uint32 *dst = fb + ((uint32)(y0 + (int32)(y - wy)) >> 1) * (uint32)width + (uint32)x0;
+        uint32 *d = (ww < DBGVIEW_WIDTH) ? row : dst;
         const uint32 *pal[2];
         uint32 border[2];
         uint32 hs[2];
@@ -339,20 +361,23 @@ void dbgview_lines(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 
         } else if (!on[0]) {                    /* display off */
             for (k = 0; k < DBGVIEW_WIDTH; k++)
                 d[k] = border[0];
-            continue;
         } else {
             draw_sprites(v, pal, list, nspr, y, draw_background(v, pal[0], y, hs[0], nt[0], d), 3, d);
         }
-        if (v->reg[0] & 0x20) {                 /* left column blanked */
-            for (k = 0; k < 8; k++)
-                d[k] = (border[0] & 0xFFFF0000u) | (border[1] & 0xFFFFu);
+        if (on[0] | on[1]) {
+            if (v->reg[0] & 0x20) {             /* left column blanked */
+                for (k = 0; k < 8; k++)
+                    d[k] = (border[0] & 0xFFFF0000u) | (border[1] & 0xFFFFu);
+            }
         }
+        if (d != dst)
+            memcpy(dst, d + wx, ww * 4);
     }
 }
 
 void dbgview_draw(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 y0)
 {
-    dbgview_lines(v, fb, width, x0, y0, 0, v->active);
+    dbgview_lines(v, fb, width, x0, y0, 0, vdp_win_h(v));
 }
 
 void dbgview_palette(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 y0)
@@ -367,7 +392,8 @@ void dbgview_palette(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int3
                         (uint32)x0;
 
             for (x = 0; x < 16 * 8; x++) {
-                uint32 c = sms_rgb(v->cram[row * 16 + (x >> 3)]);
+                uint32 i = row * 16 + (x >> 3);
+                uint32 c = v->gg ? gg_rgb(v->gg_cram + 2 * i) : sms_rgb(v->cram[i]);
 
                 d[x] = (c << 16) | c;
             }

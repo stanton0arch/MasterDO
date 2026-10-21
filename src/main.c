@@ -12,9 +12,12 @@
  * run a frame ahead of the display. game.c records the emulation, update
  * and drawing times, and the frames where the pad changed, written out
  * when the run pauses or ends (the pad changes as a pad script that the
- * cycle model replays). Pad during
+ * cycle model replays). Game Gear images (the .gg files of the gg
+ * directory, or a Game Gear region in the header) run in the Game Gear
+ * mode: the LCD window of 160 x 144 pixels in a black case, 12-bit
+ * colours, P held as the START button. Pad during
  * the run: D-pad, A (button 1) and B (button 2) for the SMS pad, P for
- * PAUSE; L pauses the run and shows the reference picture drawn by the CPU
+ * PAUSE (START on the Game Gear); L pauses the run and shows the reference picture drawn by the CPU
  * (debug view) to compare with the cels (A: reference, B: cels, L: resume);
  * R toggles the presentation between the queue (a presenter thread shows
  * the finished screens one per VBL, the emulation working a frame ahead)
@@ -63,14 +66,18 @@ typedef struct {
     uint32             run_vram;    /* VRAM free during the run, or after a failed load */
     int32              pic_x;       /* picture position on screen (y even) */
     int32              pic_y;
-    uint32             pic_h;       /* picture height: 192, 224 or 240 lines */
+    uint32             pic_w;       /* picture shown: 256 pixels, or 160 (Game Gear) */
+    uint32             pic_h;       /* its height: 192, 224 or 240 lines, or 144 */
+    uint32             gg;          /* the cartridge runs in the Game Gear mode */
     uint32             border[PLAT_NUM_SCREENS];  /* colour each screen is filled with */
     uint32             direct;      /* presentation without the queue */
     uint32             draw_errors;
 } app_state;
 
-/* The run holds the translator state: kept off the small task stack. */
+/* The run holds the translator state, the application its lists and
+ * results: both kept off the small task stack. */
 static game g;
+static app_state st;
 
 /* The PSG voices on the DSP, opened once for the whole session. */
 static psg_dsp snd;
@@ -122,8 +129,16 @@ static void log_vdp(const char *what)
         printf(" %02x", v->reg[k]);
     printf(", address $%04lx code %lu, status $%02lx, CRAM", (unsigned long)vdp_addr(v),
            (unsigned long)vdp_code(v), (unsigned long)v->status);
-    for (k = 0; k < 32; k++)
-        printf(" %02x", v->cram[k]);
+    if (v->gg) {
+        for (k = 0; k < VDP_GG_CRAM; k += 2)
+            printf(" %03lx", (unsigned long)(v->gg_cram[k] | ((uint32)v->gg_cram[k + 1] << 8)));
+        printf(", ports $00-$06");
+        for (k = 0; k < 7; k++)
+            printf(" %02lx", (unsigned long)g.sms->gg_port[k]);
+    } else {
+        for (k = 0; k < 32; k++)
+            printf(" %02x", v->cram[k]);
+    }
     printf(", %lu sprites, backdrop $%04lx, %lu lines\n", (unsigned long)g.rd->n_sprites,
            (unsigned long)render_backdrop(g.rd), (unsigned long)v->active);
     /* The writes made during the active display of the frame (the bands
@@ -141,30 +156,47 @@ static void log_vdp(const char *what)
     for (k = 0; k < v->de_n; k++)
         printf(" %lu:%s", (unsigned long)(v->de_log[k] >> 8), (v->de_log[k] & 1) ? "on" : "off");
     printf(", %lu colour writes", (unsigned long)v->cr_n);
-    for (k = 0; k < v->cr_n; k++)
-        printf(" %lu:%02lx=%02lx", (unsigned long)(v->cr_log[k] >> 16),
-               (unsigned long)((v->cr_log[k] >> 8) & 31), (unsigned long)(v->cr_log[k] & 0x3F));
+    for (k = 0; k < v->cr_n; k++) {
+        uint32 e = v->cr_log[k];
+
+        if (v->gg)
+            printf(" %lu:%02lx=%03lx", (unsigned long)(e >> 20), (unsigned long)((e >> 12) & 31),
+                   (unsigned long)(e & 0xFFF));
+        else
+            printf(" %lu:%02lx=%02lx", (unsigned long)(e >> 16), (unsigned long)((e >> 8) & 31),
+                   (unsigned long)(e & 0x3F));
+    }
     printf("\n");
 }
 
-/* The picture on the screens: centred, with the height of the display
- * mode (192, 224 or 240 lines), the clip window of every screen set to
- * it (the cels are positioned in it). */
-static void set_picture(platform *p, app_state *st, uint32 h)
+/* The picture on the screens: centred, with the size of the part shown
+ * (the 256-pixel picture of the display mode, 192, 224 or 240 lines, or
+ * the 160 x 144 LCD window of the Game Gear), the clip window of every
+ * screen set to it (the cels are positioned in it). */
+static void set_picture(platform *p, app_state *st, uint32 w, uint32 h)
 {
+    st->pic_w = w;
     st->pic_h = h;
+    st->pic_x = (p->width - (int32)w) / 2;
     st->pic_y = ((p->height - (int32)h) / 2) & ~1;
     if (st->pic_y < 0)
         st->pic_y = 0;
     plat_reset_clip(p);
-    plat_set_clip(p, st->pic_x, st->pic_y, RENDER_W, (int32)h);
+    plat_set_clip(p, st->pic_x, st->pic_y, (int32)w, (int32)h);
 }
 
-/* Fills the back screen with the backdrop colour when it does not hold it
+/* The colour around the picture: the backdrop on the Master System, the
+ * black case of the LCD on the Game Gear. */
+static uint32 border_colour(const app_state *st)
+{
+    return st->gg ? 0 : render_backdrop(g.rd);
+}
+
+/* Fills the back screen with the border colour when it does not hold it
  * already; force redraws it anyway (display off: the picture goes). */
 static void fill_border(platform *p, app_state *st, uint32 force)
 {
-    uint32 bd = render_backdrop(g.rd);
+    uint32 bd = border_colour(st);
 
     if (force || st->border[p->back] != bd) {
         plat_fill(p, p->back, bd);
@@ -180,13 +212,16 @@ static uint32 draw_picture(platform *p, app_state *st)
     uint32 dt;
     Err err;
 
-    if (!render_display_on(g.rd)) {
+    if (!render_display_on(g.rd) && !st->gg) {
         fill_border(p, st, 1);
         return 0;
     }
     fill_border(p, st, 0);
     t0 = plat_usec_now();
-    err = DrawCels(plat_bitmap(p, p->back), render_chain(g.rd));
+    /* Game Gear with no line displayed: the LCD window in the backdrop
+     * colour, the case left black. */
+    err = DrawCels(plat_bitmap(p, p->back), render_display_on(g.rd) ? render_chain(g.rd)
+                                                                     : render_blank_window(g.rd));
     dt = plat_usec_now() - t0;
     if (err < 0) {
         /* The screen may hold part of a picture: it is not shown again. */
@@ -222,14 +257,16 @@ static uint32 show_snapshot(platform *p, app_state *st, uint32 prev)
 
             redraw = 0;
             plat_reset_clip(p);
-            plat_fill(p, p->back, render_backdrop(g.rd));
+            plat_fill(p, p->back, border_colour(st));
             if (which == 0) {
                 dbgview_draw(v, plat_pixels(p, p->back), p->width, st->pic_x, st->pic_y);
                 dt = plat_usec_now() - t0;
             } else {
-                set_picture(p, st, st->pic_h);
+                set_picture(p, st, st->pic_w, st->pic_h);
                 if (render_display_on(g.rd))
                     DrawCels(plat_bitmap(p, p->back), render_chain(g.rd));
+                else if (st->gg)
+                    DrawCels(plat_bitmap(p, p->back), render_blank_window(g.rd));
                 dt = plat_usec_now() - t0;
                 plat_reset_clip(p);
             }
@@ -281,7 +318,7 @@ static void run_game(platform *p, app_state *st)
 
     reset_borders(st);
     st->draw_errors = 0;
-    set_picture(p, st, render_height(g.rd));
+    set_picture(p, st, render_win_w(g.rd), render_win_h(g.rd));
     render_forget_picture(g.rd);
     for (;;) {
         uint32 t0 = plat_usec_now();
@@ -303,7 +340,7 @@ static void run_game(platform *p, app_state *st)
             if (prev & ControlX)
                 break;
             reset_borders(st);
-            set_picture(p, st, st->pic_h);
+            set_picture(p, st, st->pic_w, st->pic_h);
             render_forget_picture(g.rd);
             shown = plat_usec_now();
             longs = p->long_presents;
@@ -320,17 +357,20 @@ static void run_game(platform *p, app_state *st)
             longs = p->long_presents;
         }
 
-        if (game_frame(&g, sms_buttons(held), (pressed & ControlStart) != 0) != 0) {
+        /* P: the PAUSE button when pressed, or START while held on the
+         * Game Gear. */
+        if (game_frame(&g, sms_buttons(held),
+                       ((st->gg ? held : pressed) & ControlStart) != 0) != 0) {
             plat_drain(p);
             plat_reset_clip(p);
             sprintf(buf, "RUN STOPPED AT PC %04lX", (unsigned long)g.stop_pc);
             show_message(p, buf);
             break;
         }
-        if (render_height(g.rd) != st->pic_h) {
+        if (render_win_h(g.rd) != st->pic_h || render_win_w(g.rd) != st->pic_w) {
             /* The display mode changed height: the picture moves, and the
              * screens get their border again. */
-            set_picture(p, st, render_height(g.rd));
+            set_picture(p, st, render_win_w(g.rd), render_win_h(g.rd));
             reset_borders(st);
         }
         /* A picture identical to the previous one is not drawn: the screen
@@ -553,19 +593,20 @@ static void draw_results(platform *p, const app_state *st)
 int main(int argc, char **argv)
 {
     platform plat;
-    app_state st;
     uint32 prev;
 
     (void)argc;
     (void)argv;
 
-    printf("masterdo: a picture identical to the previous one shown again instead of drawn\n");
+    printf("masterdo: Game Gear mode: 12-bit colours, 160x144 LCD window, START button, "
+           "PSG stereo, Game Gear images listed from the gg directory\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);
     memset(&st, 0, sizeof(st));
     st.pic_x = (plat.width - RENDER_W) / 2;
     st.pic_y = ((plat.height - RENDER_H) / 2) & ~1;
+    st.pic_w = RENDER_W;
     st.pic_h = RENDER_H;
 
     show_message(&plat, "Benchmarks of steps 0 and 1...");
@@ -598,8 +639,9 @@ int main(int argc, char **argv)
         /* The memory left after a failed load (the results screen shows
          * it); replaced by the run's figures once the game is set up. */
         plat_mem_free(&st.run_free, &st.run_vram);
+        st.gg = st.rom.gg;
         if (st.rom.data != NULL && st.rom.size >= 0x4000 &&
-            game_init(&g, st.rom.data, (uint32)st.rom.size) == 0) {
+            game_init(&g, st.rom.data, (uint32)st.rom.size, st.gg) == 0) {
             st.have_game = 1;
             game_set_name(&g, st.rom.name);
             game_set_sound(&g, snd.ok ? &snd : NULL);
@@ -608,9 +650,11 @@ int main(int argc, char **argv)
             game_translate_rom(&g);
             plat_mem_free(&st.run_free, &st.run_vram);
             printf("Memory: %lu bytes of DRAM and %lu bytes of VRAM free during the run; "
-                   "picture at (%ld,%ld)\n",
-                   (unsigned long)st.run_free, (unsigned long)st.run_vram, (long)st.pic_x,
-                   (long)st.pic_y);
+                   "picture of %lux%lu at (%ld,%ld)\n",
+                   (unsigned long)st.run_free, (unsigned long)st.run_vram,
+                   (unsigned long)render_win_w(g.rd), (unsigned long)render_win_h(g.rd),
+                   (long)((plat.width - (int32)render_win_w(g.rd)) / 2),
+                   (long)(((plat.height - (int32)render_win_h(g.rd)) / 2) & ~1));
         }
 
         for (;;) {

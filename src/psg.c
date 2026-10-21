@@ -67,16 +67,34 @@ static void set_hz(psg_dsp *d, uint32 v, uint32 hz)
     TweakKnob(d->freq[v], (int32)hz);
 }
 
-static Err set_gain(Item mixer, const char *name, int32 gain)
+/* Bits of the stereo distribution enabling voice v on the left and on
+ * the right (the two noise voices share channel 3's). */
+static uint32 stereo_bits(uint32 v)
 {
-    Item knob = GrabKnob(mixer, (char *)name);
-    Err err;
+    uint32 c = v < 3 ? v : 3;
 
-    if (knob < 0)
-        return knob;
-    err = TweakRawKnob(knob, gain);
-    ReleaseKnob(knob);
-    return err;
+    return (0x10u << c) | (1u << c);
+}
+
+/* Mixer gains of the voices whose distribution changed. */
+static void set_stereo(psg_dsp *d, uint32 stereo)
+{
+    uint32 changed = stereo ^ d->stereo;
+    uint32 v;
+
+    d->stereo = stereo;
+    for (v = 0; v < PSG_VOICES; v++) {
+        uint32 b = stereo_bits(v);
+
+        if (changed & b & 0xF0) {
+            d->tweaks++;
+            TweakRawKnob(d->gain_l[v], (stereo & b & 0xF0) ? mixer_gain[v] : 0);
+        }
+        if (changed & b & 0x0F) {
+            d->tweaks++;
+            TweakRawKnob(d->gain_r[v], (stereo & b & 0x0F) ? mixer_gain[v] : 0);
+        }
+    }
 }
 
 static void fail(psg_dsp *d, const char *what, const char *name, Err err)
@@ -97,7 +115,10 @@ Err psg_open(psg_dsp *d)
         d->voice[v] = -1;
         d->amp[v] = -1;
         d->freq[v] = -1;
+        d->gain_l[v] = -1;
+        d->gain_r[v] = -1;
     }
+    d->stereo = 0xFF;
     err = OpenAudioFolio();
     if (err < 0) {
         printf("Sound: OpenAudioFolio failed (0x%lx), the run is silent\n", (unsigned long)err);
@@ -129,9 +150,13 @@ Err psg_open(psg_dsp *d)
             fail(d, "ConnectInstruments", mixer_input[v], err);
             return err;
         }
-        err = set_gain(d->mixer, mixer_left[v], mixer_gain[v]);
+        d->gain_l[v] = GrabKnob(d->mixer, (char *)mixer_left[v]);
+        d->gain_r[v] = GrabKnob(d->mixer, (char *)mixer_right[v]);
+        err = d->gain_l[v] < 0 ? d->gain_l[v] : d->gain_r[v];
         if (err >= 0)
-            err = set_gain(d->mixer, mixer_right[v], mixer_gain[v]);
+            err = TweakRawKnob(d->gain_l[v], mixer_gain[v]);
+        if (err >= 0)
+            err = TweakRawKnob(d->gain_r[v], mixer_gain[v]);
         if (err < 0) {
             fail(d, "mixer gain", mixer_left[v], err);
             return err;
@@ -186,7 +211,7 @@ void psg_close(psg_dsp *d)
     d->ok = 0;
 }
 
-uint32 psg_update(psg_dsp *d, const uint32 reg[8], uint32 clock)
+uint32 psg_update(psg_dsp *d, const uint32 reg[8], uint32 clock, uint32 stereo)
 {
     uint32 t0 = d->tweaks;
     uint32 c;
@@ -196,6 +221,8 @@ uint32 psg_update(psg_dsp *d, const uint32 reg[8], uint32 clock)
 
     if (!d->ok)
         return 0;
+    if ((stereo & 0xFF) != d->stereo)
+        set_stereo(d, stereo & 0xFF);
     for (c = 0; c < 3; c++) {
         uint32 p = reg[2 * c] & 0x3FF;
 

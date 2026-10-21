@@ -68,9 +68,17 @@
  *
  * The caller: render_update() after each emulated frame, then, if the
  * display is on, DrawCels(bitmap, render_chain()) into a bitmap whose clip
- * window is the 256 x render_height() picture; the border around the
- * picture and the whole picture while the display is off take the
- * backdrop colour (render_backdrop()).
+ * window is the part of the picture shown, render_win_w() x
+ * render_win_h(): the 256 x render_height() picture, or in Game Gear mode
+ * the 160 x 144 LCD window, to which the line bands are cut and whose
+ * top-left corner the cels are positioned from. On the Master System the
+ * border around the picture and the whole picture while the display is
+ * off take the backdrop colour (render_backdrop()); in Game Gear mode the
+ * border is the case around the LCD, and the window alone takes the
+ * backdrop while the display is off (render_blank_window()).
+ *
+ * Game Gear colours: 12 bits (4 per component) from the 64 bytes of its
+ * colour RAM, each component widened to the 5 bits of the 3DO.
  *
  * Catch-up in spare time: while the display is off the update draws
  * nothing and the work waits (a game rebuilding a screen writes most of
@@ -238,6 +246,15 @@ typedef struct {
     uint32  nrows;          /* name table rows of the current mode: 28 or 32 */
     uint32  bm_h;           /* bitmap lines: nrows * 8 */
     uint32  height;         /* picture lines: 192, 224 or 240 */
+    /* The part of the picture shown (vdp_win_*): the whole picture, or
+     * the LCD window of the Game Gear. The cels are positioned relative
+     * to its top-left corner, and the caller sets the clip window of the
+     * bitmap to it. */
+    uint32  gg;
+    uint32  win_x;
+    uint32  win_y;
+    uint32  win_w;
+    uint32  win_h;
     uint32  nlayers;        /* layers usable in the current mode: 2, or 1 */
     uint32 *tiles;          /* the shared stores and tables (see render_layer) */
     uint32 *tiles_f;
@@ -257,6 +274,7 @@ typedef struct {
     uint32  spr_runs;       /* the last update made cels per run of lines */
     CCB    *chain;          /* first cel to draw */
     CCB    *last_cel;       /* the cel carrying CCB_LAST */
+    uint32  wblank;         /* index of the cel of render_blank_window() */
     /* Band tables of the update, kept off the task stack. */
     uint32  tops[VDP_HS_LOG + 1];
     uint32  hss[VDP_HS_LOG + 1];
@@ -267,9 +285,11 @@ typedef struct {
     uint32  dons[VDP_DE_LOG + 1];
     /* Palette bands of the update (vdp_palette_bands). */
     uint32  ptops[VDP_PAL_BANDS];
-    uint32  pcram[VDP_PAL_BANDS * 8];   /* 32 colour bytes per band */
+    uint32  pcram[VDP_PAL_BANDS * VDP_PAL_WORDS];   /* the colours of each band */
+    uint32  pal_words;      /* words per band: 8, or 16 in Game Gear mode */
     uint32  npb;
-    uint32  spr_bands;      /* the sprite cels take the PLUTs of their band */
+    uint32  spr_bands;      /* sprite cels that may hold another band's PLUT (the
+                               first ones), set back at one palette */
     /* Line bands of the update: the scroll bands crossed with the name
      * table bands, the palette bands and the lines with the display on,
      * as ya | yb << 8 | hs << 16 | layer << 24 | palette band << 25, with
@@ -288,7 +308,7 @@ typedef struct {
     uint32  pic_npb;
     uint32  pic_sig;
     uint32  repeat;         /* the last update repeats the picture before it */
-    uint32  cram0[8];       /* colours of the first palette band's PLUTs */
+    uint32  cram0[VDP_PAL_WORDS];   /* colours of the first palette band's PLUTs */
     uint32  cram0_ok;
     render_stats st;
 } renderer;
@@ -298,6 +318,11 @@ void  render_free(renderer *r);
 
 /* Forgets the picture: everything is rebuilt at the next update. */
 void  render_reset(renderer *r);
+
+/* The part of the picture shown (vdp_win_*) and the colour format, from
+ * the VDP: set at every update, and by the caller after a reset so that
+ * render_win_w() and render_win_h() are known before the first frame. */
+void  render_set_window(renderer *r, const vdp_state *v);
 
 /* Brings the bitmaps, the pieces and the sprite cels up to date with the
  * VDP; clears the VDP's dirty flags; tells whether the picture is the
@@ -437,6 +462,13 @@ void   render_tile_conv(render_layer *l, uint32 t, uint32 flip, const uint8 *vra
 #define render_backdrop(r)  ((r)->backdrop)
 #define render_display_on(r) ((r)->display_on)
 #define render_height(r)    ((r)->height)
+/* Size of the part of the picture shown (the clip window of the bitmap). */
+#define render_win_w(r)     ((r)->win_w)
+#define render_win_h(r)     ((r)->win_h)
+/* A cel of the backdrop colour covering the window, for a picture with no
+ * line displayed when the border around the window is not the backdrop
+ * (Game Gear mode: the caller fills the border with black). */
+#define render_blank_window(r) (&(r)->cels[(r)->wblank])
 /* The picture of the last update is identical to the one before it. */
 #define render_repeated(r)  ((r)->repeat)
 /* The screens no longer hold the previous picture (a pause screen, a failed

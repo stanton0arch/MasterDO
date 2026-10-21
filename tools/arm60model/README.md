@@ -67,6 +67,13 @@ caught up in their spare time). A frame with the display off is charged
 no drawing time, as on the console, so its spare time goes to the
 picture's catch-up and to translation like the ISO's.
 
+A `.gg` image runs in the Game Gear mode (12-bit colours, the 160 x 144
+LCD window, ports $00-$06, START on the PAUSE bit of the pad script), as
+the ISO decides it from the file name; `-gg` and `-sms` force the mode.
+In that mode the pictures compared and dumped are the LCD window, and the
+drawing time charged to a frame is the 3.5 ms scaled by the pixels of
+the window (an estimate until measured on the console).
+
 `-framelog` prints one `Frame:` line per frame (emulation, update and
 drawing times, spare time used, translations at once and their time,
 forced ones, refusals, blocks translated in spare time, interpreted
@@ -137,7 +144,8 @@ simulated pc and lr with their symbols, the stack pointer, r0 and r1.
 
 Environment variables:
 - `SIMPAD="1600:10,1606:0,2100:8"`: buttons held from each frame on
-  (`SMS_PAD_*` bits of `sms.h`, 0x100 for PAUSE), up to 1 024 entries.
+  (`SMS_PAD_*` bits of `sms.h`, 0x100 for PAUSE, or START held on the Game
+  Gear), up to 1 024 entries.
   The ISO records the pad changes of a run and writes them at the pause
   or the end of the run as a `Pad script:` line holding a `panel.txt`
   entry (cartridge, frames, script), so that a run played on the console
@@ -182,7 +190,14 @@ differing frames side by side (`diff_NNNNNN.png`) are kept in
 ```
 tools/arm60model/batch.py                 # the whole panel, about 3 minutes
 tools/arm60model/batch.py -only sonic2,ys -frames 1800 -label "trial"
+tools/arm60model/batch.py -roms takeme/roms/gg -panel tools/arm60model/panel_gg.txt \
+        -reports tools/arm60model/reports/gg   # the Game Gear panel
 ```
+
+The Game Gear images live in `takeme/roms/gg` (the ISO lists them after
+those of `takeme/roms`) and have their own panel file and report
+directory, so that each panel's report is compared with the previous one
+of the same panel.
 
 Options: `-roms DIR`, `-panel FILE`, `-frames N`, `-jobs N`, `-only a,b`,
 `-out DIR`, `-reports DIR`, `-against REPORT.json`, `-timeout SECONDS` (a

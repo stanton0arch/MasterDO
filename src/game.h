@@ -236,8 +236,9 @@ typedef struct {
     uint32  hot_vram;       /* entry counters allocated in VRAM */
 } game;
 
-/* Allocates the translator and the machine for a cartridge image. */
-Err   game_init(game *g, const uint8 *rom, uint32 rom_size);
+/* Allocates the translator and the machine for a cartridge image; gg
+ * selects the Game Gear mode. */
+Err   game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg);
 void  game_free(game *g);
 
 /* Translates the code reachable from the entry points ($0000, $0038,
@@ -247,7 +248,8 @@ void  game_translate_rom(game *g);
 /* Resets the machine (translations are kept) and the statistics. */
 void  game_reset(game *g);
 
-/* Runs one frame with the buttons held (SMS_PAD_*) and the PAUSE button,
+/* Runs one frame with the buttons held (SMS_PAD_*) and the PAUSE button
+ * (pressed in this frame), or in Game Gear mode the START button (held),
  * then updates the picture; returns 0, or the translator exit reason once
  * the run has stopped. The caller then draws render_chain(g->rd) when
  * render_display_on(g->rd), and calls game_frame_done() with the
