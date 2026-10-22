@@ -144,13 +144,16 @@ typedef struct {
     uint32 snd_us;
 } game_long_rec;
 
-/* Zones of the code buffer given to the hot area; set before game_init
- * (a tuning knob of the analysis harness). */
+/* Zones of the code buffer given to the hot area, and the number of
+ * zones of the code buffer (0: chosen by game_init from the DRAM left);
+ * set before game_init (tuning knobs of the analysis harness). */
 extern uint32 game_hot_zones;
+extern uint32 game_zones;
 
 typedef struct {
     z80j_ctx     *ctx;
     uint32       *code;
+    uint32        zones;        /* zones of 32 KiB in the code buffer */
     void         *blocks;
     uint32       *links;
     uint8        *hot;      /* entry counts of the interpreter */

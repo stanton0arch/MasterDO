@@ -17,6 +17,7 @@
         EXPORT  sim_mark
         EXPORT  sim_codedump
         EXPORT  psg_update
+        EXPORT  plat_mem_free
         IMPORT  hmain
 
 sim_start
@@ -57,6 +58,9 @@ sim_mark
         mov     pc,lr
 sim_codedump
         swi     0xF0000B
+        mov     pc,lr
+plat_mem_free
+        swi     0xF0000D
         mov     pc,lr
 ; The PSG voices on the DSP are not modelled: no knob is tweaked.
 psg_update

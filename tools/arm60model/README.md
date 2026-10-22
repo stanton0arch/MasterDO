@@ -18,7 +18,11 @@ built. It is not part of the ISO and `make` does not use it.
   is S x 1.05 + N x 3.2 + I x 1 cycles of 80 ns, weights fitted on Phoenix.
 - The OS calls are replaced by host services: `printf`, memory allocation,
   the microsecond clock (modelled time), the ROM image, dumps of the debug
-  view (`view_NNNNNN.ppm`) and of the code buffer (`code.bin`).
+  view (`view_NNNNNN.ppm`) and of the code buffer (`code.bin`). The
+  allocations are counted against the memory Phoenix leaves to a
+  cartridge's run (1 242 672 bytes of DRAM, 571 392 bytes of VRAM less the
+  image): an allocation past it fails as `AllocMem` does, and the end of a
+  run prints what is left.
 
 Accuracy against Phoenix: within 0.3 % on the benchmarks of steps 0-1 and
 on the ROM translation, within about 4 % on the cartridge frames (see
@@ -45,7 +49,12 @@ everything through the interpreter (nothing translated), `-budget f:c`
 override the budget of translations at once (f microseconds per frame
 plus c/16 microseconds per interpreted instruction), `-hot q:s` override
 the entry counts at which an address is queued (q) and translated at once
-(s), `-seed` translate the reachable code into the hot area, `-hotzones n`
+(s), `-force n` the entry count from which an address is translated
+whatever the budget, `-forcelimit us` the elapsed time of a frame past
+which that rule waits for the next frame (0: no limit), `-zones n` the
+zones of the code buffer (default: as many as the DRAM left allows),
+`-dramfree n` the DRAM left to the run, `-seed` translate the reachable
+code into the hot area, `-hotzones n`
 (kept for older scripts: the zones are no longer split between the areas,
 any nonzero value gives the hot area its own zone), `-check` verify the
 translator's block table after each frame (hashed blocks with their code,

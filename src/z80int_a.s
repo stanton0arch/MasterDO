@@ -656,9 +656,9 @@ int_jump_count
         teq     r1,#0
         beq     next
         ldrb    r0,[r1,r12]
-        cmp     r0,#255
-        addne   r0,r0,#1
-        strneb  r0,[r1,r12]
+        cmp     r0,#254
+        addcc   r0,r0,#1
+        strccb  r0,[r1,r12]
         ldr     r2,[r10,#HOT_QUEUE_AT]
         cmp     r0,r2
         beq     int_hot

@@ -11,20 +11,26 @@
 #include "mem.h"
 
 #define JIT_ZONE_BYTES  (32 * 1024)
-#define JIT_ZONES       13
+#define JIT_ZONES       13      /* zones of the code buffer, at least */
+#define GAME_MAX_ZONES  16      /* at most: 256 run marks of 2 KiB chunks */
 #define JIT_HOT_ZONES   5       /* code translated again after an eviction goes there */
-#define JIT_CODE_BYTES  (JIT_ZONE_BYTES * JIT_ZONES)
+#define JIT_CODE_BYTES  (JIT_ZONE_BYTES * g->zones)
+/* Zones beyond JIT_ZONES go to the code buffer only while the DRAM left
+ * once the run is set up stays above this reserve (images small enough
+ * to leave the entry counters and the cartridge RAM to VRAM). */
+#define DRAM_RESERVE    (24 * 1024)
 /* Block descriptors (24 bytes each, about 40 KiB): the recorded plays of
  * the panel use 1 226 at most; when they run out a zone is evicted. */
 #define JIT_BLOCKS      1700
 #define JIT_LINKS       4096
 #define ROM_QUEUE       1024
 #define ROM_MAX_BLOCKS  4000
-/* The code translated before the run stops at half of the code buffer:
- * the rest is left to the code met while running (a large cartridge has
- * more reachable code than the buffer holds, whose translation would
- * evict itself). */
-#define ROM_MAX_CODE    (JIT_CODE_BYTES / 2)
+/* The code translated before the run stops at half of the smallest code
+ * buffer: the rest is left to the code met while running (a large
+ * cartridge has more reachable code than the buffer holds, whose
+ * translation would evict itself), and so are the zones a larger buffer
+ * adds. */
+#define ROM_MAX_CODE    (JIT_ZONE_BYTES * JIT_ZONES / 2)
 
 /* Interpreter: an address is interpreted the first time it is entered
  * and translated at once from its second entry, within a budget per
@@ -37,6 +43,11 @@
 #define HOT_FORCE_AT    8       /* translated whatever the budget from this entry */
 #define HOT_SYNC_US     3000
 #define HOT_INT_COST    100
+/* A frame translates the addresses reaching HOT_FORCE_AT whatever the
+ * budget until it has run for this many display periods: a working set
+ * entered as a whole (a level, a race or a match starting) is spread over
+ * a few frames instead of stopping one of them. */
+#define FORCE_PERIODS   3
 
 /* Time of a frame outside the emulation, the picture update and the
  * drawing: the pad read, the presentation and the system. A translation
@@ -50,6 +61,7 @@
 static uint32 percent(uint32 part, uint32 whole);
 
 uint32 game_hot_zones = JIT_HOT_ZONES;
+uint32 game_zones = 0;
 
 /* Records of the run's log: a record of n words of kind k is allocated
  * in the arena (NULL, counted as dropped, when it is full) and formatted
@@ -338,6 +350,37 @@ void game_free(game *g)
     g->cart_ram = NULL;
 }
 
+/* The code buffer: JIT_ZONES zones, and up to GAME_MAX_ZONES when the
+ * DRAM measured now still leaves DRAM_RESERVE free once the buffer and
+ * the arenas of the logs are allocated. Code that outgrows the buffer
+ * is evicted and translated again where it runs again, so every zone the
+ * memory allows saves translations. A buffer found nowhere in one piece
+ * falls back to fewer zones. */
+static uint32 *alloc_code(game *g)
+{
+    uint32 dram = 0;
+    uint32 vram = 0;
+    uint32 need = JIT_ZONE_BYTES * JIT_ZONES + GAME_LOG_WORDS * 4 + GAME_PAD_LOGS * 4 + DRAM_RESERVE;
+    uint32 *code;
+
+    g->zones = JIT_ZONES;
+    if (game_zones != 0) {
+        g->zones = game_zones;
+    } else {
+        plat_mem_free(&dram, &vram);
+        if (dram > need)
+            g->zones += (dram - need) / JIT_ZONE_BYTES;
+        if (g->zones > GAME_MAX_ZONES)
+            g->zones = GAME_MAX_ZONES;
+    }
+    for (;;) {
+        code = (uint32 *)AllocMem(JIT_CODE_BYTES, MEMTYPE_DRAM);
+        if (code != NULL || g->zones <= JIT_ZONES || game_zones != 0)
+            return code;
+        g->zones--;
+    }
+}
+
 Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
 {
     z80j_glue glue;
@@ -351,7 +394,6 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
      * (SMS_VDP_OFFSET, sms.h). */
     g->ctx = (z80j_ctx *)AllocMem(sizeof(z80j_ctx) + sizeof(sms_machine), MEMTYPE_DRAM | MEMTYPE_FILL);
     g->sms = (g->ctx != NULL) ? (sms_machine *)((uint8 *)g->ctx + sizeof(z80j_ctx)) : NULL;
-    g->code = (uint32 *)AllocMem(JIT_CODE_BYTES, MEMTYPE_DRAM);
     g->blocks = AllocMem((int32)z80j_block_bytes(JIT_BLOCKS), MEMTYPE_DRAM);
     g->links = (uint32 *)AllocMem((int32)z80j_link_bytes(JIT_LINKS), MEMTYPE_DRAM);
     /* The entry counters of the interpreter go to VRAM, which the CPU
@@ -364,10 +406,10 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
         g->hot = (uint8 *)AllocMem(0x10000, MEMTYPE_DRAM);
     }
     g->rd = (renderer *)AllocMem(sizeof(renderer), MEMTYPE_DRAM | MEMTYPE_FILL);
-    if (g->ctx == NULL || g->code == NULL || g->blocks == NULL || g->links == NULL ||
+    if (g->ctx == NULL || g->blocks == NULL || g->links == NULL ||
         g->hot == NULL || g->sms == NULL || g->rd == NULL) {
-        printf("ERROR: out of memory for the machine (%lu + %lu + %lu + %lu + %lu bytes)\n",
-               (unsigned long)sizeof(z80j_ctx), (unsigned long)JIT_CODE_BYTES,
+        printf("ERROR: out of memory for the machine (%lu + %lu + %lu + %lu bytes)\n",
+               (unsigned long)sizeof(z80j_ctx),
                (unsigned long)z80j_block_bytes(JIT_BLOCKS), (unsigned long)z80j_link_bytes(JIT_LINKS),
                (unsigned long)sizeof(sms_machine));
         game_free(g);
@@ -377,12 +419,6 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
         game_free(g);
         return -1;
     }
-    z80j_default_glue(&glue);
-    z80j_init(&g->jit, g->ctx, g->code, JIT_CODE_BYTES / 4, JIT_ZONES, game_hot_zones,
-              g->blocks, JIT_BLOCKS, g->links, JIT_LINKS, &glue);
-    z80j_set_interp(&g->jit, g->hot, HOT_QUEUE_AT, HOT_SYNC_AT);
-    z80j_set_force(&g->jit, HOT_FORCE_AT);
-    game_set_frame_us(g, PLAT_NTSC_FRAME_US);
     /* Cartridge RAM (the battery RAM of the Sega mapper, shown in slot 2
      * by register $FFFC): 32 KiB in VRAM, which the CPU reads and writes
      * like DRAM, when the renderer has left some, else the 16 KiB page
@@ -400,6 +436,19 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
     }
     if (g->cart_ram == NULL)
         g->cart_ram_size = 0;
+    g->code = alloc_code(g);
+    if (g->code == NULL) {
+        printf("ERROR: out of memory for the code buffer (%lu bytes)\n",
+               (unsigned long)(JIT_ZONE_BYTES * JIT_ZONES));
+        game_free(g);
+        return -1;
+    }
+    z80j_default_glue(&glue);
+    z80j_init(&g->jit, g->ctx, g->code, JIT_CODE_BYTES / 4, g->zones, game_hot_zones,
+              g->blocks, JIT_BLOCKS, g->links, JIT_LINKS, &glue);
+    z80j_set_interp(&g->jit, g->hot, HOT_QUEUE_AT, HOT_SYNC_AT);
+    z80j_set_force(&g->jit, HOT_FORCE_AT);
+    game_set_frame_us(g, PLAT_NTSC_FRAME_US);
     /* The record arena of the run's log (also lent to the translation of
      * the reachable code before the run) and the pad recorder are
      * optional: without memory the records are dropped and counted, and
@@ -500,19 +549,20 @@ void game_translate_rom(game *g)
     printf("ROM translation: %lu blocks, %lu instructions, %lu bytes of ARM code, %lu us "
            "(%lu us per instruction), %lu busy-wait loops, %lu flag scans from the cache, "
            "%lu evictions%s; code buffer "
-           "%d zones of %d bytes shared by the cold and hot areas, run marks per "
+           "%lu zones of %d bytes shared by the cold and hot areas, run marks per "
            "%lu bytes, %d block descriptors, %d link entries; "
            "interpreter: translation queued at %d entries, at once from %d within "
            "%d us per frame when the frame has room, plus %d/16 us per interpreted "
-           "instruction, whatever the budget from %d entries\n",
+           "instruction, whatever the budget from %d entries while the frame is under %lu us\n",
            (unsigned long)g->rom_blocks, (unsigned long)g->rom_insns,
            (unsigned long)g->rom_bytes, (unsigned long)g->rom_us,
            (unsigned long)(g->rom_insns ? g->rom_us / g->rom_insns : 0),
            (unsigned long)g->rom_busy, (unsigned long)j->stats.scan_hits,
            (unsigned long)j->stats.evictions,
-           g->rom_capped ? ", stopped at half of the code buffer" : "",
-           JIT_ZONES, JIT_ZONE_BYTES, (unsigned long)(4u << j->chunk_shift), JIT_BLOCKS, JIT_LINKS,
-           HOT_QUEUE_AT, HOT_SYNC_AT, HOT_SYNC_US, HOT_INT_COST, HOT_FORCE_AT);
+           g->rom_capped ? ", stopped at half of the smallest code buffer" : "",
+           (unsigned long)g->zones, JIT_ZONE_BYTES, (unsigned long)(4u << j->chunk_shift), JIT_BLOCKS, JIT_LINKS,
+           HOT_QUEUE_AT, HOT_SYNC_AT, HOT_SYNC_US, HOT_INT_COST, HOT_FORCE_AT,
+           (unsigned long)j->force_limit_us);
 }
 
 void game_reset(game *g)
@@ -782,6 +832,7 @@ void game_set_frame_us(game *g, uint32 us)
 {
     g->frame_us = us;
     z80j_set_budget(&g->jit, plat_usec_now, HOT_SYNC_US, HOT_INT_COST, us);
+    z80j_set_force_limit(&g->jit, FORCE_PERIODS * us);
 }
 
 uint32 game_spare_time(game *g, uint32 frame_start, uint32 deadline_us)

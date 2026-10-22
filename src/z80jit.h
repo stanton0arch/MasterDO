@@ -301,6 +301,7 @@ typedef struct {
 typedef struct z80j_block z80j_block;
 
 #define Z80J_QUEUE 256          /* hot addresses waiting to be translated */
+#define Z80J_WAITING 256        /* addresses kept waiting by the forced translation limit */
 
 #define JIT_MAX_ZONES   64
 #define JIT_SCAN_CACHE  512
@@ -422,6 +423,13 @@ typedef struct {
     uint32      evict_est_us;               /* running average of the cost of an eviction */
     uint32      evict_ahead_wait;           /* frame from which an eviction ahead is tried again */
     uint32      buf_ports[8];   /* bitmap of the ports set by z80j_set_buffer_port */
+    uint32      force_limit_us; /* elapsed time of a frame past which the addresses */
+                                /* past force_at wait for the next frame (0: never) */
+    uint32      force_closed;   /* the frame has run past force_limit_us */
+    uint32      now_us;         /* clock sample of force_room */
+    uint32      now_fresh;      /* now_us starts the next timed translation */
+    uint32      nwaiting;       /* addresses kept waiting by the limit this frame */
+    uint16      waiting[Z80J_WAITING];
 } z80j_state;
 
 /* Memory for max_blocks block descriptors, and for a link log of
@@ -471,6 +479,13 @@ void   z80j_set_interp(z80j_state *j, uint8 *hot, uint32 queue_at, uint32 sync_a
  * budget (0: never): code interpreted that often is either a loop or
  * code that keeps missing the budget. */
 void   z80j_set_force(z80j_state *j, uint32 force_at);
+
+/* Elapsed time of a frame (from the start given to z80j_frame_start, the
+ * usual cost of a translation included) past which an address reaching
+ * force_at is no longer translated whatever the budget: it is
+ * interpreted for the rest of the frame and asks again in the next one
+ * (0: no limit). */
+void   z80j_set_force_limit(z80j_state *j, uint32 limit_us);
 
 /* Budget of the translations at once, measured with clock: translations
  * paid for by the instructions the frame has interpreted (int_cost per

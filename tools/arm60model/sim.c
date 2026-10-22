@@ -8,11 +8,13 @@
  * cycles of 80 ns. Not modelled: DRAM page effects beyond the fit, the
  * interrupts of the 3DO OS, the CEL engine.
  *
- * Host services (SWI 0xF000nn, see hstub.s): 0 exit, 1 printf, 2 allocate,
- * 3 free (ignored), 4 microsecond clock, 5 ROM address, 6 ROM size,
+ * Host services (SWI 0xF000nn, see hstub.s): 0 exit, 1 printf, 2 allocate
+ * (counted against the memory left to the run: -dramfree n, default the
+ * DRAM of Phoenix; the VRAM less the image), 3 free (counted back),
+ * 4 microsecond clock, 5 ROM address, 6 ROM size,
  * 7 picture dump (view_NNNNNN.ppm), 8 command-line argument, 9 pad
  * buttons of a frame, 10 time marks (15: reset the profile), 11 code
- * buffer dump (code.bin).
+ * buffer dump (code.bin), 13 free memory (plat_mem_free).
  *
  * Options: -rom file, -frames n, -bench, -dump n, -from n, -img, -sym.
  * Environment: SIMPAD="frame:bits,..." (buttons held from that frame on,
@@ -44,6 +46,14 @@ static uint64_t cS, cN, cI;
 static uint64_t ninsn;
 static uint32_t heap = HEAP_BASE;
 static uint32_t rom_size;
+/* Memory of the console left to the cartridge's run (Phoenix, NTSC, the
+ * ISO's own code and the system loaded): the allocations are counted
+ * against it, an allocation past it fails as AllocMem does, and the
+ * image takes its size of VRAM. */
+static uint32_t dram_free = 1242672;
+static uint32_t vram_free = 571392;
+static struct { uint32_t a, size, vram; } allocs[256];
+static uint32_t nallocs;
 static uint32_t args[32] = { 0, 0, 0, 0xFFFFFFFFu };
 static int done;
 
@@ -303,21 +313,48 @@ static void do_swi(uint32_t n)
     case 12: do_format(1); break;
     case 2: {
         uint32_t size = (r[1] + 7) & ~7u;
+        uint32_t vram = (r[2] & 0x10000u) != 0;
+        uint32_t *avail = vram ? &vram_free : &dram_free;
         uint32_t a = heap;
+        if (getenv("SIMALLOC")) {
+            uint32_t o;
+            const char *sy = sym_near(r[14], &o);
+            fprintf(stderr, "Alloc: %u bytes %s from %s+%x%s\n", (unsigned)r[1],
+                    vram ? "VRAM" : "DRAM", sy, (unsigned)o, size > *avail ? ": no memory" : "");
+        }
+        if (size > *avail) {
+            r[0] = 0;
+            break;
+        }
+        *avail -= size;
+        if (nallocs < 256) {
+            allocs[nallocs].a = a;
+            allocs[nallocs].size = size;
+            allocs[nallocs++].vram = vram;
+        }
         heap += size;
         if (heap > HEAP_END) fatal("out of heap");
         if (r[2] & 0x100u) memset(mem + a, r[2] & 0xFF, size);  /* MEMTYPE_FILL */
         else memset(mem + a, 0xA5, size);
-        if (getenv("SIMALLOC")) {
-            uint32_t o;
-            const char *sy = sym_near(r[14], &o);
-            fprintf(stderr, "Alloc: %u bytes %s from %s+%x\n", (unsigned)r[1],
-                    (r[2] & 0x10000u) ? "VRAM" : "DRAM", sy, (unsigned)o);
-        }
         r[0] = a;
         break;
     }
-    case 3: break;
+    case 3: {
+        /* The space is given back to the count, not to the heap. */
+        uint32_t k;
+        for (k = 0; k < nallocs; k++) {
+            if (allocs[k].a == r[1]) {
+                *(allocs[k].vram ? &vram_free : &dram_free) += allocs[k].size;
+                allocs[k] = allocs[--nallocs];
+                break;
+            }
+        }
+        break;
+    }
+    case 13:
+        wr32(r[0], dram_free);
+        wr32(r[1], vram_free);
+        break;
     case 4: r[0] = usec_now(); break;
     case 5: r[0] = ROM_ADDR; break;
     case 6: r[0] = rom_size; break;
@@ -657,6 +694,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-anatest")) args[22] = 1;
         else if (!strcmp(argv[i], "-emittest")) args[23] = 1;
         else if (!strcmp(argv[i], "-force") && i + 1 < argc) args[20] = atoi(argv[++i]) + 1;
+        else if (!strcmp(argv[i], "-forcelimit") && i + 1 < argc) args[25] = atoi(argv[++i]) + 1;
+        else if (!strcmp(argv[i], "-zones") && i + 1 < argc) args[27] = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-dramfree") && i + 1 < argc) dram_free = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-hotzones") && i + 1 < argc) args[12] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-budget") && i + 1 < argc) {
             unsigned f = 0, c = 0;
@@ -701,6 +741,7 @@ int main(int argc, char **argv)
             memmove(mem + ROM_ADDR, mem + ROM_ADDR + 512, rom_size - 512);
             rom_size -= 512;
         }
+        vram_free = vram_free > rom_size ? vram_free - rom_size : 0;
     }
     if (getenv("SIMSCALE")) {
         /* Every cycle weight scaled: another host timing, to see whether
@@ -730,6 +771,8 @@ int main(int argc, char **argv)
     fprintf(stderr, "sim: %llu instructions, S %llu N %llu I %llu, %.0f us\n",
             (unsigned long long)ninsn, (unsigned long long)cS, (unsigned long long)cN,
             (unsigned long long)cI, cycles() * 0.08);
+    fprintf(stderr, "sim: %u bytes of DRAM and %u bytes of VRAM left by the allocations\n",
+            (unsigned)dram_free, (unsigned)vram_free);
     for (i = 1; i < 15; i += 2)
         if (mark_n[i + 1]) fprintf(stderr, "mark %d: %u spans, %.0f us average\n", i, mark_n[i + 1], mark_sum[i + 1] * 0.08 / mark_n[i + 1]);
     if (getenv("SIMPROF")) report_profile(cycles());

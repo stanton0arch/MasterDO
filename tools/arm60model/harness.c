@@ -703,6 +703,8 @@ void hmain(void)
         return;
     if (sim_arg(12))
         game_hot_zones = sim_arg(12);   /* -hotzones n */
+    if (sim_arg(27))
+        game_zones = sim_arg(27);       /* -zones n */
     if (game_init(&g, rom, size, sim_arg(24)) != 0)    /* -gg: the Game Gear mode */
         return;
     if (sim_arg(4)) {
@@ -720,6 +722,8 @@ void hmain(void)
     }
     if (sim_arg(20))
         z80j_set_force(&g.jit, sim_arg(20) - 1);     /* -force n */
+    if (sim_arg(25))
+        z80j_set_force_limit(&g.jit, sim_arg(25) - 1);  /* -forcelimit us (0: none) */
     if (sim_arg(7)) {
         /* -budget floor:cost: the budget of translations at once (us per
          * frame, 1/16 us per interpreted instruction). */

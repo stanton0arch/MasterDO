@@ -1315,6 +1315,33 @@ static void queue_hot(z80j_state *j, uint32 pc)
 
 static uint32 host_force(z80j_state *j, uint32 pc);
 
+/* An address reaching force_at is translated whatever the budget while
+ * the frame has not run past force_limit_us (the usual cost of a
+ * translation included); beyond, it is interpreted for the rest of the
+ * frame, unless the budget lets it through, and its count goes back below
+ * force_at at the next frame, so that its next entry asks again. A
+ * working set entered as a whole reaches force_at in the same frame: its
+ * translation is spread over the frames that follow instead of stopping
+ * one of them. Once the limit is reached the clock is not read again in
+ * the frame; below it, the sample taken starts the measure of the
+ * translation that follows. */
+static uint32 force_room(z80j_state *j, uint32 pc)
+{
+    if (j->force_limit_us == 0 || j->clock == 0)
+        return 1;
+    if (!j->force_closed) {
+        j->now_us = j->clock();
+        if (j->now_us - j->frame_start_us + j->est_us <= j->force_limit_us) {
+            j->now_fresh = 1;           /* the translation that follows starts now */
+            return 1;
+        }
+    }
+    j->force_closed = 1;
+    if (j->hot[pc] == j->force_at && j->nwaiting < Z80J_WAITING)
+        j->waiting[j->nwaiting++] = (uint16)pc;
+    return 0;
+}
+
 /* Translations at once: one is allowed when the instructions the frame
  * has interpreted have paid for it (their estimated cost covers the time
  * already spent plus the usual cost of a translation), or, up to the
@@ -1350,12 +1377,15 @@ static uint32 sync_allowed(z80j_state *j)
     return 0;
 }
 
-/* Translates pc now and keeps the running average of the cost. */
+/* Translates pc now and keeps the running average of the cost. A clock
+ * sample force_room has just taken starts the measure (the clock can be a
+ * costly system call). */
 static uint32 timed_translate(z80j_state *j, uint32 pc, uint32 *dt)
 {
-    uint32 t0 = (j->clock != 0) ? j->clock() : 0;
+    uint32 t0 = j->now_fresh ? j->now_us : (j->clock != 0) ? j->clock() : 0;
     uint32 host = host_force(j, pc);
 
+    j->now_fresh = 0;
     *dt = (j->clock != 0) ? j->clock() - t0 : j->est_us;
     j->est_us = (j->est_us * 3 + *dt) >> 2;
     return host;
@@ -1473,24 +1503,29 @@ static uint32 host_for(z80j_state *j, uint32 pc)
     if (j->hot != 0) {
         uint32 n = j->hot[pc];
 
+        uint32 forced;
+
         if (n == 255)
             return j->glue.interp;      /* parked: interpreted for good */
-        j->hot[pc] = (uint8)++n;
+        if (n < 254)                    /* the count stops short of parking */
+            j->hot[pc] = (uint8)++n;
         if (j->queue_at == 0)
             return j->glue.interp;      /* interpretation only */
-        /* Below force_at the budget decides; after a refusal it cannot
-         * open again before the frame has interpreted enough to pay for a
-         * translation (hot_sync_gate), so a miss before that point is
-         * refused without asking. */
+        /* Below force_at, or past it while the frame has run too long,
+         * the budget decides; after a refusal it cannot open again before
+         * the frame has interpreted enough to pay for a translation
+         * (hot_sync_gate), so a miss before that point is refused without
+         * asking. */
+        forced = j->force_at != 0 && n >= j->force_at && n >= j->sync_at && force_room(j, pc);
         if (n < j->sync_at ||
-            ((j->force_at == 0 || n < j->force_at) &&
+            (!forced &&
              (j->ctx->int_insns < j->ctx->hot_sync_gate ? (j->stats.sync_refused++, 1)
                                                         : !sync_allowed(j)))) {
             if (n >= j->queue_at)
                 queue_hot(j, pc);
             return j->glue.interp;
         }
-        if (j->force_at != 0 && n >= j->force_at)
+        if (forced)
             j->stats.forced++;
         return sync_translate(j, pc);
     }
@@ -1562,6 +1597,11 @@ void z80j_set_force(z80j_state *j, uint32 force_at)
     j->ctx->hot_force_at = force_at;
 }
 
+void z80j_set_force_limit(z80j_state *j, uint32 limit_us)
+{
+    j->force_limit_us = limit_us;
+}
+
 void z80j_set_budget(z80j_state *j, uint32 (*clock)(void), uint32 floor_us,
                      uint32 int_cost, uint32 frame_us)
 {
@@ -1583,6 +1623,16 @@ void z80j_frame_start(z80j_state *j, uint32 start_us, uint32 reserve_us)
     j->frame_start_us = start_us;
     j->reserve_us = reserve_us;
     j->ctx->hot_sync_gate = 0;
+    /* The addresses the forced translation limit kept waiting ask again
+     * at their next entry. */
+    while (j->nwaiting != 0) {
+        uint32 pc = j->waiting[--j->nwaiting];
+
+        if (j->hot[pc] != 255 && j->hot[pc] >= j->force_at)
+            j->hot[pc] = (uint8)(j->force_at - 1);
+    }
+    j->force_closed = 0;
+    j->now_fresh = 0;
 }
 
 uint32 z80j_translate(z80j_state *j, uint32 pc)
@@ -1616,7 +1666,8 @@ uint32 z80j_hot(z80j_state *j)
         j->ctx->hot_sync_gate = 0xFFFFFFFFu;    /* interpretation only, or parked */
         return j->glue.interp;
     }
-    if (j->hot[pc] >= j->sync_at && j->force_at != 0 && j->hot[pc] >= j->force_at) {
+    if (j->hot[pc] >= j->sync_at && j->force_at != 0 && j->hot[pc] >= j->force_at &&
+        force_room(j, pc)) {
         j->stats.forced++;
         return sync_translate(j, pc);
     }
