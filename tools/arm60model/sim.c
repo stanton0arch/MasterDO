@@ -50,7 +50,7 @@ static uint32_t rom_size;
  * ISO's own code and the system loaded): the allocations are counted
  * against it, an allocation past it fails as AllocMem does, and the
  * image takes its size of VRAM. */
-static uint32_t dram_free = 1242672;
+static uint32_t dram_free = 1232640;
 static uint32_t vram_free = 571392;
 static struct { uint32_t a, size, vram; } allocs[256];
 static uint32_t nallocs;

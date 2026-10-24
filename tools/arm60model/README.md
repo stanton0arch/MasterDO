@@ -20,7 +20,7 @@ built. It is not part of the ISO and `make` does not use it.
   the microsecond clock (modelled time), the ROM image, dumps of the debug
   view (`view_NNNNNN.ppm`) and of the code buffer (`code.bin`). The
   allocations are counted against the memory Phoenix leaves to a
-  cartridge's run (1 242 672 bytes of DRAM, 571 392 bytes of VRAM less the
+  cartridge's run (1 232 640 bytes of DRAM, 571 392 bytes of VRAM less the
   image): an allocation past it fails as `AllocMem` does, and the end of a
   run prints what is left.
 
