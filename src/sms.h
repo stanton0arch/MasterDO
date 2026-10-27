@@ -76,10 +76,6 @@ typedef struct {
     uint32       gg_japan;  /* region reported by port $00: Japan */
     uint32       gg_start;  /* START held */
     uint32       gg_port[7];/* ports $00-$06 ($06: PSG stereo distribution) */
-    /* Port handlers of the translator (z80jit.h). */
-    uint32       port_in[Z80J_PORTS];
-    uint32       port_out[Z80J_PORTS];
-    uint32       port_outn[Z80J_PORTS];
 } sms_machine;
 
 /* Offset of the VDP state from the context (its size): the machine must

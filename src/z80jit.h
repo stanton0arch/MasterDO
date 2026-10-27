@@ -67,6 +67,7 @@
 #define Z80J_MARK_CHUNKS 256   /* run marks of the code buffer (z80j_state) */
 #define Z80J_OBUF_WORDS 16     /* Z80J_RUN_MAX */
 #define Z80J_TAB_OFF   0x4000
+#define Z80J_PORTS     256      /* port handler tables (see below) */
 
 typedef struct z80j_machine z80j_machine;
 
@@ -140,7 +141,10 @@ typedef struct {
     uint32 obuf[Z80J_OBUF_WORDS];   /* +0xD00: bytes of a buffered run (see below) */
     uint8  pad1[Z80J_MRAM_OFF - 0x900 - 4 * Z80J_MARK_CHUNKS - 4 * Z80J_OBUF_WORDS];
     uint8  mram[0x2000];    /* +0x1000: machine RAM near the global pointer */
-    uint8  pad2[Z80J_TAB_OFF - Z80J_MRAM_OFF - 0x2000];
+    uint32 in_tab[Z80J_PORTS];      /* +0x3000: the tables port_in, port_out */
+    uint32 out_tab[Z80J_PORTS];     /* +0x3400  and port_outn point at, */
+    uint32 outn_tab[Z80J_PORTS];    /* +0x3800  filled by z80j_init */
+    uint8  pad2[Z80J_TAB_OFF - Z80J_MRAM_OFF - 0x2000 - 12 * Z80J_PORTS];
     uint32 lookup[0x10000]; /* +0x4000: code to run for each Z80 address */
 } z80j_ctx;
 
@@ -191,11 +195,11 @@ typedef struct {
  *        ctx->obuf, each the byte | d << 8, d being the T-states from the
  *        end of that element to the end of the last one
  * r10 is the global pointer; r3-r11 must be preserved, r0-r2, r12 and lr
- * may be lost. The tables start with the generic handlers of the glue,
- * which call the machine's C callbacks below; a machine may put its own
+ * may be lost. The tables (in_tab, out_tab and outn_tab of the context)
+ * start with the generic handlers of the glue, which call the machine's C
+ * callbacks below; a machine may put its own
  * handlers in them (and its data in ctx->mdata) before translating code.
  */
-#define Z80J_PORTS 256
 #define Z80J_RUN_MIXED  0x40000000u
 #define Z80J_RUN_BUF    0x2000u
 #define Z80J_RUN_BUF_N  0x4000u     /* z80j_glue_out_split: the last element */

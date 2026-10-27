@@ -196,37 +196,37 @@ void sms_reset(sms_machine *s)
     vdp_reset(&s->vdp);
 }
 
-/* Port handlers: the C callbacks above, except for the VDP data port,
- * the status read, the control port, the V and H counter reads and the
- * PSG writes, handled in assembly (the C callbacks remain their slow
- * paths). */
+/* Port handlers, written into the tables of the context: the C callbacks
+ * above, except for the VDP data port, the status read, the control port,
+ * the V and H counter reads and the PSG writes, handled in assembly (the
+ * C callbacks remain their slow paths). */
 static void sms_ports(sms_machine *s)
 {
     z80j_ctx *ctx = s->ctx;
     uint32 p;
 
     for (p = 0; p < Z80J_PORTS; p++) {
-        s->port_in[p] = JIT_ADDR(z80j_port_in_c);
-        s->port_out[p] = JIT_ADDR(z80j_port_out_c);
-        s->port_outn[p] = JIT_ADDR(z80j_port_outn_loop);
+        ctx->in_tab[p] = JIT_ADDR(z80j_port_in_c);
+        ctx->out_tab[p] = JIT_ADDR(z80j_port_out_c);
+        ctx->outn_tab[p] = JIT_ADDR(z80j_port_outn_loop);
         if (PORT_KIND(p) == 4) {
-            s->port_in[p] = JIT_ADDR(sms_vdp_data_r);
-            s->port_out[p] = JIT_ADDR(sms_vdp_data_w);
-            s->port_outn[p] = JIT_ADDR(sms_vdp_data_wn);
+            ctx->in_tab[p] = JIT_ADDR(sms_vdp_data_r);
+            ctx->out_tab[p] = JIT_ADDR(sms_vdp_data_w);
+            ctx->outn_tab[p] = JIT_ADDR(sms_vdp_data_wn);
         } else if (PORT_KIND(p) == 5) {
-            s->port_in[p] = JIT_ADDR(sms_vdp_stat_r);
-            s->port_out[p] = JIT_ADDR(sms_vdp_ctrl_w);
+            ctx->in_tab[p] = JIT_ADDR(sms_vdp_stat_r);
+            ctx->out_tab[p] = JIT_ADDR(sms_vdp_ctrl_w);
         } else if (PORT_KIND(p) == 2) {
-            s->port_in[p] = JIT_ADDR(sms_vdp_vc_r);
-            s->port_out[p] = JIT_ADDR(sms_psg_w);
+            ctx->in_tab[p] = JIT_ADDR(sms_vdp_vc_r);
+            ctx->out_tab[p] = JIT_ADDR(sms_psg_w);
         } else if (PORT_KIND(p) == 3) {
-            s->port_in[p] = JIT_ADDR(sms_vdp_hc_r);
-            s->port_out[p] = JIT_ADDR(sms_psg_w);
+            ctx->in_tab[p] = JIT_ADDR(sms_vdp_hc_r);
+            ctx->out_tab[p] = JIT_ADDR(sms_psg_w);
         }
     }
-    ctx->port_in = JIT_ADDR(s->port_in);
-    ctx->port_out = JIT_ADDR(s->port_out);
-    ctx->port_outn = JIT_ADDR(s->port_outn);
+    ctx->port_in = JIT_ADDR(ctx->in_tab);
+    ctx->port_out = JIT_ADDR(ctx->out_tab);
+    ctx->port_outn = JIT_ADDR(ctx->outn_tab);
     ctx->mdata = JIT_ADDR(&s->vdp);
     ctx->event_a = JIT_ADDR(sms_vdp_event_a);
 }

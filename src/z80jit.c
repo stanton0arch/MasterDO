@@ -194,11 +194,6 @@ uint32   jit_last_ntargets;
 uint32 jit_dec_tab[512];
 #define jit_pcmap (jit_dec_tab + 256)
 
-/* Port tables of the generic handlers (machine C callbacks). */
-static uint32   port_in_c[Z80J_PORTS];
-static uint32   port_out_c[Z80J_PORTS];
-static uint32   port_outn_c[Z80J_PORTS];
-
 /*--------------------------------------------------------------------------
  * Z80 memory and pages
  *------------------------------------------------------------------------*/
@@ -2090,13 +2085,13 @@ void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
             jit_dec_tab[v] = main_info(v);
     }
     for (v = 0; v < Z80J_PORTS; v++) {
-        port_in_c[v] = JIT_ADDR(z80j_port_in_c);
-        port_out_c[v] = JIT_ADDR(z80j_port_out_c);
-        port_outn_c[v] = JIT_ADDR(z80j_port_outn_loop);
+        ctx->in_tab[v] = JIT_ADDR(z80j_port_in_c);
+        ctx->out_tab[v] = JIT_ADDR(z80j_port_out_c);
+        ctx->outn_tab[v] = JIT_ADDR(z80j_port_outn_loop);
     }
-    ctx->port_in = JIT_ADDR(port_in_c);
-    ctx->port_out = JIT_ADDR(port_out_c);
-    ctx->port_outn = JIT_ADDR(port_outn_c);
+    ctx->port_in = JIT_ADDR(ctx->in_tab);
+    ctx->port_out = JIT_ADDR(ctx->out_tab);
+    ctx->port_outn = JIT_ADDR(ctx->outn_tab);
     ctx->mdata = 0;
     ctx->write_a = JIT_ADDR(z80j_write_generic);
     ctx->wdata = 0;
