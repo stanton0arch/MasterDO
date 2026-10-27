@@ -298,7 +298,8 @@ uint32 jit_unlink_zone(z80j_state *j, uint32 lo, uint32 hi);
 /* z80jit_blk.s */
 /* Translates the block at pc: the block management around the decoding,
  * the analysis and the emission. Returns 0 with j->error set when the
- * block could not be translated (5: nothing decodable). With a non-null
+ * block could not be translated (5: nothing decodable, 6: no block
+ * descriptor could be freed). With a non-null
  * targets, the static exits of the block are written there (at most
  * max_targets), their number in jit_last_ntargets. */
 z80j_block *jit_translate_block(z80j_state *j, uint32 pc, uint32 *targets,

@@ -20,12 +20,14 @@
 
 /* The part of the picture shown, vdp_win_w(v) x vdp_win_h(v) (the
  * 256 x v->active picture, or the LCD window of the Game Gear), at
- * (x0, y0) of a frame buffer width pixels wide. */
-void dbgview_draw(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 y0);
+ * (x0, y0) of a frame buffer width pixels wide. The tables of the drawing
+ * (about 10 KiB) are allocated for its duration, in DRAM or else in VRAM;
+ * -1 when neither has room, and nothing is drawn. */
+Err dbgview_draw(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 y0);
 
 /* Lines first to first + count - 1 of that part only (first even). */
-void dbgview_lines(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 y0,
-                   uint32 first, uint32 count);
+Err dbgview_lines(const vdp_state *v, uint32 *fb, int32 width, int32 x0, int32 y0,
+                  uint32 first, uint32 count);
 
 /* The 32 colours of the colour RAM: two rows of sixteen 8x8 squares
  * (background palette, then sprite palette). */

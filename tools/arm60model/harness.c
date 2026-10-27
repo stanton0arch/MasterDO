@@ -960,7 +960,9 @@ void hmain(void)
 
             set_window(v);
             sim_mark(1);
-            dbgview_draw(v, fb, (int32)pic_w, 0, 0);
+            if (dbgview_draw(v, fb, (int32)pic_w, 0, 0) != 0)
+                printf("Harness: no memory for the reference view at frame %lu\n",
+                       (unsigned long)f);
             sim_mark(2);
             if (render_display_on(g.rd))
                 compose(render_chain(g.rd), render_backdrop(g.rd));

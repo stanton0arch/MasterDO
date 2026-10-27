@@ -206,6 +206,10 @@ tb_next_zone
         mov     r0,r4
         mov     r1,r6
         bl      jit_next_zone
+        add     r2,r4,#S_FREE_BLOCKS :AND: 0xFF00
+        ldr     r2,[r2,#S_FREE_BLOCKS :AND: 0xFF]
+        cmp     r2,#0
+        beq     tb_no_descriptor
         ldmia   r6,{r0,r1}
 tb_zone_ok
         str     r0,[r4,#S_CUR]
@@ -325,6 +329,8 @@ tb_emit
         bl      jit_next_zone
         add     r3,r4,#S_FREE_BLOCKS :AND: 0xFF00
         ldr     r9,[r3,#S_FREE_BLOCKS :AND: 0xFF]
+        cmp     r9,#0
+        beq     tb_no_descriptor
         ldmia   r6,{r0,r1}
         str     r0,[r4,#S_CUR]
         str     r1,[r4,#S_ZONE_END]
@@ -337,6 +343,14 @@ tb_failed
         b       tb_exit
 tb_undecodable
         mov     r0,#5
+        add     r3,r4,#S_ERROR :AND: 0xFF00
+        str     r0,[r3,#S_ERROR :AND: 0xFF]
+        mov     r0,#0
+        b       tb_exit
+tb_no_descriptor
+        ; Every descriptor in use although the zones were emptied
+        ; (jit_next_zone frees some whenever another zone holds blocks).
+        mov     r0,#6
         add     r3,r4,#S_ERROR :AND: 0xFF00
         str     r0,[r3,#S_ERROR :AND: 0xFF]
         mov     r0,#0

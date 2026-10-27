@@ -340,11 +340,15 @@ static void do_swi(uint32_t n)
         break;
     }
     case 3: {
-        /* The space is given back to the count, not to the heap. */
+        /* The space is given back to the count; to the heap as well when
+         * the block is the last one allocated (an allocation freed before
+         * the next one, as the reference view's tables are). */
         uint32_t k;
         for (k = 0; k < nallocs; k++) {
             if (allocs[k].a == r[1]) {
                 *(allocs[k].vram ? &vram_free : &dram_free) += allocs[k].size;
+                if (allocs[k].a + allocs[k].size == heap)
+                    heap = allocs[k].a;
                 allocs[k] = allocs[--nallocs];
                 break;
             }

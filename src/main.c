@@ -243,7 +243,8 @@ static uint32 show_snapshot(platform *p, app_state *st, uint32 prev)
     const vdp_state *v = &g.sms->vdp;
     uint32 which = 0;       /* 0 reference, 1 cels */
     uint32 redraw = 1;
-    char buf[64];
+    uint32 no_mem = 0;      /* no memory for the reference picture */
+    char buf[80];
 
     log_vdp("paused");
     game_log_state(&g);
@@ -259,7 +260,8 @@ static uint32 show_snapshot(platform *p, app_state *st, uint32 prev)
             plat_reset_clip(p);
             plat_fill(p, p->back, border_colour(st));
             if (which == 0) {
-                dbgview_draw(v, plat_pixels(p, p->back), p->width, st->pic_x, st->pic_y);
+                no_mem = dbgview_draw(v, plat_pixels(p, p->back), p->width, st->pic_x,
+                                      st->pic_y) != 0;
                 dt = plat_usec_now() - t0;
             } else {
                 set_picture(p, st, st->pic_w, st->pic_h);
@@ -275,11 +277,15 @@ static uint32 show_snapshot(platform *p, app_state *st, uint32 prev)
                 dbgview_palette(v, plat_pixels(p, p->back), p->width, st->pic_x,
                                 st->pic_y + (int32)st->pic_h + 4);
             sprintf(buf, "PAUSED FRAME %lu: %s   A/B: VIEW  L: RESUME  X: END",
-                    (unsigned long)g.frame, which == 0 ? "CPU REFERENCE" : "CELS");
+                    (unsigned long)g.frame,
+                    which == 1 ? "CELS" : no_mem ? "NO MEMORY" : "CPU REFERENCE");
             text_line(p, p->back, 0, COLOR_TITLE, buf);
             plat_present(p);
-            printf("View: %s drawn in %lu us\n", which == 0 ? "reference" : "cels",
-                   (unsigned long)dt);
+            if (which == 0 && no_mem)
+                printf("View: no memory for the reference picture\n");
+            else
+                printf("View: %s drawn in %lu us\n", which == 0 ? "reference" : "cels",
+                       (unsigned long)dt);
         }
         held = plat_pad_state();
         pressed = held & ~prev;

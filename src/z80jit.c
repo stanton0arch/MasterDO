@@ -1058,10 +1058,12 @@ static void evict_zone(z80j_state *j, uint32 z)
  * has run the least recently (the fewest live chunks, then the oldest
  * last run, then the oldest fill), whichever area owns it. The zones
  * the areas are filling are not candidates; with a single zone the area
- * takes it again (a flush). */
-static uint32 pick_zone(z80j_state *j, const z80j_area *a)
+ * takes it again (a flush). With full set, only the zones holding blocks
+ * are candidates (a zone to empty for its descriptors), and j->nzones
+ * comes back when there is none. */
+static uint32 pick_zone(z80j_state *j, const z80j_area *a, uint32 full)
 {
-    uint32 best = a->zone;
+    uint32 best = full ? j->nzones : a->zone;
     uint32 best_score = 0xFFFFFFFFu;
     uint32 best_fill = 0;
     uint32 z;
@@ -1071,6 +1073,8 @@ static uint32 pick_zone(z80j_state *j, const z80j_area *a)
         uint32 fresh;
 
         if (z == j->area[0].zone || (j->area[1].count != 0 && z == j->area[1].zone))
+            continue;
+        if (full && j->zone_blocks[z] == 0)
             continue;
         if (j->zone_blocks[z] == 0)
             score = 0;
@@ -1109,12 +1113,21 @@ static void area_take(z80j_state *j, z80j_area *a, uint32 z)
  * (called by jit_translate_block). */
 void jit_next_zone(z80j_state *j, z80j_area *a)
 {
-    uint32 z = pick_zone(j, a);
+    uint32 z = pick_zone(j, a, 0);
 
     area_take(j, a, z);
     evict_zone(j, z);
     if (j->nzones == 1)
         j->stats.flushes++;
+    /* Small blocks use up the descriptors before the zones: the zone
+     * taken may have been empty, so the zones holding the code that ran
+     * the least recently are emptied until a descriptor is free. */
+    while (j->free_blocks == 0) {
+        z = pick_zone(j, a, 1);
+        if (z >= j->nzones)
+            break;
+        evict_zone(j, z);
+    }
 }
 
 /* An area's zone with less than half left, or fewer free descriptors
@@ -1132,24 +1145,27 @@ uint32 z80j_evict_ahead(z80j_state *j, uint32 elapsed_us, uint32 margin_us)
         return 0;
     for (a = 0; a < 2; a++) {
         const z80j_area *ar = &j->area[a];
+        uint32 short_blocks = j->nblocks + EVICT_AHEAD_BLOCKS > j->max_blocks;
         uint32 fresh;
 
         if (ar->count == 0)
             continue;
-        if ((uint32)(ar->end - ar->cur) >= (j->zone_words >> 1) &&
-            j->nblocks + EVICT_AHEAD_BLOCKS <= j->max_blocks)
+        if ((uint32)(ar->end - ar->cur) >= (j->zone_words >> 1) && !short_blocks)
             continue;
-        /* Nothing to do while an empty zone waits. */
-        for (z = 0; z < j->nzones; z++) {
+        /* Nothing to do while an empty zone waits, unless descriptors are
+         * short: an empty zone frees none. */
+        for (z = 0; z < j->nzones && !short_blocks; z++) {
             if (j->zone_blocks[z] == 0 && z != j->area[0].zone &&
                 (j->area[1].count == 0 || z != j->area[1].zone))
                 return 0;
         }
-        /* The zone the area would take; a zone whose code ran lately is
+        /* The zone the area would take (or, descriptors short, the zone
+         * holding blocks it would empty); a zone whose code ran lately is
          * left to the real moment (the area may never fill up) and looked
          * at again after a round of ageing. */
-        z = pick_zone(j, ar);
-        if (z == j->area[0].zone || (j->area[1].count != 0 && z == j->area[1].zone))
+        z = pick_zone(j, ar, short_blocks);
+        if (z >= j->nzones || z == j->area[0].zone ||
+            (j->area[1].count != 0 && z == j->area[1].zone))
             return 0;
         if (zone_live(j, z, &fresh) != 0) {
             j->evict_ahead_wait = j->frame_no + j->nzones;

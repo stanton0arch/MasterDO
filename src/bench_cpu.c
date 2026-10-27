@@ -174,11 +174,11 @@ static void bench_jit(bench_cpu_result *res, jit_env *e, uint8 *cart)
     res->jit_code_bytes = e->state.stats.code_bytes;
 }
 
-/* Kept off the small task stack (the block hash alone is 4 KiB). */
-static jit_env env;
-
 Err bench_cpu_run(bench_cpu_result *res)
 {
+    /* The translator's state (about 36 KiB) is allocated for the
+     * benchmark only, so that the cartridge run gets that memory back. */
+    jit_env *env;
     uint8 *cart;
     uint32 t0;
     uint32 t1;
@@ -207,9 +207,15 @@ Err bench_cpu_run(bench_cpu_result *res)
     memcpy(cart, z80prog_code, (size_t)z80prog_size);
     bench_interp(&res->interp, cart);
 
-    if (jit_env_alloc(&env) == 0) {
-        bench_jit(res, &env, cart);
-        jit_env_free(&env);
+    env = (jit_env *)AllocMem(sizeof(jit_env), MEMTYPE_DRAM);
+    if (env == NULL) {
+        printf("ERROR: translator out of memory (%lu bytes)\n", (unsigned long)sizeof(jit_env));
+    } else {
+        if (jit_env_alloc(env) == 0) {
+            bench_jit(res, env, cart);
+            jit_env_free(env);
+        }
+        FreeMem(env, sizeof(jit_env));
     }
     FreeMem(cart, Z80PROG_CART_SIZE);
     return 0;
