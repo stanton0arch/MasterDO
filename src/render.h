@@ -162,6 +162,8 @@ typedef struct {
     uint32 ahead_cut;       /* of which stopped by their deadline */
     uint32 ahead_us;        /* time they took */
     uint32 repeats;         /* pictures identical to the previous one */
+    uint32 spr_cut;         /* sprite cels cut at the top of a palette band */
+    uint32 spr_uncut;       /* of those, left whole for lack of cels */
 } render_stats;
 
 /*
@@ -271,7 +273,9 @@ typedef struct {
     uint32  display_on;
     uint32  n_sprites;      /* sprite cels in the chain */
     uint32  spr_mode;       /* the sprite cels are set up for: bit 0 tall, bit 1 zoom */
-    uint32  spr_runs;       /* the last update made cels per run of lines */
+    uint32  spr_runs;       /* sprite cels, from the first, whose preamble or vertical
+                               step the last update changed (runs of lines, parts cut
+                               at palette bands): set back at the next update */
     CCB    *chain;          /* first cel to draw */
     CCB    *last_cel;       /* the cel carrying CCB_LAST */
     uint32  wblank;         /* index of the cel of render_blank_window() */

@@ -129,6 +129,8 @@ def parse_picture(line):
     p["pbands"], p["pmerged"], p["tall"] = grab(
         line, r"(\d+) frames in palette bands, (\d+) colour writes merged, (\d+) frames of more "
         r"than 192 lines", (0, 0, 0))
+    p["spr_cut"], p["spr_uncut"] = grab(
+        line, r"(\d+) sprite cels cut at palette bands \((\d+) left whole\)", (0, 0))
     p["ahead_cells"], p["ahead_tiles"], p["ahead_frames"], p["ahead_us"], p["ahead_cut"] = grab(
         line, r"(\d+) cells and (\d+) tiles ahead in (\d+) frames with the display off "
         r"\((\d+) us, (\d+) cut short\)", (0, 0, 0, 0, 0))
@@ -510,8 +512,9 @@ def game_lines(g):
             pf["sprites"], pf["pieces"], pf["strips"], pf["patches"], pf["tiles"], pf["cells"],
             p["bands"], p["ntbands"], p["dbands"], p["dropped"], p["layers"], p["spr_partial"],
             p["spr_dropped"], p["overflow"], p["collision"], g["display_changes"]))
-        out.append("  display: %d frames of more than 192 lines, %d frames in palette bands (%d colour writes merged)" % (
-            p.get("tall", 0), p.get("pbands", 0), p.get("pmerged", 0)))
+        out.append("  display: %d frames of more than 192 lines, %d frames in palette bands (%d colour writes merged, %d sprite cels cut at their tops, %d left whole)" % (
+            p.get("tall", 0), p.get("pbands", 0), p.get("pmerged", 0), p.get("spr_cut", 0),
+            p.get("spr_uncut", 0)))
         if p.get("ahead_frames", 0):
             out.append("  catch-up with the display off: %d cells and %d tiles ahead in %d frames (%s ms, %d cut short by the deadline)" % (
                 p["ahead_cells"], p["ahead_tiles"], p["ahead_frames"], ms(p["ahead_us"]), p["ahead_cut"]))

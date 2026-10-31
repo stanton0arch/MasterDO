@@ -1193,11 +1193,201 @@ static void sprite_tiles(renderer *r, uint32 t, uint32 tall, const uint8 *vram)
         render_tile_conv(&r->layer[0], t + 1, 0, vram);
 }
 
+/* A sprite colour group: consecutive palette bands whose sprite colours
+ * are the same (colour writes to the background half, or to colour 16,
+ * which no sprite shows, move no sprite pixel). */
+typedef struct {
+    int32   end;        /* first line past the group */
+    uint16 *plut;       /* sprite PLUT of its first band */
+} spr_group;
+
+/* The sprite colour groups of the frame, from the top; the last one runs
+ * past every line. Returns their number. */
+static uint32 sprite_groups(const renderer *r, spr_group *grp)
+{
+    const uint32 *a = (const uint32 *)(r->pluts + 32);
+    uint32 ng = 0;
+    uint32 q;
+
+    grp[0].plut = r->pluts + 32;
+    for (q = 1; q < r->npb; q++) {
+        const uint32 *b = (const uint32 *)(r->pluts + q * RENDER_PLUT_SET + 32);
+        uint32 k;
+
+        /* Entries 0-15, two per word; entry 0 is transparent in every
+         * band. */
+        for (k = 0; k < 8 && a[k] == b[k]; k++)
+            ;
+        if (k < 8) {
+            grp[ng++].end = (int32)r->ptops[q];
+            grp[ng].plut = (uint16 *)b;
+            a = b;
+        }
+    }
+    grp[ng].end = 0x7FFFFFFF;
+    return ng + 1;
+}
+
+#define SPR_ROW_BYTES   8       /* a row of a converted tile, 8 bpp */
+
+/* One part of a sprite cel: rows from src drawn from line y, vdy lines
+ * per row. */
+static void sprite_part(CCB *c, uint8 *src, Coord x, int32 y, uint32 rows, uint32 vdy,
+                        uint16 *plut)
+{
+    c->ccb_SourcePtr = (CelData *)src;
+    c->ccb_PLUTPtr = plut;
+    c->ccb_XPos = x;
+    c->ccb_YPos = (Coord)(y << 16);
+    c->ccb_PRE0 = ((rows - PRE0_VCNT_PREFETCH) << PRE0_VCNT_SHIFT) | PRE0_BPP_8;
+    c->ccb_VDY = (int32)(vdy << 16);
+}
+
+/* The parts of a sprite cel of rows rows from src at line y, each row on
+ * 1 << s lines, cut at the group ends it crosses: one part per group,
+ * with the group's PLUT. A doubled row straddling a group end is drawn as
+ * two one-line parts, one on each side. Written from cel d on, or only
+ * counted when d is NULL; returns the number of parts. */
+static uint32 cut_sprite(CCB *d, const spr_group *q, uint8 *src, Coord x, int32 y,
+                         uint32 rows, uint32 s)
+{
+    int32 yb = y + (int32)(rows << s);
+    int32 a = y;
+    uint32 n = 0;
+
+    while (q->end <= y)
+        q++;
+    for (;;) {
+        int32 b = (q->end < yb) ? q->end : yb;
+        uint32 oa = (uint32)(a - y);
+        uint32 ob = (uint32)(b - y);
+        uint16 *pl = q->plut;
+
+        if (s == 0) {
+            if (d != NULL)
+                sprite_part(d + n, src + oa * SPR_ROW_BYTES, x, a, ob - oa, 1, pl);
+            n++;
+        } else {
+            if (oa & 1) {               /* the second line of a row */
+                if (d != NULL)
+                    sprite_part(d + n, src + (oa >> 1) * SPR_ROW_BYTES, x, a, 1, 1, pl);
+                n++;
+                oa++;
+            }
+            if (oa < (ob & ~1u)) {      /* whole doubled rows */
+                if (d != NULL)
+                    sprite_part(d + n, src + (oa >> 1) * SPR_ROW_BYTES, x, y + (int32)oa,
+                                (ob - oa) >> 1, 2, pl);
+                n++;
+            }
+            if ((ob & 1) && ob > oa) {  /* the first line of a row */
+                if (d != NULL)
+                    sprite_part(d + n, src + (ob >> 1) * SPR_ROW_BYTES, x, b - 1, 1, 1, pl);
+                n++;
+            }
+        }
+        if (b == yb)
+            return n;
+        a = b;
+        q++;
+    }
+}
+
+/* Sprite cels in a frame with several sprite colour groups: a cel
+ * crossing the end of a group is cut into one part per group, each with
+ * the sprite colours of its group, as the hardware draws each line with
+ * the colours it holds then; the others take the PLUT of the group of
+ * their first line. The parts of a cel stay together in the chain, in its
+ * place. The cels drawn on top (the first ones) are cut first; a cel
+ * whose parts would go past the capacity keeps the colours of its first
+ * line, and is counted. Returns the number of sprite cels. */
+static uint32 split_sprites(renderer *r, uint32 n, const spr_group *grp)
+{
+    CCB *cel = &r->cels[CEL_SPRITE0];
+    CCB *end = cel + n;
+    CCB *c;
+    uint32 s = (r->spr_mode >> 1) & 1;
+    int32 hmax = (r->spr_mode & 1) ? 16 : 8;
+    uint32 extra = 0;
+    uint32 ncand = 0;
+    uint32 ncut = 0;
+    uint8 cut[RENDER_SPRITE_CELS];      /* the cels to measure, then those cut */
+    uint8 parts[RENDER_SPRITE_CELS];    /* the parts of those cut */
+    uint32 d;
+    uint32 k;
+
+    /* Every cel gets the PLUT of the group of its first line; a cel no
+     * taller than the whole sprite of the mode (the runs of lines are
+     * shorter) is a candidate when the end of its group is within that
+     * height. */
+    hmax <<= s;
+    for (c = cel, k = 0; c < end; c++, k++) {
+        int32 y = (int32)c->ccb_YPos >> 16;
+        const spr_group *q = grp;
+        int32 e = q->end;
+
+        while (e <= y)
+            e = (++q)->end;
+        c->ccb_PLUTPtr = q->plut;
+        if (e < y + hmax)
+            cut[ncand++] = (uint8)k;
+    }
+    for (k = 0; k < ncand; k++) {
+        uint32 i = cut[k];
+        int32 y;
+        uint32 rows;
+        uint32 p;
+
+        c = &cel[i];
+        y = (int32)c->ccb_YPos >> 16;
+        rows = (((uint32)c->ccb_PRE0 & PRE0_VCNT_MASK) >> PRE0_VCNT_SHIFT) +
+               PRE0_VCNT_PREFETCH;
+        p = cut_sprite(NULL, grp, NULL, 0, y, rows, s);
+        if (p == 1)
+            continue;
+        r->st.spr_cut++;
+        if (n + extra + p - 1 > RENDER_SPRITE_CELS) {
+            r->st.spr_uncut++;
+            continue;
+        }
+        extra += p - 1;
+        cut[ncut] = (uint8)i;
+        parts[ncut++] = (uint8)p;
+    }
+    if (ncut == 0)
+        return n;
+    /* From the last cel down to the first one cut, each moved past the
+     * parts added before it (a cel is read before its first part
+     * overwrites it); the cels before the first one cut stay in place. */
+    d = n + extra;
+    for (k = n; k-- > cut[0];) {
+        c = &cel[k];
+        if (k == cut[ncut - 1]) {
+            d -= parts[--ncut];
+            cut_sprite(&cel[d], grp, (uint8 *)c->ccb_SourcePtr, c->ccb_XPos,
+                       (int32)c->ccb_YPos >> 16,
+                       (((uint32)c->ccb_PRE0 & PRE0_VCNT_MASK) >> PRE0_VCNT_SHIFT) +
+                       PRE0_VCNT_PREFETCH, s);
+        } else {
+            CCB *e = &cel[--d];
+
+            e->ccb_SourcePtr = c->ccb_SourcePtr;
+            e->ccb_XPos = c->ccb_XPos;
+            e->ccb_YPos = c->ccb_YPos;
+            e->ccb_PRE0 = c->ccb_PRE0;
+            e->ccb_VDY = c->ccb_VDY;
+            e->ccb_PLUTPtr = c->ccb_PLUTPtr;
+        }
+    }
+    r->spr_runs = n + extra;
+    return n + extra;
+}
+
 /* Sets up the cels of the active sprites (before the $D0 terminator in
  * the 192-line mode) that reach the screen and converts the tiles they
  * miss; returns the count. The usual case, every sprite shown whole, is
- * one cel per sprite set up in assembly. With several palette bands each
- * cel takes the sprite PLUT of the band of its first line. */
+ * one cel per sprite set up in assembly. With several palette bands the
+ * cels take the sprite colours of their lines (split_sprites). */
 static uint32 update_sprites(renderer *r, const vdp_state *v)
 {
     const uint8 *vram = v->vram;
@@ -1209,12 +1399,17 @@ static uint32 update_sprites(renderer *r, const vdp_state *v)
     uint32 nn;
     uint32 k;
 
-    if (mode != r->spr_mode || r->spr_runs) {
+    /* The cels the last update changed, or all of them for another
+     * size or zoom, set back to the whole sprite of the mode. */
+    nn = r->spr_runs;
+    if (mode != r->spr_mode) {
+        r->spr_mode = mode;
+        nn = RENDER_SPRITE_CELS;
+    }
+    if (nn != 0) {
         uint32 scale = 1 << v->spr_zoom;
 
-        r->spr_mode = mode;
-        r->spr_runs = 0;
-        for (k = 0; k < RENDER_SPRITE_CELS; k++) {
+        for (k = 0; k < nn; k++) {
             CCB *c = &r->cels[CEL_SPRITE0 + k];
 
             c->ccb_PRE0 = (((tall ? 16 : 8) - PRE0_VCNT_PREFETCH) << PRE0_VCNT_SHIFT) |
@@ -1222,6 +1417,7 @@ static uint32 update_sprites(renderer *r, const vdp_state *v)
             c->ccb_HDX = (int32)(scale << 20);
             c->ccb_VDY = (int32)(scale << 16);
         }
+        r->spr_runs = 0;
     }
     a.tiles = r->tiles;
     a.t_ok = r->t_ok;
@@ -1235,7 +1431,6 @@ static uint32 update_sprites(renderer *r, const vdp_state *v)
     if (v->spr_partial) {
         CCB *c;
 
-        r->spr_runs = 1;
         r->st.spr_partial++;
         a.end = &r->cels[CEL_SPRITE0 + RENDER_SPRITE_CELS];
         a.dropped = 0;
@@ -1243,6 +1438,7 @@ static uint32 update_sprites(renderer *r, const vdp_state *v)
         r->st.spr_dropped += a.dropped;
         n = (uint32)(c - &r->cels[CEL_SPRITE0]);
         nn = a.needed;
+        r->spr_runs = n;
     } else {
         CCB *c = render_sprites(sat, n, &r->cels[CEL_SPRITE0], &a);
 
@@ -1252,26 +1448,17 @@ static uint32 update_sprites(renderer *r, const vdp_state *v)
     for (k = 0; k < nn; k++)
         sprite_tiles(r, r->wlist[k], tall, vram);
     if (r->npb > 1) {
-        uint16 *spl[VDP_PAL_BANDS];
-        int32 top[VDP_PAL_BANDS + 1];
-        uint32 npb = r->npb;
-        CCB *c = &r->cels[CEL_SPRITE0];
-        uint32 q;
+        spr_group grp[VDP_PAL_BANDS];
 
-        for (q = 0; q < npb; q++) {
-            spl[q] = r->pluts + q * RENDER_PLUT_SET + 32;
-            top[q] = (int32)r->ptops[q];
+        if (sprite_groups(r, grp) > 1) {
+            n = split_sprites(r, n, grp);
+            if (n > r->spr_bands)
+                r->spr_bands = n;
+        } else if (r->spr_bands) {
+            for (k = 0; k < r->spr_bands; k++)
+                r->cels[CEL_SPRITE0 + k].ccb_PLUTPtr = r->pluts + 32;
+            r->spr_bands = 0;
         }
-        top[npb] = 0x7FFFFFFF;          /* the last band runs to the bottom */
-        for (k = 0; k < n; k++, c++) {
-            int32 y = (int32)c->ccb_YPos >> 16;
-
-            for (q = 0; top[q + 1] <= y; q++)
-                ;
-            c->ccb_PLUTPtr = spl[q];
-        }
-        if (n > r->spr_bands)
-            r->spr_bands = n;
     } else if (r->spr_bands) {
         /* One palette again: every cel given another band's PLUT returns
          * to the first band's, those past this frame's sprites included,
