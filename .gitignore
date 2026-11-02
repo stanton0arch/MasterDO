@@ -49,3 +49,4 @@ project-context.MD
 # and the player binary (rebuilt by every make)
 /takeme/roms/*
 /takeme/LaunchMe
+project-status.md
