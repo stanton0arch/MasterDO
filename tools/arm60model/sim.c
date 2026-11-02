@@ -22,7 +22,7 @@
  * largest; SIMPROFALL=1 every function),
  * SIMALLOC=1 (every allocation with its size and memory type), SIMSCALE=f
  * (every cycle weight multiplied by f: another host timing),
- * SIMDIS=symbol (executions per instruction of a function).
+ * SIMDIS=symbol (executions and cycles per instruction of a function).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -786,7 +786,7 @@ int main(int argc, char **argv)
         for (k = 0; k < nsyms; k++) if (!strcmp(syms[k].name, want)) {
             uint32_t a, end = k + 1 < nsyms ? syms[k + 1].addr : syms[k].addr + 256;
             for (a = syms[k].addr; a < end; a += 4)
-                fprintf(stderr, "%08x %08x %10u\n", a, rd32(a), pcount[(a - LOAD_ADDR) >> 2]);
+                fprintf(stderr, "%08x %08x %10u %12.0f\n", a, rd32(a), pcount[(a - LOAD_ADDR) >> 2], prof[(a - LOAD_ADDR) >> 2]);
         }
     }
     return 0;

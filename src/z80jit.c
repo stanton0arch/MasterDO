@@ -102,13 +102,7 @@ CHECK_OFF(b_targets, offsetof(jit_block_ctx, targets) == 84);
 CHECK_OFF(b_max_targets, offsetof(jit_block_ctx, max_targets) == 88);
 CHECK_OFF(b_ntargets, offsetof(jit_block_ctx, ntargets) == 92);
 CHECK_OFF(b_ctx_size, sizeof(jit_block_ctx) == 0x68);
-CHECK_OFF(st_size, sizeof(jit_stub) == 28);
-CHECK_OFF(st_site, offsetof(jit_stub, site) == 4);
-CHECK_OFF(st_pc, offsetof(jit_stub, pc) == 8);
-CHECK_OFF(st_t, offsetof(jit_stub, t) == 12);
-CHECK_OFF(st_resume, offsetof(jit_stub, resume) == 16);
-CHECK_OFF(st_index, offsetof(jit_stub, index) == 20);
-CHECK_OFF(st_reg, offsetof(jit_stub, reg) == 24);
+CHECK_OFF(st_words, STUB_WORDS == 4);
 CHECK_OFF(s_cur, offsetof(z80j_state, cur) == 12);
 CHECK_OFF(s_zone_end, offsetof(z80j_state, zone_end) == 16);
 CHECK_OFF(s_glue, offsetof(z80j_state, glue) == 0x4F84);
@@ -189,7 +183,7 @@ CHECK_OFF(block_words, BLOCK_WORDS == 1024);   /* BLOCK_BYTES of z80jit_blk.s */
  * the block context shared by the parts of a translation, with its
  * instruction records and stubs (z80j_init binds them). */
 static jit_insn jit_insns[MAX_INSNS];
-static jit_stub jit_stubs[MAX_STUBS];
+static uint32   jit_stub_words[MAX_STUBS * STUB_WORDS];
 jit_block_ctx   jit_bctx;
 
 /* Tables of z80jit_dec.s: the properties of the unprefixed opcodes, then
@@ -2028,7 +2022,7 @@ void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
 
     memset(j, 0, sizeof(*j));
     jit_bctx.ins = jit_insns;
-    jit_bctx.stubs = jit_stubs;
+    jit_bctx.stubs = (jit_stub *)jit_stub_words;
     j->ctx = ctx;
     j->code = code;
     j->code_end = code + code_words;

@@ -2623,8 +2623,11 @@ void emit_test(void)
                 uint32 first = 0xFFFFFFFFu;
                 uint32 m = (na < nb) ? na : nb;
 
+                /* The assembly keeps the host address of the segment
+                 * starts only (the targets inside the block and the
+                 * repeated instructions are among them). */
                 for (k = 0; k < n; k++)
-                    if (ea[k].host - code != eb[k].host - code)
+                    if (ea[k].seg_start && ea[k].host - code != eb[k].host - code)
                         break;
                 if (k < n)
                     differ = 1;

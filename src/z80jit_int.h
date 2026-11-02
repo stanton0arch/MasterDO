@@ -158,6 +158,13 @@ typedef struct {
     uint32  reg;            /* STUB_WRITE: register holding the address */
 } jit_stub;
 
+/* The assembly emitter (z80jit_emt.s) keeps its own stub records in the
+ * same array: STUB_WORDS words each (the branch word with the kind and the
+ * T-states, the site, a Z80 address, a resume address, register or record),
+ * written with one STM and read back with one LDM. The structure above is
+ * the one of the C reference emitter of the model (emittest.c). */
+#define STUB_WORDS 4
+
 #define RUN_PART   0xFFFFFFFFu
 #define RUN_LOOP   0xFFFFFFFEu  /* OUTI / OUTD closed by JR NZ or JP NZ back to it */
 /* Element of a group of port outputs sent in one call (jit_out_groups):
@@ -207,7 +214,8 @@ typedef struct jit_block_ctx_s {
     uint32      key;        /* page kind and bank of the code */
     uint32      end_leave;  /* the block ends after EI + 1: leave */
     jit_stub   *stubs;
-    int32       nstubs;
+    int32       nstubs;     /* (the next free record while the assembly
+                             * emitter runs, the count once it is done) */
     uint32      entry_check;/* 0 none, 1 bank check, 2 RAM check */
     uint32      has_dyn;    /* RAM block with dynamic targets: masked check */
     uint32      mark_off;   /* context offset of the run mark of the block's chunk */

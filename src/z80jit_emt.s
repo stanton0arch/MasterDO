@@ -11,7 +11,7 @@
 ; r12 memory address; r0-r2, r12 and lr scratch. The templates are
 ; written with those registers; the emitter itself keeps:
 ;   r4  block context (jit_block_ctx)      r5  cursor (next free word)
-;   r6  record of the instruction          r7  its index
+;   r6  record of the instruction          r7  the record past the last one
 ;   r8  routines of the glue (z80j_glue)   r9  opcode of the instruction
 ;   r11 EF_* flags of the instruction (live flags, fused test, index
 ;       register, memory operand)
@@ -25,7 +25,6 @@
         ; The routines below are exported for the profiles of the model only.
         EXPORT  eb_body
         EXPORT  eb_stubs
-        EXPORT  new_stub
         EXPORT  e_imm
         EXPORT  e_dpi
         EXPORT  e_mov32
@@ -126,15 +125,18 @@ B_BODY          EQU     44
 B_SKIP_SITE     EQU     48
 B_SKIP_TO       EQU     52
 
-; jit_stub.
-ST_KIND         EQU     0
-ST_SITE         EQU     4
-ST_PC           EQU     8
-ST_T            EQU     12
-ST_RESUME       EQU     16
-ST_INDEX        EQU     20
-ST_REG          EQU     24
-ST_SIZE         EQU     28
+; Stub records (z80jit_int.h, STUB_WORDS): four words each, written with
+; one STM when the branch to the stub is left in the code and read back
+; with one LDM by the pass that emits the stubs. Word 0: the branch word
+; (condition, B or BL, offset zero) with the kind in bits 8-11 and the
+; T-states in bits 0-7; word 1: the site of that branch (its word is only
+; written by the pass); word 2: a Z80 address; word 3: the resume address
+; of a time-out stub, the register of a write stub, the record of the
+; instruction (taken, dynamic) or of the target (forward). A kind that
+; does not use a word leaves it as it is. The next free record is kept in
+; b->nstubs while the code is emitted; the stub pass makes it the count.
+ST_SIZE         EQU     16
+ST_KIND_SHIFT   EQU     8
 MAX_STUBS       EQU     256
 
 STUB_TIMEOUT    EQU     0
@@ -287,12 +289,26 @@ BL_NE           EQU     0x1B000000
 
 IMM_NONE        EQU     0xFFFFFFFF
 
+; Encodings of the single words built most often, their register and
+; immediate fields clear (the mnemonic in the comment): MOVW builds them
+; with immediates, cheaper than a literal load.
+W_MARK          EQU     0xE58AA000      ; STR r10,[r10] | offset
+W_SUBS_CYC      EQU     0xE2588C00      ; SUBS r8,r8,#0 rotated 12 | T-states
+W_SUBEQ_CYC     EQU     0x02488C00      ; SUBEQ r8,r8,#0 rotated 12 | condition, T-states
+W_MOV_IMM       EQU     0xE3A00000      ; MOV r0,#0 | destination, immediate
+W_ORR_IMM       EQU     0xE3800000      ; ORR r0,r0,#0 | destination, source, immediate
+W_MOV_R12_R     EQU     0xE1A0C000      ; MOV r12,r0 | register
+W_MOV_R2_LR     EQU     0xE1A0200E      ; MOV r2,lr
+W_MOV_R1_IMM    EQU     0xE3A01000      ; MOV r1,#0 | immediate
+W_TEQ_R0        EQU     0xE3300000      ; TEQ r0,#0
+W_LDR_R0_G      EQU     0xE59A0000      ; LDR r0,[r10] | offset
+W_CMP_R0_IMM    EQU     0xE3500000      ; CMP r0,#0 | bank
+
 RAM_INLINE_WORDS EQU    16              ; RAM blocks up to this size checked inline
 
 ; Stack frame of the main routine.
-F_J             EQU     0
-F_MISS          EQU     4               ; site of the bank check branch
-F_SIZE          EQU     8
+F_MISS          EQU     0               ; site of the bank check branch
+F_SIZE          EQU     4
 
 ;----------------------------------------------------------------------------
 ; Macros
@@ -308,6 +324,37 @@ F_SIZE          EQU     8
         MACRO
         TMPL    $w,$t
         ldr     $w,$t
+        MEND
+
+; Builds the constant $v in $w with immediates, one per nonzero byte.
+        MACRO
+        MOVW    $w,$v
+        mov     $w,#($v) :AND: 0xFF000000
+        [ (($v) :AND: 0x00FF0000) <> 0
+        orr     $w,$w,#($v) :AND: 0x00FF0000
+        ]
+        [ (($v) :AND: 0x0000FF00) <> 0
+        orr     $w,$w,#($v) :AND: 0x0000FF00
+        ]
+        [ (($v) :AND: 0x000000FF) <> 0
+        orr     $w,$w,#($v) :AND: 0x000000FF
+        ]
+        MEND
+
+; Appends the stub record r0-r3 (see ST_SIZE); $p is a scratch register.
+        MACRO
+        STUB    $p
+        ldr     $p,[r4,#B_NSTUBS]
+        stmia   $p!,{r0,r1,r2,r3}
+        str     $p,[r4,#B_NSTUBS]
+        MEND
+
+; Leaves the word of a branch to a stub in the code, written by the stub
+; pass: r1 = its site.
+        MACRO
+        SITE
+        mov     r1,r5
+        add     r5,r5,#4
         MEND
 
 ; Loads the template word at $t into $w under the condition $c.
@@ -413,12 +460,12 @@ jit_emit_block
         sub     sp,sp,#F_SIZE
         mov     r4,r0
         ldr     r1,[r4,#B_J]
-        str     r1,[sp,#F_J]
         ldr     r5,[r1,#S_CUR]
         add     r8,r1,#S_GLUE :AND: 0xFF00
         add     r8,r8,#S_GLUE :AND: 0xFF
+        ldr     r0,[r4,#B_STUBS]
+        str     r0,[r4,#B_NSTUBS]       ; the next free stub record
         mov     r0,#0
-        str     r0,[r4,#B_NSTUBS]
         str     r0,[sp,#F_MISS]
         str     r0,[r4,#B_SKIP_SITE]
         ldr     r0,[r4,#B_ENTRY_CHECK]
@@ -430,77 +477,146 @@ eb_body
         ; The run mark of the chunk holding the block: STR r10,[r10,#off].
         str     r5,[r4,#B_BODY]
         ldr     r0,[r4,#B_MARK_OFF]
-        TMPL    r1,t_mark
+        MOVW    r1,W_MARK
         orr     r0,r0,r1
         EMIT    r0
 
         ldr     r6,[r4,#B_INS]
-        mov     r7,#0
         ldr     r0,[r4,#B_N]
-        str     r0,[r4,#B_SKIP_TO]      ; no skip pending: the loop runs to the end
+        RECORD  r7,r6,r0                ; the loop runs to the end
 eb_loop
-        str     r5,[r6,#I_HOST]
         ; The EF_* flags of the instruction: its interrupt check, fused
         ; test, live flags and memory operand, then a segment check when
         ; it starts one. The words of the record from ei mem d dyn to
-        ; live_after live_before seg_t t_after come in one load.
+        ; live_after live_before seg_t t_after come in one load; r2 (len
+        ; pre op t) is kept for eb_insn.
         add     r0,r6,#I_EI
-        ldmia   r0,{r0,r1,r2,r3,r9,r12,lr}      ; ei mem d dyn; n; len pre op t; kind cc use def; internal busy irq_check seg_start; run; fused; (next: live)
-        ldr     r1,[r6,#I_LIVE_AFTER]
+        ldmia   r0,{r0,r1,r2,r3,r9,r11,r12,lr}  ; ei mem d dyn; n; len pre op t; kind cc use def; internal busy irq_check seg_start; run; fused; live_after live_before seg_t t_after
         and     r3,r3,#0xFF             ; flags written
-        tst     r3,r1,lsr #24           ; read later
+        tst     r3,lr,lsr #24           ; read later
         movne   r11,#EF_LIVE
         moveq   r11,#0
         tst     r0,#0xFF0000            ; memory operand
         orrne   r11,r11,#EF_MEM
-        cmp     lr,#0                   ; fused test (the byte alone in its word)
+        cmp     r12,#0                  ; fused test (the byte alone in its word)
         orrne   r11,r11,#EF_FUSED
         tst     r9,#0xFF00              ; interrupt check
         orrne   r11,r11,#EF_IRQ
         tst     r9,#0xFF                ; segment start
         bne     eb_seg
 eb_insn
-        ldr     r0,[r6,#I_LEN]
-        mov     r9,r0,lsr #8
+        mov     r9,r2,lsr #8
         and     r9,r9,#0xFF             ; opcode
-        mov     r0,r0,lsr #16
-        and     r0,r0,#0xFF             ; prefix
-        cmp     r0,#PRE_ED
+        ands    r0,r2,#0xFF0000         ; prefix
+        bne     eb_prefix
+eb_main
+        adr     r0,main_tab
+        ldr     pc,[r0,r9,lsl #2]
+eb_prefix
+        cmp     r0,#PRE_ED :SHL: 16
         beq     emit_ed
         bhi     eb_dd
-        cmp     r0,#PRE_CB
-        beq     emit_cb
-eb_main
-        adrl    r0,main_tab
-        ldr     pc,[r0,r9,lsl #2]
+        b       emit_cb
 eb_dd
-        cmp     r0,#PRE_DDCB
+        cmp     r0,#PRE_DDCB :SHL: 16
         bhs     emit_cb
         tst     r11,#EF_MEM
         bne     eb_main
-        cmp     r0,#PRE_DD
+        cmp     r0,#PRE_DD :SHL: 16
         orreq   r11,r11,#EF_IX
         orrne   r11,r11,#EF_IY
         b       eb_main
 
+; Handlers of the unprefixed and DD / FD opcodes (the C switch of the
+; emitter, opcode by opcode; a bare prefix never reaches here).
+main_tab
+        DCD     m_nop, m_ld_rr_nn, m_ld_ind_a, m_inc_rr
+        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_rlca
+        DCD     m_exaf, m_add_hl, m_ld_a_ind, m_inc_rr
+        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_rrca
+        DCD     m_djnz, m_ld_rr_nn, m_ld_ind_a, m_inc_rr
+        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_rla
+        DCD     m_jr, m_add_hl, m_ld_a_ind, m_inc_rr
+        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_rra
+        DCD     m_jrcc, m_ld_rr_nn, m_ld_nn_hl, m_inc_rr
+        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_daa
+        DCD     m_jrcc, m_add_hl, m_ld_hl_nn, m_inc_rr
+        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_cpl
+        DCD     m_jrcc, m_ld_rr_nn, m_ld_nn_a, m_inc_rr
+        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_scf
+        DCD     m_jrcc, m_add_hl, m_ld_a_nn, m_inc_rr
+        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_ccf
+        DCD     m_nop, m_ld_r_r, m_ld_r_r, m_ld_r_r
+        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_hl, m_ld_r_r
+        DCD     m_ld_r_r, m_nop, m_ld_r_r, m_ld_r_r
+        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_hl, m_ld_r_r
+        DCD     m_ld_r_r, m_ld_r_r, m_nop, m_ld_r_r
+        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_hl, m_ld_r_r
+        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_r, m_nop
+        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_hl, m_ld_r_r
+        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_r, m_ld_r_r
+        DCD     m_nop, m_ld_r_r, m_ld_r_hl, m_ld_r_r
+        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_r, m_ld_r_r
+        DCD     m_ld_r_r, m_nop, m_ld_r_hl, m_ld_r_r
+        DCD     m_ld_hl_r, m_ld_hl_r, m_ld_hl_r, m_ld_hl_r
+        DCD     m_ld_hl_r, m_ld_hl_r, m_halt, m_ld_hl_r
+        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_r, m_ld_r_r
+        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_hl, m_nop
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
+        DCD     m_ret_cc, m_pop, m_jp_cc, m_jp
+        DCD     m_call_cc, m_push, m_alu_n, m_rst
+        DCD     m_ret_cc, m_ret, m_jp_cc, m_nop
+        DCD     m_call_cc, m_call, m_alu_n, m_rst
+        DCD     m_ret_cc, m_pop, m_jp_cc, m_out_n
+        DCD     m_call_cc, m_push, m_alu_n, m_rst
+        DCD     m_ret_cc, m_exx, m_jp_cc, m_in_n
+        DCD     m_call_cc, m_call, m_alu_n, m_rst
+        DCD     m_ret_cc, m_pop, m_jp_cc, m_ex_sp
+        DCD     m_call_cc, m_push, m_alu_n, m_rst
+        DCD     m_ret_cc, m_jp_hl, m_jp_cc, m_ex_de
+        DCD     m_call_cc, m_call, m_alu_n, m_rst
+        DCD     m_ret_cc, m_pop, m_jp_cc, m_di
+        DCD     m_call_cc, m_push, m_alu_n, m_rst
+        DCD     m_ret_cc, m_ld_sp_hl, m_jp_cc, m_di
+        DCD     m_call_cc, m_call, m_alu_n, m_rst
+
+
 ; Segment check: SUBS r8,r8,#t * CYCLE, then BMI to the time-out stub,
-; which resumes at the check. r9 is loaded again at eb_insn.
+; which resumes at the check. The check is the host address of the
+; instruction, kept in its record: the only ones read are those of the
+; targets of jumps inside the block and of the repeated instructions,
+; which all start a segment. r2 is kept for eb_insn, which loads r9 again.
 eb_seg
-        ldrb    r9,[r6,#I_SEG_T]
-        TMPL    r0,t_subs_cyc
-        orr     r0,r0,#0xC00
+        mov     r9,lr,lsr #8
+        and     r9,r9,#0xFF             ; seg_t
+        MOVW    r0,W_SUBS_CYC
         orr     r0,r0,r9                ; (always below 256: a byte in bits 8-15)
         mov     r12,r5                  ; the check, where the stub resumes
-        EMIT    r0
-        mov     r0,#STUB_TIMEOUT
-        bl      new_stub
-        ldr     r1,[r6,#I_PC]
-        mov     r2,r9
-        mov     r3,r12
-        add     r0,r0,#ST_PC
-        stmia   r0,{r1,r2,r3}           ; pc, t, resume
-        mov     r0,#B_MI
-        EMIT    r0
+        str     r12,[r6,#I_HOST]
+        str     r0,[r5],#4
+        orr     r0,r9,#B_MI             ; the stub record: B_MI | t, site, pc, resume
+        ldr     r3,[r6,#I_PC]
+        mov     r9,r12
+        ldr     lr,[r4,#B_NSTUBS]
+        mov     r1,r5                   ; the site, written by the stub pass
+        add     r5,r5,#4
+        stmia   lr!,{r0,r1,r3,r9}
+        str     lr,[r4,#B_NSTUBS]
         b       eb_insn
 
 ; Every handler comes back here.
@@ -508,10 +624,8 @@ eb_done
         tst     r11,#EF_IRQ
         bne     eb_irq
 eb_next
-        add     r7,r7,#1
         add     r6,r6,#I_SIZE
-        ldr     r0,[r4,#B_SKIP_TO]
-        cmp     r7,r0
+        cmp     r6,r7
         blo     eb_loop
 
         ; The end of the instructions, or the instruction the branch past
@@ -524,9 +638,10 @@ eb_next
         PATCHB  r0,r1,r2
         mov     r0,#0
         str     r0,[r4,#B_SKIP_SITE]
-        ldr     r0,[r4,#B_N]
-        str     r0,[r4,#B_SKIP_TO]
-        cmp     r7,r0
+        ldr     r0,[r4,#B_INS]
+        ldr     r1,[r4,#B_N]
+        RECORD  r7,r0,r1
+        cmp     r6,r7
         blo     eb_loop
         b       eb_noskip2
 
@@ -536,18 +651,16 @@ eb_irq
         adr     lr,t_irq_check
         ldmia   lr,{r0-r2}
         stmia   r5!,{r0-r2}
-        mov     r0,#STUB_LEAVE
-        bl      new_stub
-        ldr     r1,[r6,#I_PC]
-        ldrb    r2,[r6,#I_LEN]
-        add     r1,r1,r2
-        mov     r1,r1,lsl #16
-        mov     r1,r1,lsr #16
-        ldrb    r2,[r6,#I_T_AFTER]
-        add     r0,r0,#ST_PC
-        stmia   r0,{r1,r2}              ; pc, t
-        mov     r0,#B_NE
-        EMIT    r0
+        ldr     r2,[r6,#I_PC]
+        ldrb    r1,[r6,#I_LEN]
+        add     r2,r2,r1
+        mov     r2,r2,lsl #16
+        mov     r2,r2,lsr #16           ; the next instruction
+        ldrb    r0,[r6,#I_T_AFTER]
+        orr     r0,r0,#B_NE
+        orr     r0,r0,#STUB_LEAVE :SHL: ST_KIND_SHIFT
+        SITE
+        STUB    r12
         b       eb_next
 
 eb_noskip2
@@ -571,110 +684,118 @@ eb_noskip2
         ldr     r0,[r8,#G_MISS]
         EMITB   r1,r0,B_AL
 
-        ; The stubs, in the order they were made.
+        ; The stubs, in the order they were made. Nothing below makes one:
+        ; the count takes the place of the next free record.
 eb_stubs
         ldr     r7,[r4,#B_STUBS]        ; the stub
-        ldr     r0,[r4,#B_NSTUBS]
-        rsb     r0,r0,r0,lsl #3
-        add     r9,r7,r0,lsl #2         ; the end of the stubs
+        ldr     r9,[r4,#B_NSTUBS]       ; the end of the stubs
+        sub     r0,r9,r7
+        mov     r0,r0,lsr #4
+        str     r0,[r4,#B_NSTUBS]
+        cmp     r0,#MAX_STUBS
+        bls     eb_stubs_ok
+        SETERR  r1,r2,3
+eb_stubs_ok
         ldr     r11,[r8,#G_SEG_TIMEOUT] ; (r9 and r11 are free by now)
 eb_stub_loop
         cmp     r7,r9
         bhs     eb_end
-        ldr     r0,[r7,#ST_KIND]
-        adr     r1,stub_tab
-        ldr     pc,[r1,r0,lsl #2]
-eb_stub_next
-        add     r7,r7,#ST_SIZE
+        ldmia   r7!,{r0,r1,r2,r3}       ; branch | kind << 8 | t, site, pc, resume / reg / record
+        and     r12,r0,#0xF00           ; the kind, shifted
+        cmp     r12,#STUB_FORWARD :SHL: ST_KIND_SHIFT
+        beq     st_forward
+        ; The branch at the site, to the stub emitted here.
+        and     r6,r0,#0xFF             ; t
+        and     r0,r0,#0xFF000000
+        sub     lr,r5,r1
+        sub     lr,lr,#8
+        mov     lr,lr,lsl #6
+        orr     lr,r0,lr,lsr #8
+        str     lr,[r1]
+        cmp     r12,#STUB_TIMEOUT :SHL: ST_KIND_SHIFT
+        beq     st_timeout
+        cmp     r12,#STUB_WRITE :SHL: ST_KIND_SHIFT
+        beq     st_write
+        cmp     r12,#STUB_LINK :SHL: ST_KIND_SHIFT
+        beq     st_link
+        cmp     r12,#STUB_LEAVE :SHL: ST_KIND_SHIFT
+        beq     st_leave
+        mov     r6,r3                   ; the instruction, for the helpers
+        cmp     r12,#STUB_TAKEN :SHL: ST_KIND_SHIFT
+        beq     st_taken
+st_dyn
+        bl      e_dyn_exit
         b       eb_stub_loop
-stub_tab
-        DCD     st_timeout, st_forward, st_link, st_taken, st_write, st_leave, st_dyn
+st_taken
+        bl      e_taken
+        b       eb_stub_loop
 
+; Time-out: BL seg_timeout, then the T-states times CYCLE, the address
+; and the resume address.
 st_timeout
-        ldr     r0,[r7,#ST_SITE]
-        mov     r1,r5
-        PATCHB  r0,r1,r2
-        EMITB   r1,r11,BL_AL
-        add     r3,r7,#ST_PC
-        ldmia   r3,{r1,r2,r3}           ; pc, t, resume
-        mov     r0,r2,lsl #8
-        stmia   r5!,{r0,r1,r3}          ; t * CYCLE, pc, resume
-        b       eb_stub_next
+        sub     r0,r11,r5
+        sub     r0,r0,#8
+        mov     r0,r0,lsl #6
+        mov     r0,r0,lsr #8
+        orr     r0,r0,#BL_AL
+        mov     r1,r6,lsl #8
+        stmia   r5!,{r0,r1,r2,r3}       ; BL, t * CYCLE, pc, resume
+        b       eb_stub_loop
+; Forward: the branch at the site goes to the code of the target record.
 st_forward
-        ldr     r0,[r7,#ST_SITE]
-        ldr     r1,[r7,#ST_INDEX]
-        ldr     r2,[r4,#B_INS]
-        RECORD  r3,r2,r1
-        ldr     r1,[r3,#I_HOST]
-        PATCHB  r0,r1,r2
-        b       eb_stub_next
+        ldr     r2,[r3,#I_HOST]
+        and     r0,r0,#0xFF000000
+        sub     r2,r2,r1
+        sub     r2,r2,#8
+        mov     r2,r2,lsl #6
+        orr     r0,r0,r2,lsr #8
+        str     r0,[r1]
+        b       eb_stub_loop
+; Link: BL link, then the target, the site and the key (jit_link_stub
+; retargets the site when the target is translated).
 st_link
-        ldr     r0,[r7,#ST_SITE]
-        mov     r1,r5
-        PATCHB  r0,r1,r2
         ldr     r0,[r8,#G_LINK]
-        EMITB   r1,r0,BL_AL
-        ldr     r0,[r7,#ST_PC]
-        ldr     r1,[r7,#ST_SITE]
+        EMITB   r3,r0,BL_AL
+        mov     r0,r2                   ; the target
         ldr     r2,[r4,#B_KEY]
         mov     r3,r5                   ; the data words
         stmia   r5!,{r0-r2}
         bl      e_link
-        b       eb_stub_next
-st_taken
-        ldr     r0,[r7,#ST_SITE]
-        mov     r1,r5
-        PATCHB  r0,r1,r2
-        ldr     r1,[r7,#ST_INDEX]
-        ldr     r2,[r4,#B_INS]
-        RECORD  r6,r2,r1                ; the instruction, for the helpers
-        bl      e_taken
-        b       eb_stub_next
-st_dyn
-        ldr     r0,[r7,#ST_SITE]
-        mov     r1,r5
-        PATCHB  r0,r1,r2
-        ldr     r1,[r7,#ST_INDEX]
-        ldr     r2,[r4,#B_INS]
-        RECORD  r6,r2,r1
-        bl      e_dyn_exit
-        b       eb_stub_next
+        b       eb_stub_loop
+; Write: the address moved to r12 unless it is there, r2 = lr, BL write,
+; then the next address (or -1), the T-states times CYCLE and the key.
 st_write
-        ldr     r0,[r7,#ST_SITE]
-        mov     r1,r5
-        PATCHB  r0,r1,r2
-        ldr     r0,[r7,#ST_REG]
-        cmp     r0,#RAD
-        TMPL    r1,t_mov_r12_r
-        orrne   r1,r1,r0
+        cmp     r3,#RAD
+        MOVW    r1,W_MOV_R12_R
+        orrne   r1,r1,r3
         strne   r1,[r5],#4              ; MOV r12,reg
-        TMPL    r0,t_mov_r2_lr
-        EMIT    r0
-        ldr     r0,[r8,#G_WRITE]
-        EMITB   r1,r0,BL_AL
-        ldr     r0,[r7,#ST_PC]
-        ldr     r1,[r7,#ST_T]
-        ldr     r2,[r4,#B_KEY]
-        mov     r1,r1,lsl #8
-        stmia   r5!,{r0-r2}
-        b       eb_stub_next
+        MOVW    r0,W_MOV_R2_LR
+        ldr     r1,[r8,#G_WRITE]
+        sub     r1,r1,r5
+        sub     r1,r1,#12               ; the BL, one word on
+        mov     r1,r1,lsl #6
+        mov     r1,r1,lsr #8
+        orr     r1,r1,#BL_AL
+        mov     r3,r6,lsl #8
+        ldr     r12,[r4,#B_KEY]
+        stmia   r5!,{r0,r1,r2,r3,r12}   ; MOV r2,lr; BL; pc; t * CYCLE; key
+        b       eb_stub_loop
+; Leave: r0 = the next address, r1 = the T-states times CYCLE, B leave.
 st_leave
-        ldr     r0,[r7,#ST_SITE]
-        mov     r1,r5
-        PATCHB  r0,r1,r2
-        ldr     r0,[r7,#ST_PC]
+        mov     r0,r2
         mov     r1,#0
         bl      e_mov32
-        ldr     r1,[r7,#ST_T]
-        mov     r1,r1,lsl #8
-        TMPL    r0,t_mov_r1_imm
-        bl      e_dpi
+        MOVW    r0,W_MOV_R1_IMM
+        cmp     r6,#0
+        orrne   r0,r0,#0xC00            ; a byte in bits 8-15 (zero as it is)
+        orr     r0,r0,r6
+        EMIT    r0
         ldr     r0,[r8,#G_LEAVE]
         EMITB   r1,r0,B_AL
-        b       eb_stub_next
+        b       eb_stub_loop
 
 eb_end
-        ldr     r1,[sp,#F_J]
+        GETJ    r1
         ldr     r0,[r1,#S_ZONE_END]
         sub     r0,r0,r5
         cmp     r0,#64                  ; 16 words
@@ -687,14 +808,9 @@ eb_full
         SETERR  r2,r3,4
         b       eb_exit
 
-t_mark          STR     r10,[r10]       ; | offset
-t_subs_cyc      SUBS    r8,r8,#0        ; | T-states * CYCLE
 t_irq_check     LDR     r0,[r10,#GOFF_IRQ_LINE]
                 LDR     r1,[r10,#GOFF_NMI]
                 ORRS    r0,r0,r1
-t_mov_r12_r     MOV     r12,r0          ; | register
-t_mov_r2_lr     MOV     r2,lr
-t_mov_r1_imm    MOV     r1,#0           ; | immediate
 
 ; Bank check of a block from a paged slot: LDR r0,[r10,#slot_bank + 4 *
 ; slot]; CMP r0,#bank (or through r1); BNE to the miss stub.
@@ -702,7 +818,7 @@ eb_bank_check
         ldr     r0,[r4,#B_KEY]
         mov     r1,r0,lsr #16
         sub     r1,r1,#1                ; slot
-        TMPL    r2,t_ldr_r0_g
+        MOVW    r2,W_LDR_R0_G
         add     r2,r2,#GOFF_SLOT_BANK :AND: 0xF00
         add     r2,r2,#GOFF_SLOT_BANK :AND: 0xFF
         add     r2,r2,r1,lsl #2
@@ -711,7 +827,7 @@ eb_bank_check
         mov     r0,r0,lsr #16           ; bank
         cmp     r0,#256
         bhs     eb_bank_wide
-        TMPL    r1,t_cmp_r0_imm
+        MOVW    r1,W_CMP_R0_IMM
         orr     r0,r1,r0
         EMIT    r0
 eb_bank_site
@@ -726,8 +842,6 @@ eb_bank_wide
         EMIT    r0
         b       eb_bank_site
 
-t_ldr_r0_g      LDR     r0,[r10]        ; | offset
-t_cmp_r0_imm    CMP     r0,#0           ; | bank
 t_cmp_r0_r1     CMP     r0,r1
 
 ; Entry check of a RAM block: a BL, then the first address, the number of
@@ -936,29 +1050,8 @@ t_ri_bics       BICS    r0,r0,#0        ; | registers, immediate
 t_ri_eors       EORS    r0,r0,#0        ; | registers, immediate
 
 ;----------------------------------------------------------------------------
-; Stubs and encodings
+; Encodings
 ;----------------------------------------------------------------------------
-
-; new_stub: r0 = kind -> r0 = a new stub (site = the cursor; the other
-; fields are left to the caller: each kind reads only the ones its creator
-; sets). Uses r1-r3.
-new_stub
-        ldr     r1,[r4,#B_NSTUBS]
-        ldr     r2,[r4,#B_STUBS]
-        rsb     r3,r1,r1,lsl #3
-        add     r2,r2,r3,lsl #2
-        add     r1,r1,#1
-        str     r1,[r4,#B_NSTUBS]
-        cmp     r1,#MAX_STUBS
-        bhi     ns_many
-ns_fill
-        mov     r1,r5
-        stmia   r2,{r0,r1}
-        mov     r0,r2
-        mov     pc,lr
-ns_many
-        SETERR  r1,r3,3
-        b       ns_fill
 
 ; Shifts $v right by its trailing zero count rounded down to even and
 ; takes half of it from $r ($t: scratch).
@@ -1080,11 +1173,11 @@ em_p
         EMIT    r1
         mov     pc,lr
 em_two
-        TMPL    r1,t_mov_imm
+        MOVW    r1,W_MOV_IMM
         orr     r1,r1,r12
         and     r2,r0,#0xFF
         orr     r1,r1,r2
-        TMPL    r2,t_orr_imm
+        MOVW    r2,W_ORR_IMM
         orr     r2,r2,r12
         orr     r2,r2,r12,lsl #4        ; the same register as source
         orr     r2,r2,#0xC00
@@ -1105,6 +1198,12 @@ em_general
         EMIT    r0
         ldmfd   sp!,{r4,r6,r7,pc}
 em_mvn
+        ; A 16-bit value shifted left by 16 (the operand of LD rr,nn)
+        ; with both bytes set (one alone was encoded above): MOV then
+        ; ORR, as the byte loop below would make them; MVN never
+        ; encodes it.
+        movs    r1,r6,lsl #16
+        beq     em_hi16
         mvn     r1,r6
         bl      e_imm
         cmp     r1,#IMM_NONE
@@ -1139,6 +1238,20 @@ em_bnext
         add     r7,r7,#8
         cmp     r7,#32
         blo     em_byte
+        ldmfd   sp!,{r4,r6,r7,pc}
+em_hi16
+        MOVW    r0,W_MOV_IMM
+        orr     r0,r0,r4,lsl #4         ; the destination as Rn, MOV included
+        orr     r0,r0,r4
+        orr     r0,r0,#0x800
+        and     r1,r6,#0xFF0000
+        orr     r0,r0,r1,lsr #16        ; MOV rd,#low byte << 16
+        MOVW    r1,W_ORR_IMM
+        orr     r1,r1,r4,lsl #4
+        orr     r1,r1,r4
+        orr     r1,r1,#0x400
+        orr     r1,r1,r6,lsr #24        ; ORR rd,rd,#high byte << 24
+        stmia   r5!,{r0,r1}
         ldmfd   sp!,{r4,r6,r7,pc}
 
 t_mov_imm       MOV     r0,#0           ; | destination, immediate
@@ -1186,31 +1299,27 @@ t_read          MVN     r0,r0,LSR #24   ; | address register
 ; block; never for a repeated instruction) and the T-states left after
 ; the instruction. Uses r1-r3, r12.
 e_write
-        stmfd   sp!,{r0,lr}
         adr     r12,t_write
         ldmia   r12,{r1,r2,r3,r12}
         orr     r1,r1,r0
         orr     r12,r12,r0
         stmia   r5!,{r1,r2,r3,r12}
-        mov     r0,#STUB_WRITE
-        bl      new_stub
-        ldmfd   sp!,{r1,lr}
-        str     r1,[r0,#ST_REG]
+        mov     r3,r0                   ; the address register
         ldrb    r1,[r6,#I_KIND]
         cmp     r1,#K_REP
-        mvneq   r1,#0
+        mvneq   r2,#0
         beq     ew_pc
-        ldr     r1,[r6,#I_PC]
-        ldrb    r2,[r6,#I_LEN]
-        add     r1,r1,r2
-        mov     r1,r1,lsl #16
-        mov     r1,r1,lsr #16
+        ldr     r2,[r6,#I_PC]
+        ldrb    r1,[r6,#I_LEN]
+        add     r2,r2,r1
+        mov     r2,r2,lsl #16
+        mov     r2,r2,lsr #16
 ew_pc
-        str     r1,[r0,#ST_PC]
-        ldrb    r2,[r6,#I_T_AFTER]
-        str     r2,[r0,#ST_T]
-        mov     r0,#BL_EQ
-        EMIT    r0
+        ldrb    r0,[r6,#I_T_AFTER]
+        orr     r0,r0,#BL_EQ
+        orr     r0,r0,#STUB_WRITE :SHL: ST_KIND_SHIFT
+        SITE
+        STUB    r12
         mov     pc,lr
 t_write         MOV     r1,r0,LSR #24   ; | address register
                 LDR     r1,[r10,r1,LSL #2]
@@ -1362,18 +1471,21 @@ t_add_r12_d     DCD     0xE280C800      ; ADD r12,base,#d << 16 | base, d
 t_sub_r12_d     DCD     0xE240C800      ; SUB r12,base,#d << 16
 
 ; e_push: emits the push of the 16-bit value in r0 (uses r1, r2 of the
-; generated code; a special page goes through the glue).
+; generated code; a special page goes through the glue). Uses r0-r3, r12.
 e_push
-        stmfd   sp!,{lr}
         adr     r12,t_push
-        ldmia   r12,{r0-r3,r12,lr}
-        stmia   r5!,{r0-r3,r12,lr}
-        adr     r12,t_push + 24
-        ldmia   r12,{r0,r1}
-        stmia   r5!,{r0,r1}
-        ldr     r0,[r8,#G_PUSH_SLOW]
-        EMITB   r1,r0,BL_EQ
-        ldmfd   sp!,{pc}
+        ldmia   r12,{r0-r3,r12}
+        stmia   r5!,{r0-r3,r12}
+        adr     r12,t_push + 20
+        ldmia   r12,{r0,r1,r2}
+        ldr     r3,[r8,#G_PUSH_SLOW]
+        sub     r3,r3,r5
+        sub     r3,r3,#20               ; the BL, three words on
+        mov     r3,r3,lsl #6
+        mov     r3,r3,lsr #8
+        orr     r3,r3,#BL_EQ
+        stmia   r5!,{r0-r3}
+        mov     pc,lr
 t_push          SUB     r11,r11,#0x20000
                 MOV     r1,r11,LSR #24
                 LDR     r1,[r10,r1,LSL #2]
@@ -1430,119 +1542,145 @@ t_ldr_iy        LDR     r0,[r10,#GOFF_IY]       ; | register
 
 ; e_get8: r0 = Z80 register, r1 = a scratch register, r2 = index register
 ; -> r0 = operand (clean value in bits 24-31 of the register shifted left:
-; the high byte of a pair isolated in the scratch register). Uses r3.
+; the high byte of a pair isolated in the scratch register). The pair is
+; found as by e_pair_of. Uses r3, r12.
 e_get8
-        stmfd   sp!,{lr}
         cmp     r0,#7
         moveq   r0,#RA
-        beq     eg_done
-        stmfd   sp!,{r0}
-        bl      e_pair_of
-        ldmfd   sp!,{r3}
-        tst     r3,#1
+        moveq   pc,lr
+        mov     r12,r0                  ; the register
+        cmp     r0,#2
+        movlo   r0,#RBC
+        blo     eg_pair
+        cmp     r0,#4
+        movlo   r0,#RDE
+        blo     eg_pair
+        cmp     r2,#EF_IX
+        moveq   r0,#RIX
+        beq     eg_pair
+        cmp     r2,#EF_IY
+        movne   r0,#RHL
+        bne     eg_pair
+        TMPL    r3,t_ldr_iy
+        orr     r3,r3,r1,lsl #12
+        EMIT    r3
+        mov     r0,r1
+eg_pair
+        tst     r12,#1
         orrne   r0,r0,#0x400            ; the low byte: shifted left by 8
-        bne     eg_done
+        movne   pc,lr
         TMPL    r3,t_and_hi
         orr     r3,r3,r0,lsl #16
         orr     r3,r3,r1,lsl #12
         EMIT    r3
         mov     r0,r1
-eg_done
-        ldmfd   sp!,{pc}
+        mov     pc,lr
 t_and_hi        AND     r0,r0,#0xFF000000       ; | scratch, pair
 
 ; e_set8: r0 = Z80 register, r1 = operand (e_get8 form), r2 = index
-; register: emits the register = the operand. Uses r3, r12.
+; register: emits the register = the operand. The pair is found as by
+; e_pair_of, IY loaded in lr and stored back. Uses r0-r3, r12.
 e_set8
-        stmfd   sp!,{r4,lr}
-        mov     r4,r1
         cmp     r0,#7
         bne     es_pair
-        tst     r4,#O_IMM
+        tst     r1,#O_IMM
         TMPLC   ne,r3,t_mov_a_imm       ; A = immediate << 24
         TMPLC   eq,r3,t_mov_a_r         ; A = register << shift
-        mov     r1,r4,lsl #20
+        mov     r1,r1,lsl #20
         mov     r1,r1,lsr #20
         orr     r3,r3,r1
         EMIT    r3
-        ldmfd   sp!,{r4,pc}
+        mov     pc,lr
 es_pair
-        ; The pair, IY loaded in lr and stored back.
-        stmfd   sp!,{r0,r2}
-        mov     r1,#RLR
-        bl      e_pair_of
-        ldmfd   sp!,{r1,r2}
-        mov     r3,r0,lsl #16
-        orr     r3,r3,r0,lsl #12        ; pair as Rn and Rd
-        tst     r1,#1
+        cmp     r0,#2
+        movlo   r3,#RBC
+        blo     es_fields
+        cmp     r0,#4
+        movlo   r3,#RDE
+        blo     es_fields
+        cmp     r2,#EF_IX
+        moveq   r3,#RIX
+        beq     es_fields
+        cmp     r2,#EF_IY
+        movne   r3,#RHL
+        bne     es_fields
+        TMPL    r3,t_ldr_iy
+        orr     r3,r3,#RLR :SHL: 12
+        EMIT    r3
+        mov     r3,#RLR
+        orr     r0,r0,#8                ; IY: stored back below
+es_fields
+        orr     r3,r3,r3,lsl #4
+        mov     r3,r3,lsl #12           ; pair as Rn and Rd
+        tst     r0,#1
         bne     es_low
         ; High byte.
-        tst     r4,#O_IMM
+        tst     r1,#O_IMM
         beq     es_hreg
-        tst     r4,#0xFF0000
+        tst     r1,#0xFF0000
         TMPL    r12,t_bic_hi
         orreq   r12,r12,r3
         streq   r12,[r5],#4             ; zero: BIC
         beq     es_iy
-        TMPL    r12,t_and_lo
+        TMPL    r2,t_and_lo
+        orr     r2,r2,r3
+        TMPL    r12,t_orr_imm_hi
         orr     r12,r12,r3
-        TMPL    lr,t_orr_imm_hi
-        orr     lr,lr,r3
-        and     r0,r4,#0xFF0000
-        orr     lr,lr,r0,lsr #16
-        stmia   r5!,{r12,lr}
+        and     r1,r1,#0xFF0000
+        orr     r12,r12,r1,lsr #16
+        stmia   r5!,{r2,r12}
         b       es_iy
 es_hreg
-        TMPL    r12,t_and_lo
+        TMPL    r2,t_and_lo
+        orr     r2,r2,r3
+        TMPL    r12,t_orr_reg
         orr     r12,r12,r3
-        TMPL    lr,t_orr_reg
-        orr     lr,lr,r3
-        orr     lr,lr,r4
-        stmia   r5!,{r12,lr}
+        orr     r12,r12,r1
+        stmia   r5!,{r2,r12}
         b       es_iy
 es_low
-        tst     r4,#O_IMM
+        tst     r1,#O_IMM
         bne     es_limm
-        and     r12,r4,#0xF80
+        and     r12,r1,#0xF80
         cmp     r12,#0x400              ; a low byte operand: moved to r1
         TMPLC   eq,r12,t_mov_r1_lsl8
-        andeq   r0,r4,#15
-        orreq   r12,r12,r0
+        andeq   r2,r1,#15
+        orreq   r12,r12,r2
         streq   r12,[r5],#4
-        moveq   r4,#1
-        TMPL    r12,t_and_hi_p
+        moveq   r1,#1
+        TMPL    r2,t_and_hi_p
+        orr     r2,r2,r3
+        and     r12,r1,#0xF80
+        cmp     r12,#0xC00
+        TMPLC   eq,r12,t_orr_lsl16
+        TMPLC   ne,r12,t_orr_lsr8
         orr     r12,r12,r3
-        and     lr,r4,#0xF80
-        cmp     lr,#0xC00
-        TMPLC   eq,lr,t_orr_lsl16
-        TMPLC   ne,lr,t_orr_lsr8
-        orr     lr,lr,r3
-        and     r0,r4,#15
-        orr     lr,lr,r0
-        stmia   r5!,{r12,lr}
+        and     r1,r1,#15
+        orr     r12,r12,r1
+        stmia   r5!,{r2,r12}
         b       es_iy
 es_limm
-        tst     r4,#0xFF0000
+        tst     r1,#0xFF0000
         TMPL    r12,t_bic_lo
         orreq   r12,r12,r3
         streq   r12,[r5],#4
         beq     es_iy
-        TMPL    r12,t_and_hi_p
+        TMPL    r2,t_and_hi_p
+        orr     r2,r2,r3
+        TMPL    r12,t_orr_imm_lo
         orr     r12,r12,r3
-        TMPL    lr,t_orr_imm_lo
-        orr     lr,lr,r3
-        and     r0,r4,#0xFF0000
-        orr     lr,lr,r0,lsr #16
-        stmia   r5!,{r12,lr}
+        and     r1,r1,#0xFF0000
+        orr     r12,r12,r1,lsr #16
+        stmia   r5!,{r2,r12}
 es_iy
-        cmp     r2,#EF_IY
-        bne     es_done
+        tst     r0,#8
+        moveq   pc,lr
+        and     r1,r0,#7
         cmp     r1,#4
         cmpne   r1,#5
         TMPLC   eq,r3,t_str_lr_iy
         streq   r3,[r5],#4
-es_done
-        ldmfd   sp!,{r4,pc}
+        mov     pc,lr
 t_mov_a_imm     MOV     r4,#0           ; | immediate << 24
 t_mov_a_r       MOV     r4,r0           ; | operand
 t_bic_hi        BIC     r0,r0,#0xFF000000       ; | pair
@@ -2139,7 +2277,8 @@ e_dyn_exit
 ; that holds when it is true: from the ARM flags of a fused producer (the
 ; previous instruction), or after a TST emitted here. Uses r1, r2.
 e_cond
-        cmp     r7,#0
+        ldr     r1,[r4,#B_INS]
+        cmp     r6,r1                   ; the first instruction: nothing before it
         ldrneb  r1,[r6,#I_FUSED - I_SIZE]
         moveq   r1,#0
         and     r2,r0,#1                ; 1: flag set is true
@@ -2254,41 +2393,42 @@ e_jump_cond
         bne     ejc_busy
         cmp     r1,#0
         beq     ejc_target
-        TMPL    r0,t_sub_cyc_cc
+        MOVW    r0,W_SUBEQ_CYC          ; (1 to 255: a byte in bits 8-15)
         ldr     r2,[sp]
         orr     r0,r0,r2
-        mov     r1,r1,lsl #8
-        bl      e_dpi
+        orr     r0,r0,r1
+        EMIT    r0
 ejc_target
         ldrb    r0,[r6,#I_INTERNAL]
         cmp     r0,#0xFF                ; no instruction of the block
         beq     ejc_outside
-        cmp     r0,r7
+        ldr     r1,[r4,#B_INS]
+        RECORD  r2,r1,r0                ; the target
+        cmp     r2,r6
         bhi     ejc_forward
-        bl      ejc_host                ; a target behind: a direct branch
+        ldr     r0,[r2,#I_HOST]         ; a target behind: a direct branch
         ldr     r1,[sp]
         b       ejc_branch
 ejc_outside
+        ; A link stub, or a dynamic one when the target is read at run
+        ; time: the condition and the kind, the target, the instruction.
         ldrb    r0,[r6,#I_DYN]
         cmp     r0,#0
-        movne   r0,#STUB_DYN
-        moveq   r0,#STUB_LINK
-        bl      new_stub
-        ldrb    r1,[r6,#I_DYN]
-        cmp     r1,#0
-        strne   r7,[r0,#ST_INDEX]
-        ldreq   r1,[r6,#I_TARGET]
-        streq   r1,[r0,#ST_PC]
-        b       ejc_place
-ejc_forward
-        mov     r0,#STUB_FORWARD
-        bl      new_stub
-        ldrb    r1,[r6,#I_INTERNAL]
-        str     r1,[r0,#ST_INDEX]
-ejc_place
         ldr     r0,[sp]
         orr     r0,r0,#B_EQ
-        EMIT    r0
+        orrne   r0,r0,#STUB_DYN :SHL: ST_KIND_SHIFT
+        orreq   r0,r0,#STUB_LINK :SHL: ST_KIND_SHIFT
+        ldr     r2,[r6,#I_TARGET]
+        mov     r3,r6
+        b       ejc_place
+ejc_forward
+        ldr     r0,[sp]
+        orr     r0,r0,#B_EQ
+        orr     r0,r0,#STUB_FORWARD :SHL: ST_KIND_SHIFT
+        mov     r3,r2                   ; the target record
+ejc_place
+        SITE
+        STUB    r12
         b       ejc_done
 ejc_line
         ; A loop waiting for a line: the idle time is taken under the
@@ -2334,29 +2474,24 @@ ejc_host
         RECORD  r2,r1,r0
         ldr     r0,[r2,#I_HOST]
         mov     pc,lr
-t_sub_cyc_cc    SUBEQ   r8,r8,#0        ; | condition, T-states * CYCLE
 
 ; e_leave_check: emits the leave of the block when the machine asked for
 ; it (r0 != 0), through a leave stub with the address of the next
-; instruction.
+; instruction. Uses r0-r3, r12.
 e_leave_check
-        stmfd   sp!,{lr}
-        TMPL    r0,t_teq_r0
+        MOVW    r0,W_TEQ_R0
         EMIT    r0
-        mov     r0,#STUB_LEAVE
-        bl      new_stub
-        ldr     r1,[r6,#I_PC]
-        ldrb    r2,[r6,#I_LEN]
-        add     r1,r1,r2
-        mov     r1,r1,lsl #16
-        mov     r1,r1,lsr #16
-        ldrb    r2,[r6,#I_T_AFTER]
-        str     r1,[r0,#ST_PC]
-        str     r2,[r0,#ST_T]
-        mov     r0,#B_NE
-        EMIT    r0
-        ldmfd   sp!,{pc}
-t_teq_r0        TEQ     r0,#0
+        ldr     r2,[r6,#I_PC]
+        ldrb    r1,[r6,#I_LEN]
+        add     r2,r2,r1
+        mov     r2,r2,lsl #16
+        mov     r2,r2,lsr #16           ; the next instruction
+        ldrb    r0,[r6,#I_T_AFTER]
+        orr     r0,r0,#B_NE
+        orr     r0,r0,#STUB_LEAVE :SHL: ST_KIND_SHIFT
+        SITE
+        STUB    r12
+        mov     pc,lr
 
 ; e_port_c: emits r1 = port C.
 e_port_c
@@ -2430,18 +2565,16 @@ e_out_loop
         adr     r12,t_ol4
         ldmia   r12,{r1,r2,r3}
         stmia   r5!,{r0,r1,r2,r3}
-        mov     r0,#STUB_LEAVE
-        bl      new_stub
-        ldr     r1,[r9,#I_PC]
-        ldrb    r2,[r9,#I_LEN]
-        add     r1,r1,r2
-        mov     r1,r1,lsl #16
-        mov     r1,r1,lsr #16
-        ldrb    r2,[r9,#I_T_AFTER]
-        str     r1,[r0,#ST_PC]
-        str     r2,[r0,#ST_T]
-        mov     r0,#B_NE
-        EMIT    r0
+        ldr     r2,[r9,#I_PC]
+        ldrb    r1,[r9,#I_LEN]
+        add     r2,r2,r1
+        mov     r2,r2,lsl #16
+        mov     r2,r2,lsr #16           ; the instruction after the loop
+        ldrb    r0,[r9,#I_T_AFTER]
+        orr     r0,r0,#B_NE
+        orr     r0,r0,#STUB_LEAVE :SHL: ST_KIND_SHIFT
+        SITE
+        STUB    r12
         mov     r9,r5                   ; the branch past the loop
         mov     r0,#B_AL
         EMIT    r0
@@ -2824,7 +2957,8 @@ eed_grp
         ; (LD r,(HL) to A, B, C, D or E; AND, XOR or OR (HL)), with no
         ; cycle check or interrupt check between them, that byte is taken
         ; instead of a second read.
-        cmp     r7,#0
+        ldr     r0,[r4,#B_INS]
+        cmp     r6,r0
         beq     eg_read
         ldrb    r0,[r6,#I_SEG_START]
         sub     r12,r6,#I_SIZE          ; the previous instruction
@@ -2875,11 +3009,9 @@ eed_loop
         add     r0,r6,#I_SIZE
         bl      e_out_loop
         str     r0,[r4,#B_SKIP_SITE]
-        add     r0,r7,#2                ; the block loop patches it there
-        ldr     r1,[r4,#B_N]
-        cmp     r0,r1
-        movhs   r0,r1                   ; (or at the end of the instructions)
-        str     r0,[r4,#B_SKIP_TO]
+        add     r0,r6,#2 * I_SIZE       ; the block loop patches it there
+        cmp     r0,r7
+        movlo   r7,r0                   ; (or at the end of the instructions)
         bl      e_block_insn
         b       eb_done
 eed_plain
@@ -3351,13 +3483,13 @@ m_ld_rr_nn                              ; LD rr,nn
         EMIT    r0
         b       eb_done
 m_ld_rr_reg
-        stmfd   sp!,{r0}
+        mov     r12,r0
         and     r0,r9,#0x30
         mov     r0,r0,lsr #4            ; p
         mov     r1,#2
         bl      e_rp_reg
         mov     r1,r0
-        ldmfd   sp!,{r0}
+        mov     r0,r12
         bl      e_mov32
         b       eb_done
 t_str_r0_iy     STR     r0,[r10,#GOFF_IY]
@@ -3370,11 +3502,9 @@ m_add_hl                                ; ADD HL,rr
         cmp     r0,#0x20
         moveq   r0,r12
         beq     m_add_hl_rr
-        stmfd   sp!,{r12}
         mov     r0,r0,lsr #4
         mov     r1,#2
-        bl      e_rp_reg
-        ldmfd   sp!,{r12}
+        bl      e_rp_reg                ; (uses r1 and r2)
 m_add_hl_rr
         ; r12 = rh, r0 = rr
         and     r1,r11,#EF_LIVE + EF_FUSED
@@ -3763,10 +3893,10 @@ m_ld_r_hl                               ; LD r,(HL)
 
 m_ld_hl_r                               ; LD (HL),r
         bl      e_mem_addr
-        stmfd   sp!,{r0}
+        mov     r12,r0
         and     r0,r9,#7
         bl      e_get_low
-        ldmfd   sp!,{r0}
+        mov     r0,r12
         bl      e_write
         b       eb_done
 
@@ -3821,13 +3951,11 @@ m_call_cc                               ; CALL cc,nn
         and     r0,r9,#0x38
         mov     r0,r0,lsr #3
         bl      e_cond
-        stmfd   sp!,{r0}
-        mov     r0,#STUB_TAKEN
-        bl      new_stub
-        str     r7,[r0,#ST_INDEX]
-        ldmfd   sp!,{r0}
         orr     r0,r0,#B_EQ
-        EMIT    r0
+        orr     r0,r0,#STUB_TAKEN :SHL: ST_KIND_SHIFT
+        mov     r3,r6                   ; the instruction
+        SITE
+        STUB    r12
         b       eb_done
 
 m_pop                                   ; POP rr
@@ -3838,7 +3966,8 @@ m_pop                                   ; POP rr
         and     r0,r9,#0x30
         cmp     r0,#0x30
         bne     m_pop_read
-        cmp     r7,#0
+        ldr     r0,[r4,#B_INS]
+        cmp     r6,r0
         beq     m_pop_read
         ldrb    r0,[r6,#I_SEG_START]
         ldrb    r1,[r6,#I_PRE]
@@ -4348,73 +4477,5 @@ cb_reg_setres
         b       eb_done
 t_bic_pair_bit  BIC     r0,r0,#0        ; | pair, bit
 t_orr_pair_bit  ORR     r0,r0,#0
-
-; Handlers of the unprefixed and DD / FD opcodes (the C switch of the
-; emitter, opcode by opcode; a bare prefix never reaches here).
-main_tab
-        DCD     m_nop, m_ld_rr_nn, m_ld_ind_a, m_inc_rr
-        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_rlca
-        DCD     m_exaf, m_add_hl, m_ld_a_ind, m_inc_rr
-        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_rrca
-        DCD     m_djnz, m_ld_rr_nn, m_ld_ind_a, m_inc_rr
-        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_rla
-        DCD     m_jr, m_add_hl, m_ld_a_ind, m_inc_rr
-        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_rra
-        DCD     m_jrcc, m_ld_rr_nn, m_ld_nn_hl, m_inc_rr
-        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_daa
-        DCD     m_jrcc, m_add_hl, m_ld_hl_nn, m_inc_rr
-        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_cpl
-        DCD     m_jrcc, m_ld_rr_nn, m_ld_nn_a, m_inc_rr
-        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_scf
-        DCD     m_jrcc, m_add_hl, m_ld_a_nn, m_inc_rr
-        DCD     m_inc_r, m_inc_r, m_ld_r_n, m_ccf
-        DCD     m_nop, m_ld_r_r, m_ld_r_r, m_ld_r_r
-        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_hl, m_ld_r_r
-        DCD     m_ld_r_r, m_nop, m_ld_r_r, m_ld_r_r
-        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_hl, m_ld_r_r
-        DCD     m_ld_r_r, m_ld_r_r, m_nop, m_ld_r_r
-        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_hl, m_ld_r_r
-        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_r, m_nop
-        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_hl, m_ld_r_r
-        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_r, m_ld_r_r
-        DCD     m_nop, m_ld_r_r, m_ld_r_hl, m_ld_r_r
-        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_r, m_ld_r_r
-        DCD     m_ld_r_r, m_nop, m_ld_r_hl, m_ld_r_r
-        DCD     m_ld_hl_r, m_ld_hl_r, m_ld_hl_r, m_ld_hl_r
-        DCD     m_ld_hl_r, m_ld_hl_r, m_halt, m_ld_hl_r
-        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_r, m_ld_r_r
-        DCD     m_ld_r_r, m_ld_r_r, m_ld_r_hl, m_nop
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_alu_r, m_alu_r, m_alu_r, m_alu_r
-        DCD     m_ret_cc, m_pop, m_jp_cc, m_jp
-        DCD     m_call_cc, m_push, m_alu_n, m_rst
-        DCD     m_ret_cc, m_ret, m_jp_cc, m_nop
-        DCD     m_call_cc, m_call, m_alu_n, m_rst
-        DCD     m_ret_cc, m_pop, m_jp_cc, m_out_n
-        DCD     m_call_cc, m_push, m_alu_n, m_rst
-        DCD     m_ret_cc, m_exx, m_jp_cc, m_in_n
-        DCD     m_call_cc, m_call, m_alu_n, m_rst
-        DCD     m_ret_cc, m_pop, m_jp_cc, m_ex_sp
-        DCD     m_call_cc, m_push, m_alu_n, m_rst
-        DCD     m_ret_cc, m_jp_hl, m_jp_cc, m_ex_de
-        DCD     m_call_cc, m_call, m_alu_n, m_rst
-        DCD     m_ret_cc, m_pop, m_jp_cc, m_di
-        DCD     m_call_cc, m_push, m_alu_n, m_rst
-        DCD     m_ret_cc, m_ld_sp_hl, m_jp_cc, m_di
-        DCD     m_call_cc, m_call, m_alu_n, m_rst
 
         END

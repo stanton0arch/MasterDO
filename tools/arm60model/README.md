@@ -161,7 +161,7 @@ Environment variables:
   or on Phoenix is replayed here;
 - `SIMPROF=1`: cycles per function of the image, and of the generated code
   (the 40 largest; `SIMPROFALL=1` lists every function with cycles);
-- `SIMDIS=symbol`: executions of each instruction of a function.
+- `SIMDIS=symbol`: executions and cycles of each instruction of a function.
 
 Scripts on `code.bin` (the whole code buffer and the block descriptors,
 written at the end of a cartridge run) and `codecnt.bin` (executions of
