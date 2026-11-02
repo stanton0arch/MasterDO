@@ -7,9 +7,11 @@
  * producers before conditional jumps, OUTI / OUTD / OUT (C),r runs, OUTI
  * loops, busy-wait loops reading memory or a line port, EI, BIT, block
  * instructions) over pages of every kind, decoded by jit_decode_block and
- * analysed both ways from the same records; the fields the analysis
- * writes (internal, busy, run, seg_start, fused, live_after, live_before,
- * seg_t at segment starts, t_after) and the counts are compared.
+ * analysed both ways from the same records (the decoder resolves the
+ * targets inside the block and marks the jumps back; the C passes find
+ * them again on their own); the fields the analysis writes (busy, run,
+ * seg_start, fused, live_after, live_before, seg_t at segment starts,
+ * t_after) and the counts are compared.
  */
 
 #include "z80jit_int.h"
@@ -541,8 +543,8 @@ void ana_test(void)
                 continue;
             memcpy(rb, ra, na * sizeof(jit_insn));
             for (k = 0; k < na; k++) {
-                ra[k].live_after = ra[k].live_before = ra[k].seg_t = ra[k].t_after = 0xDEADBEEFu;
-                rb[k].live_after = rb[k].live_before = rb[k].seg_t = rb[k].t_after = 0x5A5A5A5Au;
+                ((uint32 *)&ra[k])[9] = 0xDEADBEEFu;     /* live_after live_before seg_t t_after */
+                ((uint32 *)&rb[k])[9] = 0x5A5A5A5Au;
             }
             bcb = bca;
             bcb.ins = rb;
@@ -583,10 +585,11 @@ void ana_test(void)
                 }
                 if (ra[k].run == RUN_LOOP)
                     nloops++;
-                for (w = 14; w < 25; w++) {
-                    if (w == 23 && !ra[k].seg_start)
-                        continue;               /* seg_t is only read at segment starts */
-                    if (x[w] != y[w]) {
+                for (w = 6; w < 10; w++) {
+                    /* seg_t is only read at segment starts */
+                    uint32 mask = (w == 9 && !ra[k].seg_start) ? 0xFFFF00FFu : 0xFFFFFFFFu;
+
+                    if ((x[w] ^ y[w]) & mask) {
                         if (bad++ < 10)
                             printf("Analysis test: block at $%04lx (key %08lx), instruction %lu at "
                                    "$%04lx, word %lu: C %08lx, assembly %08lx\n",
@@ -596,7 +599,7 @@ void ana_test(void)
                         break;
                     }
                 }
-                if (w < 25)
+                if (w < 10)
                     break;
             }
             nscans += j->stats.scan_hits;

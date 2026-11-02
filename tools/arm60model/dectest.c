@@ -7,9 +7,11 @@
  *   read through its own page) and the wrap at $FFFF;
  * - jit_decode_block on random blocks over pages of every kind (fixed,
  *   paged slots, RAM with a mirror and the end of the address space as
- *   seams), against the block decoding loop of translate_block as it was:
- *   the number of instructions, the next address, the flags, the
- *   twenty-one words set per instruction and the instruction map.
+ *   seams), against the block decoding loop of translate_block as it was,
+ *   followed by the resolution of the jump targets inside the block that
+ *   the first analysis pass used to make: the number of instructions, the
+ *   next address, the flags, the nine words set per instruction (the six
+ *   decoded words and the marks), the jumps back and the instruction map.
  */
 
 #include "z80jit_int.h"
@@ -429,6 +431,7 @@ static void ref_decode(const z80j_ctx *c, uint32 pc, jit_insn *in)
         b = buf;
     }
     in->pc = pc;
+    in->dyn = 0;                        /* the decoder clears it with ei, mem and d */
     op = b[0];
     if (op == 0xCB) {
         ref_init_insn(in, pc);
@@ -466,9 +469,46 @@ static void ref_decode(const z80j_ctx *c, uint32 pc, jit_insn *in)
 }
 
 
+/* The jump targets inside the block, as the first analysis pass resolved
+ * them before the decoder took it over: a JR, JP, JR cc, JP cc, DJNZ or
+ * repeated block instruction whose static target starts an instruction of
+ * the block gets its index, the target starts a segment, and a JR, JP,
+ * JR cc or JP cc to an instruction at or before it is a jump back. */
+static void ref_targets(jit_insn *ins, int32 n, uint32 pc, uint32 next, uint32 *back)
+{
+    uint32 span = (next - pc) & 0xFFFFu;
+    int32 i;
+    int32 k;
+
+    back[0] = back[1] = 0;
+    for (i = 0; i < n; i++) {
+        jit_insn *p = &ins[i];
+        uint32 kd = p->kind;
+        uint32 off;
+
+        if (!(IS_COND(kd) && kd != K_RETCC && kd != K_CALLCC) && kd != K_JR && kd != K_JP)
+            continue;
+        if (p->dyn)
+            continue;
+        off = (p->target - pc) & 0xFFFFu;
+        if (off >= span)
+            continue;
+        for (k = 0; k < n; k++) {
+            if (ins[k].pc == p->target)
+                break;
+        }
+        if (k == n)
+            continue;
+        p->internal = (int8)k;
+        ins[k].seg_start = 1;
+        if (k <= i && (kd == K_JRCC || kd == K_JPCC || kd == K_JR || kd == K_JP))
+            back[i >> 5] |= 1u << (i & 31);
+    }
+}
+
 /* The block decoding loop of translate_block before z80jit_dec.s. */
 static int32 ref_decode_block(const z80j_ctx *ctx, jit_insn *ins, uint32 pc, uint32 key,
-                              uint32 *next, uint32 *flags)
+                              uint32 *next, uint32 *flags, uint32 *back)
 {
     uint32 addr = pc & 0xFFFFu;
     uint32 page = addr >> 8;
@@ -484,7 +524,7 @@ static int32 ref_decode_block(const z80j_ctx *ctx, jit_insn *ins, uint32 pc, uin
         in->irq_check = 0;
         in->run = 0;
         in->seg_start = 0;
-        in->fused = 0;
+        ((uint32 *)in)[8] = 0;                  /* fused and its padding */
         in->dyn = 0;
         addr = (addr + in->len) & 0xFFFFu;
         if (key == KEY_RAM &&
@@ -522,6 +562,7 @@ static int32 ref_decode_block(const z80j_ctx *ctx, jit_insn *ins, uint32 pc, uin
         }
     }
     *next = addr;
+    ref_targets(ins, n, pc & 0xFFFFu, addr, back);
     return n;
 }
 
@@ -615,6 +656,7 @@ void dec_test(void)
     uint32 seams = 0;
     uint32 dyns = 0;
     uint32 ei_checks = 0;
+    uint32 internals = 0;
     uint32 keys_cut = 0;
     uint32 v;
     uint32 p;
@@ -650,10 +692,10 @@ void dec_test(void)
             ref_decode(c, pc, &ra[0]);
             jit_decode(&rb[0], pc, c);
             cases++;
-            w = words_differ(&ra[0], &rb[0], 14);
-            if (w != 0 || ((uint32 *)&rb[0])[14] != 0x5A5A5A5Au) {
+            w = words_differ(&ra[0], &rb[0], 6);
+            if (w != 0 || ((uint32 *)&rb[0])[6] != 0x5A5A5A5Au) {
                 if (bad++ < 10)
-                    report("instruction", pc, bytes, w != 0 ? w - 1 : 14, &ra[0], &rb[0]);
+                    report("instruction", pc, bytes, w != 0 ? w - 1 : 6, &ra[0], &rb[0]);
             }
         }
     }
@@ -697,6 +739,7 @@ void dec_test(void)
             uint32 key;
             uint32 na, nb_;
             uint32 nexta, fa;
+            uint32 backa[2];
             uint32 serial = ((round * 1500 + v) + 1) << 8;
             jit_block_ctx d;
             uint32 k;
@@ -711,7 +754,7 @@ void dec_test(void)
             key = jit_block_key(c, pc);
             fill(ra, MAX_INSNS, 0xDEADBEEFu);
             fill(rb, MAX_INSNS, 0x5A5A5A5Au);
-            na = (uint32)ref_decode_block(c, ra, pc, key, &nexta, &fa);
+            na = (uint32)ref_decode_block(c, ra, pc, key, &nexta, &fa, backa);
             d.ins = rb;
             d.pc = pc;
             d.ctx = c;
@@ -719,6 +762,7 @@ void dec_test(void)
             d.serial = serial;
             d.next_pc = 0;
             d.dec_flags = 0;
+            d.back[0] = d.back[1] = 0x12345678u;
             nb_ = (uint32)jit_decode_block(&d);
             blocks++;
             insns += na;
@@ -738,13 +782,23 @@ void dec_test(void)
             }
             if (na == 0)
                 continue;                       /* a lone instruction across a seam */
+            if (d.back[0] != backa[0] || d.back[1] != backa[1]) {
+                if (bad++ < 10)
+                    printf("Decoder test: block at $%04lx (key %08lx): jumps back C %08lx %08lx, "
+                           "assembly %08lx %08lx\n", (unsigned long)pc, (unsigned long)key,
+                           (unsigned long)backa[0], (unsigned long)backa[1],
+                           (unsigned long)d.back[0], (unsigned long)d.back[1]);
+                continue;
+            }
             if (na < MAX_INSNS && !IS_END(ra[na - 1].kind) && (fa & JIT_DEC_SEAM) == 0 &&
                 jit_block_key(c, nexta) != key)
                 keys_cut++;
             for (k = 0; k < na; k++) {
                 if (ra[k].irq_check)
                     ei_checks++;
-                w = words_differ(&ra[k], &rb[k], 21);
+                if (ra[k].internal >= 0)
+                    internals++;
+                w = words_differ(&ra[k], &rb[k], 9);
                 if (w != 0) {
                     if (bad++ < 10)
                         report("block record", ra[k].pc, k, w - 1, &ra[k], &rb[k]);
@@ -762,9 +816,9 @@ void dec_test(void)
         }
     }
     printf("Decoder test: %lu blocks, %lu instructions, %lu cut at a seam, %lu with operands read "
-           "at run time, %lu interrupt checks after EI, %lu ended by a page of another key; "
-           "%lu differences in all\n",
+           "at run time, %lu interrupt checks after EI, %lu targets inside the block, %lu ended "
+           "by a page of another key; %lu differences in all\n",
            (unsigned long)blocks, (unsigned long)insns, (unsigned long)seams,
-           (unsigned long)dyns, (unsigned long)ei_checks, (unsigned long)keys_cut,
-           (unsigned long)bad);
+           (unsigned long)dyns, (unsigned long)ei_checks, (unsigned long)internals,
+           (unsigned long)keys_cut, (unsigned long)bad);
 }

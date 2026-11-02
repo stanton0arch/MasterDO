@@ -1,54 +1,56 @@
 ; Analysis passes of the translator over a decoded block (see z80jit.c,
-; translate_block): the jump targets inside the block, the busy-wait
-; loops, the segments and their T-states, the runs of port outputs and the
-; output loops, the flag liveness and the flag tests fused with their
-; jump, and the groups of port outputs sent in one call. They read and
-; write the instruction records (jit_insn, z80jit_int.h) in three walks:
-; one forward for the internal targets, one forward for the segments and
-; the runs, one backward for the T-states left in a segment, the liveness
-; and the fusion; the groups are then made by jit_out_groups (C) when the
-; block holds at least two port outputs.
+; translate_block): the busy-wait loops, the segments and their T-states,
+; the runs of port outputs and the output loops, the flag liveness and the
+; flag tests fused with their jump, and the groups of port outputs sent in
+; one call. The jump targets inside the block are resolved by the decoder
+; (z80jit_dec.s: internal, the seg_start of the targets, the jumps back).
+; The passes read and write the packed instruction records (jit_insn,
+; z80jit_int.h) in two walks: one forward for the segments and the runs,
+; one backward for the T-states left in a segment, the liveness and the
+; fusion; the groups are then made by jit_out_groups (C) when the block
+; holds at least two port outputs. When the caller asks for the static
+; exits of the block, a walk reports them first.
 
         AREA    |C$$code|, CODE, READONLY
 
         EXPORT  jit_analyse_block
-        IMPORT  jit_dec_tab
         IMPORT  jit_busy_loop
         IMPORT  jit_flags_needed
         IMPORT  jit_out_groups
 
-; jit_insn (z80jit_int.h; offsets checked in z80jit.c).
-I_PRE           EQU     8
-I_OP            EQU     12
-I_T             EQU     24
-I_KIND          EQU     28
-I_CC            EQU     32
-I_TARGET        EQU     36
-I_INTERNAL      EQU     56
-I_BUSY          EQU     60
-I_IRQ_CHECK     EQU     64
-I_RUN           EQU     68
-I_SEG_START     EQU     72
-I_FUSED         EQU     76
-I_DYN           EQU     80
-I_LIVE_AFTER    EQU     84
-I_LIVE_BEFORE   EQU     88
-I_SIZE          EQU     104
+; jit_insn (z80jit_int.h; offsets checked in z80jit.c). The fields of a
+; byte are given by their byte offset in the big-endian words.
+I_PC            EQU     0
+I_TARGET        EQU     4
+I_DYN           EQU     11
+I_LEN           EQU     16              ; len pre op t
+I_W_LEN         EQU     16
+I_KIND          EQU     20              ; kind cc use def
+I_CC            EQU     21
+I_INTERNAL      EQU     24              ; internal busy irq_check seg_start
+I_BUSY          EQU     25
+I_IRQ_CHECK     EQU     26
+I_SEG_START     EQU     27
+I_RUN           EQU     28
+I_FUSED         EQU     32
+I_W_LIVE        EQU     36              ; live_after live_before seg_t t_after
+I_LIVE_BEFORE   EQU     37
+I_SIZE          EQU     48
 
 ; jit_block_ctx (z80jit_int.h): the translator state comes first, then
 ; the decoded block (its records, their number, the address after it), the
-; block's address and the tag of its instruction map entries, the counts
-; the analysis returns and the static exits it reports when asked.
+; block's address, the counts the analysis returns, the static exits it
+; reports when asked and the jumps back the decoder found.
+B_J             EQU     0
 B_INS           EQU     4
 B_N             EQU     8
 B_NEXT_PC       EQU     12
 B_PC            EQU     56
-B_SERIAL        EQU     60
 B_BUSY          EQU     72
 B_TARGETS       EQU     84
 B_MAX_TARGETS   EQU     88
 B_NTARGETS      EQU     92
-B_J             EQU     0
+B_BACK          EQU     96
 
 K_JRCC          EQU     1
 K_JPCC          EQU     2
@@ -89,15 +91,13 @@ F_CAFTER        EQU     16              ; flags read after the conditional
 F_FUSED         EQU     20              ; counts returned
 F_BUSY          EQU     24
 F_LINE          EQU     28
-F_NBACK         EQU     32              ; jumps back found by the first pass
-F_BACK          EQU     36              ; head index | index << 8 of each
-F_TARGETS       EQU     36 + 4 * MAX_INSNS      ; next static exit to report (0: none asked)
-F_TEND          EQU     F_TARGETS + 4           ; end of the room for them
-F_NOUT          EQU     F_TEND + 4              ; OUTI, OUTD and OUT (n),A met
-F_SIZE          EQU     F_NOUT + 4
+F_TARGETS       EQU     32              ; next static exit to report (0: none asked)
+F_TEND          EQU     36              ; end of the room for them
+F_NOUT          EQU     40              ; OUTI, OUTD and OUT (n),A met
+F_SIZE          EQU     44
 
-; Reports the static exit $v (a Z80 address) when exits are asked for and
-; there is room left. Uses r12, lr.
+; Reports the static exit $v (a Z80 address) when there is room left.
+; Uses r12, lr.
         MACRO
         REPORT  $v
         ldr     r12,[sp,#F_TARGETS]
@@ -120,24 +120,15 @@ jit_analyse_block
         stmfd   sp!,{r4-r9,r11,lr}
         sub     sp,sp,#F_SIZE
         str     r0,[sp,#F_ARGS]
+        str     r0,[sp,#F_BC]
         add     r1,r0,#B_INS
         ldmia   r1,{r4,r5,r7}           ; ins, n, next_pc
-        add     r1,r0,#B_PC
-        ldmia   r1,{r6,r8}              ; pc, serial
-        mov     r9,r0                   ; block context
         str     r5,[sp,#F_N]
-        str     r9,[sp,#F_BC]
-        ldr     r1,[r9,#B_J]
+        ldr     r1,[r0,#B_J]
         str     r1,[sp,#F_J]
-        add     r1,r5,r5,lsl #2
-        add     r1,r1,r5,lsl #3
-        add     r5,r4,r1,lsl #3         ; end of the records
-        sub     r7,r7,r6
-        mov     r7,r7,lsl #16
-        mov     r7,r7,lsr #16           ; span of the block
-        ldr     r9,an_tab
+        add     r1,r5,r5,lsl #1
+        add     r5,r4,r1,lsl #4         ; end of the records
         mov     r1,#0
-        str     r1,[sp,#F_NBACK]
         str     r1,[sp,#F_BUSY]
         str     r1,[sp,#F_LINE]
         str     r1,[sp,#F_FUSED]
@@ -147,140 +138,49 @@ jit_analyse_block
         add     r2,r1,r2,lsl #2
         str     r1,[sp,#F_TARGETS]
         str     r2,[sp,#F_TEND]
+        cmp     r1,#0
+        bne     pr_start
 
-; Pass 1: a jump whose static target lies inside the block gets the index
-; of the target instruction, which starts a segment. Jumps back by JR, JP,
-; JR cc and JP cc are kept for the busy-wait loop analysis.
-; When the caller asks for them (the code reachable from the entry points,
-; translated before the run), the static exits of the block are reported
-; on the way, in instruction order: the target of a conditional jump
-; leaving the block, of a JR, JP, CALL or RST (inside or not), the return
-; address of a CALL or RST after its target, and the address after the
-; block when it does not end with a transfer.
-; r0 = record, r4 = ins, r5 = end, r6 = pc, r7 = span, r8 = serial,
-; r9 = jit_dec_tab, r11 = index.
-        mov     r0,r4
-        mov     r11,#0
-p1_loop
-        ldr     r1,[r0,#I_KIND]
-        sub     r2,r1,#1
-        cmp     r2,#5                   ; conditional (K_JRCC to K_REP)
-        bls     p1_cond
-        cmp     r1,#K_JR
-        cmpne   r1,#K_JP
-        beq     p1_target
-        cmp     r1,#K_CALL
-        cmpne   r1,#K_RST
-        bne     p1_next
-        ; CALL and RST: the target, then the return address.
-        ldr     r2,[r0,#I_DYN]
-        cmp     r2,#0
-        bne     p1_next
-        ldr     r2,[r0,#I_TARGET]
-        REPORT  r2
-        ldmia   r0,{r2,r3}              ; pc, len
-        add     r2,r2,r3
-        mov     r2,r2,lsl #16
-        mov     r2,r2,lsr #16
-        REPORT  r2
-p1_next
-        add     r11,r11,#1
-        add     r0,r0,#I_SIZE
-        cmp     r0,r5
-        blo     p1_loop
-        b       p1_done
-p1_cond
-        cmp     r1,#K_RETCC
-        beq     p1_next
-        cmp     r1,#K_CALLCC
-        bne     p1_target
-        ; CALL cc: never a jump inside the block, its target is an exit.
-        ldr     r2,[r0,#I_DYN]
-        cmp     r2,#0
-        bne     p1_next
-        ldr     r2,[r0,#I_TARGET]
-        REPORT  r2
-        b       p1_next
-p1_target
-        ldr     r2,[r0,#I_DYN]
-        cmp     r2,#0                   ; the target is read when it runs
-        bne     p1_next
-        ldr     r2,[r0,#I_TARGET]
-        sub     r3,r2,r6
-        mov     r3,r3,lsl #16
-        mov     r3,r3,lsr #16           ; offset from the block start
-        cmp     r3,r7
-        bhs     p1_outside
-        and     r3,r2,#0xFF
-        add     r3,r9,r3,lsl #2
-        ldr     r3,[r3,#1024]           ; instruction map entry
-        bic     r12,r3,#0xFF
-        cmp     r12,r8                  ; of this decoding
-        bne     p1_outside
-        and     r3,r3,#0xFF
-        sub     r3,r3,#1                ; index of the target
-        str     r3,[r0,#I_INTERNAL]
-        add     r2,r3,r3,lsl #2
-        add     r2,r2,r3,lsl #3
-        add     r2,r4,r2,lsl #3
-        mov     r12,#1
-        str     r12,[r2,#I_SEG_START]   ; the target starts a segment
-        cmp     r1,#K_JR                ; an unconditional transfer is an
-        cmpne   r1,#K_JP                ; exit even inside the block
-        bne     p1_back
-        ldr     r2,[r0,#I_TARGET]
-        REPORT  r2
-p1_back
-        cmp     r3,r11                  ; a jump back
-        bhi     p1_next
-        cmp     r1,#K_JRCC
-        cmpne   r1,#K_JPCC
-        cmpne   r1,#K_JR
-        cmpne   r1,#K_JP
-        bne     p1_next
-        ldr     r2,[sp,#F_NBACK]
-        orr     r12,r3,r11,lsl #8
-        add     lr,sp,#F_BACK
-        str     r12,[lr,r2,lsl #2]
-        add     r2,r2,#1
-        str     r2,[sp,#F_NBACK]
-        b       p1_next
-p1_outside
-        ; A jump leaving the block: an exit (r2 = its target).
-        REPORT  r2
-        b       p1_next
-p1_done
-        ; The address after the block is an exit when the block does not
-        ; end with a transfer.
-        ldr     r1,[r5,#I_KIND - I_SIZE]
-        cmp     r1,#K_JR
-        bhs     p1_nofall
-        ldr     r2,[sp,#F_ARGS]
-        ldr     r2,[r2,#B_NEXT_PC]
-        REPORT  r2
-p1_nofall
-
-; Busy-wait loops: each jump back kept is given to jit_busy_loop (C),
-; which says whether the loop it closes waits for an interrupt (1) or
-; for a line (2); the answer goes to the jump's record.
-        ldr     r11,[sp,#F_NBACK]
-        cmp     r11,#0
+; Busy-wait loops: each jump back the decoder found (b->back, a bit per
+; instruction) is given to jit_busy_loop (C) with the index of its
+; target, the loop head; the answer, whether the loop waits for an
+; interrupt (1) or for a line (2), goes to the jump's record.
+; r7 = index, r8 = the bits of the instructions from r7 on, r9 = those of
+; the instructions from 32 on.
+pr_done
+        ldr     r0,[sp,#F_ARGS]
+        add     r0,r0,#B_BACK
+        ldmia   r0,{r8,r9}
+        orrs    r0,r8,r9
         beq     p2_start
-        add     r9,sp,#F_BACK
+        mov     r7,#0
 pb_loop
-        ldr     r12,[r9],#4
-        mov     r7,r12,lsr #8           ; index of the jump
-        and     r3,r12,#0xFF            ; index of the loop head
+        cmp     r7,#32
+        moveq   r8,r9
+        movs    r8,r8,lsr #1            ; carry: the jump r7 is one
+        bcs     pb_jump
+        beq     pb_skip                 ; none left in this word
+pb_next
+        add     r7,r7,#1
+        cmp     r7,#MAX_INSNS
+        blo     pb_loop
+        b       p2_start
+pb_skip
+        cmp     r7,#32
+        bhs     p2_start
+        mov     r7,#32
+        b       pb_loop
+pb_jump
+        add     r11,r4,r7,lsl #4
+        add     r11,r11,r7,lsl #5       ; the record of the jump
+        ldrb    r3,[r11,#I_INTERNAL]    ; the head of its loop
         ldr     r0,[sp,#F_J]
         mov     r1,r4
         ldr     r2,[sp,#F_N]
         str     r7,[sp,#-4]!            ; fifth argument
         bl      jit_busy_loop
         add     sp,sp,#4
-        add     r1,r7,r7,lsl #2
-        add     r1,r1,r7,lsl #3
-        add     r1,r4,r1,lsl #3
-        str     r0,[r1,#I_BUSY]
+        strb    r0,[r11,#I_BUSY]
         cmp     r0,#0
         beq     pb_next
         ldr     r1,[sp,#F_BUSY]
@@ -290,13 +190,73 @@ pb_loop
         ldreq   r1,[sp,#F_LINE]
         addeq   r1,r1,#1
         streq   r1,[sp,#F_LINE]
-pb_next
-        subs    r11,r11,#1
-        bne     pb_loop
+        b       pb_next
+
+; The static exits of the block, reported when the caller asks for them
+; (the code reachable from the entry points, translated before the run),
+; in instruction order: the target of a conditional jump leaving the
+; block (no instruction of the block starts there), of a JR, JP, CALL or
+; RST (inside or not), the return address of a CALL or RST after its
+; target, and the address after the block when it does not end with a
+; transfer. r0 = record, r5 = end, r7 = next_pc.
+pr_start
+        mov     r0,r4
+pr_loop
+        ldrb    r1,[r0,#I_KIND]
+        sub     r2,r1,#1
+        cmp     r2,#5                   ; conditional (K_JRCC to K_REP)
+        bls     pr_cond
+        cmp     r1,#K_JR
+        cmpne   r1,#K_JP
+        beq     pr_static
+        cmp     r1,#K_CALL
+        cmpne   r1,#K_RST
+        bne     pr_next
+        ; CALL and RST: the target, then the return address.
+        ldrb    r2,[r0,#I_DYN]
+        cmp     r2,#0
+        bne     pr_next
+        ldr     r2,[r0,#I_TARGET]
+        REPORT  r2
+        ldr     r2,[r0,#I_PC]
+        ldrb    r3,[r0,#I_LEN]
+        add     r2,r2,r3
+        mov     r2,r2,lsl #16
+        mov     r2,r2,lsr #16
+        REPORT  r2
+pr_next
+        add     r0,r0,#I_SIZE
+        cmp     r0,r5
+        blo     pr_loop
+        ldrb    r1,[r5,#I_KIND - I_SIZE]
+        cmp     r1,#K_JR
+        bhs     pr_done
+        REPORT  r7
+        b       pr_done
+pr_cond
+        cmp     r1,#K_RETCC
+        beq     pr_next
+        ldrb    r2,[r0,#I_DYN]
+        cmp     r2,#0                   ; the target is read when it runs
+        bne     pr_next
+        cmp     r1,#K_CALLCC            ; never a jump inside the block
+        beq     pr_report
+        ldrb    r2,[r0,#I_INTERNAL]
+        cmp     r2,#0xFF                ; a target inside the block: no exit
+        bne     pr_next
+        b       pr_report
+pr_static
+        ldrb    r2,[r0,#I_DYN]
+        cmp     r2,#0
+        bne     pr_next
+pr_report
+        ldr     r2,[r0,#I_TARGET]
+        REPORT  r2
+        b       pr_next
 
 ; Pass 2: segments and port output runs. A segment starts at the block
-; start, at a jump target (pass 1), after a conditional instruction and
-; whenever the running total of T-states would exceed SEG_MAX_T.
+; start, at a jump target (the decoder), after a conditional instruction
+; and whenever the running total of T-states would exceed SEG_MAX_T.
 ; Consecutive OUTI, or OUTD, or OUTI mixed with OUT (C),r on one register
 ; among A, D and E, inside a segment, make one run (at most RUN_MAX
 ; elements, ended after an element with an interrupt check): the head
@@ -307,37 +267,41 @@ pb_next
 ; the previous instruction is conditional, bit 1 the previous element of
 ; the run has an interrupt check, bit 2 this instruction is conditional;
 ; r3 = head of the open run or 0, r6 = its run word so far, r7 = the
-; opcode of its head.
+; opcode of its head; r8 = the len pre op t word of the instruction.
 p2_start
         mov     r0,r4
         mov     r1,#0
         mov     r2,#0
         mov     r3,#0
         mov     r12,#1
-        str     r12,[r0,#I_SEG_START]   ; the block start
+        strb    r12,[r0,#I_SEG_START]   ; the block start
 p2_loop
-        add     r8,r0,#I_T
-        ldmia   r8,{r8,r9}              ; t, kind
-        ldr     r11,[r0,#I_SEG_START]
+        add     r8,r0,#I_W_LEN
+        ldmia   r8,{r8,r9,r11}          ; len pre op t; kind cc use def; internal busy irq_check seg_start
+        mov     r9,r9,lsr #24           ; kind
+        and     r11,r11,#0xFF           ; seg_start
         sub     r12,r9,#1
         cmp     r12,#5
         orrls   r2,r2,#4                ; conditional
+        and     r12,r8,#0xFF            ; T-states
         tst     r2,#1
         bne     p2_seg1                 ; after a conditional instruction
         cmp     r11,#0
         bne     p2_seg
-        add     r12,r1,r8
-        cmp     r12,#SEG_MAX_T
+        add     lr,r1,r12
+        cmp     lr,#SEG_MAX_T
         bhi     p2_seg1
 p2_noseg
-        add     r1,r1,r8
+        add     r1,r1,r12
         cmp     r3,#0
         bne     p2_open
 p2_newrun
-        add     r12,r0,#I_PRE
-        ldmia   r12,{r12,lr}            ; pre, op
+        mov     r12,r8,lsr #16
+        and     r12,r12,#0xFF           ; prefix
         cmp     r12,#PRE_ED
         beq     p2_ed
+        mov     lr,r8,lsr #8
+        and     lr,lr,#0xFF             ; opcode
         teq     lr,#0xD3                ; OUT (n),A: counted for the groups
         teqeq   r12,#0
         ldreq   r12,[sp,#F_NOUT]
@@ -360,7 +324,7 @@ p2_next
 
 p2_seg1
         mov     r11,#1
-        str     r11,[r0,#I_SEG_START]
+        strb    r11,[r0,#I_SEG_START]
 p2_seg
         mov     r1,#0
         b       p2_noseg
@@ -374,10 +338,12 @@ p2_open
         beq     p2_close
         cmp     r11,#0                  ; and before a segment start
         bne     p2_close
-        ldr     r12,[r0,#I_PRE]
+        mov     r12,r8,lsr #16
+        and     r12,r12,#0xFF           ; prefix
         cmp     r12,#PRE_ED
         bne     p2_close
-        ldr     r9,[r0,#I_OP]
+        mov     r9,r8,lsr #8
+        and     r9,r9,#0xFF             ; opcode
         bl      run_elem
         cmp     r11,#0
         beq     p2_close
@@ -387,7 +353,7 @@ p2_open
         moveq   lr,#1
         orreq   r6,r6,lr,lsl r12
         add     r6,r6,#1                ; one more element
-        ldr     r12,[r0,#I_IRQ_CHECK]
+        ldrb    r12,[r0,#I_IRQ_CHECK]
         bic     r2,r2,#2
         cmp     r12,#0
         orrne   r2,r2,#2
@@ -405,23 +371,22 @@ p2_close
         bne     p2_lone
         tst     r2,#2                   ; the OUTI has an interrupt check
         bne     p2_lone
-        ldr     r12,[r0,#I_KIND]
+        ldrb    r12,[r0,#I_KIND]
         cmp     r12,#K_JRCC
         cmpne   r12,#K_JPCC
         bne     p2_lone
-        ldr     r12,[r0,#I_CC]
+        ldrb    r12,[r0,#I_CC]
         cmp     r12,#0                  ; NZ
         bne     p2_lone
-        ldr     r12,[r0,#I_INTERNAL]
-        add     lr,r12,r12,lsl #2
-        add     lr,lr,r12,lsl #3
-        add     lr,r4,lr,lsl #3
+        ldrb    r12,[r0,#I_INTERNAL]
+        add     lr,r4,r12,lsl #4
+        add     lr,lr,r12,lsl #5
         cmp     lr,r3                   ; back to the OUTI
         bne     p2_lone
-        ldr     r12,[r0,#I_DYN]
-        ldr     lr,[r0,#I_BUSY]
+        ldrb    r12,[r0,#I_DYN]
+        ldrb    lr,[r0,#I_BUSY]
         orrs    r12,r12,lr
-        ldreq   r12,[r0,#I_IRQ_CHECK]
+        ldreqb  r12,[r0,#I_IRQ_CHECK]
         cmpeq   r12,#0
         bne     p2_lone
         mvn     r12,#1                  ; RUN_LOOP
@@ -435,7 +400,8 @@ p2_lone
 
 ; No open run: this ED instruction may start one.
 p2_ed
-        ldr     r7,[r0,#I_OP]
+        mov     r7,r8,lsr #8
+        and     r7,r7,#0xFF             ; opcode
         mov     r9,r7
         mov     r6,#0
         bl      run_elem
@@ -449,7 +415,7 @@ p2_ed
         cmp     r11,#2
         orreq   r6,r6,#0x100            ; mask bit of the first element
         add     r6,r6,#1
-        ldr     r12,[r0,#I_IRQ_CHECK]
+        ldrb    r12,[r0,#I_IRQ_CHECK]
         bic     r2,r2,#2
         cmp     r12,#0
         orrne   r2,r2,#2
@@ -506,18 +472,20 @@ rw_loop
 ; and the fusion of a flag producer with the conditional jump that is its
 ; only reader, decided when the producer is reached from what its jump
 ; needs (c_need, 0 when the jump cannot fuse) and the flags read after the
-; jump either way (c_after).
+; jump either way (c_after). The four values of an instruction go to one
+; word (live_after live_before seg_t t_after; seg_t is read at segment
+; starts only, and is below 256 there).
 ; r4 = ins, r5 = record, r6 = flags live before the next instruction,
 ; r7 = T-states of the segment after the record, r8 = c_need.
 p3_start
         sub     r5,r5,#I_SIZE           ; the last instruction
-        ldr     r1,[r5,#I_KIND]
+        ldrb    r1,[r5,#I_KIND]
         cmp     r1,#K_RET
         movhs   r6,#FL_ALL              ; RET, RETN, JP (HL), HALT
         bhs     p3_init
         cmp     r1,#K_JR
         blo     p3_fall
-        ldr     r0,[r5,#I_DYN]          ; JR, JP, CALL, RST
+        ldrb    r0,[r5,#I_DYN]          ; JR, JP, CALL, RST
         cmp     r0,#0
         movne   r6,#FL_ALL
         bne     p3_init
@@ -534,8 +502,16 @@ p3_init
         mov     r7,#0
         mov     r8,#0
 p3_loop
-        add     r0,r5,#I_T
-        ldmia   r0,{r0-r3,r9,r11}       ; t kind cc target use def
+        ldr     r3,[r5,#I_TARGET]
+        add     r0,r5,#I_W_LEN
+        ldmia   r0,{r0,r1}              ; len pre op t; kind cc use def
+        and     r11,r1,#0xFF            ; flags written
+        mov     r9,r1,lsr #8
+        and     r9,r9,#0xFF             ; flags read
+        mov     r2,r1,lsr #16
+        and     r2,r2,#0xFF             ; condition
+        mov     r1,r1,lsr #24           ; kind
+        and     r0,r0,#0xFF             ; T-states
         cmp     r8,#0
         bne     p3_fuse
 p3_live
@@ -547,13 +523,12 @@ p3_live
         orr     r6,r6,r9                ; live before: read, or live after and not written
         mov     r8,#0
 p3_store
-        ldr     r12,[r5,#I_SEG_START]
+        ldrb    r12,[r5,#I_SEG_START]
         add     r2,r7,r0                ; T-states of the segment from here on
-        mov     r3,r7                   ; after this instruction
-        mov     r0,lr
-        mov     r1,r6
-        add     lr,r5,#I_LIVE_AFTER
-        stmia   lr,{r0-r3}              ; live_after live_before seg_t t_after
+        orr     r3,r7,r2,lsl #8         ; seg_t, t_after
+        orr     r3,r3,r6,lsl #16        ; live_before
+        orr     r3,r3,lr,lsl #24        ; live_after
+        str     r3,[r5,#I_W_LIVE]
         cmp     r12,#0
         movne   r7,#0                   ; a segment start: the previous instruction ends its segment
         moveq   r7,r2
@@ -591,17 +566,16 @@ p4_done
 p3_cond
         cmp     r1,#K_RETCC
         beq     p3_all
-        ldr     r12,[r5,#I_DYN]
+        ldrb    r12,[r5,#I_DYN]
         cmp     r12,#0
         bne     p3_all
-        ldr     r12,[r5,#I_INTERNAL]
-        cmp     r12,#0
-        blt     p3_scan
-        add     lr,r12,r12,lsl #2
-        add     lr,lr,r12,lsl #3
-        add     lr,r4,lr,lsl #3
+        ldrb    r12,[r5,#I_INTERNAL]
+        cmp     r12,#0xFF
+        beq     p3_scan
+        add     lr,r4,r12,lsl #4
+        add     lr,lr,r12,lsl #5
         cmp     lr,r5                   ; a target further on: its liveness is known
-        ldrhi   r12,[lr,#I_LIVE_BEFORE]
+        ldrhib  r12,[lr,#I_LIVE_BEFORE]
         bhi     p3_taken
 p3_scan
         stmfd   sp!,{r0-r3}
@@ -630,13 +604,16 @@ p3_taken
 ; The next instruction is a conditional jump that can take its flags from
 ; the ARM flags (c_need): this instruction fuses with it when it produces
 ; them (fuse_mask), has no interrupt check, and none of the flags it
-; writes is read after the jump. r0-r3, r9 and r11 hold the loaded words.
+; writes is read after the jump. r0-r3, r9 and r11 hold the loaded fields.
 p3_fuse
-        ldr     r12,[r5,#I_IRQ_CHECK]
+        ldrb    r12,[r5,#I_IRQ_CHECK]
         cmp     r12,#0
         bne     p3_live
-        ldr     r12,[r5,#I_PRE]
-        ldr     lr,[r5,#I_OP]
+        ldr     lr,[r5,#I_W_LEN]
+        mov     r12,lr,lsr #16
+        and     r12,r12,#0xFF           ; prefix
+        mov     lr,lr,lsr #8
+        and     lr,lr,#0xFF             ; opcode
         stmfd   sp!,{r2,r3}
         mov     r2,lr,lsr #6            ; x
         cmp     r12,#PRE_CB
@@ -709,7 +686,7 @@ fm_done
         ldr     lr,[sp,#F_CAFTER]
         tst     r11,lr                  ; a flag written here is read after the jump
         bne     p3_live
-        str     r12,[r5,#I_FUSED]
+        strb    r12,[r5,#I_FUSED]
         ldr     lr,[sp,#F_FUSED]
         add     lr,lr,#1
         str     lr,[sp,#F_FUSED]
@@ -717,7 +694,5 @@ fm_done
 
 ; FU_* a condition can use: NZ Z, NC C, PO PE, P M.
 cc_need DCB     FU_Z_EQ + FU_Z_CS, FU_C_CS + FU_C_CC, FU_V_VS, FU_S_MI
-
-an_tab  DCD     jit_dec_tab
 
         END

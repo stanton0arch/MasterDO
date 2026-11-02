@@ -80,34 +80,35 @@
         IMPORT  z80j_glue_out_split
         IMPORT  z80j_glue_pop_af
 
-; jit_insn (z80jit_int.h; offsets checked in z80jit.c).
+; jit_insn (z80jit_int.h; offsets checked in z80jit.c). The fields of a
+; byte are given by their byte offset in the big-endian words.
 I_PC            EQU     0
-I_LEN           EQU     4
-I_PRE           EQU     8
-I_OP            EQU     12
-I_D             EQU     16
-I_N             EQU     20
-I_T             EQU     24
-I_KIND          EQU     28
-I_CC            EQU     32
-I_TARGET        EQU     36
-I_USE           EQU     40
-I_DEF           EQU     44
-I_EI            EQU     48
-I_MEM           EQU     52
-I_INTERNAL      EQU     56
-I_BUSY          EQU     60
-I_IRQ_CHECK     EQU     64
-I_RUN           EQU     68
-I_SEG_START     EQU     72
-I_FUSED         EQU     76
-I_DYN           EQU     80
-I_LIVE_AFTER    EQU     84
-I_LIVE_BEFORE   EQU     88
-I_SEG_T         EQU     92
-I_T_AFTER       EQU     96
-I_HOST          EQU     100
-I_SIZE          EQU     104
+I_TARGET        EQU     4
+I_EI            EQU     8               ; ei mem d dyn
+I_MEM           EQU     9
+I_D             EQU     10
+I_DYN           EQU     11
+I_N             EQU     12
+I_LEN           EQU     16              ; len pre op t
+I_PRE           EQU     17
+I_OP            EQU     18
+I_T             EQU     19
+I_KIND          EQU     20              ; kind cc use def
+I_CC            EQU     21
+I_USE           EQU     22
+I_DEF           EQU     23
+I_INTERNAL      EQU     24              ; internal busy irq_check seg_start
+I_BUSY          EQU     25
+I_IRQ_CHECK     EQU     26
+I_SEG_START     EQU     27
+I_RUN           EQU     28
+I_FUSED         EQU     32
+I_LIVE_AFTER    EQU     36              ; live_after live_before seg_t t_after
+I_LIVE_BEFORE   EQU     37
+I_SEG_T         EQU     38
+I_T_AFTER       EQU     39
+I_HOST          EQU     40
+I_SIZE          EQU     48
 
 ; jit_block_ctx.
 B_J             EQU     0
@@ -374,9 +375,8 @@ F_SIZE          EQU     8
 ; Address of the record of instruction $i (a register) in $w, $b = ins.
         MACRO
         RECORD  $w,$b,$i
-        add     $w,$i,$i,lsl #2
-        add     $w,$w,$i,lsl #3
-        add     $w,$b,$w,lsl #3
+        add     $w,$b,$i,lsl #4
+        add     $w,$w,$i,lsl #5
         MEND
 
 ; One byte of a word of the inline RAM entry check (eb_ram_inline): r2 =
@@ -442,25 +442,29 @@ eb_loop
         str     r5,[r6,#I_HOST]
         ; The EF_* flags of the instruction: its interrupt check, fused
         ; test, live flags and memory operand, then a segment check when
-        ; it starts one.
-        add     r0,r6,#I_IRQ_CHECK
-        ldmia   r0,{r0,r1,r2,r3,r12,lr} ; irq_check run seg_start fused dyn live_after
-        add     r9,r6,#I_DEF
-        ldmia   r9,{r9,r11,r12}         ; def ei mem
-        tst     r9,lr
+        ; it starts one. The words of the record from ei mem d dyn to
+        ; live_after live_before seg_t t_after come in one load.
+        add     r0,r6,#I_EI
+        ldmia   r0,{r0,r1,r2,r3,r9,r12,lr}      ; ei mem d dyn; n; len pre op t; kind cc use def; internal busy irq_check seg_start; run; fused; (next: live)
+        ldr     r1,[r6,#I_LIVE_AFTER]
+        and     r3,r3,#0xFF             ; flags written
+        tst     r3,r1,lsr #24           ; read later
         movne   r11,#EF_LIVE
         moveq   r11,#0
-        cmp     r12,#0
+        tst     r0,#0xFF0000            ; memory operand
         orrne   r11,r11,#EF_MEM
-        cmp     r3,#0
+        cmp     lr,#0                   ; fused test (the byte alone in its word)
         orrne   r11,r11,#EF_FUSED
-        cmp     r0,#0
+        tst     r9,#0xFF00              ; interrupt check
         orrne   r11,r11,#EF_IRQ
-        cmp     r2,#0
+        tst     r9,#0xFF                ; segment start
         bne     eb_seg
 eb_insn
-        add     r0,r6,#I_PRE
-        ldmia   r0,{r0,r9}              ; pre, op
+        ldr     r0,[r6,#I_LEN]
+        mov     r9,r0,lsr #8
+        and     r9,r9,#0xFF             ; opcode
+        mov     r0,r0,lsr #16
+        and     r0,r0,#0xFF             ; prefix
         cmp     r0,#PRE_ED
         beq     emit_ed
         bhi     eb_dd
@@ -482,7 +486,7 @@ eb_dd
 ; Segment check: SUBS r8,r8,#t * CYCLE, then BMI to the time-out stub,
 ; which resumes at the check. r9 is loaded again at eb_insn.
 eb_seg
-        ldr     r9,[r6,#I_SEG_T]
+        ldrb    r9,[r6,#I_SEG_T]
         TMPL    r0,t_subs_cyc
         orr     r0,r0,#0xC00
         orr     r0,r0,r9                ; (always below 256: a byte in bits 8-15)
@@ -535,11 +539,11 @@ eb_irq
         mov     r0,#STUB_LEAVE
         bl      new_stub
         ldr     r1,[r6,#I_PC]
-        ldr     r2,[r6,#I_LEN]
+        ldrb    r2,[r6,#I_LEN]
         add     r1,r1,r2
         mov     r1,r1,lsl #16
         mov     r1,r1,lsr #16
-        ldr     r2,[r6,#I_T_AFTER]
+        ldrb    r2,[r6,#I_T_AFTER]
         add     r0,r0,#ST_PC
         stmia   r0,{r1,r2}              ; pc, t
         mov     r0,#B_NE
@@ -549,7 +553,7 @@ eb_irq
 eb_noskip2
         ; Fall-through exit when the block did not end with a transfer.
         sub     r6,r6,#I_SIZE           ; the last instruction
-        ldr     r0,[r6,#I_KIND]
+        ldrb    r0,[r6,#I_KIND]
         cmp     r0,#K_JR
         ldrlo   r0,[r4,#B_NEXT_PC]
         bllo    e_exit
@@ -808,11 +812,11 @@ eb_ram_m1
         beq     eb_ram_done
         ldr     r1,[r4,#B_N]
 eb_ram_dyn
-        ldr     r0,[r6,#I_DYN]
+        ldrb    r0,[r6,#I_DYN]
         cmp     r0,#0
         beq     eb_ram_dnext
         ldr     r0,[r6,#I_PC]
-        ldr     r3,[r6,#I_LEN]
+        ldrb    r3,[r6,#I_LEN]
         add     r0,r0,r3
         sub     r0,r0,#2
         sub     r0,r0,r7
@@ -1192,18 +1196,18 @@ e_write
         bl      new_stub
         ldmfd   sp!,{r1,lr}
         str     r1,[r0,#ST_REG]
-        ldr     r1,[r6,#I_KIND]
+        ldrb    r1,[r6,#I_KIND]
         cmp     r1,#K_REP
         mvneq   r1,#0
         beq     ew_pc
         ldr     r1,[r6,#I_PC]
-        ldr     r2,[r6,#I_LEN]
+        ldrb    r2,[r6,#I_LEN]
         add     r1,r1,r2
         mov     r1,r1,lsl #16
         mov     r1,r1,lsr #16
 ew_pc
         str     r1,[r0,#ST_PC]
-        ldr     r2,[r6,#I_T_AFTER]
+        ldrb    r2,[r6,#I_T_AFTER]
         str     r2,[r0,#ST_T]
         mov     r0,#BL_EQ
         EMIT    r0
@@ -1324,8 +1328,10 @@ t_add_r1_g      ADD     r1,r10,#0       ; | immediate
 ; memory operand of the instruction: HL, IX, or IY loaded in r12, with the
 ; displacement added in r12. Uses r1-r3, r12.
 e_mem_addr
-        ldr     r1,[r6,#I_PRE]
-        ldr     r2,[r6,#I_D]
+        ldrb    r1,[r6,#I_PRE]
+        ldrb    r2,[r6,#I_D]
+        mov     r2,r2,lsl #24
+        mov     r2,r2,asr #24           ; the displacement, signed
         cmp     r1,#PRE_DD
         moveq   r0,#RIX
         beq     ema_disp
@@ -1604,7 +1610,7 @@ t_get_low       MOV     r0,r5,LSR #24
 ; e_idx_reg: r0 = a temporary register -> r0 = the register holding HL,
 ; IX, or IY loaded in the temporary, for the instruction. Uses r1, r2.
 e_idx_reg
-        ldr     r1,[r6,#I_PRE]
+        ldrb    r1,[r6,#I_PRE]
         cmp     r1,#PRE_DD
         moveq   r0,#RIX
         moveq   pc,lr
@@ -1618,7 +1624,7 @@ e_idx_reg
 
 ; e_idx_store: r0 = register: emits its store to IY for an FD instruction.
 e_idx_store
-        ldr     r1,[r6,#I_PRE]
+        ldrb    r1,[r6,#I_PRE]
         cmp     r1,#PRE_FD
         movne   pc,lr
         TMPL    r2,t_str_iy
@@ -2093,7 +2099,7 @@ t_dynamic       DCD     0xE28A1C40      ; ADD r1,r10,#TAB_OFF (the rotation of t
 e_load_target
         stmfd   sp!,{r4,lr}
         ldr     r4,[r6,#I_PC]
-        ldr     r0,[r6,#I_LEN]
+        ldrb    r0,[r6,#I_LEN]
         add     r4,r4,r0
         sub     r4,r4,#2
         mov     r4,r4,lsl #16
@@ -2134,7 +2140,7 @@ e_dyn_exit
 ; previous instruction), or after a TST emitted here. Uses r1, r2.
 e_cond
         cmp     r7,#0
-        ldrne   r1,[r6,#I_FUSED - I_SIZE]
+        ldrneb  r1,[r6,#I_FUSED - I_SIZE]
         moveq   r1,#0
         and     r2,r0,#1                ; 1: flag set is true
         tst     r1,#FU_Z_EQ
@@ -2241,7 +2247,7 @@ t_line_idle     MOV     r0,r8,ASR #8
 ; link stub of an outside target).
 e_jump_cond
         stmfd   sp!,{r0,lr}             ; the condition is kept on the stack
-        ldr     r2,[r6,#I_BUSY]
+        ldrb    r2,[r6,#I_BUSY]
         cmp     r2,#2
         beq     ejc_line
         cmp     r2,#0
@@ -2254,21 +2260,21 @@ e_jump_cond
         mov     r1,r1,lsl #8
         bl      e_dpi
 ejc_target
-        ldr     r0,[r6,#I_INTERNAL]
-        cmp     r0,#0
-        blt     ejc_outside
+        ldrb    r0,[r6,#I_INTERNAL]
+        cmp     r0,#0xFF                ; no instruction of the block
+        beq     ejc_outside
         cmp     r0,r7
         bhi     ejc_forward
         bl      ejc_host                ; a target behind: a direct branch
         ldr     r1,[sp]
         b       ejc_branch
 ejc_outside
-        ldr     r0,[r6,#I_DYN]
+        ldrb    r0,[r6,#I_DYN]
         cmp     r0,#0
         movne   r0,#STUB_DYN
         moveq   r0,#STUB_LINK
         bl      new_stub
-        ldr     r1,[r6,#I_DYN]
+        ldrb    r1,[r6,#I_DYN]
         cmp     r1,#0
         strne   r7,[r0,#ST_INDEX]
         ldreq   r1,[r6,#I_TARGET]
@@ -2277,7 +2283,7 @@ ejc_outside
 ejc_forward
         mov     r0,#STUB_FORWARD
         bl      new_stub
-        ldr     r1,[r6,#I_INTERNAL]
+        ldrb    r1,[r6,#I_INTERNAL]
         str     r1,[r0,#ST_INDEX]
 ejc_place
         ldr     r0,[sp]
@@ -2323,7 +2329,7 @@ ejc_done
         ldmfd   sp!,{r0,pc}
 ; r0 = the code of the internal target of the instruction.
 ejc_host
-        ldr     r0,[r6,#I_INTERNAL]
+        ldrb    r0,[r6,#I_INTERNAL]
         ldr     r1,[r4,#B_INS]
         RECORD  r2,r1,r0
         ldr     r0,[r2,#I_HOST]
@@ -2340,11 +2346,11 @@ e_leave_check
         mov     r0,#STUB_LEAVE
         bl      new_stub
         ldr     r1,[r6,#I_PC]
-        ldr     r2,[r6,#I_LEN]
+        ldrb    r2,[r6,#I_LEN]
         add     r1,r1,r2
         mov     r1,r1,lsl #16
         mov     r1,r1,lsr #16
-        ldr     r2,[r6,#I_T_AFTER]
+        ldrb    r2,[r6,#I_T_AFTER]
         str     r1,[r0,#ST_PC]
         str     r2,[r0,#ST_T]
         mov     r0,#B_NE
@@ -2365,7 +2371,7 @@ t_port_c        MOV     r1,r5,LSR #16
 ; the end of the instruction (the segment check has already taken the
 ; rest of the segment).
 e_time_left
-        ldr     r1,[r6,#I_T_AFTER]
+        ldrb    r1,[r6,#I_T_AFTER]
         cmp     r1,#0
         TMPLC   eq,r0,t_mov_r2_cyc
         TMPLC   ne,r0,t_add_r2_cyc
@@ -2406,7 +2412,7 @@ e_out_loop
         EMIT    r0
         TMPL    r0,t_sub_r8_r2
         EMIT    r0
-        ldr     r0,[r6,#I_OP]
+        ldrb    r0,[r6,#I_OP]
         tst     r0,#8
         TMPLC   ne,r0,t_rsb_r0
         strne   r0,[r5],#4              ; OUTD: a negative count
@@ -2417,7 +2423,7 @@ e_out_loop
         adr     r12,t_ol3
         ldmia   r12,{r0,r1,r2}
         stmia   r5!,{r0,r1,r2}
-        ldr     r0,[r6,#I_OP]
+        ldrb    r0,[r6,#I_OP]
         tst     r0,#8
         TMPLC   eq,r0,t_add_hl_r0
         TMPLC   ne,r0,t_sub_hl_r0
@@ -2427,11 +2433,11 @@ e_out_loop
         mov     r0,#STUB_LEAVE
         bl      new_stub
         ldr     r1,[r9,#I_PC]
-        ldr     r2,[r9,#I_LEN]
+        ldrb    r2,[r9,#I_LEN]
         add     r1,r1,r2
         mov     r1,r1,lsl #16
         mov     r1,r1,lsr #16
-        ldr     r2,[r9,#I_T_AFTER]
+        ldrb    r2,[r9,#I_T_AFTER]
         str     r1,[r0,#ST_PC]
         str     r2,[r0,#ST_T]
         mov     r0,#B_NE
@@ -2468,7 +2474,7 @@ t_ol4           BIC     r5,r5,#0xFF000000
 ; loop, to be patched; the regular code of one pass follows.
 e_copy_loop
         stmfd   sp!,{r4,r7,r9,lr}
-        ldr     r9,[r6,#I_SEG_T]
+        ldrb    r9,[r6,#I_SEG_T]
         add     r9,r9,#5                ; T-states of a pass
         adr     r12,t_cl1
         ldmia   r12,{r0,r1,r2}
@@ -2482,7 +2488,7 @@ e_copy_loop
         mov     r7,r5                   ; the branch to the regular code
         mov     r0,#B_CC
         EMIT    r0
-        ldr     r0,[r6,#I_OP]
+        ldrb    r0,[r6,#I_OP]
         tst     r0,#8
         ldreq   r0,[r8,#G_LDIR]
         ldrne   r0,[r8,#G_LDDR]
@@ -2502,7 +2508,7 @@ e_copy_loop
         mov     r1,r9,lsl #8
         bl      e_dpi
         TMPL    r0,t_addne_r8
-        ldr     r1,[r6,#I_SEG_T]
+        ldrb    r1,[r6,#I_SEG_T]
         mov     r1,r1,lsl #8
         bl      e_dpi
         ldr     r0,[r6,#I_HOST]
@@ -2621,7 +2627,7 @@ ebi_out
         tst     r9,#2
         beq     ebi_out_pass
         mov     r0,r6
-        ldr     r1,[r6,#I_SEG_T]
+        ldrb    r1,[r6,#I_SEG_T]
         add     r1,r1,#5
         bl      e_out_loop
         str     r0,[sp]
@@ -2725,7 +2731,7 @@ eor_count
         cmp     r9,#0
         bne     eor_mixed
         bl      e_port_c
-        ldr     r0,[r11,#I_OP]
+        ldrb    r0,[r11,#I_OP]
         cmp     r0,#0xAB
         TMPLC   eq,r0,t_mvn_r0_imm
         subeq   r1,r7,#1
@@ -2764,14 +2770,14 @@ eor_call
         ldr     r1,[sp]                 ; nmem
         cmp     r1,#0
         beq     eor_leave
-        ldr     r0,[r11,#I_OP]
+        ldrb    r0,[r11,#I_OP]
         cmp     r0,#0xAB
         TMPLC   eq,r0,t_sub_hl_n
         TMPLC   ne,r0,t_add_hl_n
         orr     r0,r0,r1
         EMIT    r0
-        ldr     r0,[r11,#I_DEF]
-        ldr     r1,[r11,#I_LIVE_AFTER]
+        ldrb    r0,[r11,#I_DEF]
+        ldrb    r1,[r11,#I_LIVE_AFTER]
         tst     r0,r1
         beq     eor_leave
         adr     r12,t_io_flags
@@ -2820,14 +2826,14 @@ eed_grp
         ; instead of a second read.
         cmp     r7,#0
         beq     eg_read
-        ldr     r0,[r6,#I_SEG_START]
+        ldrb    r0,[r6,#I_SEG_START]
         sub     r12,r6,#I_SIZE          ; the previous instruction
-        ldr     r1,[r12,#I_PRE]
-        ldr     r2,[r12,#I_IRQ_CHECK]
+        ldrb    r1,[r12,#I_PRE]
+        ldrb    r2,[r12,#I_IRQ_CHECK]
         orr     r0,r0,r1
         orrs    r0,r0,r2
         bne     eg_read
-        ldr     r0,[r12,#I_OP]
+        ldrb    r0,[r12,#I_OP]
         mov     r1,r0,lsr #3
         and     r1,r1,#7                ; y
         and     r2,r0,#0xC7
@@ -2862,8 +2868,8 @@ eg_kept
 eed_loop
         ; The JR NZ / JP NZ that follows closes the loop: the fast path
         ; goes past it (patched by the block loop).
-        ldr     r0,[r6,#I_KIND + I_SIZE]
-        ldr     r1,[r6,#I_SEG_T]
+        ldrb    r0,[r6,#I_KIND + I_SIZE]
+        ldrb    r1,[r6,#I_SEG_T]
         cmp     r0,#K_JRCC
         addeq   r1,r1,#5
         add     r0,r6,#I_SIZE
@@ -3230,20 +3236,20 @@ t_air_flags     ADD     r1,r10,#PZST_OFF
 ; e_taken: emits the taken path of CALL cc / RET cc of the record.
 e_taken
         stmfd   sp!,{lr}
-        ldr     r0,[r6,#I_KIND]
+        ldrb    r0,[r6,#I_KIND]
         cmp     r0,#K_CALLCC
         bne     et_ret
         TMPL    r0,t_sub_cyc7
         EMIT    r0
         ldr     r0,[r6,#I_PC]
-        ldr     r1,[r6,#I_LEN]
+        ldrb    r1,[r6,#I_LEN]
         add     r0,r0,r1
         mov     r0,r0,lsl #16
         mov     r0,r0,lsr #16
         mov     r1,#0
         bl      e_mov32
         bl      e_push
-        ldr     r0,[r6,#I_DYN]
+        ldrb    r0,[r6,#I_DYN]
         cmp     r0,#0
         bne     et_call_dyn
         ldr     r0,[r6,#I_TARGET]
@@ -3301,17 +3307,17 @@ t_djnz          SUB     r5,r5,#0x01000000
                 TST     r5,#0xFF000000
 
 m_jr                                    ; JR
-        ldr     r0,[r6,#I_INTERNAL]
-        cmp     r0,#0
-        blt     m_jr_out
+        ldrb    r0,[r6,#I_INTERNAL]
+        cmp     r0,#0xFF                ; no instruction of the block
+        beq     m_jr_out
 m_jump_in
         ; A static target inside the block: the idle time of a busy-wait
         ; loop, then a direct branch.
-        ldr     r0,[r6,#I_BUSY]
+        ldrb    r0,[r6,#I_BUSY]
         cmp     r0,#0
         movne   r0,#CC_AL
         blne    e_idle
-        ldr     r0,[r6,#I_INTERNAL]
+        ldrb    r0,[r6,#I_INTERNAL]
         ldr     r1,[r4,#B_INS]
         RECORD  r2,r1,r0
         ldr     r0,[r2,#I_HOST]
@@ -3336,7 +3342,7 @@ m_ld_rr_nn                              ; LD rr,nn
         and     r1,r9,#0x30
         cmp     r1,#0x20
         bne     m_ld_rr_reg
-        ldr     r1,[r6,#I_PRE]
+        ldrb    r1,[r6,#I_PRE]
         cmp     r1,#PRE_FD
         bne     m_ld_rr_reg
         mov     r1,#0
@@ -3442,7 +3448,7 @@ m_ld_a_ind                              ; LD A,(BC) / LD A,(DE)
         b       eb_done
 
 m_ld_nn_hl                              ; LD (nn),HL
-        ldr     r0,[r6,#I_DYN]
+        ldrb    r0,[r6,#I_DYN]
         cmp     r0,#0
         beq     m_ld_nn_hl_c
         ; Address read when the instruction runs: the generic write
@@ -3482,7 +3488,7 @@ t_ld_nn_hl_hi   ADD     r12,r12,#0x10000
                 MOV     r0,r7,LSR #24
 
 m_ld_hl_nn                              ; LD HL,(nn)
-        ldr     r0,[r6,#I_DYN]
+        ldrb    r0,[r6,#I_DYN]
         cmp     r0,#0
         beq     m_ld_hl_nn_c
         bl      e_dyn_addr
@@ -3504,7 +3510,7 @@ m_ld_hl_nn_c
         ldr     r0,[r6,#I_N]
         add     r0,r0,#1
         bl      e_read_const
-        ldr     r0,[r6,#I_PRE]
+        ldrb    r0,[r6,#I_PRE]
         cmp     r0,#PRE_FD
         bne     m_ld_hl_nn_reg
         adr     r12,t_ld_iy_nn
@@ -3526,7 +3532,7 @@ t_ld_iy_nn      MOV     r1,r2,LSL #16
                 STR     r1,[r10,#GOFF_IY]
 
 m_ld_nn_a                               ; LD (nn),A
-        ldr     r0,[r6,#I_DYN]
+        ldrb    r0,[r6,#I_DYN]
         cmp     r0,#0
         beq     m_ld_nn_a_c
         bl      e_dyn_addr
@@ -3543,7 +3549,7 @@ m_ld_nn_a_c
         b       eb_done
 
 m_ld_a_nn                               ; LD A,(nn)
-        ldr     r0,[r6,#I_DYN]
+        ldrb    r0,[r6,#I_DYN]
         cmp     r0,#0
         beq     m_ld_a_nn_c
         bl      e_dyn_addr
@@ -3735,7 +3741,7 @@ t_ccf           AND     r0,r3,#PSR_C
 
 m_halt                                  ; HALT
         ldr     r0,[r6,#I_PC]
-        ldr     r1,[r6,#I_LEN]
+        ldrb    r1,[r6,#I_LEN]
         add     r0,r0,r1
         mov     r0,r0,lsl #16
         mov     r0,r0,lsr #16
@@ -3834,16 +3840,16 @@ m_pop                                   ; POP rr
         bne     m_pop_read
         cmp     r7,#0
         beq     m_pop_read
-        ldr     r0,[r6,#I_SEG_START]
-        ldr     r1,[r6,#I_PRE]
+        ldrb    r0,[r6,#I_SEG_START]
+        ldrb    r1,[r6,#I_PRE]
         sub     r12,r6,#I_SIZE          ; the previous instruction
-        ldr     r2,[r12,#I_PRE]
+        ldrb    r2,[r12,#I_PRE]
         orr     r0,r0,r1
-        ldr     r1,[r12,#I_IRQ_CHECK]
+        ldrb    r1,[r12,#I_IRQ_CHECK]
         orr     r0,r0,r2
         orrs    r0,r0,r1
         bne     m_pop_read
-        ldr     r0,[r12,#I_OP]
+        ldrb    r0,[r12,#I_OP]
         cmp     r0,#0xF5
         bne     m_pop_read
         adr     r12,t_pop_kept
@@ -3859,7 +3865,7 @@ m_pop_read
         beq     m_pop_af
         cmp     r0,#0x20
         bne     m_pop_pair
-        ldr     r1,[r6,#I_PRE]
+        ldrb    r1,[r6,#I_PRE]
         cmp     r1,#PRE_FD
         bne     m_pop_pair
         adr     r12,t_pop_iy
@@ -3874,7 +3880,7 @@ m_pop_pair
         movne   r0,#RBC
         b       m_pop_rr
 m_pop_hl
-        ldr     r1,[r6,#I_PRE]
+        ldrb    r1,[r6,#I_PRE]
         cmp     r1,#PRE_DD
         moveq   r0,#RIX
         movne   r0,#RHL
@@ -3944,15 +3950,15 @@ m_jp_cc                                 ; JP cc,nn
         b       eb_done
 
 m_jp                                    ; JP nn
-        ldr     r0,[r6,#I_DYN]
+        ldrb    r0,[r6,#I_DYN]
         cmp     r0,#0
         beq     m_jp_static
         bl      e_dyn_exit
         b       eb_done
 m_jp_static
-        ldr     r0,[r6,#I_INTERNAL]
-        cmp     r0,#0
-        bge     m_jump_in
+        ldrb    r0,[r6,#I_INTERNAL]
+        cmp     r0,#0xFF                ; an instruction of the block
+        bne     m_jump_in
         b       m_jr_out
 
 m_out_n                                 ; OUT (n),A
@@ -4041,7 +4047,7 @@ ego_last
         mov     r1,r2,lsr #8
         and     r1,r1,#0x1F             ; count
         orr     r1,r1,#RUN_BUF_HI
-        ldr     r0,[r6,#I_PRE]
+        ldrb    r0,[r6,#I_PRE]
         cmp     r0,#0                   ; OUT (n),A
         orreq   r1,r1,#RUN_BUF_N_HI
         TMPL    r0,t_orr_r0_hi
@@ -4119,7 +4125,7 @@ m_ex_sp                                 ; EX (SP),HL
         stmia   r5!,{r1,r2}
         mov     r0,#RAD
         bl      e_write
-        ldr     r0,[r6,#I_PRE]
+        ldrb    r0,[r6,#I_PRE]
         cmp     r0,#PRE_FD
         bne     m_ex_sp_reg
         adr     r12,t_ex_sp_iy
@@ -4188,14 +4194,14 @@ t_push_af       ADD     r1,r10,#FENC_OFF
 m_call                                  ; CALL nn
 m_rst                                   ; RST
         ldr     r0,[r6,#I_PC]
-        ldr     r1,[r6,#I_LEN]
+        ldrb    r1,[r6,#I_LEN]
         add     r0,r0,r1
         mov     r0,r0,lsl #16
         mov     r0,r0,lsr #16
         mov     r1,#0
         bl      e_mov32
         bl      e_push
-        ldr     r0,[r6,#I_DYN]
+        ldrb    r0,[r6,#I_DYN]
         cmp     r0,#0
         bne     m_call_dyn
         ldr     r0,[r6,#I_TARGET]
@@ -4271,7 +4277,7 @@ cb_mem_write
 ; The undocumented copy of the result (operand r1: r0 of the generated
 ; code shifted by 0 or 24) to register z, for DD CB / FD CB with z != 6.
 cb_copy
-        ldr     r0,[r6,#I_PRE]
+        ldrb    r0,[r6,#I_PRE]
         cmp     r0,#PRE_DDCB
         movlo   pc,lr
         and     r0,r9,#7

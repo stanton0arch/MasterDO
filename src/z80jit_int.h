@@ -88,43 +88,51 @@
 #define IS_STATIC(k) ((k) >= K_JR && (k) <= K_RST)
 #define IS_END(k)    ((k) >= K_JR)
 
-/* Decoded instruction. CONTRACT with z80jit_dec.s, which writes the first
- * twenty-one words with STM: keep the order (offsets checked in z80jit.c). */
+/* Decoded instruction, packed: the fields of a byte or less share words,
+ * so that the decoder writes six words with one STM and each pass loads
+ * one word where it loaded several. The offsets in the comments are the
+ * byte offsets of the fields (big-endian words), which the assembly reads
+ * with LDRB. CONTRACT with z80jit_dec.s, z80jit_ana.s and z80jit_emt.s
+ * (offsets checked in z80jit.c). */
 typedef struct {
-    /* decoded (jit_decode) */
-    uint32  pc;
-    uint32  len;
-    uint32  pre;            /* PRE_* */
-    uint32  op;             /* opcode byte after the prefixes */
-    int32   d;              /* (IX+d) displacement */
-    uint32  n;              /* immediate, 8 or 16 bits */
-    uint32  t;              /* T-states, branch not taken / not repeated */
-    uint32  kind;
-    uint32  cc;             /* condition 0-7 (NZ Z NC C PO PE P M) */
-    uint32  target;
-    uint32  use;            /* flags read */
-    uint32  def;            /* flags written */
-    uint32  ei;             /* EI: the block ends after the next instruction */
-    uint32  mem;            /* (HL) or (IX+d) operand: H and L stay H and L */
+    /* decoded (jit_decode): the first six words */
+    uint32  pc;             /*  0 */
+    uint32  target;         /*  4 static target; a repeated block instruction: itself */
+    uint8   ei;             /*  8 EI: the block ends after the next instruction */
+    uint8   mem;            /*  9 (HL) or (IX+d) operand: H and L stay H and L */
+    int8    d;              /* 10 (IX+d) displacement */
+    uint8   dyn;            /* 11 JP / CALL in RAM: the target is read from */
+                            /*    memory when the instruction runs (block decoder) */
+    uint32  n;              /* 12 immediate, 8 or 16 bits */
+    uint8   len;            /* 16 */
+    uint8   pre;            /* 17 PRE_* */
+    uint8   op;             /* 18 opcode byte after the prefixes */
+    uint8   t;              /* 19 T-states, branch not taken / not repeated */
+    uint8   kind;           /* 20 */
+    uint8   cc;             /* 21 condition 0-7 (NZ Z NC C PO PE P M) */
+    uint8   use;            /* 22 flags read */
+    uint8   def;            /* 23 flags written */
     /* set by the block decoder (jit_decode_block) */
-    int32   internal;       /* index of the target inside the block, or -1 */
-    uint32  busy;           /* jump back of a busy-wait loop */
-    uint32  irq_check;      /* instruction after EI: check for a pending */
-                            /* interrupt after it */
-    uint32  run;            /* first of a run of port outputs: its length, */
-                            /* the mask of its OUT (C),r elements << 8 and */
-                            /* the opcode of OUT (C),r << 24; RUN_PART for */
-                            /* the others; RUN_LOOP; or RUN_GRP (below) */
-    uint32  seg_start;      /* a cycle check precedes the instruction */
-    uint32  fused;          /* FU_* valid in the ARM flags for the next jump */
-    uint32  dyn;            /* JP / CALL in RAM: the target is read from */
-                            /* memory when the instruction runs */
+    int8    internal;       /* 24 index of the target inside the block, or -1 */
+    uint8   busy;           /* 25 jump back of a busy-wait loop (analysis) */
+    uint8   irq_check;      /* 26 instruction after EI: check for a pending */
+                            /*    interrupt after it */
+    uint8   seg_start;      /* 27 a cycle check precedes the instruction (a */
+                            /*    jump target: block decoder; the rest: analysis) */
+    uint32  run;            /* 28 first of a run of port outputs: its length, */
+                            /*    the mask of its OUT (C),r elements << 8 and */
+                            /*    the opcode of OUT (C),r << 24; RUN_PART for */
+                            /*    the others; RUN_LOOP; or RUN_GRP (below) */
+                            /*    (analysis) */
+    uint8   fused;          /* 32 FU_* valid in the ARM flags for the next jump */
+    uint8   pad[3];
     /* analysis */
-    uint32  live_after;     /* flags read later on the fall-through path */
-    uint32  live_before;    /* flags read from this instruction on */
-    uint32  seg_t;          /* T-states of the segment starting here */
-    uint32  t_after;        /* T-states of its segment after this instruction */
-    uint32 *host;           /* generated code of the instruction */
+    uint8   live_after;     /* 36 flags read later on the fall-through path */
+    uint8   live_before;    /* 37 flags read from this instruction on */
+    uint8   seg_t;          /* 38 T-states of the segment starting here */
+    uint8   t_after;        /* 39 T-states of its segment after this instruction */
+    uint32 *host;           /* 40 generated code of the instruction */
+    uint32  pad2;           /* 44 (a 48-byte record: index * 48 in two adds) */
 } jit_insn;
 
 #define JIT_DEC_DYN   0x4u  /* some operand is read when it runs */
@@ -216,6 +224,10 @@ typedef struct jit_block_ctx_s {
     uint32     *targets;    /* where the analysis reports the static exits (0: not asked) */
     uint32      max_targets;/* room there */
     uint32      ntargets;   /* exits reported */
+    uint32      back[2];    /* out of the decoder: a bit per instruction, the
+                             * jumps back (JR, JP, JR cc, JP cc to an
+                             * instruction of the block at or before them)
+                             * the busy-wait loop analysis looks at */
 } jit_block_ctx;
 
 extern jit_block_ctx jit_bctx;
@@ -225,16 +237,20 @@ extern jit_block_ctx jit_bctx;
  * instruction map of the block being decoded: entry (address & 255) holds
  * the serial of the decoding | the instruction's index + 1. */
 extern uint32 jit_dec_tab[512];
-/* Decodes the instruction at pc (16 bits): pc to mem of *in. */
+/* Decodes the instruction at pc (16 bits): the first six words of *in. */
 void   jit_decode(jit_insn *in, uint32 pc, const z80j_ctx *c);
 /* Decodes the instructions of the block b (ins, pc, ctx, key and serial
- * set): writes n, next_pc, dec_flags and has_dyn, returns n, 0 when the
- * first instruction crosses a seam of RAM. */
+ * set), with the marks of each (internal, dyn, irq_check, the seg_start
+ * of the jump targets; busy, run and fused cleared): writes n, next_pc,
+ * dec_flags, has_dyn and back, returns n, 0 when the first instruction
+ * crosses a seam of RAM. */
 int32  jit_decode_block(jit_block_ctx *b);
 
 /* z80jit_ana.s */
-/* Runs the analysis passes over the decoded block b: writes busy, line,
- * fused and, when targets is set, the static exits and ntargets. */
+/* Runs the analysis passes over the decoded block b (the busy-wait
+ * loops, the segments, the runs and groups of port outputs, the flag
+ * liveness and fusion): writes busy, line, fused and, when targets is
+ * set, the static exits and ntargets. */
 void   jit_analyse_block(jit_block_ctx *b);
 
 /* z80jit.c, for z80jit_ana.s */
