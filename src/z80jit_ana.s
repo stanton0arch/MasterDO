@@ -35,14 +35,19 @@ I_LIVE_AFTER    EQU     84
 I_LIVE_BEFORE   EQU     88
 I_SIZE          EQU     104
 
-; jit_ana_block (z80jit_int.h).
-A_NEXT_PC       EQU     12
-A_BUSY          EQU     24
-A_TARGETS       EQU     36
-A_MAX_TARGETS   EQU     40
-A_NTARGETS      EQU     44
-
-; jit_block_ctx: the translator state comes first.
+; jit_block_ctx (z80jit_int.h): the translator state comes first, then
+; the decoded block (its records, their number, the address after it), the
+; block's address and the tag of its instruction map entries, the counts
+; the analysis returns and the static exits it reports when asked.
+B_INS           EQU     4
+B_N             EQU     8
+B_NEXT_PC       EQU     12
+B_PC            EQU     56
+B_SERIAL        EQU     60
+B_BUSY          EQU     72
+B_TARGETS       EQU     84
+B_MAX_TARGETS   EQU     88
+B_NTARGETS      EQU     92
 B_J             EQU     0
 
 K_JRCC          EQU     1
@@ -75,8 +80,8 @@ RUN_MAX         EQU     16              ; Z80J_RUN_MAX
 MAX_INSNS       EQU     64
 
 ; Stack frame.
-F_ARGS          EQU     0               ; the jit_ana_block
-F_BC            EQU     4               ; its block context
+F_ARGS          EQU     0               ; the block context
+F_BC            EQU     4               ; the same (the flag scans' argument)
 F_J             EQU     8               ; the translator state
 F_N             EQU     12              ; instructions
 F_CAFTER        EQU     16              ; flags read after the conditional
@@ -103,18 +108,23 @@ F_SIZE          EQU     F_NOUT + 4
         MEND
 
 ;----------------------------------------------------------------------------
-; void jit_analyse_block(jit_ana_block *a)
+; void jit_analyse_block(jit_block_ctx *b)
 ;
-; Runs the analysis passes over the a->n decoded instructions of the block
-; at a->pc (see translate_block for what each one establishes). Returns
+; Runs the analysis passes over the b->n decoded instructions of the block
+; at b->pc (see translate_block for what each one establishes). Returns
 ; the busy-wait loops found, those waiting for a line and the fused flag
-; tests in a->busy, a->line and a->fused.
+; tests in b->busy, b->line and b->fused, and the static exits in
+; b->targets (b->ntargets of them) when b->targets is set.
 ;----------------------------------------------------------------------------
 jit_analyse_block
         stmfd   sp!,{r4-r9,r11,lr}
         sub     sp,sp,#F_SIZE
         str     r0,[sp,#F_ARGS]
-        ldmia   r0,{r4-r9}              ; ins, n, pc, next_pc, serial, bc
+        add     r1,r0,#B_INS
+        ldmia   r1,{r4,r5,r7}           ; ins, n, next_pc
+        add     r1,r0,#B_PC
+        ldmia   r1,{r6,r8}              ; pc, serial
+        mov     r9,r0                   ; block context
         str     r5,[sp,#F_N]
         str     r9,[sp,#F_BC]
         ldr     r1,[r9,#B_J]
@@ -132,8 +142,8 @@ jit_analyse_block
         str     r1,[sp,#F_LINE]
         str     r1,[sp,#F_FUSED]
         str     r1,[sp,#F_NOUT]
-        ldr     r1,[r0,#A_TARGETS]
-        ldr     r2,[r0,#A_MAX_TARGETS]
+        ldr     r1,[r0,#B_TARGETS]
+        ldr     r2,[r0,#B_MAX_TARGETS]
         add     r2,r1,r2,lsl #2
         str     r1,[sp,#F_TARGETS]
         str     r2,[sp,#F_TEND]
@@ -246,7 +256,7 @@ p1_done
         cmp     r1,#K_JR
         bhs     p1_nofall
         ldr     r2,[sp,#F_ARGS]
-        ldr     r2,[r2,#A_NEXT_PC]
+        ldr     r2,[r2,#B_NEXT_PC]
         REPORT  r2
 p1_nofall
 
@@ -515,7 +525,7 @@ p3_start
         b       p3_scan0
 p3_fall
         ldr     r0,[sp,#F_ARGS]
-        ldr     r1,[r0,#A_NEXT_PC]
+        ldr     r1,[r0,#B_NEXT_PC]
 p3_scan0
         ldr     r0,[sp,#F_BC]
         bl      jit_flags_needed
@@ -558,6 +568,7 @@ p3_store
         blo     p4_done
         ldr     r0,[sp,#F_J]
         ldr     r1,[sp,#F_ARGS]
+        add     r1,r1,#B_INS
         ldmia   r1,{r1,r2}              ; ins, n
         bl      jit_out_groups
 p4_done
@@ -566,13 +577,13 @@ p4_done
         ldr     r1,[sp,#F_BUSY]
         ldr     r2,[sp,#F_LINE]
         ldr     r3,[sp,#F_FUSED]
-        add     r0,r0,#A_BUSY
+        add     r0,r0,#B_BUSY
         stmia   r0,{r1-r3}
         ldr     r1,[sp,#F_TARGETS]
-        ldr     r2,[r0,#A_TARGETS - A_BUSY]
+        ldr     r2,[r0,#B_TARGETS - B_BUSY]
         sub     r1,r1,r2
         mov     r1,r1,lsr #2
-        str     r1,[r0,#A_NTARGETS - A_BUSY]
+        str     r1,[r0,#B_NTARGETS - B_BUSY]
         add     sp,sp,#F_SIZE
         ldmfd   sp!,{r4-r9,r11,pc}
 

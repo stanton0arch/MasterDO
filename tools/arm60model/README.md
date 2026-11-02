@@ -174,6 +174,12 @@ each code word since the `-from` frame):
 - `entries.py code.bin codecnt.bin [frames] [count]`: block entries (the
   executions of the first word of each block's body, where the links of
   other blocks lead) in all and per frame, and the most entered blocks.
+- `cmpcode.py A/code.bin A/sim.sym B/code.bin B/sim.sym`: the code buffers
+  of two builds compared word for word (the branches leaving the buffer by
+  the symbol they reach, since the image's layout moves between builds),
+  block descriptors included; the check of a translator change that must
+  leave the generated code as it was (`-frames 1` on each cartridge gives
+  the ROM translation).
 
 Pictures are PPM files; any image tool converts them.
 

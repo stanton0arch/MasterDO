@@ -607,7 +607,7 @@ static void check_blocks(uint32 f)
             }
             if (h == 0) {
                 printf("Check: frame %lu: block $%04lx key %06lx hashed without code\n",
-                       (unsigned long)f, (unsigned long)b->pc, (unsigned long)b->key);
+                       (unsigned long)f, (unsigned long)BLK_PC_OF(b), (unsigned long)b->key);
                 check_printed++;
                 continue;
             }
@@ -615,25 +615,25 @@ static void check_blocks(uint32 f)
             if (z < JIT_MAX_ZONES)
                 cnt[z]++;
             if (b->key == KEY_RAM &&
-                ((h[0] & 0x0F000000u) != 0x0B000000u || h[1] != b->pc || h[2] > 72)) {
+                ((h[0] & 0x0F000000u) != 0x0B000000u || h[1] != BLK_PC_OF(b) || h[2] > 72)) {
                 printf("Check: frame %lu: RAM block $%04lx zone %lu entry %08lx: header %08lx %08lx %08lx\n",
-                       (unsigned long)f, (unsigned long)b->pc, (unsigned long)z,
+                       (unsigned long)f, (unsigned long)BLK_PC_OF(b), (unsigned long)z,
                        (unsigned long)JIT_ADDR(h), (unsigned long)h[0], (unsigned long)h[1],
                        (unsigned long)h[2]);
                 check_printed++;
             }
-            look = j->ctx->lookup[b->pc];
+            look = j->ctx->lookup[BLK_PC_OF(b)];
             if (look != j->glue.miss && look != j->glue.interp && look != JIT_ADDR(h) &&
                 !KEY_IS_SLOT(b->key)) {
                 printf("Check: frame %lu: block $%04lx key %06lx entry %08lx but lookup %08lx\n",
-                       (unsigned long)f, (unsigned long)b->pc, (unsigned long)b->key,
+                       (unsigned long)f, (unsigned long)BLK_PC_OF(b), (unsigned long)b->key,
                        (unsigned long)JIT_ADDR(h), (unsigned long)look);
                 check_printed++;
             }
             for (b2 = b->next; b2 != 0; b2 = b2->next) {
-                if (b2->pc == b->pc && b2->key == b->key) {
+                if (BLK_PC_OF(b2) == BLK_PC_OF(b) && b2->key == b->key) {
                     printf("Check: frame %lu: block $%04lx key %06lx hashed twice (%08lx, %08lx)\n",
-                           (unsigned long)f, (unsigned long)b->pc, (unsigned long)b->key,
+                           (unsigned long)f, (unsigned long)BLK_PC_OF(b), (unsigned long)b->key,
                            (unsigned long)JIT_ADDR(h), (unsigned long)JIT_ADDR(b2->entry));
                     check_printed++;
                     break;
@@ -653,7 +653,7 @@ static void check_blocks(uint32 f)
             n++;
             if (b->entry == 0 || z != k) {
                 printf("Check: frame %lu: zone %lu lists block $%04lx whose code is in zone %lu\n",
-                       (unsigned long)f, (unsigned long)k, (unsigned long)b->pc,
+                       (unsigned long)f, (unsigned long)k, (unsigned long)BLK_PC_OF(b),
                        (unsigned long)z);
                 check_printed++;
                 break;

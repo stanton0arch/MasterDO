@@ -75,14 +75,6 @@ CHECK_OFF(i_size, sizeof(jit_insn) == 104);
 CHECK_OFF(i_seg_start, offsetof(jit_insn, seg_start) == 72);
 CHECK_OFF(i_live_after, offsetof(jit_insn, live_after) == 84);
 CHECK_OFF(i_t_after, offsetof(jit_insn, t_after) == 96);
-CHECK_OFF(d_serial, offsetof(jit_dec_block, serial) == 16);
-CHECK_OFF(d_next, offsetof(jit_dec_block, next_pc) == 20);
-CHECK_OFF(d_flags, offsetof(jit_dec_block, flags) == 24);
-/* The arguments of z80jit_ana.s. */
-CHECK_OFF(a_next_pc, offsetof(jit_ana_block, next_pc) == 12);
-CHECK_OFF(a_bc, offsetof(jit_ana_block, bc) == 20);
-CHECK_OFF(a_busy, offsetof(jit_ana_block, busy) == 24);
-CHECK_OFF(a_fused, offsetof(jit_ana_block, fused) == 32);
 CHECK_OFF(b_j, offsetof(jit_block_ctx, j) == 0);
 CHECK_OFF(b_ins, offsetof(jit_block_ctx, ins) == 4);
 CHECK_OFF(b_n, offsetof(jit_block_ctx, n) == 8);
@@ -97,6 +89,17 @@ CHECK_OFF(b_mark_off, offsetof(jit_block_ctx, mark_off) == 40);
 CHECK_OFF(b_body, offsetof(jit_block_ctx, body) == 44);
 CHECK_OFF(b_skip_site, offsetof(jit_block_ctx, skip_site) == 48);
 CHECK_OFF(b_skip_to, offsetof(jit_block_ctx, skip_to) == 52);
+CHECK_OFF(b_pc, offsetof(jit_block_ctx, pc) == 56);
+CHECK_OFF(b_serial, offsetof(jit_block_ctx, serial) == 60);
+CHECK_OFF(b_ctx, offsetof(jit_block_ctx, ctx) == 64);
+CHECK_OFF(b_dec_flags, offsetof(jit_block_ctx, dec_flags) == 68);
+CHECK_OFF(b_busy, offsetof(jit_block_ctx, busy) == 72);
+CHECK_OFF(b_line, offsetof(jit_block_ctx, line) == 76);
+CHECK_OFF(b_fused, offsetof(jit_block_ctx, fused) == 80);
+CHECK_OFF(b_targets, offsetof(jit_block_ctx, targets) == 84);
+CHECK_OFF(b_max_targets, offsetof(jit_block_ctx, max_targets) == 88);
+CHECK_OFF(b_ntargets, offsetof(jit_block_ctx, ntargets) == 92);
+CHECK_OFF(b_ctx_size, sizeof(jit_block_ctx) == 0x60);
 CHECK_OFF(st_size, sizeof(jit_stub) == 28);
 CHECK_OFF(st_site, offsetof(jit_stub, site) == 4);
 CHECK_OFF(st_pc, offsetof(jit_stub, pc) == 8);
@@ -161,10 +164,10 @@ CHECK_OFF(s_seams, offsetof(z80j_state, stats.seams) == 0x88B4);
 CHECK_OFF(ar_count, offsetof(z80j_area, count) == 12 && sizeof(z80j_area) == 16);
 CHECK_OFF(blk_body, offsetof(z80j_block, body) == 12);
 CHECK_OFF(blk_next, offsetof(z80j_block, next) == 16);
-CHECK_OFF(b_nmemo, offsetof(jit_block_ctx, nmemo) == 0xB8 && sizeof(jit_block_ctx) == 0xBC);
-CHECK_OFF(d_size, sizeof(jit_dec_block) == 28);
-CHECK_OFF(a_size, sizeof(jit_ana_block) == 48 && offsetof(jit_ana_block, busy) == 24);
-CHECK_OFF(a_targets, offsetof(jit_ana_block, targets) == 36 && offsetof(jit_ana_block, ntargets) == 44);
+CHECK_OFF(s_scan_key, offsetof(z80j_state, scan_key) == 0x4384);
+CHECK_OFF(s_scan_kind, offsetof(z80j_state, scan_kind) == 0x4B84);
+CHECK_OFF(s_scan_val, offsetof(z80j_state, scan_val) == 0x4D84);
+CHECK_OFF(scan_cache, JIT_SCAN_CACHE == 512);
 CHECK_OFF(c_lookup, offsetof(z80j_ctx, lookup) == 0x4400);
 CHECK_OFF(key_ram, KEY_RAM == 0x80000u);
 CHECK_OFF(dec_flags, JIT_DEC_DYN == 4u && JIT_DEC_SEAM == 8u);
@@ -177,15 +180,12 @@ CHECK_OFF(c_page_kind, offsetof(z80j_ctx, page_kind) == 0x900);
 CHECK_OFF(block_words, BLOCK_WORDS == 1024);   /* BLOCK_BYTES of z80jit_blk.s */
 #define HASH(pc)    ((pc) & 1023u)
 
-/* Translation scratch (not re-entrant, kept off the small task stack),
- * shared with z80jit_blk.s, which also leaves there the instruction count,
- * the end address and the number of static exits reported of the block
- * translated last. */
-jit_insn jit_insns[MAX_INSNS];
-jit_stub jit_stubs[MAX_STUBS];
-uint32   jit_last_n;
-uint32   jit_last_next;
-uint32   jit_last_ntargets;
+/* Translation scratch (not re-entrant, kept off the small task stack):
+ * the block context shared by the parts of a translation, with its
+ * instruction records and stubs (z80j_init binds them). */
+static jit_insn jit_insns[MAX_INSNS];
+static jit_stub jit_stubs[MAX_STUBS];
+jit_block_ctx   jit_bctx;
 
 /* Tables of z80jit_dec.s: the properties of the unprefixed opcodes, then
  * the instruction index + 1 for each address of the block being
@@ -471,13 +471,20 @@ void z80j_insn_info(const z80j_ctx *ctx, uint32 pc, uint32 *len, uint32 *t,
  * Flag liveness
  *------------------------------------------------------------------------*/
 
-/* Code whose content cannot change while the block is valid. */
+/* Code whose content cannot change while the block is valid: a fixed
+ * page, or a paged slot showing the bank of the block's own key. */
 static int32 scan_safe(const jit_block_ctx *b, uint32 pc)
 {
-    uint32 key = jit_block_key(b->j->ctx, pc);
+    uint32 kind = (uint32)b->j->ctx->page_kind[(pc >> 8) & 0xFFu] & Z80J_PAGE_KIND;
 
-    return key == KEY_FIXED || (key == b->key && KEY_IS_SLOT(key));
+    if (kind == Z80J_PAGE_FIXED)
+        return 1;
+    if (kind >= Z80J_PAGE_SLOT(0) && kind <= Z80J_PAGE_SLOT(3))
+        return b->key == ((kind << 16) | (b->j->ctx->slot_bank[kind - 1] & 0xFFFFu));
+    return 0;
 }
+
+static z80j_block *find_block(z80j_state *j, uint32 pc, uint32 key);
 
 /*
  * Flags that code starting at pc may read before writing them. Follows
@@ -522,39 +529,41 @@ static uint32 scan_needed(jit_block_ctx *b, uint32 pc, int32 depth)
     return needed | (FL_ALL & ~defined);
 }
 
-/* Flags the code at pc may read before writing them (scan_needed), with
- * a memo per block and a cache across blocks. Called by z80jit_ana.s. */
+/* Flags the code at pc may read before writing them (scan_needed), for
+ * the block b. Called by z80jit_ana.s. The value depends on the bytes at
+ * pc and on the key of the scanning block only, so for ROM keys it is
+ * kept in two places: the descriptor of the block at pc with the same
+ * key, where an exit leading to a translated block finds it with the
+ * lookup the linker makes anyway, and a cache across blocks for the
+ * other addresses. A RAM key is never cached (the scan stops at RAM). */
 uint32 jit_flags_needed(jit_block_ctx *b, uint32 pc)
 {
     z80j_state *j = b->j;
-    uint32 ckey = (pc & 0xFFFFu) | (b->key << 16);      /* pc and bank */
-    uint32 ckind = b->key >> 16;                        /* page kind */
-    uint32 slot = (pc ^ (pc >> 9)) & (JIT_SCAN_CACHE - 1);
-    int32 k;
-    uint32 v;
+    uint32 ckey, ckind, slot, v;
+    z80j_block *blk;
 
-    for (k = 0; k < b->nmemo; k++) {
-        if (b->memo_pc[k] == pc)
-            return b->memo_val[k];
+    pc &= 0xFFFFu;
+    if (b->key == KEY_RAM)
+        return scan_needed(b, pc, SCAN_DEPTH);
+    ckey = pc | (b->key << 16);                 /* pc and bank */
+    ckind = b->key >> 16;                       /* page kind */
+    slot = (pc ^ (pc >> 9)) & (JIT_SCAN_CACHE - 1);
+    if (j->scan_key[slot] == ckey && j->scan_kind[slot] == ckind) {
+        j->stats.scan_hits++;
+        return j->scan_val[slot];
     }
-    /* ROM code only: the scan stops at RAM anyway (unsafe), and a block
-     * key of RAM is not cached. */
-    if (b->key != KEY_RAM && j->scan_key[slot] == ckey && j->scan_kind[slot] == ckind) {
-        v = j->scan_val[slot];
+    blk = find_block(j, pc, b->key);
+    if (blk != 0 && (blk->pc & BLK_SCAN_VALID) != 0) {
+        v = (blk->pc >> BLK_SCAN_SHIFT) & FL_ALL;
         j->stats.scan_hits++;
     } else {
         v = scan_needed(b, pc, SCAN_DEPTH);
-        if (b->key != KEY_RAM) {
-            j->scan_key[slot] = ckey;
-            j->scan_kind[slot] = (uint8)ckind;
-            j->scan_val[slot] = (uint8)v;
-        }
+        if (blk != 0)
+            blk->pc = pc | (v << BLK_SCAN_SHIFT) | BLK_SCAN_VALID;
     }
-    if (b->nmemo < SCAN_MEMO) {
-        b->memo_pc[b->nmemo] = pc;
-        b->memo_val[b->nmemo] = v;
-        b->nmemo++;
-    }
+    j->scan_key[slot] = ckey;
+    j->scan_kind[slot] = (uint8)ckind;
+    j->scan_val[slot] = (uint8)v;
     return v;
 }
 
@@ -933,7 +942,7 @@ static z80j_block *find_block(z80j_state *j, uint32 pc, uint32 key)
     z80j_block *b;
 
     for (b = j->hash[HASH(pc)]; b != 0; b = b->next) {
-        if (b->pc == pc && b->key == key)
+        if (BLK_PC_OF(b) == pc && b->key == key)
             return b;
     }
     return 0;
@@ -941,7 +950,7 @@ static z80j_block *find_block(z80j_state *j, uint32 pc, uint32 key)
 
 static void unhash_block(z80j_state *j, z80j_block *blk)
 {
-    z80j_block **pp = &j->hash[HASH(blk->pc)];
+    z80j_block **pp = &j->hash[HASH(BLK_PC_OF(blk))];
 
     while (*pp != 0) {
         if (*pp == blk) {
@@ -1019,10 +1028,10 @@ static void evict_zone(z80j_state *j, uint32 z)
     for (blk = j->zone_head[z]; blk != 0; blk = next) {
         next = blk->znext;
         unhash_block(j, blk);
-        ctx->lookup[blk->pc] = j->glue.miss;
+        ctx->lookup[BLK_PC_OF(blk)] = j->glue.miss;
         /* Interpreted again until it proves hot, in spare time. */
         if (j->hot != 0 && j->queue_at != 0)
-            j->hot[blk->pc] = (uint8)(j->queue_at - 1);
+            j->hot[BLK_PC_OF(blk)] = (uint8)(j->queue_at - 1);
         free_block(j, blk);
         freed++;
     }
@@ -1430,7 +1439,7 @@ uint32 z80j_spare_fits(const z80j_state *j, uint32 elapsed_us, uint32 margin_us)
  * here. With a non-null targets, the static exits of the block (the
  * targets of its jumps and calls, the return addresses of its calls, the
  * address after it when it does not end with a transfer) are written
- * there by the analysis, their number in jit_last_ntargets. */
+ * there by the analysis, their number in jit_bctx.ntargets. */
 static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
                                    uint32 max_targets)
 {
@@ -1438,7 +1447,7 @@ static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
 
     if (blk == 0 && j->error != 5) {
         printf("Z80 translator: block at $%04lx not translated (error %ld, %ld instructions)\n",
-               (unsigned long)(pc & 0xFFFFu), (long)j->error, (long)jit_last_n);
+               (unsigned long)(pc & 0xFFFFu), (long)j->error, (long)jit_bctx.n);
     }
     return blk;
 }
@@ -1802,8 +1811,8 @@ uint32 z80j_prepare(z80j_state *j, uint32 pc, uint32 *targets, uint32 max_target
         return 0;
     if (translate_block(j, pc, targets, max_targets) == 0)
         return 0;
-    *ntargets = jit_last_ntargets;
-    return jit_last_n;
+    *ntargets = jit_bctx.ntargets;
+    return (uint32)jit_bctx.n;
 }
 
 /*--------------------------------------------------------------------------
@@ -2013,6 +2022,8 @@ void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
     uint32 v;
 
     memset(j, 0, sizeof(*j));
+    jit_bctx.ins = jit_insns;
+    jit_bctx.stubs = jit_stubs;
     j->ctx = ctx;
     j->code = code;
     j->code_end = code + code_words;

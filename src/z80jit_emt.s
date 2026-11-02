@@ -22,6 +22,59 @@
         AREA    |C$$code|, CODE, READONLY
 
         EXPORT  jit_emit_block
+        ; The routines below are exported for the profiles of the model only.
+        EXPORT  eb_body
+        EXPORT  eb_stubs
+        EXPORT  new_stub
+        EXPORT  e_imm
+        EXPORT  e_dpi
+        EXPORT  e_mov32
+        EXPORT  e_link
+        EXPORT  e_read
+        EXPORT  e_write
+        EXPORT  e_fixed
+        EXPORT  e_read_const
+        EXPORT  e_write_const
+        EXPORT  e_fixed_base
+        EXPORT  e_mem_addr
+        EXPORT  e_push
+        EXPORT  e_pop
+        EXPORT  e_pair_of
+        EXPORT  e_get8
+        EXPORT  e_set8
+        EXPORT  e_to_low
+        EXPORT  e_get_low
+        EXPORT  e_idx_reg
+        EXPORT  e_idx_store
+        EXPORT  e_rp_reg
+        EXPORT  e_alu
+        EXPORT  e_cmp4
+        EXPORT  e_incdec
+        EXPORT  e_rot
+        EXPORT  e_rot_flags
+        EXPORT  e_bit
+        EXPORT  e_exit
+        EXPORT  e_dynamic
+        EXPORT  e_load_target
+        EXPORT  e_dyn_addr
+        EXPORT  e_dyn_exit
+        EXPORT  e_cond
+        EXPORT  e_idle
+        EXPORT  e_line_idle
+        EXPORT  e_jump_cond
+        EXPORT  e_leave_check
+        EXPORT  e_port_c
+        EXPORT  e_time_left
+        EXPORT  e_out_loop
+        EXPORT  e_copy_loop
+        EXPORT  e_block_insn
+        EXPORT  e_out_run
+        EXPORT  e_pair_lo_hi
+        EXPORT  e_taken
+        EXPORT  e_imm8
+        EXPORT  e_port_handler
+        EXPORT  e_port_table
+        EXPORT  e_grp_out
         IMPORT  jit_link_host
         IMPORT  jit_link_stub
         IMPORT  z80j_glue_out_split

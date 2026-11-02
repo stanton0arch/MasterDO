@@ -1,9 +1,10 @@
 ; Translation of one block (see z80jit.c, translate_block): the management
-; around the decoding, the analysis and the code emission of a block, which
-; the compiler had turned into a hundred stack loads and stores per block.
-; The values that flow between the parts (the area, the zone, the block
-; descriptor, the argument blocks of the three assembly routines) stay in
-; registers here; nothing about the generated code changes.
+; around the decoding, the analysis and the code emission of a block. The
+; three parts share one block context (jit_bctx, z80jit_int.h), filled
+; here with their inputs and read back for their outputs; the area, the
+; zone, the block descriptor and the instruction count stay in registers;
+; the statistics are updated once per block. Nothing about the generated
+; code changes.
 ;
 ; z80j_block *jit_translate_block(z80j_state *j, uint32 pc, uint32 *targets,
 ;                                  uint32 max_targets)
@@ -12,21 +13,16 @@
 ; be decoded at pc (the caller leaves such code to the interpreter), another
 ; value when the emitter failed (the caller reports it). With a non-null
 ; targets, the static exits of the block are written there by the analysis
-; (at most max_targets), their number in jit_last_ntargets.
+; (at most max_targets), their number in jit_bctx.ntargets.
 
         AREA    |C$$code|, CODE, READONLY
 
         EXPORT  jit_translate_block
         IMPORT  jit_next_zone
-        IMPORT  jit_block_key
         IMPORT  jit_decode_block
         IMPORT  jit_analyse_block
         IMPORT  jit_emit_block
-        IMPORT  jit_insns
-        IMPORT  jit_stubs
-        IMPORT  jit_last_n
-        IMPORT  jit_last_next
-        IMPORT  jit_last_ntargets
+        IMPORT  jit_bctx
 
 ; z80j_state (offsets checked in z80jit.c)
 S_CTX           EQU     0
@@ -37,6 +33,9 @@ S_AREA          EQU     0x1C            ; area[0]; area[1] 16 bytes further
 S_SEEN          EQU     0x3C
 S_ZONE_BLOCKS   EQU     0x403C
 S_CHUNK_SHIFT   EQU     0x437C
+S_SCAN_KEY      EQU     0x4384          ; the flag scan cache: 512 keys,
+S_SCAN_KIND     EQU     0x4B84          ; page kinds (bytes) and values (bytes)
+S_SCAN_VAL      EQU     0x4D84
 S_FREE_BLOCKS   EQU     0x4FC8
 S_NBLOCKS       EQU     0x4FD0
 S_HASH          EQU     0x4FD4
@@ -47,12 +46,8 @@ S_LINKS         EQU     0x5FD4
 S_NLINKS        EQU     0x5FD8
 S_ERROR         EQU     0x5FE4
 S_SEED_HOT      EQU     0x5FE8
-ST_TRANSLATIONS EQU     0x884C
-ST_INSNS        EQU     0x8850
-ST_CODE_BYTES   EQU     0x8854
-ST_FUSED        EQU     0x8858
-ST_BUSY_LOOPS   EQU     0x887C
-ST_LINE_LOOPS   EQU     0x8880
+ST_TRANSLATIONS EQU     0x884C          ; then insns, code_bytes, fused
+ST_BUSY_LOOPS   EQU     0x887C          ; then line_loops
 ST_PROMOTED     EQU     0x8894
 ST_DYN_BLOCKS   EQU     0x88B0
 ST_SEAMS        EQU     0x88B4
@@ -64,67 +59,52 @@ A_CUR           EQU     0
 A_END           EQU     4
 A_COUNT         EQU     12
 
-; z80j_block
+; z80j_block: the pc word holds the Z80 address in its low 16 bits and,
+; with bit 31 set, the flag scan value of the block's code in bits 16-21.
 BLK_PC          EQU     0
 BLK_KEY         EQU     4
 BLK_ENTRY       EQU     8
 BLK_BODY        EQU     12
 BLK_NEXT        EQU     16
 BLK_ZNEXT       EQU     20              ; the blocks of the same zone
+BLK_SCAN_VALID  EQU     0x80000000
 
 ; jit_block_ctx
 B_J             EQU     0
-B_INS           EQU     4
 B_N             EQU     8
-B_NEXT_PC       EQU     12
 B_KEY           EQU     16
 B_END_LEAVE     EQU     20
-B_STUBS         EQU     24
-B_NSTUBS        EQU     28
 B_ENTRY_CHECK   EQU     32
 B_HAS_DYN       EQU     36
 B_MARK_OFF      EQU     40
 B_BODY          EQU     44
-B_NMEMO         EQU     0xB8
-B_SIZE          EQU     0xBC
-
-; jit_dec_block
-D_SERIAL        EQU     16
-D_NEXT_PC       EQU     20
-D_FLAGS         EQU     24
-D_SIZE          EQU     28
-DEC_DYN         EQU     4
+B_PC            EQU     56
+B_SERIAL        EQU     60
+B_CTX           EQU     64
+B_DEC_FLAGS     EQU     68
+B_BUSY          EQU     72              ; then line, fused
+B_FUSED         EQU     80
+B_TARGETS       EQU     84
+B_MAX_TARGETS   EQU     88
 DEC_SEAM        EQU     8
 
-; jit_ana_block
-A_BC            EQU     20
-A_BUSY          EQU     24
-A_TARGETS       EQU     36
-A_MAX_TARGETS   EQU     40
-A_NTARGETS      EQU     44
-A_SIZE          EQU     48
-
 ; z80j_ctx
+C_SLOT_BANK     EQU     0x87C
+C_PAGE_KIND     EQU     0x900
 C_LOOKUP        EQU     0x4400
 GOFF_CHUNK_MARK EQU     0x900
+PAGE_KIND       EQU     0x0F
 
 KEY_FIXED       EQU     0
 KEY_RAM         EQU     0x80000
 BLOCK_BYTES     EQU     4096            ; free bytes required before a translation
 
-; Stack frame: the block context, the decoder and analysis argument blocks,
-; whether the emission was tried again in another zone, and the exits asked
-; for.
-F_BC            EQU     0
-F_D             EQU     B_SIZE
-F_A             EQU     F_D + D_SIZE
-F_RETRIED       EQU     F_A + A_SIZE
-F_TARGETS       EQU     F_RETRIED + 4   ; the exits asked for, and their room
-F_MAX_TARGETS   EQU     F_TARGETS + 4
-F_SIZE          EQU     F_MAX_TARGETS + 4
+; Stack frame: whether the emission was tried again in another zone.
+F_RETRIED       EQU     0
+F_SIZE          EQU     4
 
-; Context offset of the run mark of the chunk holding j->cur, into
-; [sp,#B_MARK_OFF]. Uses $a, $b.
+; Context offset of the run mark of the chunk holding j->cur, into the
+; block context. Uses $a, $b.
         MACRO
         MARKOFF $a,$b
         ldr     $a,[r4,#S_CUR]
@@ -136,7 +116,7 @@ F_SIZE          EQU     F_MAX_TARGETS + 4
         mov     $a,$a,lsr $b
         mov     $a,$a,lsl #2
         add     $a,$a,#GOFF_CHUNK_MARK
-        str     $a,[sp,#B_MARK_OFF]
+        str     $a,[r7,#B_MARK_OFF]
         MEND
 
 ; Adds $v to the statistic at offset $off of the state. Uses $a, $b.
@@ -148,7 +128,7 @@ F_SIZE          EQU     F_MAX_TARGETS + 4
         str     $b,[$a,#$off :AND: 0xFF]
         MEND
 
-; r4 = j, r5 = Z80 address, r6 = area, r7 = instruction records,
+; r4 = j, r5 = Z80 address, r6 = area, r7 = block context,
 ; r8 = instruction count, r9 = block descriptor, r11 = ctx.
 jit_translate_block
         stmfd   sp!,{r4-r9,r11,lr}
@@ -157,10 +137,42 @@ jit_translate_block
         mov     r5,r1,lsl #16
         mov     r5,r5,lsr #16
         ldr     r11,[r4,#S_CTX]
+        ldr     r7,tb_bctx
         mov     r0,#0
         str     r0,[sp,#F_RETRIED]
-        str     r2,[sp,#F_TARGETS]
-        str     r3,[sp,#F_MAX_TARGETS]
+        ; The block context: the translator state, the block, the exits
+        ; asked for (the records and stubs are bound once, by z80j_init).
+        str     r4,[r7,#B_J]
+        str     r2,[r7,#B_TARGETS]
+        str     r3,[r7,#B_MAX_TARGETS]
+        str     r5,[r7,#B_PC]
+        str     r11,[r7,#B_CTX]
+        str     r0,[r7,#B_END_LEAVE]
+
+        ; The key of the code at pc (jit_block_key): the page kind, with
+        ; the bank for a paged slot; then the entry check it calls for
+        ; (none for fixed code, the bytes for RAM, the bank for a slot).
+        add     r0,r11,r5,lsr #8
+        ldrb    r0,[r0,#C_PAGE_KIND]
+        and     r0,r0,#PAGE_KIND
+        sub     r1,r0,#1
+        cmp     r1,#3
+        bls     tb_slot
+        cmp     r0,#0
+        movne   r0,#KEY_RAM
+        moveq   r1,#0
+        movne   r1,#2
+        b       tb_keyed
+tb_slot
+        add     r1,r11,r1,lsl #2
+        ldr     r1,[r1,#C_SLOT_BANK]
+        mov     r1,r1,lsl #16
+        orr     r0,r0,r1
+        mov     r0,r0,ror #16           ; kind << 16 | bank
+        mov     r1,#1
+tb_keyed
+        str     r0,[r7,#B_KEY]
+        str     r1,[r7,#B_ENTRY_CHECK]
 
         ; Area: hot for a block translated before (evicted since) when a
         ; hot area exists, or when every block is seeded there; cold
@@ -214,102 +226,52 @@ tb_next_zone
 tb_zone_ok
         str     r0,[r4,#S_CUR]
         str     r1,[r4,#S_ZONE_END]
-
-        ; The block context.
         MARKOFF r0,r1
-        ldr     r7,tb_insns
-        ldr     r0,tb_stubs
-        mov     r1,#0
-        str     r4,[sp,#B_J]
-        str     r7,[sp,#B_INS]
-        str     r0,[sp,#B_STUBS]
-        str     r1,[sp,#B_NSTUBS]
-        str     r1,[sp,#B_END_LEAVE]
-        str     r1,[sp,#B_HAS_DYN]
-        str     r1,[sp,#B_NMEMO]
-        mov     r0,r11
-        mov     r1,r5
-        bl      jit_block_key
-        str     r0,[sp,#B_KEY]
 
-        ; Decoding (jit_decode_block, z80jit_dec.s): ins, pc, ctx, key and
-        ; the serial tagging the instruction map entries.
-        mov     r3,r0
+        ; Decoding (jit_decode_block, z80jit_dec.s), the instruction map
+        ; entries tagged with the serial of this translation.
         add     r12,r4,#ST_TRANSLATIONS :AND: 0xFF00
         ldr     r12,[r12,#ST_TRANSLATIONS :AND: 0xFF]
         add     r12,r12,#1
         mov     r12,r12,lsl #8
+        str     r12,[r7,#B_SERIAL]
         mov     r0,r7
-        mov     r1,r5
-        mov     r2,r11
-        add     lr,sp,#F_D
-        stmia   lr,{r0-r3,r12}
-        mov     r0,lr
         bl      jit_decode_block
         movs    r8,r0
         beq     tb_undecodable
-        ldr     r1,[sp,#F_D + D_FLAGS]
+        ldr     r1,[r7,#B_DEC_FLAGS]
         tst     r1,#DEC_SEAM
         beq     tb_noseam
         mov     r0,#1
         STATADD ST_SEAMS,r0,r2,r3
 tb_noseam
-        and     r2,r1,#DEC_DYN
-        mov     r2,r2,lsr #2
-        str     r2,[sp,#B_HAS_DYN]
-        ldr     r3,[sp,#F_D + D_NEXT_PC]
-        str     r8,[sp,#B_N]
-        str     r3,[sp,#B_NEXT_PC]
-        ldr     r0,tb_last_n
-        str     r8,[r0]
-        ldr     r0,tb_last_next
-        str     r3,[r0]
 
-        ; Analysis (jit_analyse_block, z80jit_ana.s): ins, n, pc, next_pc,
-        ; serial, then the block context for the flag scans.
-        ldr     r12,[sp,#F_D + D_SERIAL]
+        ; Analysis (jit_analyse_block, z80jit_ana.s): the busy-wait loops
+        ; it found go to the statistics (its fused tests with the block's
+        ; counters, at the commit).
         mov     r0,r7
-        mov     r1,r8
-        mov     r2,r5
-        add     lr,sp,#F_A
-        stmia   lr,{r0-r3,r12}
-        mov     r0,sp
-        str     r0,[lr,#A_BC]
-        ldr     r0,[sp,#F_TARGETS]
-        ldr     r1,[sp,#F_MAX_TARGETS]
-        str     r0,[lr,#A_TARGETS]
-        str     r1,[lr,#A_MAX_TARGETS]
-        mov     r0,lr
         bl      jit_analyse_block
-        ldr     r0,[sp,#F_A + A_NTARGETS]
-        ldr     r1,tb_last_ntargets
-        str     r0,[r1]
-        add     lr,sp,#F_A + A_BUSY
-        ldmia   lr,{r0,r1,r2}           ; busy, line, fused
-        STATADD ST_BUSY_LOOPS,r0,r3,r12
-        STATADD ST_LINE_LOOPS,r1,r3,r12
-        STATADD ST_FUSED,r2,r3,r12
+        add     r3,r7,#B_BUSY
+        ldmia   r3,{r0,r1}              ; busy, line
+        add     r3,r4,#ST_BUSY_LOOPS :AND: 0xFF00
+        add     r3,r3,#ST_BUSY_LOOPS :AND: 0xFF
+        ldmia   r3,{r2,r12}
+        add     r2,r2,r0
+        add     r12,r12,r1
+        stmia   r3,{r2,r12}
 
-        ; Code: the first free descriptor takes the block; its entry check
-        ; depends on the key (none for fixed code, the bytes for RAM, the
-        ; bank for a paged slot).
+        ; Code: the first free descriptor takes the block.
         add     r3,r4,#S_FREE_BLOCKS :AND: 0xFF00
         ldr     r9,[r3,#S_FREE_BLOCKS :AND: 0xFF]
 tb_emit
         mov     r0,r5
-        ldr     r1,[sp,#B_KEY]
+        ldr     r1,[r7,#B_KEY]
         ldr     r2,[r4,#S_CUR]
         stmia   r9,{r0-r2}              ; pc, key, entry
-        cmp     r1,#KEY_RAM
-        moveq   r3,#2
-        movne   r3,#1
-        cmp     r1,#KEY_FIXED
-        moveq   r3,#0
-        str     r3,[sp,#B_ENTRY_CHECK]
         mov     r0,#0
         add     r3,r4,#S_ERROR :AND: 0xFF00
         str     r0,[r3,#S_ERROR :AND: 0xFF]
-        mov     r0,sp
+        mov     r0,r7
         bl      jit_emit_block
         add     r3,r4,#S_ERROR :AND: 0xFF00
         ldr     r0,[r3,#S_ERROR :AND: 0xFF]
@@ -384,7 +346,7 @@ tb_commit
         ldr     r12,[r3,#S_ZONE_HEAD :AND: 0xFF]
         str     r12,[r9,#BLK_ZNEXT]
         str     r9,[r3,#S_ZONE_HEAD :AND: 0xFF]
-        ldr     r2,[sp,#B_BODY]
+        ldr     r2,[r7,#B_BODY]
         str     r2,[r9,#BLK_BODY]
         mov     r2,r5,lsl #22           ; HASH(pc): the low 10 bits
         add     r3,r4,#S_HASH :AND: 0xFF00
@@ -394,17 +356,55 @@ tb_commit
         str     r9,[r3,#S_HASH :AND: 0xFF]
         add     r3,r11,#C_LOOKUP
         str     r1,[r3,r5,lsl #2]
-        ; Statistics: translations, dynamic blocks, instructions, bytes.
-        mov     r2,#1
-        STATADD ST_TRANSLATIONS,r2,r3,r12
-        ldr     r2,[sp,#B_HAS_DYN]
+
+        ; The flag scan value of the block's code, when the cache holds it
+        ; (a block exiting here scanned it): kept in the descriptor, where
+        ; the next block exiting here finds it with the lookup its link
+        ; makes anyway. RAM code is never cached.
+        ldr     r2,[r7,#B_KEY]
+        cmp     r2,#KEY_RAM
+        beq     tb_noscan
+        eor     r3,r5,r5,lsr #9
+        mov     r3,r3,lsl #23
+        mov     r3,r3,lsr #23           ; cache slot of pc
+        add     r12,r4,#S_SCAN_KEY :AND: 0xFF00
+        add     r12,r12,r3,lsl #2
+        ldr     r12,[r12,#S_SCAN_KEY :AND: 0xFF]
+        orr     lr,r5,r2,lsl #16        ; pc and bank
+        cmp     r12,lr
+        bne     tb_noscan
+        add     r12,r4,#S_SCAN_KIND :AND: 0xFF00
+        add     r12,r12,r3
+        ldrb    r12,[r12,#S_SCAN_KIND :AND: 0xFF]
+        cmp     r12,r2,lsr #16          ; page kind
+        bne     tb_noscan
+        add     r12,r4,#S_SCAN_VAL :AND: 0xFF00
+        add     r12,r12,r3
+        ldrb    r12,[r12,#S_SCAN_VAL :AND: 0xFF]
+        orr     r12,r5,r12,lsl #16
+        orr     r12,r12,#BLK_SCAN_VALID
+        str     r12,[r9,#BLK_PC]
+tb_noscan
+
+        ; Statistics: translations, instructions, bytes, fused tests in
+        ; one go, then the dynamic blocks.
+        add     r3,r4,#ST_TRANSLATIONS :AND: 0xFF00
+        add     r3,r3,#ST_TRANSLATIONS :AND: 0xFF
+        ldmia   r3,{r2,r12,lr}          ; translations, insns, code_bytes
+        add     r2,r2,#1
+        add     r12,r12,r8
+        sub     r0,r0,r1                ; bytes of code
+        add     lr,lr,r0
+        stmia   r3,{r2,r12,lr}
+        ldr     r0,[r7,#B_FUSED]
+        ldr     r2,[r3,#12]             ; fused
+        add     r2,r2,r0
+        str     r2,[r3,#12]
+        ldr     r2,[r7,#B_HAS_DYN]
         cmp     r2,#0
         beq     tb_nodyn
         STATADD ST_DYN_BLOCKS,r2,r3,r12
 tb_nodyn
-        STATADD ST_INSNS,r8,r3,r12
-        sub     r0,r0,r1
-        STATADD ST_CODE_BYTES,r0,r3,r12
         mov     r0,r9
 tb_exit
         add     sp,sp,#F_SIZE
@@ -523,10 +523,6 @@ ul_done
 ul_mov_r0       DCD     0xE3A00C00      ; mov r0,#0
 ul_orr_r0       DCD     0xE3800000      ; orr r0,r0,#0
 
-tb_insns        DCD     jit_insns
-tb_stubs        DCD     jit_stubs
-tb_last_n       DCD     jit_last_n
-tb_last_next    DCD     jit_last_next
-tb_last_ntargets DCD    jit_last_ntargets
+tb_bctx         DCD     jit_bctx
 
         END

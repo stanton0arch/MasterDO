@@ -698,7 +698,7 @@ void dec_test(void)
             uint32 na, nb_;
             uint32 nexta, fa;
             uint32 serial = ((round * 1500 + v) + 1) << 8;
-            jit_dec_block d;
+            jit_block_ctx d;
             uint32 k;
             uint32 w;
 
@@ -718,7 +718,7 @@ void dec_test(void)
             d.key = key;
             d.serial = serial;
             d.next_pc = 0;
-            d.flags = 0;
+            d.dec_flags = 0;
             nb_ = (uint32)jit_decode_block(&d);
             blocks++;
             insns += na;
@@ -727,13 +727,13 @@ void dec_test(void)
             if (fa & JIT_DEC_DYN)
                 dyns++;
             if (nb_ != na || (na != 0 && d.next_pc != nexta) ||
-                (d.flags & (JIT_DEC_SEAM | JIT_DEC_DYN)) != fa) {
+                (d.dec_flags & (JIT_DEC_SEAM | JIT_DEC_DYN)) != fa) {
                 if (bad++ < 10)
                     printf("Decoder test: block at $%04lx (key %08lx): C %lu instructions to $%04lx, "
                            "flags %lx; assembly %lu to $%04lx, flags %lx\n",
                            (unsigned long)pc, (unsigned long)key, (unsigned long)na,
                            (unsigned long)nexta, (unsigned long)fa, (unsigned long)nb_,
-                           (unsigned long)d.next_pc, (unsigned long)d.flags);
+                           (unsigned long)d.next_pc, (unsigned long)d.dec_flags);
                 continue;
             }
             if (na == 0)

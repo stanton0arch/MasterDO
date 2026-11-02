@@ -33,6 +33,7 @@ n = (cur - code) // 4
 words = struct.unpack('>%dI' % n, d[16:16 + 4 * n])
 off = 16 + 4 * n
 blk = [struct.unpack('>5I', d[off + 20 * k: off + 20 * k + 20]) for k in range(nb)]
+blk = [(b[0] & 0xFFFF,) + b[1:] for b in blk]     # the pc word also holds the flag scan value
 off2 = off + 20 * nb + n
 cyc = struct.unpack('<%df' % n, d[off2: off2 + 4 * n])
 ent = sorted([(b[2], b[0], b[1]) for b in blk])

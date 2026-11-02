@@ -19,6 +19,7 @@ code, cur, blocks, nb = struct.unpack('<4I', d[:16])
 n = (cur - code) // 4
 off = 16 + 4 * n
 blk = [struct.unpack('>5I', d[off + 20 * k: off + 20 * k + 20]) for k in range(nb)]
+blk = [(b[0] & 0xFFFF,) + b[1:] for b in blk]     # the pc word also holds the flag scan value
 cnt = struct.unpack('<%dI' % n, cnt_raw[:4 * n])
 res = []
 total = 0

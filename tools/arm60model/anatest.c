@@ -521,24 +521,22 @@ void ana_test(void)
             uint32 na;
             uint32 serial = ((round * 1500 + v) + 1) << 8;
             uint32 ba = 0, la = 0, fa = 0;
-            jit_dec_block d;
             jit_block_ctx bca;
             jit_block_ctx bcb;
-            jit_ana_block a;
             uint32 k;
 
             if ((v & 7) == 0)
                 pc = (pc & 0xFF00u) | (0xF0u + (pc & 15u));     /* near a page end */
             ana_gen_code(c, (pc - 8) & 0xFFFFu, 160);
             key = jit_block_key(c, pc);
-            d.ins = ra;
-            d.pc = pc;
-            d.ctx = c;
-            d.key = key;
-            d.serial = serial;
-            d.next_pc = 0;
-            d.flags = 0;
-            na = (uint32)jit_decode_block(&d);
+            memset(&bca, 0, sizeof(bca));
+            bca.j = j;
+            bca.ins = ra;
+            bca.pc = pc;
+            bca.ctx = c;
+            bca.key = key;
+            bca.serial = serial;
+            na = (uint32)jit_decode_block(&bca);
             if (na == 0)
                 continue;
             memcpy(rb, ra, na * sizeof(jit_insn));
@@ -546,38 +544,28 @@ void ana_test(void)
                 ra[k].live_after = ra[k].live_before = ra[k].seg_t = ra[k].t_after = 0xDEADBEEFu;
                 rb[k].live_after = rb[k].live_before = rb[k].seg_t = rb[k].t_after = 0x5A5A5A5Au;
             }
-            bca.j = j;
-            bca.key = key;
-            bca.nmemo = 0;
             bcb = bca;
+            bcb.ins = rb;
             j->stats.scan_hits = 0;
             /* The scan cache takes ROM code as immutable; the test rewrites
              * it, so the cache starts empty for each block (the assembly
              * then finds what the C run cached, for the same code). */
             memset(j->scan_kind, 0xFF, sizeof(j->scan_kind));
-            ref_analyse(j, &bca, ra, (int32)na, pc, d.next_pc, serial, &ba, &la, &fa);
-            a.ins = rb;
-            a.n = (int32)na;
-            a.pc = pc;
-            a.next_pc = d.next_pc;
-            a.serial = serial;
-            a.targets = 0;
-            a.max_targets = 0;
-            a.bc = &bcb;
-            a.busy = a.line = a.fused = 0x12345678u;
-            jit_analyse_block(&a);
+            ref_analyse(j, &bca, ra, (int32)na, pc, bca.next_pc, serial, &ba, &la, &fa);
+            bcb.busy = bcb.line = bcb.fused = 0x12345678u;
+            jit_analyse_block(&bcb);
             blocks++;
             insns += na;
             nbusy += ba;
             nline += la;
             nfused += fa;
-            if (a.busy != ba || a.line != la || a.fused != fa) {
+            if (bcb.busy != ba || bcb.line != la || bcb.fused != fa) {
                 if (bad++ < 10)
                     printf("Analysis test: block at $%04lx (key %08lx): C %lu busy loops (%lu line), "
                            "%lu fused; assembly %lu (%lu), %lu\n", (unsigned long)pc,
                            (unsigned long)key, (unsigned long)ba, (unsigned long)la,
-                           (unsigned long)fa, (unsigned long)a.busy, (unsigned long)a.line,
-                           (unsigned long)a.fused);
+                           (unsigned long)fa, (unsigned long)bcb.busy, (unsigned long)bcb.line,
+                           (unsigned long)bcb.fused);
                 continue;
             }
             for (k = 0; k < na; k++) {

@@ -127,37 +127,8 @@ typedef struct {
     uint32 *host;           /* generated code of the instruction */
 } jit_insn;
 
-/* Decoding of a block (jit_decode_block). */
-typedef struct {
-    jit_insn       *ins;    /* in: records of the instructions */
-    uint32          pc;     /* in: address of the block */
-    const z80j_ctx *ctx;    /* in */
-    uint32          key;    /* in: page kind and bank of the code */
-    uint32          serial; /* in: tag of the instruction map entries */
-                            /* (a multiple of 256) */
-    uint32          next_pc;/* out: address after the last instruction */
-    uint32          flags;  /* out: JIT_DEC_* */
-} jit_dec_block;
-
 #define JIT_DEC_DYN   0x4u  /* some operand is read when it runs */
 #define JIT_DEC_SEAM  0x8u  /* the block was cut at a seam of RAM */
-
-/* Analysis of a decoded block (jit_analyse_block). CONTRACT with
- * z80jit_ana.s (offsets checked in z80jit.c). */
-typedef struct {
-    jit_insn       *ins;    /* in: the decoded instructions */
-    int32           n;      /* in: their number */
-    uint32          pc;     /* in: address of the block (16 bits) */
-    uint32          next_pc;/* in: address after the last instruction */
-    uint32          serial; /* in: tag of the instruction map entries */
-    struct jit_block_ctx_s *bc; /* in: block context of the flag scans */
-    uint32          busy;   /* out: busy-wait loops found */
-    uint32          line;   /* out: of which wait for a line */
-    uint32          fused;  /* out: flag tests fused with their jump */
-    uint32         *targets;/* in: where to report the static exits (0: not asked) */
-    uint32          max_targets;    /* in: room there */
-    uint32          ntargets;       /* out: exits reported */
-} jit_ana_block;
 
 /* Branches resolved at the end of the block. CONTRACT with z80jit_emt.s
  * (offsets checked in z80jit.c). */
@@ -199,7 +170,9 @@ typedef struct {
 
 /* Block descriptor. */
 struct z80j_block {
-    uint32      pc;         /* Z80 address */
+    uint32      pc;         /* Z80 address (bits 0-15); bits 16-21 hold the
+                             * flags the block's code reads (its forward
+                             * flag scan value) when bit 31 is set */
     uint32      key;        /* page kind and bank of the code */
     uint32     *entry;      /* generated code, entry check included; 0: free */
     uint32     *body;       /* generated code after the entry check */
@@ -207,18 +180,16 @@ struct z80j_block {
     z80j_block *znext;      /* the blocks of the same zone (z80j_state.zone_head) */
 };
 
-#define SCAN_MEMO 16
+#define BLK_PC_OF(b)    ((b)->pc & 0xFFFFu)
+#define BLK_SCAN_SHIFT  16
+#define BLK_SCAN_VALID  0x80000000u
 
-/* Translation scratch shared by z80jit.c and z80jit_blk.s, and the
- * instruction count and end address of the block translated last. */
-extern jit_insn jit_insns[MAX_INSNS];
-extern jit_stub jit_stubs[MAX_STUBS];
-extern uint32   jit_last_n;
-extern uint32   jit_last_next;
-extern uint32   jit_last_ntargets;
-
-/* Translation of one block, shared by the parts. CONTRACT with
- * z80jit_ana.s and z80jit_emt.s (offsets checked in z80jit.c): the
+/* Translation of one block, shared by the parts: the block management
+ * (z80jit_blk.s) fills the inputs of the decoder, the analysis and the
+ * emitter, each of which writes its outputs back here. One static
+ * instance (jit_bctx) serves every translation, with its instruction
+ * records and stubs. CONTRACT with z80jit_dec.s, z80jit_ana.s,
+ * z80jit_blk.s and z80jit_emt.s (offsets checked in z80jit.c): the
  * translator state comes first. */
 typedef struct jit_block_ctx_s {
     z80j_state *j;
@@ -235,10 +206,19 @@ typedef struct jit_block_ctx_s {
     uint32     *body;       /* code after the entry check, where links lead */
     uint32     *skip_site;  /* branch past a port output loop, patched at */
     int32       skip_to;    /* the code of instruction skip_to */
-    uint32      memo_pc[SCAN_MEMO];
-    uint32      memo_val[SCAN_MEMO];
-    int32       nmemo;
+    uint32      pc;         /* address of the block (16 bits) */
+    uint32      serial;     /* tag of the instruction map entries (a multiple of 256) */
+    const z80j_ctx *ctx;
+    uint32      dec_flags;  /* JIT_DEC_* of the decoding */
+    uint32      busy;       /* out of the analysis: busy-wait loops found */
+    uint32      line;       /* of which wait for a line */
+    uint32      fused;      /* flag tests fused with their jump */
+    uint32     *targets;    /* where the analysis reports the static exits (0: not asked) */
+    uint32      max_targets;/* room there */
+    uint32      ntargets;   /* exits reported */
 } jit_block_ctx;
+
+extern jit_block_ctx jit_bctx;
 
 /* z80jit_dec.s */
 /* Opcode properties (256 words, see main_info in z80jit.c), then the
@@ -247,13 +227,15 @@ typedef struct jit_block_ctx_s {
 extern uint32 jit_dec_tab[512];
 /* Decodes the instruction at pc (16 bits): pc to mem of *in. */
 void   jit_decode(jit_insn *in, uint32 pc, const z80j_ctx *c);
-/* Decodes the instructions of a block (see translate_block): returns their
- * number, 0 when the first one crosses a seam of RAM. */
-int32  jit_decode_block(jit_dec_block *d);
+/* Decodes the instructions of the block b (ins, pc, ctx, key and serial
+ * set): writes n, next_pc, dec_flags and has_dyn, returns n, 0 when the
+ * first instruction crosses a seam of RAM. */
+int32  jit_decode_block(jit_block_ctx *b);
 
 /* z80jit_ana.s */
-/* Runs the analysis passes over a decoded block (see translate_block). */
-void   jit_analyse_block(jit_ana_block *a);
+/* Runs the analysis passes over the decoded block b: writes busy, line,
+ * fused and, when targets is set, the static exits and ntargets. */
+void   jit_analyse_block(jit_block_ctx *b);
 
 /* z80jit.c, for z80jit_ana.s */
 /* Flags the code at pc may read before writing them, for the block b. */
@@ -301,7 +283,7 @@ uint32 jit_unlink_zone(z80j_state *j, uint32 lo, uint32 hi);
  * block could not be translated (5: nothing decodable, 6: no block
  * descriptor could be freed). With a non-null
  * targets, the static exits of the block are written there (at most
- * max_targets), their number in jit_last_ntargets. */
+ * max_targets), their number in jit_bctx.ntargets. */
 z80j_block *jit_translate_block(z80j_state *j, uint32 pc, uint32 *targets,
                                 uint32 max_targets);
 

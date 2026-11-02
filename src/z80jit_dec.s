@@ -9,6 +9,7 @@
 
         EXPORT  jit_decode
         EXPORT  jit_decode_block
+        EXPORT  jit_dec_core            ; for the profiles of the model
         IMPORT  jit_dec_tab
 
 ; jit_insn (z80jit_int.h; offsets checked in z80jit.c).
@@ -21,9 +22,16 @@ I_IRQ_CHECK     EQU     64
 I_SET           EQU     84              ; end of the seven words set per block
 I_SIZE          EQU     104
 
-; jit_dec_block (z80jit_int.h).
-D_NEXT          EQU     20
-D_FLAGS         EQU     24
+; jit_block_ctx (z80jit_int.h).
+B_INS           EQU     4
+B_N             EQU     8
+B_NEXT_PC       EQU     12
+B_KEY           EQU     16
+B_HAS_DYN       EQU     36
+B_PC            EQU     56
+B_SERIAL        EQU     60
+B_CTX           EQU     64
+B_DEC_FLAGS     EQU     68
 
 ; z80j_ctx, from its start (z80jit.h).
 C_SLOT_BANK     EQU     0x87C
@@ -410,27 +418,30 @@ jit_decode
 dc_tab  DCD     jit_dec_tab
 
 ;----------------------------------------------------------------------------
-; int32 jit_decode_block(jit_dec_block *d)
+; int32 jit_decode_block(jit_block_ctx *b)
 ;
-; Decodes the instructions of a block from d->pc into d->ins, up to an
-; unconditional transfer, a page of another kind than d->key or the size
+; Decodes the instructions of a block from b->pc into b->ins, up to an
+; unconditional transfer, a page of another kind than b->key or the size
 ; limit, as translate_block describes, and returns their number (0 when
 ; the first one crosses a seam of RAM). For each one: the instruction map
-; entry of its address, d->serial | its number from 1 (jit_dec_tab, 256
+; entry of its address, b->serial | its number from 1 (jit_dec_tab, 256
 ; entries from 256, indexed by the low byte of the address: a block spans
 ; at most 256 bytes); its decoded words; internal = -1, busy, run,
 ; seg_start and fused = 0; irq_check set when it follows EI and is no
 ; transfer or conditional (the EI gets it otherwise); dyn set in RAM for
-; JP / CALL and the absolute loads and stores of A and HL. d->next_pc
-; receives the address after the last one and d->flags DF_DYN and
-; DF_SEAM.
+; JP / CALL and the absolute loads and stores of A and HL. b->n receives
+; their number, b->next_pc the address after the last one, b->dec_flags
+; DF_DYN and DF_SEAM, and b->has_dyn whether DF_DYN is set.
 ;----------------------------------------------------------------------------
 jit_decode_block
         stmfd   sp!,{r4-r11,lr}
         sub     sp,sp,#F_SIZE
-        ldmia   r0,{r4-r8}              ; ins, pc, ctx, key, serial
-        mov     r9,r6                   ; context
-        mov     r10,r8                  ; serial | number of the instruction
+        ldr     r4,[r0,#B_INS]
+        ldr     r7,[r0,#B_KEY]
+        add     r1,r0,#B_PC
+        ldmia   r1,{r5,r6,r8}           ; pc, serial, ctx
+        mov     r9,r8                   ; context
+        mov     r10,r6                  ; serial | number of the instruction
         ldr     r11,dc_tab
         mov     r1,r5,lsl #16
         mov     r1,r1,lsr #16           ; address
@@ -501,9 +512,13 @@ db_key
 db_end
         ldr     r3,[sp,#F_ARGS]
         ldr     lr,[sp,#F_FLAGS]
-        str     r1,[r3,#D_NEXT]
-        str     lr,[r3,#D_FLAGS]
+        str     r1,[r3,#B_NEXT_PC]
+        str     lr,[r3,#B_DEC_FLAGS]
         and     r0,r10,#0xFF
+        str     r0,[r3,#B_N]
+        and     lr,lr,#DF_DYN
+        mov     lr,lr,lsr #2
+        str     lr,[r3,#B_HAS_DYN]
         add     sp,sp,#F_SIZE
         ldmfd   sp!,{r4-r11,pc}
 
