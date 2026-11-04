@@ -197,9 +197,10 @@ void sms_reset(sms_machine *s)
 }
 
 /* Port handlers, written into the tables of the context: the C callbacks
- * above, except for the VDP data port, the status read, the control port,
- * the V and H counter reads and the PSG writes, handled in assembly (the
- * C callbacks remain their slow paths). */
+ * above, except for the VDP data port (its reads, writes and runs both
+ * ways), the status read, the control port, the V and H counter reads and
+ * the PSG writes, handled in assembly (the C callbacks remain their slow
+ * paths). */
 static void sms_ports(sms_machine *s)
 {
     z80j_ctx *ctx = s->ctx;
@@ -209,10 +210,12 @@ static void sms_ports(sms_machine *s)
         ctx->in_tab[p] = JIT_ADDR(z80j_port_in_c);
         ctx->out_tab[p] = JIT_ADDR(z80j_port_out_c);
         ctx->outn_tab[p] = JIT_ADDR(z80j_port_outn_loop);
+        ctx->inn_tab[p] = JIT_ADDR(z80j_port_inn_loop);
         if (PORT_KIND(p) == 4) {
             ctx->in_tab[p] = JIT_ADDR(sms_vdp_data_r);
             ctx->out_tab[p] = JIT_ADDR(sms_vdp_data_w);
             ctx->outn_tab[p] = JIT_ADDR(sms_vdp_data_wn);
+            ctx->inn_tab[p] = JIT_ADDR(sms_vdp_data_rn);
         } else if (PORT_KIND(p) == 5) {
             ctx->in_tab[p] = JIT_ADDR(sms_vdp_stat_r);
             ctx->out_tab[p] = JIT_ADDR(sms_vdp_ctrl_w);
@@ -227,6 +230,7 @@ static void sms_ports(sms_machine *s)
     ctx->port_in = JIT_ADDR(ctx->in_tab);
     ctx->port_out = JIT_ADDR(ctx->out_tab);
     ctx->port_outn = JIT_ADDR(ctx->outn_tab);
+    ctx->port_inn = JIT_ADDR(ctx->inn_tab);
     ctx->mdata = JIT_ADDR(&s->vdp);
     ctx->event_a = JIT_ADDR(sms_vdp_event_a);
 }

@@ -36,23 +36,23 @@ S_CHUNK_SHIFT   EQU     0x437C
 S_SCAN_KEY      EQU     0x4384          ; the flag scan cache: 512 keys,
 S_SCAN_KIND     EQU     0x4B84          ; page kinds (bytes) and values (bytes)
 S_SCAN_VAL      EQU     0x4D84
-S_FREE_BLOCKS   EQU     0x4FC8
-S_NBLOCKS       EQU     0x4FD0
-S_HASH          EQU     0x4FD4
+S_FREE_BLOCKS   EQU     0x4FCC
+S_NBLOCKS       EQU     0x4FD4
+S_HASH          EQU     0x4FD8
 S_GLUE          EQU     0x4F84
 G_LINK          EQU     0               ; z80j_glue.link
 G_MISS          EQU     4               ; z80j_glue.miss
-S_LINKS         EQU     0x5FD4
-S_NLINKS        EQU     0x5FD8
-S_ERROR         EQU     0x5FE4
-S_SEED_HOT      EQU     0x5FE8
-ST_TRANSLATIONS EQU     0x884C          ; then insns, code_bytes, fused
-ST_BUSY_LOOPS   EQU     0x887C          ; then line_loops
-ST_PROMOTED     EQU     0x8894
-ST_DYN_BLOCKS   EQU     0x88B0
-ST_SEAMS        EQU     0x88B4
-S_ZONE_SHIFT    EQU     0x88C0
-S_ZONE_HEAD     EQU     0x88C4
+S_LINKS         EQU     0x5FD8
+S_NLINKS        EQU     0x5FDC
+S_ERROR         EQU     0x5FE8
+S_SEED_HOT      EQU     0x5FEC
+ST_TRANSLATIONS EQU     0x8850          ; then insns, code_bytes, fused
+ST_BUSY_LOOPS   EQU     0x8880          ; then line_loops
+ST_PROMOTED     EQU     0x8898
+ST_DYN_BLOCKS   EQU     0x88B4
+ST_SEAMS        EQU     0x88B8
+S_ZONE_SHIFT    EQU     0x88C4
+S_ZONE_HEAD     EQU     0x88C8
 
 ; z80j_area
 A_CUR           EQU     0

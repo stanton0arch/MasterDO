@@ -1209,6 +1209,61 @@ static uint32 *emit_out_loop_fast(jit_block_ctx *b, const jit_insn *in,
 }
 
 /*
+ * Fast path of a port input loop (INIR, INDR, or INI / IND closed by JR NZ
+ * or JP NZ back to it, with NOP allowed between them), at its head, after
+ * the segment check: when the stretch has room for the B - 1 further
+ * passes of t_pass T-states each, the B bytes are read in one call of the
+ * glue (B = 0: 256), which stores them through the write table, and B, HL,
+ * the flags and the T-states end as after the last pass; the bytes are
+ * spaced as in a run of INI. When a destination page has a special write
+ * the glue stores nothing: the T-states charged are given back and the
+ * regular code of one pass follows. Returns the site of the branch past
+ * the loop, to be patched.
+ */
+static uint32 *emit_in_loop_fast(jit_block_ctx *b, const jit_insn *in, uint32 t_pass)
+{
+    z80j_state *j = b->j;
+    uint32 dec = (in->op & 0x08u) != 0;
+    uint32 *slow;
+    uint32 *undo;
+    uint32 *skip;
+
+    dp_r(j, C_AL, OP_MOV, 1, R0, 0, RBC, SH_LSR, 24);
+    dp_i(j, C_EQ, OP_MOV, 0, R0, 0, 256);
+    dp_i(j, C_AL, OP_SUB, 0, RAD, R0, 1);
+    dp_i(j, C_AL, OP_MOV, 0, R1, 0, t_pass * CYCLE);
+    emit(j, (C_AL << 28) | (R2 << 16) | (RAD << 8) | 0x90u | R1);     /* mul r2,r1,r12 */
+    cmp_r(j, C_AL, OP_CMP, RCYC, R2, SH_LSL, 0);
+    slow = j->cur;
+    emit(j, (C_CC << 28) | (5u << 25));
+    dp_r(j, C_AL, OP_SUB, 0, RCYC, RCYC, R2, SH_LSL, 0);
+    if (dec)
+        dp_i(j, C_AL, OP_RSB, 0, R0, R0, 0);
+    port_c(j);
+    time_left(j, in);
+    ref_emit_b(j, C_AL, 1, j->glue.io_inn);
+    cmp_i(j, C_AL, OP_TEQ, R0, 0);
+    undo = j->cur;
+    emit(j, (C_EQ << 28) | (5u << 25));
+    dp_r(j, C_AL, OP_MOV, 1, R0, 0, RBC, SH_LSR, 24);
+    dp_i(j, C_EQ, OP_MOV, 0, R0, 0, 256);
+    dp_r(j, C_AL, dec ? OP_SUB : OP_ADD, 0, RHL, RHL, R0, SH_LSL, 16);
+    dp_i(j, C_AL, OP_BIC, 0, RBC, RBC, 0xFF000000u);
+    dp_i(j, C_AL, OP_ORR, 0, RF, RF, PSR_Z | PSR_n);
+    skip = j->cur;
+    emit(j, (C_AL << 28) | (5u << 25));
+    ref_patch_b(undo, JIT_ADDR(j->cur));
+    dp_r(j, C_AL, OP_MOV, 1, R0, 0, RBC, SH_LSR, 24);
+    dp_i(j, C_EQ, OP_MOV, 0, R0, 0, 256);
+    dp_i(j, C_AL, OP_SUB, 0, RAD, R0, 1);
+    dp_i(j, C_AL, OP_MOV, 0, R1, 0, t_pass * CYCLE);
+    emit(j, (C_AL << 28) | (R2 << 16) | (RAD << 8) | 0x90u | R1);     /* mul r2,r1,r12 */
+    dp_r(j, C_AL, OP_ADD, 0, RCYC, RCYC, R2, SH_LSL, 0);
+    ref_patch_b(slow, JIT_ADDR(j->cur));
+    return skip;
+}
+
+/*
  * Fast path of LDIR / LDDR, at its head after the segment check: when the
  * stretch has room for the BC - 1 further passes, the glue copies the
  * bytes page by page and the T-states are those of the passes made. The
@@ -1309,6 +1364,8 @@ static void emit_block_insn(jit_block_ctx *b, jit_insn *in, int32 index)
         }
         break;
     case 2:                                         /* INI IND INIR INDR */
+        if (rep)
+            skip = emit_in_loop_fast(b, in, in->seg_t + 5);
         port_c(j);
         time_left(j, in);
         ref_emit_b(j, C_AL, 1, j->glue.io_in);
@@ -1321,8 +1378,10 @@ static void emit_block_insn(jit_block_ctx *b, jit_insn *in, int32 index)
             cmp_i(j, C_AL, OP_TST, RBC, 0xFF000000u);
             dp_i(j, C_EQ, OP_ORR, 0, RF, RF, PSR_Z);
         }
-        if (rep)
+        if (rep) {
             emit_jump_cond(b, C_NE, in, index, 5);
+            ref_patch_b(skip, JIT_ADDR(j->cur));
+        }
         break;
     default:                                        /* OUTI OUTD OTIR OTDR */
         if (rep)
@@ -1500,13 +1559,16 @@ static void emit_ed(jit_block_ctx *b, jit_insn *in, int32 index)
     uint32 live = flags_live(in);
     uint32 rr;
 
-    if (in->run == RUN_LOOP) {
-        /* The JR NZ / JP NZ that follows closes the loop: the fast path
-         * goes past it (patched by ref_emit_block_code). */
-        const jit_insn *c = in + 1;
+    if (RUN_IS_LOOP(in->run)) {
+        /* The JR NZ / JP NZ after the head and its NOP closes the loop:
+         * the fast path goes past it (patched by ref_emit_block_code). */
+        uint32 nops = RUN_LOOP_NOPS(in->run);
+        const jit_insn *c = in + 1 + nops;
+        uint32 t_pass = in->seg_t + (c->kind == K_JRCC ? 5u : 0u);
 
-        b->skip_site = emit_out_loop_fast(b, in, c, in->seg_t + (c->kind == K_JRCC ? 5u : 0u));
-        b->skip_to = index + 2;
+        b->skip_site = (in->op & 1u) ? emit_out_loop_fast(b, in, c, t_pass)
+                                     : emit_in_loop_fast(b, in, t_pass);
+        b->skip_to = index + 2 + (int32)nops;
         emit_block_insn(b, in, index);
         return;
     }

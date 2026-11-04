@@ -127,7 +127,7 @@ prints two `Decoder test:` lines with the differences found (0 expected).
 translator in assembly (`src/z80jit_ana.s`) against the C passes they
 replaced, kept in `anatest.c`: 60 000 random blocks built from instruction
 templates (jumps and calls inside and outside the block, flag producers
-before conditional jumps, OUTI / OUTD / OUT (C),r runs and loops, busy-wait
+before conditional jumps, OUTI / OUTD / OUT (C),r runs, INI / OUTI loops (with NOP between), busy-wait
 loops reading memory or a line port, EI, BIT, block instructions) over
 pages of every kind are decoded by `jit_decode_block` and analysed both
 ways from the same records; the fields the analysis writes (internal

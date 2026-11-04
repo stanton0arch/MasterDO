@@ -25,12 +25,14 @@
         EXPORT  z80j_glue_io_in
         EXPORT  z80j_glue_io_out
         EXPORT  z80j_glue_io_outn
+        EXPORT  z80j_glue_io_inn
         EXPORT  z80j_glue_interp
         EXPORT  jit_save
         EXPORT  jit_continue
         EXPORT  z80j_port_in_c
         EXPORT  z80j_port_out_c
         EXPORT  z80j_port_outn_loop
+        EXPORT  z80j_port_inn_loop
         EXPORT  z80j_glue_out_split
         EXPORT  z80j_fill_words
         EXPORT  z80j_hash_words
@@ -89,6 +91,7 @@ IDLE            EQU     0x498
 PORT_IN         EQU     0x49C
 PORT_OUT        EQU     0x4A0
 PORT_OUTN       EQU     0x4A4
+PORT_INN        EQU     0x4E8
 OBUF_OFF        EQU     0xD00           ; obuf: bytes of a buffered run
 WRITE_A         EQU     0x4AC
 PZST            EQU     0x600
@@ -395,6 +398,66 @@ z80j_glue_io_outn
         ldr     r12,[r10,#PORT_OUTN]
         ldr     pc,[r12,r1,lsl#2]
 
+; Run of INI / IND: r0 = count (negative for IND), r1 = port, r2 =
+; T-states left at the end of the run, r7 = HL. The bytes are stored from
+; HL upwards (downwards for IND) through the write table, by the port's
+; input run handler called once per destination page (with the host
+; address of its first byte and the T-states left at the end of the page's
+; bytes), when every page of the run takes plain writes; a page with a
+; special write (a write table entry of zero) stores nothing and returns
+; 0, the regular code of one pass then writing the byte through its stub.
+; Returns r0 = the bytes stored. HL is left unchanged.
+z80j_glue_io_inn
+        stmfd   sp!,{r3-r9,lr}
+        movs    r4,r0                   ; bytes left
+        mov     r5,#1                   ; step
+        rsbmi   r4,r4,#0
+        rsbmi   r5,r5,#0
+        mov     r3,r7                   ; address (bits 16-31)
+        mov     r6,r1                   ; port
+        mov     r7,r2                   ; T-states left at the end
+        mov     r8,r4                   ; bytes asked
+        ; The pages of the first and of the last byte (at most two pages
+        ; for 256 bytes) must both take plain writes.
+        mov     r0,r3,lsr#24
+        ldr     r0,[r10,r0,lsl#2]
+        teq     r0,#0
+        beq     inn_none
+        sub     r0,r4,#1
+        mul     r12,r5,r0
+        add     r12,r3,r12,lsl#16       ; address of the last byte
+        mov     r0,r12,lsr#24
+        ldr     r0,[r10,r0,lsl#2]
+        teq     r0,#0
+        beq     inn_none
+        ldr     r9,[r10,#PORT_INN]
+inn_page
+        mov     r0,r3,lsr#16
+        and     r0,r0,#0xFF
+        cmp     r5,#0
+        rsbpl   r0,r0,#0x100            ; bytes to the end of the page, upwards
+        addmi   r0,r0,#1                ; to its start, downwards
+        cmp     r0,r4
+        movhi   r0,r4                   ; bytes of this page
+        sub     r4,r4,r0                ; bytes left after them
+        add     r2,r7,r4,lsl#12         ; T-states left at the end of the page's bytes
+        mov     r12,r3,lsr#24
+        ldr     r12,[r10,r12,lsl#2]
+        add     r12,r12,r3,lsr#16       ; host address of the first byte
+        mul     r1,r0,r5                ; count, negative downwards
+        add     r3,r3,r1,lsl#16         ; the address after the page's bytes
+        mov     r0,r1
+        mov     r1,r6
+        mov     lr,pc
+        ldr     pc,[r9,r6,lsl#2]
+        teq     r4,#0
+        bne     inn_page
+        mov     r0,r8
+        ldmfd   sp!,{r3-r9,pc}
+inn_none
+        mov     r0,#0
+        ldmfd   sp!,{r3-r9,pc}
+
 ;----------------------------------------------------------------------------
 ; Generic port handlers: the machine's C callbacks. IN: r1 = port, r2 =
 ; T-states left (times 256), returns r0. OUT: r0 = value, r1 = port, r2 =
@@ -418,6 +481,32 @@ z80j_port_out_c
         mov     lr,pc
         ldr     pc,[r0,#M_OUT]
         ldmfd   sp!,{r3,r10,pc}
+
+; Run of INI / IND (the input run handler of z80jit.h): one call of the
+; port's input handler per byte. In: r0 = count (negative for IND), r1 =
+; port, r2 = T-states left at the end of the run, r12 = host address of
+; the first byte; the n-th byte from the end is read 16 (n - 1) T-states
+; earlier.
+z80j_port_inn_loop
+        stmfd   sp!,{r3-r7,lr}
+        mov     r3,r12                  ; destination
+        movs    r4,r0                   ; bytes left
+        mov     r5,#1                   ; step
+        rsbmi   r4,r4,#0
+        rsbmi   r5,r5,#0
+        mov     r6,r1                   ; port
+        mov     r7,r2                   ; T-states left at the end
+inn_loop
+        mov     r1,r6
+        sub     r2,r4,#1
+        add     r2,r7,r2,lsl#12         ; 16 T-states (times 256) per byte
+        ldr     r12,[r10,#PORT_IN]
+        mov     lr,pc
+        ldr     pc,[r12,r6,lsl#2]
+        strb    r0,[r3],r5
+        subs    r4,r4,#1
+        bne     inn_loop
+        ldmfd   sp!,{r3-r7,pc}
 
 ; Run of OUTI / OUTD: one call of the port's output handler per byte.
 ; In: r0 = count (negative for OUTD), r1 = port, r2 = T-states left at the

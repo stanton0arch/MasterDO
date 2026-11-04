@@ -131,7 +131,8 @@ typedef struct {
     uint32 event_a;         /* +0x4DC: machine event handler in assembly, or 0 */
     uint32 irq_count;       /* +0x4E0: maskable interrupts taken by the glue */
     uint32 resumed_count;   /* +0x4E4: returns resumed by the glue */
-    uint32 pad0[6];
+    uint32 port_inn;        /* +0x4E8: 256 handlers of INI / IND runs */
+    uint32 pad0[5];
     uint8  page_kind[256];  /* +0x500 */
     uint8  pzst[256];       /* +0x600: sign / zero / parity flags of a byte */
     uint8  fenc[256];       /* +0x700: internal flags -> Z80 F */
@@ -144,7 +145,7 @@ typedef struct {
     uint32 in_tab[Z80J_PORTS];      /* +0x3000: the tables port_in, port_out */
     uint32 out_tab[Z80J_PORTS];     /* +0x3400  and port_outn point at, */
     uint32 outn_tab[Z80J_PORTS];    /* +0x3800  filled by z80j_init */
-    uint8  pad2[Z80J_TAB_OFF - Z80J_MRAM_OFF - 0x2000 - 12 * Z80J_PORTS];
+    uint32 inn_tab[Z80J_PORTS];     /* +0x3C00: the table port_inn points at */
     uint32 lookup[0x10000]; /* +0x4000: code to run for each Z80 address */
 } z80j_ctx;
 
@@ -194,10 +195,17 @@ typedef struct {
  *        element; the count - 1 elements before it are the words of
  *        ctx->obuf, each the byte | d << 8, d being the T-states from the
  *        end of that element to the end of the last one
+ *   input run (INI / IND): r0 = count (negative for IND), r1 = port,
+ *        r2 = T-states left at the end of the run, r12 = host address of
+ *        the first byte; stores count bytes read from the port as single
+ *        reads would, upwards from r12 (downwards for IND), the n-th byte
+ *        from the end read 16 (n - 1) T-states earlier; returns nothing.
+ *        The glue (z80j_glue_io_inn) calls it once per destination page,
+ *        and only when every page of the run takes plain writes.
  * r10 is the global pointer; r3-r11 must be preserved, r0-r2, r12 and lr
- * may be lost. The tables (in_tab, out_tab and outn_tab of the context)
- * start with the generic handlers of the glue, which call the machine's C
- * callbacks below; a machine may put its own
+ * may be lost. The tables (in_tab, out_tab, outn_tab and inn_tab of the
+ * context) start with the generic handlers of the glue, which call the
+ * machine's C callbacks below; a machine may put its own
  * handlers in them (and its data in ctx->mdata) before translating code.
  */
 #define Z80J_RUN_MIXED  0x40000000u
@@ -257,6 +265,10 @@ typedef struct {
     uint32 interp;          /* interpreter entry (registers in the context) */
     uint32 ldir;            /* block copy of LDIR: r0 = bytes; returns those copied */
     uint32 lddr;            /* the same downwards, for LDDR */
+    uint32 io_inn;          /* INI / IND run: r0 = count (negative for IND), */
+                            /* r1 = port, r2 = T-states left at the end, r7 = HL; */
+                            /* returns the bytes stored, 0 when a destination */
+                            /* page has a special write (nothing stored then) */
 } z80j_glue;
 
 typedef struct {
@@ -553,6 +565,7 @@ void   z80j_glue_abort(void);
 void   z80j_glue_io_in(void);
 void   z80j_glue_io_out(void);
 void   z80j_glue_io_outn(void);
+void   z80j_glue_io_inn(void);
 void   z80j_glue_out_split(void);   /* buffered run whose ports differ */
 void   z80j_glue_pop_af(void);      /* POP AF after a push to a special page */
 void   z80j_glue_interp(void);
@@ -561,6 +574,7 @@ void   z80j_glue_interp(void);
 void   z80j_port_in_c(void);
 void   z80j_port_out_c(void);
 void   z80j_port_outn_loop(void);
+void   z80j_port_inn_loop(void);
 void   z80j_glue_write(void);
 void   z80j_write_generic(void);
 void   z80j_write_result(void);

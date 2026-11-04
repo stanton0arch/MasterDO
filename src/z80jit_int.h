@@ -122,7 +122,8 @@ typedef struct {
     uint32  run;            /* 28 first of a run of port outputs: its length, */
                             /*    the mask of its OUT (C),r elements << 8 and */
                             /*    the opcode of OUT (C),r << 24; RUN_PART for */
-                            /*    the others; RUN_LOOP; or RUN_GRP (below) */
+                            /*    the others; RUN_LOOP | NOP count; or RUN_GRP */
+                            /*    (below) */
                             /*    (analysis) */
     uint8   fused;          /* 32 FU_* valid in the ARM flags for the next jump */
     uint8   pad[3];
@@ -166,7 +167,11 @@ typedef struct {
 #define STUB_WORDS 4
 
 #define RUN_PART   0xFFFFFFFFu
-#define RUN_LOOP   0xFFFFFFFEu  /* OUTI / OUTD closed by JR NZ or JP NZ back to it */
+/* INI, IND, OUTI or OUTD closed by JR NZ or JP NZ back to it, with only
+ * NOP between them: RUN_LOOP | the number of NOP (RUN_IS_LOOP tells one). */
+#define RUN_LOOP   0xFE000000u
+#define RUN_IS_LOOP(run) (((run) & 0xFF000000u) == RUN_LOOP)
+#define RUN_LOOP_NOPS(run) ((run) & 0xFFu)
 /* Element of a group of port outputs sent in one call (jit_out_groups):
  * RUN_GRP | d << 16 | k, with RUN_GRP_N when it goes to the constant port
  * of a group that also has outputs through C; the last one RUN_GRP |

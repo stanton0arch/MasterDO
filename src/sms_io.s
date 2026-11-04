@@ -1,7 +1,7 @@
 ; sms_io.s - port handlers of the Master System in assembly, for the hot
 ; paths: VDP data port writes and reads, VDP control port writes, status
 ; and counter reads, runs of OUTI / OUTD to the data port (the usual way
-; to upload tiles), and PSG writes.
+; to upload tiles), runs of INI / IND from it, and PSG writes.
 ;
 ; The handlers follow the port handler conventions of z80jit.h: called by
 ; the generated code with r10 = global pointer, arguments in r0-r2, r7 =
@@ -19,6 +19,7 @@
         EXPORT  sms_vdp_data_r
         EXPORT  sms_vdp_ctrl_w
         EXPORT  sms_vdp_data_wn
+        EXPORT  sms_vdp_data_rn
         EXPORT  sms_vdp_stat_r
         EXPORT  sms_vdp_event_a
         EXPORT  sms_vdp_vc_r
@@ -238,6 +239,37 @@ sms_vdp_data_r
         add     r2,r2,#1
         str     r2,[r12,#V_NDATAR]
         mov     pc,lr
+
+;----------------------------------------------------------------------------
+; Run of INI / IND from the data port (the input run handler of z80jit.h).
+; In: r0 = count (negative for IND), r12 = host address of the first byte.
+; The bytes are those single reads would return: the read buffer first,
+; then the bytes at the address on, the buffer loaded from the byte after
+; the last one; the first read ends a pending control word.
+;----------------------------------------------------------------------------
+sms_vdp_data_rn
+        stmfd   sp!,{r4,r5,lr}
+        VDPR    lr
+        movs    r4,r0                   ; bytes
+        mov     r5,#1                   ; step
+        rsbmi   r4,r4,#0
+        rsbmi   r5,r5,#0
+        ldr     r1,[lr,#V_ACC]
+        ldr     r0,[lr,#V_BUFFER]
+        UNPEND  r1
+        ldr     r2,[lr,#V_NDATAR]
+        add     r2,r2,r4
+        str     r2,[lr,#V_NDATAR]
+        add     r2,lr,#V_VRAM
+rn_loop
+        strb    r0,[r12],r5
+        ldrb    r0,[r2,r1,lsr#18]       ; the buffer: the byte at the address
+        add     r1,r1,#ACC_ADDR1        ; the next address (wrapping by itself)
+        subs    r4,r4,#1
+        bne     rn_loop
+        str     r0,[lr,#V_BUFFER]
+        str     r1,[lr,#V_ACC]
+        ldmfd   sp!,{r4,r5,pc}
 
 ;----------------------------------------------------------------------------
 ; IN from the status port. In: r1 = port, r2 = T-states left. Out: r0 =

@@ -79,6 +79,7 @@ FU_V_VS         EQU     0x20
 
 SEG_MAX_T       EQU     200             ; a segment always fits in a fresh scanline
 RUN_MAX         EQU     16              ; Z80J_RUN_MAX
+RUN_LOOP        EQU     0xFE000000      ; | the NOP between the head and the jump
 MAX_INSNS       EQU     64
 
 ; Stack frame.
@@ -261,8 +262,7 @@ pr_report
 ; among A, D and E, inside a segment, make one run (at most RUN_MAX
 ; elements, ended after an element with an interrupt check): the head
 ; gets the length, the mask of the OUT (C),r elements and their opcode,
-; the others RUN_PART. A lone OUTI or OUTD closed by a JR NZ or JP NZ back
-; to it becomes RUN_LOOP.
+; the others RUN_PART. The port loops are found by pass 2b.
 ; r0 = record, r1 = T-states of the segment so far, r2 = state: bit 0
 ; the previous instruction is conditional, bit 1 the previous element of
 ; the run has an interrupt check, bit 2 this instruction is conditional;
@@ -316,11 +316,11 @@ p2_next
         cmp     r0,r5
         blo     p2_loop
         cmp     r3,#0                   ; a run reaching the end of the block
-        beq     p3_start
+        beq     p2b_start
         and     r12,r6,#0xFF
         cmp     r12,#2
         blcs    run_write
-        b       p3_start
+        b       p2b_start
 
 p2_seg1
         mov     r11,#1
@@ -363,38 +363,7 @@ p2_open
 p2_close
         and     r12,r6,#0xFF
         cmp     r12,#2
-        bhs     p2_write
-        ; A lone OUTI / OUTD: when this instruction is a JR NZ / JP NZ
-        ; back to it, the loop sends B bytes in one run (emit_out_loop).
-        cmp     r7,#0xA3
-        cmpne   r7,#0xAB
-        bne     p2_lone
-        tst     r2,#2                   ; the OUTI has an interrupt check
-        bne     p2_lone
-        ldrb    r12,[r0,#I_KIND]
-        cmp     r12,#K_JRCC
-        cmpne   r12,#K_JPCC
-        bne     p2_lone
-        ldrb    r12,[r0,#I_CC]
-        cmp     r12,#0                  ; NZ
-        bne     p2_lone
-        ldrb    r12,[r0,#I_INTERNAL]
-        add     lr,r4,r12,lsl #4
-        add     lr,lr,r12,lsl #5
-        cmp     lr,r3                   ; back to the OUTI
-        bne     p2_lone
-        ldrb    r12,[r0,#I_DYN]
-        ldrb    lr,[r0,#I_BUSY]
-        orrs    r12,r12,lr
-        ldreqb  r12,[r0,#I_IRQ_CHECK]
-        cmpeq   r12,#0
-        bne     p2_lone
-        mvn     r12,#1                  ; RUN_LOOP
-        str     r12,[r3,#I_RUN]
-        b       p2_lone
-p2_write
-        bl      run_write
-p2_lone
+        blhs    run_write
         mov     r3,#0
         b       p2_newrun
 
@@ -463,6 +432,73 @@ rw_loop
         subs    r12,r12,#1
         bne     rw_loop
         mov     pc,lr
+
+; Pass 2b: port loops. INI, IND, OUTI or OUTD outside a run, followed by
+; NOP only and then a JR NZ or JP NZ back to it, none of them starting a
+; segment past the head or carrying an interrupt check, the jump with
+; neither a busy-wait mark nor a dynamic target: the head gets RUN_LOOP |
+; the number of NOP, and the B passes go in one call (emit_in_loop,
+; emit_out_loop).
+; r0 = record, r1 = its index, r2 = the record walked, r3 = NOP count;
+; r6, r7, r12 hold the words read, lr is a temporary.
+p2b_start
+        mov     r0,r4
+        mov     r1,#0
+p2b_loop
+        add     r2,r0,#I_W_LEN
+        ldmia   r2,{r2,r3,r12,lr}       ; len pre op t; kind cc use def; internal busy irq_check seg_start; run
+        cmp     lr,#0                   ; in a run
+        bne     p2b_next
+        mov     r3,r2,lsr #16
+        and     r3,r3,#0xFF             ; prefix
+        cmp     r3,#PRE_ED
+        bne     p2b_next
+        mov     r3,r2,lsr #8
+        and     r3,r3,#0xF6             ; opcode without its direction and port bits
+        cmp     r3,#0xA2                ; INI, IND, OUTI, OUTD
+        bne     p2b_next
+        tst     r12,#0xFF00             ; interrupt check
+        bne     p2b_next
+        mov     r2,r0
+        mov     r3,#0
+p2b_walk
+        add     r2,r2,#I_SIZE
+        cmp     r2,r5
+        bhs     p2b_next                ; the end of the block
+        add     r6,r2,#I_W_LEN
+        ldmia   r6,{r6,r7,r12}          ; len pre op t; kind cc use def; internal busy irq_check seg_start
+        mov     lr,r6,lsl #8
+        movs    lr,lr,lsr #16           ; prefix and opcode: zero for NOP
+        bne     p2b_jump
+        tst     r12,#0xFF00             ; interrupt check
+        tsteq   r12,#0xFF               ; or segment start
+        bne     p2b_next
+        add     r3,r3,#1
+        b       p2b_walk
+p2b_jump
+        mov     lr,r7,lsr #24           ; kind
+        cmp     lr,#K_JRCC
+        cmpne   lr,#K_JPCC
+        bne     p2b_next
+        tst     r7,#0xFF0000            ; condition: NZ is 0
+        bne     p2b_next
+        tst     r12,#0xFF0000           ; busy-wait mark,
+        tsteq   r12,#0xFF00             ; interrupt check
+        tsteq   r12,#0xFF               ; or segment start
+        bne     p2b_next
+        ldrb    lr,[r2,#I_DYN]
+        cmp     lr,#0
+        bne     p2b_next
+        mov     lr,r12,lsr #24          ; the target inside the block
+        cmp     lr,r1                   ; back to the head
+        bne     p2b_next
+        orr     r3,r3,#RUN_LOOP
+        str     r3,[r0,#I_RUN]
+p2b_next
+        add     r0,r0,#I_SIZE
+        add     r1,r1,#1
+        cmp     r0,r5
+        blo     p2b_loop
 
 ; Pass 3, backwards: the T-states of each segment from each instruction
 ; on and after it; the flags live after and before each instruction (a

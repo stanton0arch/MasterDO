@@ -190,16 +190,25 @@ static void ref_analyse(z80j_state *j, jit_block_ctx *bc, jit_insn *ins, int32 n
         }
     }
 
-    /* An OUTI (OUTD) closed by JR NZ or JP NZ back to it sends B bytes,
-     * as OTIR (OTDR) does: the passes go out in one run when the stretch
-     * has room for all of them (emit_out_loop). */
+    /* INI, IND, OUTI or OUTD outside a run, followed by NOP only and then
+     * a JR NZ or JP NZ back to it, sends B bytes in one call, as INIR
+     * (OTIR) does: the passes go in one run when the stretch has room for
+     * all of them (emit_in_loop, emit_out_loop); the head gets RUN_LOOP |
+     * the number of NOP. None of the instructions past the head may start
+     * a segment or carry an interrupt check, and the jump neither a
+     * busy-wait mark nor a dynamic target. */
     for (p = ins, k = 0; p + 1 < end; p++, k++) {
-        jit_insn *c = p + 1;
+        jit_insn *c;
+        uint32 nops = 0;
 
-        if (p->run == 0 && p->pre == PRE_ED && (p->op == 0xA3 || p->op == 0xAB) &&
-            !p->irq_check && (c->kind == K_JRCC || c->kind == K_JPCC) && c->cc == 0 &&
-            c->internal == k && !c->dyn && !c->busy && !c->irq_check)
-            p->run = RUN_LOOP;
+        if (p->run != 0 || p->pre != PRE_ED || (p->op & 0xF6) != 0xA2 || p->irq_check)
+            continue;
+        for (c = p + 1; c < end && c->pre == PRE_NONE && c->op == 0 &&
+                        !c->seg_start && !c->irq_check; c++)
+            nops++;
+        if (c < end && (c->kind == K_JRCC || c->kind == K_JPCC) && c->cc == 0 &&
+            c->internal == k && !c->dyn && !c->busy && !c->irq_check && !c->seg_start)
+            p->run = RUN_LOOP | nops;
     }
 
     /* Flag liveness, backwards from the block exit. */
@@ -390,17 +399,42 @@ void ana_gen_code(const z80j_ctx *c, uint32 pc, uint32 len)
             default: b[0] = (uint8)(0xC7 | (((r >> 5) & 7) << 3)); break;
             }
             break;
-        case 18: case 19:                       /* loops: OUTI / JR NZ, OUTI / JP NZ, a busy wait, a line wait */
-            switch ((r >> 2) & 3) {
+        case 18: case 19:                       /* loops: OUTI / JR NZ, OUTI / JP NZ, a busy wait, a line wait,
+                                                 * INI / JR NZ, INI / NOP... / JP NZ, OUTI / NOP / JR NZ, INIR... */
+            switch ((r >> 2) & 7) {
             case 0: b[0] = 0xED; b[1] = 0xA3; b[2] = 0x20; b[3] = 0xFC; nb = 4; break;
             case 1:
-                b[0] = 0xED; b[1] = (r & 0x10) ? 0xAB : 0xA3; b[2] = 0xC2;
+                b[0] = 0xED; b[1] = (r & 0x20) ? 0xAB : 0xA3; b[2] = 0xC2;
                 target = (pc + at) & 0xFFFFu;
                 b[3] = (uint8)target; b[4] = (uint8)(target >> 8);
                 nb = 5;
                 break;
             case 2: b[0] = 0x7E; b[1] = 0xB7; b[2] = 0x28; b[3] = 0xFC; nb = 4; break;
-            default: b[0] = 0xDB; b[1] = 0x7E; b[2] = 0xFE; b[3] = (uint8)(r >> 8); b[4] = 0x38; b[5] = 0xFA; nb = 6; break;
+            case 3: b[0] = 0xDB; b[1] = 0x7E; b[2] = 0xFE; b[3] = (uint8)(r >> 8); b[4] = 0x38; b[5] = 0xFA; nb = 6; break;
+            case 4: b[0] = 0xED; b[1] = (r & 0x20) ? 0xAA : 0xA2; b[2] = 0x20; b[3] = 0xFC; nb = 4; break;
+            case 5: {
+                uint32 m = (r >> 5) & 3;            /* NOP between the head and the jump */
+
+                b[0] = 0xED; b[1] = (r & 0x100) ? 0xAA : 0xA2;
+                nb = 2;
+                while (m-- != 0)
+                    b[nb++] = 0x00;
+                b[nb++] = 0xC2;
+                target = (pc + at) & 0xFFFFu;
+                b[nb++] = (uint8)target; b[nb++] = (uint8)(target >> 8);
+                break;
+            }
+            case 6: b[0] = 0xED; b[1] = (r & 0x20) ? 0xA3 : 0xA2; b[2] = 0x00; b[3] = 0x20; b[4] = 0xFB; nb = 5; break;
+            default:
+                b[0] = 0xED;
+                switch ((r >> 5) & 3) {
+                case 0: b[1] = 0xB2; break;         /* INIR */
+                case 1: b[1] = 0xBA; break;         /* INDR */
+                case 2: b[1] = 0xB3; break;         /* OTIR */
+                default: b[1] = 0xBB; break;        /* OTDR */
+                }
+                nb = 2;
+                break;
             }
             break;
         case 20: case 21: {                     /* port outputs with instructions between them */
@@ -577,13 +611,13 @@ void ana_test(void)
 
                 if (ra[k].internal >= 0)
                     ninternal++;
-                if (ra[k].run != 0 && ra[k].run != RUN_PART && ra[k].run != RUN_LOOP) {
+                if (ra[k].run != 0 && ra[k].run != RUN_PART && !RUN_IS_LOOP(ra[k].run)) {
                     if ((ra[k].run & RUN_GRP) == 0)
                         nruns++;
                     else if (ra[k].run & RUN_GRP_LAST)
                         ngroups++;
                 }
-                if (ra[k].run == RUN_LOOP)
+                if (RUN_IS_LOOP(ra[k].run))
                     nloops++;
                 for (w = 6; w < 10; w++) {
                     /* seg_t is only read at segment starts */
@@ -606,7 +640,7 @@ void ana_test(void)
         }
     }
     printf("Analysis test: %lu blocks, %lu instructions, %lu internal targets, %lu busy-wait "
-           "loops (%lu waiting for a line), %lu fused tests, %lu output runs, %lu output loops, "
+           "loops (%lu waiting for a line), %lu fused tests, %lu output runs, %lu port loops, "
            "%lu output groups, %lu flag scans from the cache; %lu differences\n",
            (unsigned long)blocks, (unsigned long)insns, (unsigned long)ninternal,
            (unsigned long)nbusy, (unsigned long)nline, (unsigned long)nfused,

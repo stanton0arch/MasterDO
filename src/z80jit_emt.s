@@ -153,8 +153,8 @@ S_CTX           EQU     0
 S_CUR           EQU     12
 S_ZONE_END      EQU     16
 S_GLUE          EQU     0x4F84
-GE_ERROR        EQU     0x1060          ; error - glue
-GE_FULLF        EQU     0x38D8          ; stats.full_flags - glue
+GE_ERROR        EQU     0x1064          ; error - glue
+GE_FULLF        EQU     0x38DC          ; stats.full_flags - glue
 
 ; z80j_glue.
 G_LINK          EQU     0
@@ -171,6 +171,7 @@ G_DAA           EQU     44
 G_PUSH_SLOW     EQU     48
 G_LDIR          EQU     56
 G_LDDR          EQU     60
+G_IO_INN        EQU     64
 
 ; z80j_ctx, from the global pointer (&wtab[0]) or from its start.
 C_WTAB          EQU     0x400
@@ -200,7 +201,7 @@ PAGE_RFIXED     EQU     0x40
 PAGE_WFIXED     EQU     0x80
 
 RUN_PART        EQU     0xFFFFFFFF
-RUN_LOOP        EQU     0xFFFFFFFE
+RUN_LOOP        EQU     0xFE000000      ; | the NOP between the head and the jump
 RUN_MIXED       EQU     0x40000000
 RUN_GRP         EQU     0x80000000      ; an element of a group of outputs
 RUN_GRP_LAST    EQU     0x40000000      ; (z80jit_int.h)
@@ -2598,6 +2599,79 @@ t_ol4           BIC     r5,r5,#0xFF000000
                 ORR     r3,r3,#PSR_Z + PSR_n
                 TEQ     r12,#0
 
+; e_in_loop: r0 = T-states of a pass: emits the fast path of a port input
+; loop (INIR, INDR, or INI / IND closed by JR NZ or JP NZ back to it, with
+; NOP allowed between them) at its head, after the segment check: when
+; the stretch has room for the B - 1 further passes, the B bytes are read
+; in one call of the glue (B = 0: 256), which stores them through the
+; write table, and B, HL, the flags and the T-states end as after the
+; last pass; the bytes are spaced as in a run of INI. When a destination
+; page has a special write the glue stores nothing: the T-states charged
+; are given back and the regular code of one pass follows. Returns r0 =
+; the site of the branch past the loop, to be patched.
+e_in_loop
+        stmfd   sp!,{r4,r7,r9,lr}
+        mov     r7,r0
+        adr     r12,t_ol1
+        ldmia   r12,{r0,r1,r2}
+        stmia   r5!,{r0,r1,r2}
+        TMPL    r0,t2_mov_r1_imm
+        mov     r1,r7,lsl #8
+        bl      e_dpi
+        adr     r12,t_ol2
+        ldmia   r12,{r0,r1}
+        stmia   r5!,{r0,r1}
+        mov     r9,r5                   ; the branch to the regular code
+        mov     r0,#B_CC
+        EMIT    r0
+        TMPL    r0,t_sub_r8_r2
+        EMIT    r0
+        ldrb    r0,[r6,#I_OP]
+        tst     r0,#8
+        TMPLC   ne,r0,t_rsb_r0
+        strne   r0,[r5],#4              ; IND: a negative count
+        bl      e_port_c
+        bl      e_time_left
+        ldr     r0,[r8,#G_IO_INN]
+        EMITB   r1,r0,BL_AL
+        MOVW    r0,W_TEQ_R0
+        EMIT    r0
+        mov     r4,r5                   ; the branch to the undo
+        mov     r0,#B_EQ
+        EMIT    r0
+        adr     r12,t_ol3 + 4
+        ldmia   r12,{r0,r1}
+        stmia   r5!,{r0,r1}
+        ldrb    r0,[r6,#I_OP]
+        tst     r0,#8
+        TMPLC   eq,r0,t_add_hl_r0
+        TMPLC   ne,r0,t_sub_hl_r0
+        adr     r12,t_ol4
+        ldmia   r12,{r1,r2}
+        stmia   r5!,{r0,r1,r2}
+        mov     r1,r5                   ; the branch past the loop
+        mov     r0,#B_AL
+        EMIT    r0
+        mov     r0,r5
+        PATCHB  r4,r0,r2
+        mov     r4,r1
+        ; Nothing stored: the T-states of the further passes given back.
+        adr     r12,t_ol1
+        ldmia   r12,{r0,r1,r2}
+        stmia   r5!,{r0,r1,r2}
+        TMPL    r0,t2_mov_r1_imm
+        mov     r1,r7,lsl #8
+        bl      e_dpi
+        TMPL    r0,t_ol2
+        EMIT    r0
+        TMPL    r0,t_add_r8_r2
+        EMIT    r0
+        mov     r0,r5
+        PATCHB  r9,r0,r2
+        mov     r0,r4
+        ldmfd   sp!,{r4,r7,r9,pc}
+t_add_r8_r2     ADD     r8,r8,r2
+
 ; e_copy_loop: emits the fast path of LDIR / LDDR at its head, after the
 ; segment check: when the stretch has room for the BC - 1 further passes,
 ; the glue copies the bytes page by page and the T-states are those of
@@ -2743,6 +2817,13 @@ ebi_io
         cmp     r0,#2
         bne     ebi_out
         ; INI IND INIR INDR
+        tst     r9,#2
+        beq     ebi_in_pass
+        ldrb    r0,[r6,#I_SEG_T]
+        add     r0,r0,#5
+        bl      e_in_loop
+        str     r0,[sp]
+ebi_in_pass
         bl      e_port_c
         bl      e_time_left
         ldr     r0,[r8,#G_IO_IN]
@@ -2939,7 +3020,8 @@ t2_orrcc_h      ORRCC   r3,r3,#PSR_H
 
 emit_ed
         ldr     r0,[r6,#I_RUN]
-        cmp     r0,#RUN_LOOP
+        and     r1,r0,#0xFF000000
+        cmp     r1,#RUN_LOOP
         beq     eed_loop
         cmp     r0,#0
         beq     eed_plain
@@ -3000,18 +3082,30 @@ eg_kept
         b       eb_done
 
 eed_loop
-        ; The JR NZ / JP NZ that follows closes the loop: the fast path
-        ; goes past it (patched by the block loop).
-        ldrb    r0,[r6,#I_KIND + I_SIZE]
+        ; The JR NZ / JP NZ after the head and its NOP closes the loop:
+        ; the fast path goes past it (patched by the block loop).
+        and     r1,r0,#0xFF             ; the NOP between them
+        add     r1,r1,#1
+        RECORD  r0,r6,r1                ; the jump
+        ldrb    r2,[r0,#I_KIND]
         ldrb    r1,[r6,#I_SEG_T]
-        cmp     r0,#K_JRCC
-        addeq   r1,r1,#5
-        add     r0,r6,#I_SIZE
+        cmp     r2,#K_JRCC
+        addeq   r1,r1,#5                ; T-states of a pass
+        tst     r9,#1                   ; INI / IND, or OUTI / OUTD
+        bne     eed_loop_out
+        mov     r0,r1
+        bl      e_in_loop
+        b       eed_loop_site
+eed_loop_out
         bl      e_out_loop
+eed_loop_site
         str     r0,[r4,#B_SKIP_SITE]
-        add     r0,r6,#2 * I_SIZE       ; the block loop patches it there
-        cmp     r0,r7
-        movlo   r7,r0                   ; (or at the end of the instructions)
+        ldr     r0,[r6,#I_RUN]
+        and     r0,r0,#0xFF
+        add     r0,r0,#2
+        RECORD  r1,r6,r0                ; the record after the jump: the block
+        cmp     r1,r7                   ; loop patches it there (or at the end
+        movlo   r7,r1                   ; of the instructions)
         bl      e_block_insn
         b       eb_done
 eed_plain
