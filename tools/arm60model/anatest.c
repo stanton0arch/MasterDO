@@ -282,13 +282,17 @@ static uint32 rnd(void)
 static uint8 *host_of(const z80j_ctx *c, uint32 addr)
 {
     addr &= 0xFFFFu;
-    return (uint8 *)(c->rtab[255 - (addr >> 8)] + addr);
+    return (uint8 *)(c->rtab[63 - (addr >> 10)] + addr);
 }
 
-/* Page p of the Z80 at host page hp of the 64 KiB buffer. */
+/* The 1 KiB page holding the 256-byte page p of the Z80 at host page hp
+ * of the 64 KiB buffer (a 1 KiB page): called for the first 256-byte page
+ * of each. */
 static void map_page(z80j_ctx *c, uint8 *mem, uint32 p, uint32 hp)
 {
-    c->rtab[255 - p] = (uint32)(mem + hp * 256) - p * 256;
+    p >>= 2;
+    hp >>= 2;
+    c->rtab[63 - p] = (uint32)(mem + hp * 1024) - p * 1024;
 }
 
 static jit_insn ra[MAX_INSNS];
@@ -542,10 +546,12 @@ void ana_test(void)
             if ((r & 31) == 0)
                 kind = (r >> 5) & 15;
             c->page_kind[p] = (uint8)kind;
-            if (p >= 0xE0 && (round & 1))
-                map_page(c, mem, p, p - 0x20);
-            else
-                map_page(c, mem, p, (round & 2) ? p : ((p * 37 + round) & 0xFF));
+            if ((p & 3) == 0) {
+                if (p >= 0xE0 && (round & 1))
+                    map_page(c, mem, p, p - 0x20);
+                else
+                    map_page(c, mem, p, (round & 2) ? p : ((p * 37 + round) & 0xFC));
+            }
         }
         for (v = 0; v < 4; v++)
             c->slot_bank[v] = rnd() & ((round & 4) ? 0xFFFFFu : 0x1Fu);

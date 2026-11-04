@@ -126,7 +126,7 @@ MIN_T           EQU     0x1700          ; 23 T-states times 256
 ; Next code byte into $t (0-255), PC advanced. Uses $t only.
         MACRO
         FETCH   $t
-        mvn     $t,r12,lsr#8
+        mvn     $t,r12,lsr#10
         ldr     $t,[r10,$t,lsl#2]
         ldrb    $t,[$t,r12]
         add     r12,r12,#1
@@ -143,7 +143,7 @@ MIN_T           EQU     0x1700          ; 23 T-states times 256
 ; Byte at the Z80 address in bits 16-31 of $a into $t ($t differs from $a).
         MACRO
         RDB     $t,$a
-        mvn     $t,$a,lsr#24
+        mvn     $t,$a,lsr#26
         ldr     $t,[r10,$t,lsl#2]
         ldrb    $t,[$t,$a,lsr#16]
         MEND
@@ -610,7 +610,7 @@ next
         beq     int_wrap
 next_fetch
         bic     r12,r12,#0x10000
-        mvn     r0,r12,lsr#8
+        mvn     r0,r12,lsr#10
         ldr     r0,[r10,r0,lsl#2]
         ldrb    r0,[r0,r12]
         add     r12,r12,#1
@@ -754,11 +754,11 @@ int_push_slow
 
 ; Pops 16 bits into r0; uses r1, r2.
 int_pop
-        mvn     r0,r11,lsr#24
+        mvn     r0,r11,lsr#26
         ldr     r1,[r10,r0,lsl#2]
         ldrb    r2,[r1,r11,lsr#16]
         add     r11,r11,#0x10000
-        mvn     r0,r11,lsr#24
+        mvn     r0,r11,lsr#26
         ldr     r1,[r10,r0,lsl#2]
         ldrb    r0,[r1,r11,lsr#16]
         add     r11,r11,#0x10000
@@ -2063,14 +2063,14 @@ $lab
 $lab.scan
         cmp     lr,r2
         bhi     $lab.run
-        mvn     r0,r12,lsr#8
+        mvn     r0,r12,lsr#10
         ldr     r0,[r10,r0,lsl#2]
         ldrb    r0,[r0,r12]
         cmp     r0,#0xED
         bne     $lab.run
         add     r1,r12,#1
         bic     r1,r1,#0x10000
-        mvn     r0,r1,lsr#8
+        mvn     r0,r1,lsr#10
         ldr     r0,[r10,r0,lsl#2]
         ldrb    r0,[r0,r1]
         cmp     r0,#$op
@@ -2134,13 +2134,13 @@ lit_outn_loop
 ;============================================================================
 
 op_dd
-        mvn     r0,r12,lsr#8
+        mvn     r0,r12,lsr#10
         ldr     r0,[r10,r0,lsl#2]
         ldrb    r0,[r0,r12]
         adrl    lr,ddtable
         ldr     pc,[lr,r0,lsl#2]
 op_fd
-        mvn     r0,r12,lsr#8
+        mvn     r0,r12,lsr#10
         ldr     r0,[r10,r0,lsl#2]
         ldrb    r0,[r0,r12]
         adrl    lr,fdtable

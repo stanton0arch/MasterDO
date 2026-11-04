@@ -604,7 +604,8 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: Game Gear mode: 12-bit colours, 160x144 LCD window, START button, "
+    printf("masterdo: read table in 1 KiB pages (a bank switch rewrites 16 entries); "
+           "Game Gear mode: 12-bit colours, 160x144 LCD window, START button, "
            "PSG stereo, Game Gear images listed from the gg directory\n");
     if (plat_init(&plat) < 0)
         return 1;

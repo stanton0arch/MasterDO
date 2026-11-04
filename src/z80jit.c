@@ -14,7 +14,7 @@
 /* The offsets used by z80jit_glue.s (from the global pointer &wtab[0]). */
 #define GOFF(f) (offsetof(z80j_ctx, f) - offsetof(z80j_ctx, wtab))
 #define CHECK_OFF(name, cond) typedef char check_##name[(cond) ? 1 : -1]
-CHECK_OFF(global, offsetof(z80j_ctx, wtab) == 0x400);
+CHECK_OFF(global, offsetof(z80j_ctx, wtab) == 0x100);
 CHECK_OFF(regs, GOFF(regs) == 0x400);
 CHECK_OFF(ix, GOFF(ix) == 0x420);
 CHECK_OFF(iff1, GOFF(iff1) == 0x444);
@@ -119,9 +119,9 @@ CHECK_OFF(r_reg, GOFF(r) == 0x440);
 CHECK_OFF(iff2, GOFF(iff2) == 0x448);
 CHECK_OFF(im, GOFF(im) == 0x44C);
 CHECK_OFF(scratch, GOFF(scratch) == 0x494);
-CHECK_OFF(c_port_in, offsetof(z80j_ctx, port_in) == 0x89C);
-CHECK_OFF(c_port_out, offsetof(z80j_ctx, port_out) == 0x8A0);
-CHECK_OFF(c_port_inn, offsetof(z80j_ctx, port_inn) == 0x8E8);
+CHECK_OFF(c_port_in, offsetof(z80j_ctx, port_in) == 0x59C);
+CHECK_OFF(c_port_out, offsetof(z80j_ctx, port_out) == 0x5A0);
+CHECK_OFF(c_port_inn, offsetof(z80j_ctx, port_inn) == 0x5E8);
 CHECK_OFF(i_pc, offsetof(jit_insn, pc) == 0);
 CHECK_OFF(i_d, offsetof(jit_insn, d) == 10);
 CHECK_OFF(i_n, offsetof(jit_insn, n) == 12);
@@ -137,7 +137,7 @@ CHECK_OFF(i_fused, offsetof(jit_insn, fused) == 32);
 CHECK_OFF(i_seg_t, offsetof(jit_insn, seg_t) == 38);
 CHECK_OFF(i_host, offsetof(jit_insn, host) == 40);
 CHECK_OFF(b_back, offsetof(jit_block_ctx, back) == 96);
-CHECK_OFF(c_slot_bank, offsetof(z80j_ctx, slot_bank) == 0x87C);
+CHECK_OFF(c_slot_bank, offsetof(z80j_ctx, slot_bank) == 0x57C);
 /* The state, areas and descriptors seen by z80jit_blk.s. */
 CHECK_OFF(s_code, offsetof(z80j_state, code) == 4);
 CHECK_OFF(s_area, offsetof(z80j_state, area) == 0x1C);
@@ -171,10 +171,10 @@ CHECK_OFF(s_scan_key, offsetof(z80j_state, scan_key) == 0x4384);
 CHECK_OFF(s_scan_kind, offsetof(z80j_state, scan_kind) == 0x4B84);
 CHECK_OFF(s_scan_val, offsetof(z80j_state, scan_val) == 0x4D84);
 CHECK_OFF(scan_cache, JIT_SCAN_CACHE == 512);
-CHECK_OFF(c_lookup, offsetof(z80j_ctx, lookup) == 0x4400);
+CHECK_OFF(c_lookup, offsetof(z80j_ctx, lookup) == 0x4100);
 CHECK_OFF(key_ram, KEY_RAM == 0x80000u);
 CHECK_OFF(dec_flags, JIT_DEC_DYN == 4u && JIT_DEC_SEAM == 8u);
-CHECK_OFF(c_page_kind, offsetof(z80j_ctx, page_kind) == 0x900);
+CHECK_OFF(c_page_kind, offsetof(z80j_ctx, page_kind) == 0x600);
 
 #define SEG_MAX_T   200     /* a segment always fits in a fresh scanline */
 #define SCAN_INSNS  8       /* forward scan for the flags a target reads */
@@ -204,7 +204,7 @@ uint32 jit_dec_tab[512];
 uint32 jit_byte(const z80j_ctx *ctx, uint32 addr)
 {
     addr &= 0xFFFFu;
-    return *(const uint8 *)JIT_PTR(ctx->rtab[255 - (addr >> 8)] + addr);
+    return *(const uint8 *)JIT_PTR(ctx->rtab[63 - (addr >> 10)] + addr);
 }
 
 /* Identity of the code at pc: page kind, and bank for a paged slot. */
@@ -1711,7 +1711,7 @@ static uint32 block_bytes_match(const z80j_ctx *ctx, const z80j_block *blk)
     const uint32 *h = blk->entry;
     uint32 pc = h[1];
     uint32 nwords = h[2];
-    const uint32 *mem = (const uint32 *)JIT_PTR((ctx->rtab[255 - (pc >> 8)] + pc) & ~3u);
+    const uint32 *mem = (const uint32 *)JIT_PTR((ctx->rtab[63 - (pc >> 10)] + pc) & ~3u);
     const uint32 *bytes = h + 3;
     const uint32 *mask = bytes + nwords;
     uint32 k;

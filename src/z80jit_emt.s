@@ -174,11 +174,11 @@ G_LDDR          EQU     60
 G_IO_INN        EQU     64
 
 ; z80j_ctx, from the global pointer (&wtab[0]) or from its start.
-C_WTAB          EQU     0x400
-C_PORT_IN       EQU     0x89C
-C_PORT_OUT      EQU     0x8A0
-C_PORT_OUTN     EQU     0x8A4
-C_PAGE_KIND     EQU     0x900
+C_WTAB          EQU     0x100
+C_PORT_IN       EQU     0x59C
+C_PORT_OUT      EQU     0x5A0
+C_PORT_OUTN     EQU     0x5A4
+C_PAGE_KIND     EQU     0x600
 GOFF_IY         EQU     0x424
 GOFF_BC2        EQU     0x430
 GOFF_I          EQU     0x43C
@@ -893,7 +893,7 @@ eb_ram_words
         add     lr,lr,r7
         mov     lr,lr,lsl #16
         mov     lr,lr,lsr #16           ; address
-        mvn     r6,lr,lsr #8
+        mvn     r6,lr,lsr #10
         ldr     r6,[r3,r6,lsl #2]       ; read table entry of the page
         ldrb    lr,[r6,lr]
 eb_ram_w1
@@ -982,7 +982,7 @@ eb_ram_inline
         sub     r6,r5,r11,lsl #3        ; the recorded words
         sub     r9,r5,r11,lsl #2        ; their mask
         ; LDR r12,[r10,#-4 * (page + 1)]: the read table entry of the page
-        mov     r0,r7,lsr #8
+        mov     r0,r7,lsr #10
         add     r0,r0,#1
         TMPL    r1,t_ri_ldr
         orr     r0,r1,r0,lsl #2
@@ -1289,7 +1289,7 @@ e_read
         orr     r3,r3,r0
         stmia   r5!,{r1,r2,r3}
         mov     pc,lr
-t_read          MVN     r0,r0,LSR #24   ; | address register
+t_read          MVN     r0,r0,LSR #26   ; | address register
                 LDR     r0,[r10,r0,LSL #2]
                 LDRB    r0,[r0,r0,LSR #16]      ; | address register
 
@@ -1348,7 +1348,7 @@ e_fixed
 ef_read
         tst     r3,#PAGE_RFIXED
         beq     ef_none
-        mvn     r3,r0,lsr #8
+        mvn     r3,r0,lsr #10
         ldr     r3,[r2,r3,lsl #2]       ; read table entry
 ef_host
         add     r3,r3,r0                ; host address
@@ -1504,7 +1504,7 @@ e_pop
         ldmia   r12,{r0-r3,r12,lr}
         stmia   r5!,{r0-r3,r12,lr}
         ldmfd   sp!,{pc}
-t_pop           MVN     r0,r11,LSR #24
+t_pop           MVN     r0,r11,LSR #26
                 LDR     r1,[r10,r0,LSL #2]
                 LDRB    r2,[r1,r11,LSR #16]
                 ADD     r11,r11,#0x10000

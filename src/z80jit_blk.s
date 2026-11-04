@@ -89,9 +89,9 @@ B_MAX_TARGETS   EQU     88
 DEC_SEAM        EQU     8
 
 ; z80j_ctx
-C_SLOT_BANK     EQU     0x87C
-C_PAGE_KIND     EQU     0x900
-C_LOOKUP        EQU     0x4400
+C_SLOT_BANK     EQU     0x57C
+C_PAGE_KIND     EQU     0x600
+C_LOOKUP        EQU     0x4100
 GOFF_CHUNK_MARK EQU     0x900
 PAGE_KIND       EQU     0x0F
 

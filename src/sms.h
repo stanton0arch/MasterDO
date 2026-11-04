@@ -81,8 +81,8 @@ typedef struct {
 /* Offset of the VDP state from the context (its size): the machine must
  * be placed right after the context, as game.c allocates them, for the
  * assembly port handlers (sms_io.s, which address it from the global
- * pointer, 0x400 into the context). */
-#define SMS_VDP_OFFSET  0x44400
+ * pointer, 0x100 into the context). */
+#define SMS_VDP_OFFSET  0x44100
 
 /* Region code of the cartridge header ("TMR SEGA" at $7FF0, $3FF0 or
  * $1FF0, the high nibble of its byte $0F): 3 and 4 Master System, 5, 6

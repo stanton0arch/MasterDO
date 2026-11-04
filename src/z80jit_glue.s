@@ -57,7 +57,7 @@
         IMPORT  z80i_loop
 
 ; Context fields, relative to the global pointer (= &ctx->wtab[0]).
-GLOBAL          EQU     0x400           ; global pointer - context
+GLOBAL          EQU     0x100           ; global pointer - context
 REGS            EQU     0x400           ; F A BC DE HL cycles PC SP
 R_PC            EQU     0x418
 IX              EQU     0x420
@@ -533,7 +533,7 @@ z80j_port_outn_loop
         rsbmi   r4,r4,#0
         rsbmi   r5,r5,#0
 outn_loop
-        mvn     r2,r3,lsr#24
+        mvn     r2,r3,lsr#26
         ldr     r2,[r10,r2,lsl#2]
         ldrb    r0,[r2,r3,lsr#16]
         add     r3,r3,r5
@@ -558,7 +558,7 @@ outm_loop
         movs    r5,r5,lsr#1             ; C: OUT (C),r
         movcs   r0,r7
         bcs     outm_out
-        mvn     r2,r3,lsr#24
+        mvn     r2,r3,lsr#26
         ldr     r2,[r10,r2,lsl#2]
         ldrb    r0,[r2,r3,lsr#16]
         add     r3,r3,#0x10000
@@ -709,7 +709,7 @@ z80j_glue_push_slow
 ; moves SP). Uses r0-r2, r12.
 ;----------------------------------------------------------------------------
 z80j_glue_pop_af
-        mvn     r0,r11,lsr #24
+        mvn     r0,r11,lsr #26
         ldr     r1,[r10,r0,lsl #2]
         ldrb    r2,[r1,r11,lsr #16]
         add     r12,r11,#0x10000
@@ -733,7 +733,7 @@ z80j_glue_pop_af
 z80j_glue_verify
         ldmia   lr!,{r0,r1}             ; r0 = Z80 address, r1 = words
         stmfd   sp!,{r0,r4}
-        mvn     r2,r0,lsr#8
+        mvn     r2,r0,lsr#10
         ldr     r2,[r10,r2,lsl#2]       ; page entry
         add     r12,r2,r0               ; host address of the first byte
         bic     r12,r12,#3              ; the word holding it (RAM is contiguous)
@@ -829,7 +829,7 @@ ldir_page
         teq     r1,#0
         beq     ldir_end
         add     r1,r1,r6,lsr#16         ; host destination
-        mvn     r2,r7,lsr#24
+        mvn     r2,r7,lsr#26
         ldr     r2,[r10,r2,lsl#2]
         add     r2,r2,r7,lsr#16         ; host source
         mov     r3,r7,lsr#16
@@ -875,7 +875,7 @@ lddr_page
         teq     r1,#0
         beq     lddr_end
         add     r1,r1,r6,lsr#16         ; host destination
-        mvn     r2,r7,lsr#24
+        mvn     r2,r7,lsr#26
         ldr     r2,[r10,r2,lsl#2]
         add     r2,r2,r7,lsr#16         ; host source
         mov     r3,r7,lsr#16

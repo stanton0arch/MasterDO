@@ -47,8 +47,8 @@ B_DEC_FLAGS     EQU     68
 B_BACK          EQU     96
 
 ; z80j_ctx, from its start (z80jit.h).
-C_SLOT_BANK     EQU     0x87C
-C_PAGE_KIND     EQU     0x900
+C_SLOT_BANK     EQU     0x57C
+C_PAGE_KIND     EQU     0x600
 PAGE_KIND       EQU     0x0F
 KEY_RAM         EQU     0x80000
 
@@ -127,8 +127,8 @@ jit_dec_core
         and     r3,r1,#0xFF
         cmp     r3,#0xFC
         bhi     dc_fetch_pages
-        mvn     r3,r1,lsr #8
-        and     r3,r3,#0xFF
+        mvn     r3,r1,lsr #10
+        and     r3,r3,#0x3F
         ldr     r3,[r2,r3,lsl #2]       ; read table entry of the page
         add     r3,r3,r1                ; host address of the instruction
         and     r4,r3,#3
@@ -421,8 +421,8 @@ dc_fetch_pages
         mov     r5,r1
         mov     r6,#4
 dc_fp_loop
-        mvn     r3,r5,lsr #8
-        and     r3,r3,#0xFF
+        mvn     r3,r5,lsr #10
+        and     r3,r3,#0x3F
         ldr     r3,[r2,r3,lsl #2]
         ldrb    r3,[r3,r5]
         orr     r12,r3,r12,lsl #8
@@ -485,8 +485,8 @@ jit_decode_block
         ldr     r11,dc_tab
         mov     r1,r5,lsl #16
         mov     r1,r1,lsr #16           ; address
-        mvn     r3,r1,lsr #8
-        and     r3,r3,#0xFF
+        mvn     r3,r1,lsr #10
+        and     r3,r3,#0x3F
         ldr     r3,[r9,r3,lsl #2]       ; read table entry of the first page
         cmp     r7,#KEY_RAM
         moveq   r2,#DF_RAM
@@ -662,8 +662,8 @@ db_ram
         ldr     r6,[sp,#F_PC0]
         cmp     r3,r6
         blo     db_seam
-        mvn     r6,r3,lsr #8
-        and     r6,r6,#0xFF
+        mvn     r6,r3,lsr #10
+        and     r6,r6,#0x3F
         ldr     r6,[r9,r6,lsl #2]
         ldr     r5,[sp,#F_RTAB0]
         cmp     r6,r5

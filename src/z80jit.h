@@ -29,8 +29,9 @@
  *   thing on every pass of a line: its time goes by idle up to the next
  *   line boundary.
  *
- * The emulated machine is described by the context: 256-byte pages for
- * reads and writes, the kind of each page (fixed ROM, paged ROM slot, RAM)
+ * The emulated machine is described by the context: 1 KiB pages for
+ * reads, 256-byte pages for writes, the kind of each 256-byte page (fixed
+ * ROM, paged ROM slot, RAM; a 1 KiB read page shows one kind of memory)
  * and callbacks for I/O ports, special writes and scanline events. Blocks
  * translated from a paged slot check the slot's bank on entry; blocks
  * translated from RAM check their bytes on entry and are translated again
@@ -77,9 +78,10 @@ typedef struct z80j_machine z80j_machine;
  * global pointer is &wtab[0]; the read table sits below it.
  */
 typedef struct {
-    uint32 rtab[256];       /* -0x400: reads, page p at rtab[255 - p]; */
+    uint32 rtab[64];        /* -0x100: reads, 1 KiB page p at rtab[63 - p]; */
                             /* entry = host address of the page - Z80 address */
-    uint32 wtab[256];       /* +0x000: writes, page p at wtab[p], 0 = special */
+    uint32 wtab[256];       /* +0x000: writes, 256-byte page p at wtab[p], */
+                            /* 0 = special */
     uint32 regs[8];         /* +0x400: F A BC DE HL cycles PC SP */
     uint32 ix;              /* +0x420: IX in bits 16-31 */
     uint32 iy;              /* +0x424: IY in bits 16-31 */

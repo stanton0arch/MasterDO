@@ -306,7 +306,7 @@ static void emit_stub_branch(jit_block_ctx *b, uint32 cond, uint32 link, uint32 
 /* r0 = byte at the Z80 address held in ra (bits 16-31). Uses r0 only. */
 static void emit_read(z80j_state *j, uint32 ra)
 {
-    dp_r(j, C_AL, OP_MVN, 0, R0, 0, ra, SH_LSR, 24);
+    dp_r(j, C_AL, OP_MVN, 0, R0, 0, ra, SH_LSR, 26);
     mem_r(j, C_AL, 1, 0, R0, RG, R0, SH_LSL, 2);
     mem_r(j, C_AL, 1, 1, R0, R0, ra, SH_LSR, 16);
 }
@@ -344,7 +344,7 @@ static int32 fixed_offset(const z80j_state *j, uint32 addr, int32 write)
     } else {
         if (!(kind & Z80J_PAGE_RFIXED))
             return -1;
-        host = ctx->rtab[255 - page] + addr;
+        host = ctx->rtab[63 - (addr >> 10)] + addr;
     }
     if (host < g || host - g >= 0x100000u)
         return -1;
@@ -434,7 +434,7 @@ static void emit_push(z80j_state *j)
 /* Pops 16 bits: low byte in r2, high byte in r1 (uses r0). */
 static void emit_pop(z80j_state *j)
 {
-    dp_r(j, C_AL, OP_MVN, 0, R0, 0, RSP, SH_LSR, 24);
+    dp_r(j, C_AL, OP_MVN, 0, R0, 0, RSP, SH_LSR, 26);
     mem_r(j, C_AL, 1, 0, R1, RG, R0, SH_LSL, 2);
     mem_r(j, C_AL, 1, 1, R2, R1, RSP, SH_LSR, 16);
     dp_i(j, C_AL, OP_ADD, 0, RSP, RSP, 0x00010000u);
@@ -2355,7 +2355,7 @@ static void ref_emit_block_code(jit_block_ctx *b)
             uint32 pc0 = ins[0].pc;
             uint32 left = nwords;
 
-            emit(j, 0xE51AC000u | (((pc0 >> 8) + 1) << 2));     /* LDR r12,[r10,#-4(page+1)] */
+            emit(j, 0xE51AC000u | (((pc0 >> 10) + 1) << 2));     /* LDR r12,[r10,#-4(page+1)] */
             if (pc0 & 0xFF00u)
                 emit(j, 0xE28CCC00u | ((pc0 >> 8) & 0xFFu));    /* ADD r12,r12,#hi */
             if (pc0 & 0xFCu)
@@ -2517,7 +2517,7 @@ static uint32 ernd(void)
 static uint8 *ehost_of(const z80j_ctx *c, uint32 addr)
 {
     addr &= 0xFFFFu;
-    return (uint8 *)(c->rtab[255 - (addr >> 8)] + addr);
+    return (uint8 *)(c->rtab[63 - (addr >> 10)] + addr);
 }
 
 static jit_insn ea[MAX_INSNS];
@@ -2587,13 +2587,14 @@ void emit_test(void)
             if ((r & 0xE0) == 0x20 && p >= 0xC0)
                 kind = Z80J_PAGE_RAM;           /* RAM without a fixed mapping */
             c->page_kind[p] = (uint8)kind;
+            /* Host pages scattered in 1 KiB units, the read table's. */
             if (p >= 0xE0 && (round & 1))
                 hp = p - 0x20;
             else
-                hp = (round & 2) ? p : ((p * 37 + round) & 0xFF);
+                hp = (round & 2) ? p : (((p & 0xFC) * 37 + round * 4) & 0xFC) + (p & 3);
             if ((round & 4) && p < 0x40)
                 base = far;                     /* fixed pages out of reach */
-            c->rtab[255 - p] = (uint32)(base + hp * 256) - p * 256;
+            c->rtab[63 - (p >> 2)] = (uint32)(base + hp * 256) - p * 256;
             c->wtab[p] = (p >= 0xC0 && (r & 0x100) == 0) ? (uint32)(base + hp * 256) - p * 256 : 0;
         }
         for (v = 0; v < 4; v++)

@@ -47,7 +47,7 @@ sms_mem_write_a
         moveq   pc,r2
         b       z80j_write_generic
 write_a_ram
-        stmfd   sp!,{r2,r4-r9,r12,lr}
+        stmfd   sp!,{r2,r4,r5,r12,lr}
         mov     r12,r12,lsr#16          ; address, $FF00-$FFFF
         and     r0,r0,#0xFF
         sub     r4,r12,#0xE000          ; system RAM mirror: mram + (address - $E000)
@@ -87,36 +87,29 @@ write_a_bank
         ldr     r4,[r1,#SM_ROM]
         add     r4,r4,r0,lsl#14         ; host address of the bank
         sub     r2,r4,r12,lsl#14        ; minus the Z80 address of the slot
-        ; Read table entries of the slot: page p is at r10 - 4 - 4 * p,
-        ; so the 64 pages of slot s are the words from r10 - 256 * (s + 1)
-        ; upwards (slot 0: its first four pages, the fixed 1 KiB, stay).
+        ; Read table entries of the slot (1 KiB pages): page p is at
+        ; r10 - 4 - 4 * p, so the 16 pages of slot s are the words from
+        ; r10 - 64 * (s + 1) upwards, the highest page first (slot 0: its
+        ; first page, the fixed 1 KiB, is the last word and stays).
         add     r4,r12,#1
-        sub     r4,r10,r4,lsl#8
+        sub     r4,r10,r4,lsl#6
         mov     r0,r2
         mov     r1,r2
         mov     r5,r2
-        mov     r6,r2
-        mov     r7,r2
-        mov     r8,r2
-        mov     r9,r2
-        stmia   r4!,{r0,r1,r2,r5-r9}
-        stmia   r4!,{r0,r1,r2,r5-r9}
-        stmia   r4!,{r0,r1,r2,r5-r9}
-        stmia   r4!,{r0,r1,r2,r5-r9}
-        stmia   r4!,{r0,r1,r2,r5-r9}
-        stmia   r4!,{r0,r1,r2,r5-r9}
-        stmia   r4!,{r0,r1,r2,r5-r9}
+        stmia   r4!,{r0,r1,r2,r5}
+        stmia   r4!,{r0,r1,r2,r5}
+        stmia   r4!,{r0,r1,r2,r5}
         teq     r12,#0
-        stmneia r4!,{r0,r1,r2,r5-r9}
-        stmeqia r4!,{r0,r1,r2,r5}
+        stmneia r4,{r0,r1,r2,r5}
+        stmeqia r4,{r0,r1,r2}
         mov     r0,#Z80J_WRITE_PAGING
-        ldmfd   sp!,{r2,r4-r9,r12,lr}
+        ldmfd   sp!,{r2,r4,r5,r12,lr}
         b       z80j_write_result
 write_a_stay
-        ldmfd   sp!,{r2,r4-r9,r12,lr}
+        ldmfd   sp!,{r2,r4,r5,r12,lr}
         mov     pc,r2
 write_a_c
-        ldmfd   sp!,{r2,r4-r9,r12,lr}
+        ldmfd   sp!,{r2,r4,r5,r12,lr}
         b       z80j_write_generic
 
         END

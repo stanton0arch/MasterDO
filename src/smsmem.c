@@ -7,7 +7,8 @@
 #include "string.h"
 #include "stddef.h"
 
-#define SLOT_PAGES 64u          /* 16 KiB of 256-byte pages */
+#define SLOT_PAGES 64u          /* 16 KiB of 256-byte pages (write table, page kinds) */
+#define RPAGE      4u           /* 256-byte pages per 1 KiB page of the read table */
 
 /* Offsets used by smsmem_a.s. */
 #define CHECK_OFF(name, cond) typedef char check_##name[(cond) ? 1 : -1]
@@ -69,12 +70,11 @@ static void map_slot(sms_mem *s, uint32 slot)
         s->slot_ram_e[slot] = ram_e;
     }
     /* Every page of a range has the same entry (host address - Z80
-     * address): the read table (page p at rtab[255 - p]) is filled with
-     * a single value per range. */
-    if (ram_first > first)
-        z80j_fill_words(&ctx->rtab[255 - (ram_first - 1)], ram_first - first, rom_e);
-    if (ram_first < end)
-        z80j_fill_words(&ctx->rtab[255 - (end - 1)], end - ram_first, ram_e);
+     * address): the read table, in 1 KiB pages (page q at rtab[63 - q]),
+     * gets a single value per range; the ranges start on 1 KiB boundaries
+     * (the fixed first 1 KiB of slot 0, the Codemasters RAM at $A000). */
+    for (p = first / RPAGE; p < end / RPAGE; p++)
+        ctx->rtab[63 - p] = (p * RPAGE >= ram_first) ? ram_e : rom_e;
     s->remaps++;
 }
 
@@ -83,8 +83,8 @@ void sms_mem_map(sms_mem *s)
     uint32 p;
 
     if (s->mapper != SMS_MAPPER_CODEMASTERS) {
-        for (p = 0; p < 4; p++) {
-            s->ctx->rtab[255 - p] = JIT_ADDR(s->rom);
+        s->ctx->rtab[63] = JIT_ADDR(s->rom);   /* the first 1 KiB */
+        for (p = 0; p < RPAGE; p++) {
             s->ctx->wtab[p] = 0;
             s->ctx->page_kind[p] = Z80J_PAGE_FIXED | Z80J_PAGE_RFIXED;
         }
@@ -207,7 +207,7 @@ void sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
      * leaves the page alone under the Codemasters mapper). */
     for (p = 0xC0; p < 0x100; p++) {
         uint32 e = ram - ((p < 0xE0) ? 0xC000u : 0xE000u);
-        ctx->rtab[255 - p] = e;
+        ctx->rtab[63 - p / RPAGE] = e;
         ctx->wtab[p] = (p == 0xFF) ? 0 : e;
         ctx->page_kind[p] = (uint8)(Z80J_PAGE_RAM | Z80J_PAGE_RFIXED |
                                     ((p == 0xFF) ? 0 : Z80J_PAGE_WFIXED));

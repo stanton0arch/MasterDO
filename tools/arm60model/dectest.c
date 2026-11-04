@@ -22,7 +22,7 @@
 static uint32 ref_byte(const z80j_ctx *ctx, uint32 addr)
 {
     addr &= 0xFFFFu;
-    return *(const uint8 *)JIT_PTR(ctx->rtab[255 - (addr >> 8)] + addr);
+    return *(const uint8 *)JIT_PTR(ctx->rtab[63 - (addr >> 10)] + addr);
 }
 
 static int32 ref_disp(uint32 v)
@@ -422,7 +422,7 @@ static void ref_decode(const z80j_ctx *c, uint32 pc, jit_insn *in)
 
     /* The (up to) four bytes of the instruction. */
     if ((pc & 0xFFu) <= 0xFCu) {
-        b = (const uint8 *)JIT_PTR(c->rtab[255 - (pc >> 8)] + pc);
+        b = (const uint8 *)JIT_PTR(c->rtab[63 - (pc >> 10)] + pc);
     } else {
         buf[0] = (uint8)ref_byte(c, pc);
         buf[1] = (uint8)ref_byte(c, pc + 1);
@@ -528,7 +528,7 @@ static int32 ref_decode_block(const z80j_ctx *ctx, jit_insn *ins, uint32 pc, uin
         in->dyn = 0;
         addr = (addr + in->len) & 0xFFFFu;
         if (key == KEY_RAM &&
-            (ctx->rtab[255 - (((addr - 1) & 0xFFFFu) >> 8)] != ctx->rtab[255 - (pc >> 8)] ||
+            (ctx->rtab[63 - (((addr - 1) & 0xFFFFu) >> 10)] != ctx->rtab[63 - (pc >> 10)] ||
              ((addr - 1) & 0xFFFFu) < (pc & 0xFFFFu))) {
             *flags |= JIT_DEC_SEAM;
             if (n == 1)
@@ -577,13 +577,17 @@ static uint32 rnd(void)
 static uint8 *host_of(const z80j_ctx *c, uint32 addr)
 {
     addr &= 0xFFFFu;
-    return (uint8 *)(c->rtab[255 - (addr >> 8)] + addr);
+    return (uint8 *)(c->rtab[63 - (addr >> 10)] + addr);
 }
 
-/* Page p of the Z80 at host page hp of the 64 KiB buffer. */
+/* The 1 KiB page holding the 256-byte page p of the Z80 at host page hp
+ * of the 64 KiB buffer (a 1 KiB page): called for the first 256-byte page
+ * of each. */
 static void map_page(z80j_ctx *c, uint8 *mem, uint32 p, uint32 hp)
 {
-    c->rtab[255 - p] = (uint32)(mem + hp * 256) - p * 256;
+    p >>= 2;
+    hp >>= 2;
+    c->rtab[63 - p] = (uint32)(mem + hp * 1024) - p * 1024;
 }
 
 static jit_insn ra[MAX_INSNS];
@@ -673,8 +677,8 @@ void dec_test(void)
 
     /* Every pair of opcode bytes; pages scattered so that an instruction
      * at a page end reads its last bytes from elsewhere. */
-    for (p = 0; p < 256; p++)
-        map_page(c, mem, p, (p * 37 + 11) & 0xFF);
+    for (p = 0; p < 256; p += 4)
+        map_page(c, mem, p, (p * 37 + 44) & 0xFC);
     for (v = 0; v < 0x10000; v++) {
         uint32 k;
 
@@ -725,10 +729,12 @@ void dec_test(void)
             if ((r & 0x300) == 0)
                 kind |= Z80J_PAGE_RFIXED | Z80J_PAGE_WFIXED;
             c->page_kind[p] = (uint8)kind;
-            if (p >= 0xE0 && (round & 1))
-                map_page(c, mem, p, p - 0x20);
-            else
-                map_page(c, mem, p, (round & 2) ? p : ((p * 37 + round) & 0xFF));
+            if ((p & 3) == 0) {
+                if (p >= 0xE0 && (round & 1))
+                    map_page(c, mem, p, p - 0x20);
+                else
+                    map_page(c, mem, p, (round & 2) ? p : ((p * 37 + round) & 0xFC));
+            }
         }
         for (v = 0; v < 4; v++)
             c->slot_bank[v] = rnd() & ((round & 4) ? 0xFFFFFu : 0x1Fu);

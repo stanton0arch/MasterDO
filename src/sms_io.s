@@ -8,7 +8,7 @@
 ; HL for runs; r3-r11 are preserved, r0-r2, r12 and lr may be lost. The
 ; vdp_state lies at a fixed offset from the context (SMS_VDP_OFFSET of
 ; sms.h: the machine is allocated right after it; the global pointer is
-; the context's write table, 0x400 into it).
+; the context's write table, 0x100 into it).
 ;
 ; Layouts: CONTRACT with z80j_ctx (z80jit.h) and vdp_state (vdp.h) - keep
 ; in sync (z80jit.c and vdp.c check the offsets at compile time).
@@ -657,9 +657,9 @@ sms_vdp_data_wn
         bhi     wn_general
         ; Short forward run (1-4 bytes, the usual name table update):
         ; nothing is saved but the return address.
-        mov     r2,r7,lsr#16
-        and     r2,r2,#0xFF
-        cmp     r2,#0xFC
+        mov     r2,r7,lsl#6
+        mov     r2,r2,lsr#22            ; the offset in the 1 KiB page
+        cmp     r2,#0x3FC
         bhi     wn_general              ; the source may cross a page
         add     r2,r0,r1,lsr#18         ; destination end
         cmp     r2,#0x4000
@@ -675,7 +675,7 @@ sms_vdp_data_wn
         add     lr,r12,#V_DIRTY
         strb    r0,[lr,r1,lsr#5]        ; first and last tile written
         strb    r0,[lr,r2,lsr#5]
-        mvn     lr,r7,lsr#24
+        mvn     lr,r7,lsr#26
         ldr     lr,[r10,lr,lsl#2]
         add     lr,lr,r7,lsr#16         ; host source
         add     r1,r1,r12
@@ -717,10 +717,10 @@ wn_general
         ; word aligned. The other runs go byte by byte below.
         teq     r12,#0x10000
         bne     wn_loop
-        mov     r4,r3,lsr#16
-        and     r4,r4,#0xFF
+        mov     r4,r3,lsl#6
+        mov     r4,r4,lsr#22            ; the offset in the 1 KiB page
         add     r4,r4,r0
-        cmp     r4,#0x100
+        cmp     r4,#0x400
         bhi     wn_loop
         add     r4,r1,r0                ; destination end
         cmp     r4,#0x4000
@@ -734,7 +734,7 @@ wn_dirty
         add     r2,r2,#1
         cmp     r2,r4
         bls     wn_dirty
-        mvn     r2,r3,lsr#24
+        mvn     r2,r3,lsr#26
         ldr     r2,[r10,r2,lsl#2]
         add     r2,r2,r3,lsr#16         ; host source
         add     r4,r5,r1                ; host destination
@@ -776,7 +776,7 @@ wn_fast_done
         mov     r0,#0
         ldmfd   sp!,{r3-r9,pc}
 wn_loop
-        mvn     r2,r3,lsr#24
+        mvn     r2,r3,lsr#26
         ldr     r2,[r10,r2,lsl#2]
         ldrb    r4,[r2,r3,lsr#16]
         add     r3,r3,r12
@@ -797,7 +797,7 @@ wn_slow
         sub     r8,r0,#1
         add     r8,r2,r8,lsl#12         ; T-states left at the first byte
 wn_slow_loop
-        mvn     r2,r3,lsr#24
+        mvn     r2,r3,lsr#26
         ldr     r2,[r10,r2,lsl#2]
         ldrb    r0,[r2,r3,lsr#16]
         add     r3,r3,r5
@@ -933,10 +933,10 @@ data_wm
         add     r8,r1,r4                ; destination end
         cmp     r8,#0x4000
         bhi     wm_bytes
-        mov     r2,r7,lsr#16
-        and     r2,r2,#0xFF
+        mov     r2,r7,lsl#6
+        mov     r2,r2,lsr#22            ; the offset in the 1 KiB page
         add     r2,r2,r4                ; source end, at worst
-        cmp     r2,#0x100
+        cmp     r2,#0x400
         bhi     wm_bytes
         SETADDR r8,r2,r6
         mov     r2,r1,lsr#5             ; tiles written: first to last
@@ -949,7 +949,7 @@ wm_dirty
         add     r2,r2,#1
         cmp     r2,r8
         bls     wm_dirty
-        mvn     r2,r7,lsr#24
+        mvn     r2,r7,lsr#26
         ldr     r2,[r10,r2,lsl#2]
         add     r2,r2,r7,lsr#16         ; host source
         add     r12,r6,#V_VRAM
@@ -973,7 +973,7 @@ wm_byte
         movs    r5,r5,lsr#1
         movcs   r0,r9
         bcs     wm_put
-        mvn     r2,r3,lsr#24
+        mvn     r2,r3,lsr#26
         ldr     r2,[r10,r2,lsl#2]
         ldrb    r0,[r2,r3,lsr#16]
         add     r3,r3,#0x10000
@@ -995,7 +995,7 @@ wm_slow_loop
         movs    r5,r5,lsr#1
         movcs   r0,r9
         bcs     wm_slow_put
-        mvn     r2,r3,lsr#24
+        mvn     r2,r3,lsr#26
         ldr     r2,[r10,r2,lsl#2]
         ldrb    r0,[r2,r3,lsr#16]
         add     r3,r3,#0x10000
