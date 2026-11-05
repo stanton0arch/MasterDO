@@ -1166,6 +1166,7 @@ static uint32 update_pieces(renderer *r, const vdp_state *v, uint32 *nprio, uint
         a.p = &pp;
         a.height = r->height;
         if (render_prio_patches(&a)) {
+            /* The patches are chained by the routine. */
             first = CEL_PRIO0 + ns;
             npr = (uint32)(pp.c - &r->cels[first]);
             r->st.prio_patches += npr;
@@ -1173,7 +1174,7 @@ static uint32 update_pieces(renderer *r, const vdp_state *v, uint32 *nprio, uint
         }
     }
     r->st.prio_strips += ns;
-    for (k = 1; k < npr; k++)
+    for (k = 1; k < ns; k++)
         r->cels[first + k - 1].ccb_NextPtr = &r->cels[first + k];
     r->st.pieces += np;
     *nprio = npr;
