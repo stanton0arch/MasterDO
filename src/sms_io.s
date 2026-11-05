@@ -65,15 +65,15 @@ V_DIRTY         EQU     0x200
 V_VRAM          EQU     0x400
 V_HSN           EQU     0x4400          ; the logs lie past the video RAM
 V_NTN           EQU     0x4804
-V_CRN           EQU     0x4F84          ; the colour RAM log follows its count
+V_CRN           EQU     0x4E84          ; the colour RAM log follows its count
 VDP_HS_LOG      EQU     256
 VDP_NT_LOG      EQU     16
 VDP_CR_LOG      EQU     64
 VDP_GG_CRAM     EQU     64
 
 ; Machine fields past the vdp_state (sms_machine, sms.h; checked in sms.c).
-M_PSGREG        EQU     0x5200          ; psg_reg[8], psg_latch just below
-M_PSGW          EQU     0x5228          ; io.psg_w
+M_PSGREG        EQU     0x5100          ; psg_reg[8], psg_latch just below
+M_PSGW          EQU     0x5128          ; io.psg_w
 
 ; The access word (vdp.h): the address in bits 18-31, the code in bits
 ; 14-15, the pending and slow marks, the data port writes of the frame in
@@ -117,7 +117,7 @@ ACC_SLOW        EQU     0x20000
 
 ; A colour written during the active display: r4 := the line it shows
 ; from (the next one), r2 := the address of the free log entry less
-; V_CRN - 0x4F00, the count advanced; to cram_done when the write is past
+; V_CRN - 0x4E00, the count advanced; to cram_done when the write is past
 ; the active display or the log is full. In: r2 = T-states left, r12 =
 ; the vdp_state; r1 clobbered.
         MACRO
@@ -141,12 +141,12 @@ ACC_SLOW        EQU     0x20000
         ldr     r1,[r12,#V_ACTIVE]
         cmp     r4,r1
         bhs     cram_done
-        add     r2,r12,#0x4F00
-        ldr     r1,[r2,#V_CRN-0x4F00]
+        add     r2,r12,#0x4E00
+        ldr     r1,[r2,#V_CRN-0x4E00]
         cmp     r1,#VDP_CR_LOG
         bhs     cram_done
         add     r1,r1,#1
-        str     r1,[r2,#V_CRN-0x4F00]
+        str     r1,[r2,#V_CRN-0x4E00]
         add     r2,r2,r1,lsl#2          ; entry r1 - 1 of the log
         MEND
 
@@ -197,7 +197,7 @@ data_w_slow                             ; code 3, or a control word pending
         CRLOG
         orr     r0,r0,r3,lsl#8
         orr     r0,r0,r4,lsl#16
-        str     r0,[r2,#V_CRN-0x4F00]
+        str     r0,[r2,#V_CRN-0x4E00]
 cram_done
         ldmfd   sp!,{r1,r3,r4}
         b       data_w_next
@@ -218,7 +218,7 @@ data_w_gg                               ; Game Gear: colours of 12 bits, two byt
         orr     r0,r0,r3,lsl#12
         CRLOG
         orr     r0,r0,r4,lsl#20
-        str     r0,[r2,#V_CRN-0x4F00]
+        str     r0,[r2,#V_CRN-0x4E00]
         b       cram_done
 
 ;----------------------------------------------------------------------------

@@ -1402,9 +1402,8 @@ S_ZOOM          EQU     8
 S_Y             EQU     16
 S_PARTIAL       EQU     12
 S_VIS           EQU     272
-S_ROWS          EQU     528
-S_ORDER         EQU     0x814
-S_NORD          EQU     0x914
+S_ORDER         EQU     0x714
+S_NORD          EQU     0x814
 
 render_sprite_runs
         stmfd   sp!,{r4-r11,lr}
@@ -1618,8 +1617,8 @@ render_prio_patches
         addne   r1,r9,#S_VIS
         str     r1,[sp,#PF_VIS]
         ldr     r1,[r9,#S_NORD]
-        add     r9,r9,#0x800
-        add     r9,r9,#S_ORDER-0x800
+        add     r9,r9,#0x700
+        add     r9,r9,#S_ORDER-0x700
         str     r9,[sp,#PF_ORDER]
         add     r1,r9,r1,lsl #2
         str     r1,[sp,#PF_OEND]

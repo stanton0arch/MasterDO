@@ -116,7 +116,7 @@ void sms_vdp_data_rn(void);
 void sms_psg_w(void);
 
 /* Offsets of the PSG fields from the machine, for sms_psg_w (sms_io.s). */
-#define SMS_PSG_REG     0x5200
-#define SMS_PSG_W       0x5228
+#define SMS_PSG_REG     0x5100
+#define SMS_PSG_W       0x5128
 
 #endif /* SMS_H */

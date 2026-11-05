@@ -503,9 +503,12 @@ static void check_sprites(vdp_state *v, uint32 f)
         sprite_flag_frames[1]++;
     if (aflags != rflags || rn != v->spr_n || rpartial != v->spr_partial)
         bad = 1;
-    /* The lines shown are only written when some line overflows. */
+    /* The screen line is only written for the sprites on the screen
+     * (those with lines in the reference), the lines shown only when
+     * some line overflows. */
     for (k = 0; k < rn && !bad; k++) {
-        if (ry[k] != v->spr_y[k] || ((rflags & VDP_ST_OVERFLOW) && rvis[k] != v->spr_vis[k]))
+        if ((rvis[k] != 0 && ry[k] != v->spr_y[k]) ||
+            ((rflags & VDP_ST_OVERFLOW) && rvis[k] != v->spr_vis[k]))
             bad = 1;
     }
     /* The ordered list of the sprites on the screen with an opaque pixel
@@ -567,10 +570,10 @@ static void check_sprites(vdp_state *v, uint32 f)
             for (k = 0; k < rn; k++)
                 printf("Sprites:   sprite %lu: y %ld x %lu tile %lu rows %08lx\n", (unsigned long)k,
                        (long)v->spr_y[k], (unsigned long)sat[0x80 + 2 * k],
-                       (unsigned long)sat[0x81 + 2 * k], (unsigned long)v->spr_rows[k]);
+                       (unsigned long)sat[0x81 + 2 * k], (unsigned long)ref_opaque_rows(v, sat, k));
         }
         for (k = 0; k < rn; k++) {
-            if (ry[k] != v->spr_y[k] || rvis[k] != v->spr_vis[k])
+            if ((rvis[k] != 0 && ry[k] != v->spr_y[k]) || rvis[k] != v->spr_vis[k])
                 printf("Sprites:   sprite %lu: y %ld vis %08lx, reference y %ld vis %08lx\n",
                        (unsigned long)k, (long)v->spr_y[k], (unsigned long)v->spr_vis[k],
                        (long)ry[k], (unsigned long)rvis[k]);
@@ -898,7 +901,7 @@ void hmain(void)
                 printf("Sprite: frame %lu: %lu: y %ld x %lu tile %lu rows %08lx vis %08lx\n",
                        (unsigned long)(f + 1), (unsigned long)k, (long)v->spr_y[k],
                        (unsigned long)sat[0x80 + 2 * k], (unsigned long)sat[0x81 + 2 * k],
-                       (unsigned long)v->spr_rows[k], (unsigned long)v->spr_vis[k]);
+                       (unsigned long)ref_opaque_rows(v, sat, k), (unsigned long)v->spr_vis[k]);
 
             printf("Scroll: frame %lu: end %lu", (unsigned long)(f + 1),
                    (unsigned long)v->reg[8]);

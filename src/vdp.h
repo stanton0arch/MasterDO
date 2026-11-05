@@ -163,23 +163,24 @@ typedef struct {
     uint32  spr_h;          /* lines per sprite: 8, 16 or 32 */
     uint32  spr_zoom;       /* register 1 bit 0 */
     uint32  spr_partial;    /* some sprite is hidden on some of its lines */
-    int32   spr_y[VDP_SPRITES];     /* screen line of the first row */
+    int32   spr_y[VDP_SPRITES];     /* screen line of the first row (only
+                                       written for the sprites on the screen) */
     uint32  spr_vis[VDP_SPRITES];   /* bit k: line spr_y + k displayed, lines
                                        off the screen clear (only written
                                        when some line overflows) */
-    uint32  spr_rows[VDP_SPRITES];  /* bit r: tile row r holds an opaque pixel */
-    uint8   spr_tile_rows[VDP_TILES];   /* the same per tile, cached */
+    uint8   spr_tile_rows[VDP_TILES];   /* bit r: row r of the tile holds an
+                                           opaque pixel, cached */
     uint8   spr_tile_ok[VDP_TILES];     /* the cache entry is valid */
     /* Colour RAM writes during the active display of the current frame:
      * (first line affected << 16) | (index << 8) | value; in Game Gear
      * mode (first line affected << 20) | (colour << 12) | 12-bit value. */
-    uint32  cr_n;                   /* +0x4F84 */
-    uint32  cr_log[VDP_CR_LOG];     /* +0x4F88 */
+    uint32  cr_n;                   /* +0x4E84 */
+    uint32  cr_log[VDP_CR_LOG];     /* +0x4E88 */
     /* The sprites on the screen with an opaque pixel, by first row, for
      * the code drawing the priority layer under them: sprite | x << 8 |
      * first screen line << 16 | last screen line + 1 << 24. */
-    uint32  spr_order[VDP_SPRITES]; /* +0x5088 */
-    uint32  spr_nord;               /* +0x5188 */
+    uint32  spr_order[VDP_SPRITES]; /* +0x4F88 */
+    uint32  spr_nord;               /* +0x5088 */
 } vdp_state;
 
 /* Power-on state; lines is VDP_LINES_NTSC or VDP_LINES_PAL. */

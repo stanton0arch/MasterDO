@@ -604,7 +604,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: priority patches strip by strip over the ordered sprites; "
+    printf("masterdo: sprite evaluation with the off-screen sprites skipped; "
            "Game Gear mode: 12-bit colours, 160x144 LCD window, START button, "
            "PSG stereo, Game Gear images listed from the gg directory\n");
     if (plat_init(&plat) < 0)
