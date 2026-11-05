@@ -2448,8 +2448,7 @@ static void ref_emit_block_code(jit_block_ctx *b)
         case STUB_TIMEOUT:
             ref_patch_b(s->site, JIT_ADDR(j->cur));
             ref_emit_b(j, C_AL, 1, j->glue.seg_timeout);
-            emit(j, s->t * CYCLE);
-            emit(j, s->pc);
+            emit(j, (s->pc << 16) | (s->t * CYCLE));
             emit(j, JIT_ADDR(s->resume));
             break;
         case STUB_FORWARD:
@@ -2544,6 +2543,7 @@ void emit_test(void)
     uint32 insns = 0;
     uint32 words = 0;
     uint32 nstubs = 0;
+    uint32 max_head = 0, max_insn = 0, max_insn_pc = 0, max_tail = 0, max_tail_stubs = 0, max_block = 0;
     uint32 nram = 0;
     uint32 ndyn = 0;
     uint32 nerr = 0;
@@ -2675,6 +2675,32 @@ void emit_test(void)
             insns += n;
             words += na;
             nstubs += sta;
+            /* Largest emissions, for the room the emitter must keep in a
+             * zone: the entry check and mark before the first instruction,
+             * one instruction, the words after the last instruction (its
+             * code, the fall-through exit and the stubs), one stub. */
+            if (!erra) {
+                uint32 i;
+                uint32 e0 = (uint32)(ea[0].host - code);
+                uint32 tail = na - (uint32)(ea[n - 1].host - code);
+
+                if (e0 > max_head)
+                    max_head = e0;
+                for (i = 0; i + 1 < n; i++) {
+                    uint32 w = (uint32)(ea[i + 1].host - ea[i].host);
+
+                    if (w > max_insn) {
+                        max_insn = w;
+                        max_insn_pc = pc;
+                    }
+                }
+                if (tail > max_tail) {
+                    max_tail = tail;
+                    max_tail_stubs = sta;
+                }
+                if (na > max_block)
+                    max_block = na;
+            }
             if (bca.entry_check == 2)
                 nram++;
             if (bca.has_dyn)
@@ -2770,4 +2796,9 @@ void emit_test(void)
            (unsigned long)blocks, (unsigned long)insns, (unsigned long)words,
            (unsigned long)nstubs, (unsigned long)nram, (unsigned long)ndyn,
            (unsigned long)nerr, (unsigned long)bad);
+    printf("Emitter test: largest emissions: %lu words before the first instruction, %lu words for one "
+           "instruction (block at $%04lx), %lu words from the last instruction on (%lu stubs), "
+           "%lu words for a block\n",
+           (unsigned long)max_head, (unsigned long)max_insn, (unsigned long)max_insn_pc,
+           (unsigned long)max_tail, (unsigned long)max_tail_stubs, (unsigned long)max_block);
 }

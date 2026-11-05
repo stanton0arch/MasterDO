@@ -161,7 +161,20 @@ Environment variables:
   or on Phoenix is replayed here;
 - `SIMPROF=1`: cycles per function of the image, and of the generated code
   (the 40 largest; `SIMPROFALL=1` lists every function with cycles);
-- `SIMDIS=symbol`: executions and cycles of each instruction of a function.
+- `SIMDIS=symbol`: executions and cycles of each instruction of a function;
+- `SIMWATCH=hex`: the run stops at the first write into the four bytes at
+  that address (a stray store into a table or a state word is caught in
+  the act); `SIMWATCHSKIP=n` lets the first n writes through, each printed
+  with the writing function (the set-up of the watched word).
+
+A fatal error (a read or write outside the memory, an undefined
+instruction, a watched write) prints the registers with the symbols of pc
+and lr, the top of the stack, the last 32 branches taken with their
+symbols and the words around pc, then writes `code.bin` and `lookup.bin`
+(the context's lookup table, 65 536 words) as they stand at the fault,
+once the harness has registered the translator's buffers (`sim_register`,
+after `game_init`): a jump into the middle of a block or a stale lookup
+entry is traced from these dumps with the scripts below.
 
 Scripts on `code.bin` (the whole code buffer and the block descriptors,
 written at the end of a cartridge run) and `codecnt.bin` (executions of

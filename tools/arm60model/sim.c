@@ -75,14 +75,66 @@ static double weightS = 1.05, weightN = 3.2, weightI = 1.0;
 static double cycles(void) { return cS * weightS + cN * weightN + cI * weightI; }
 static uint32_t usec_now(void) { return (uint32_t)(cycles() * 0.08); }
 
+static const char *sym_near(uint32_t a, uint32_t *off);
+static struct { uint32_t from, to; } jumps[32];
+static uint32_t njump;
+static uint32_t reg_code, reg_code_end, reg_blocks, reg_nblocks, reg_ctx;   /* sim_register */
+static void dump_code(uint32_t code, uint32_t cur, uint32_t blocks, uint32_t nblocks);
+
+/* A fatal error of the simulated program: the message, then the registers
+ * with the symbols of pc and lr and the top of the stack (the saved return
+ * addresses of the callers, usually), to locate the fault. */
 static void fatal(const char *fmt, ...)
 {
     va_list ap;
+    uint32_t o1, o2;
+    int k;
     va_start(ap, fmt);
     fprintf(stderr, "sim: ");
     vfprintf(stderr, fmt, ap);
     fprintf(stderr, " (pc %08x, %llu insns)\n", r[15], (unsigned long long)ninsn);
     va_end(ap);
+    fprintf(stderr, "sim: pc %s+%x", sym_near(r[15], &o1), o1);
+    fprintf(stderr, " lr %s+%x\n", sym_near(r[14], &o2), o2);
+    for (k = 0; k < 16; k++)
+        fprintf(stderr, " r%d %08x%s", k, r[k], (k & 7) == 7 ? "\n" : "");
+    if (r[13] >= LOAD_ADDR && r[13] + 64 <= MEM_SIZE) {
+        fprintf(stderr, "sim: stack:");
+        for (k = 0; k < 16; k++) {
+            uint32_t w = *(uint32_t *)(mem + r[13] + 4 * k);
+            w = ((w & 0xFF) << 24) | ((w & 0xFF00) << 8) | ((w >> 8) & 0xFF00) | (w >> 24);
+            fprintf(stderr, " %08x", w);
+        }
+        fprintf(stderr, "\n");
+    }
+    fprintf(stderr, "sim: last branches (from -> to):\n");
+    for (k = 0; k < 32; k++) {
+        uint32_t i = (njump + k) & 31;
+        uint32_t oa, ob;
+        if (njump < 32 && i >= njump) continue;
+        fprintf(stderr, "  %08x (%s+%x) -> %08x (%s+%x)\n", jumps[i].from, sym_near(jumps[i].from, &oa), oa,
+                jumps[i].to, sym_near(jumps[i].to, &ob), ob);
+    }
+    if (reg_code != 0) {
+        /* The code buffer and the descriptors as at the fault, and the
+         * lookup table of the context (lookup.bin, 65536 words). */
+        FILE *f;
+        dump_code(reg_code, reg_code_end, reg_blocks, reg_nblocks);
+        f = fopen("lookup.bin", "wb");
+        if (f) { fwrite(mem + reg_ctx + 0x4100, 1, 0x40000, f); fclose(f); }
+        fprintf(stderr, "sim: code.bin and lookup.bin written (ctx %08x)\n", reg_ctx);
+    }
+    if (r[15] >= LOAD_ADDR + 128 && r[15] + 64 <= MEM_SIZE) {
+        /* The words around pc: filler (0xA5A5A5A5) tells an unused part
+         * of the code buffer, stub data words a jump into a stub. */
+        fprintf(stderr, "sim: code around pc:");
+        for (k = -24; k < 8; k++) {
+            uint32_t a = r[15] + 4 * k;
+            uint32_t w = ((uint32_t)mem[a] << 24) | ((uint32_t)mem[a + 1] << 16) | ((uint32_t)mem[a + 2] << 8) | mem[a + 3];
+            fprintf(stderr, "%s%08x", (k & 7) == 0 ? "\n  " : " ", w);
+        }
+        fprintf(stderr, "\n");
+    }
     exit(1);
 }
 
@@ -92,9 +144,25 @@ static inline uint32_t rd32(uint32_t a)
     if (a & 3) fatal("unaligned read32 %08x", a);
     return ((uint32_t)mem[a] << 24) | ((uint32_t)mem[a + 1] << 16) | ((uint32_t)mem[a + 2] << 8) | mem[a + 3];
 }
+/* SIMWATCH=hex: the run stops, with the registers, at the first write
+ * into the four bytes at that address (to find a stray store). */
+static uint32_t watch_addr = 0xFFFFFFFFu;
+static uint32_t watch_skip = 0;     /* SIMWATCHSKIP: hits to let through first (the set-up) */
+static void watch_hit(uint32_t a, uint32_t v)
+{
+    uint32_t o;
+    if (watch_skip > 0) {
+        watch_skip--;
+        fprintf(stderr, "sim: watched write %08x = %08x at %s+%x, let through\n", a, v, sym_near(r[15], &o), o);
+        return;
+    }
+    fatal("watched write %08x = %08x", a, v);
+}
+
 static inline void wr32(uint32_t a, uint32_t v)
 {
     if (a >= MEM_SIZE - 3 || a < 0x100) fatal("write32 %08x", a);
+    if (a - watch_addr < 4u || watch_addr - a < 4u) watch_hit(a, v);
     if (a & 3) fatal("unaligned write32 %08x", a);
     mem[a] = v >> 24; mem[a + 1] = v >> 16; mem[a + 2] = v >> 8; mem[a + 3] = v;
 }
@@ -106,6 +174,7 @@ static inline uint32_t rd8(uint32_t a)
 static inline void wr8(uint32_t a, uint32_t v)
 {
     if (a >= MEM_SIZE || a < 0x100) fatal("write8 %08x", a);
+    if (a - watch_addr < 4u) watch_hit(a, v);
     mem[a] = (uint8_t)v;
 }
 
@@ -305,6 +374,28 @@ static double mark_sum[16];
 static uint32_t mark_n[16];
 
 static const char *sym_near(uint32_t a, uint32_t *off);
+static void dump_code(uint32_t code, uint32_t cur, uint32_t blocks, uint32_t nblocks)
+{
+    FILE *f = fopen("code.bin", "wb");
+    uint32_t k;
+    if (f) {
+        uint32_t hdr[4] = { code, cur, blocks, nblocks };
+        fwrite(hdr, 4, 4, f);
+        fwrite(mem + code, 1, cur - code, f);
+        /* The first five words of each 24-byte descriptor (pc, key,
+         * entry, body, hash chain), as the scripts read them. */
+        for (k = 0; k < nblocks; k++) fwrite(mem + blocks + 24 * k, 1, 20, f);
+        fwrite(execmap + (code >> 2), 1, (cur - code) >> 2, f);
+        fwrite(jitcyc + (code >> 2), 4, (cur - code) >> 2, f);
+        fclose(f);
+    }
+    f = fopen("codecnt.bin", "wb");
+    if (f) {
+        fwrite(jitcnt + (code >> 2), 4, (cur - code) >> 2, f);
+        fclose(f);
+    }
+}
+
 static void do_swi(uint32_t n)
 {
     switch (n) {
@@ -372,27 +463,8 @@ static void do_swi(uint32_t n)
         else { mark_sum[id] += cycles() - mark_t[id - 1]; mark_n[id]++; }
         break;
     }
-    case 11: {
-        FILE *f = fopen("code.bin", "wb");
-        uint32_t k;
-        if (f) {
-            uint32_t hdr[4] = { r[0], r[1], r[2], r[3] };
-            fwrite(hdr, 4, 4, f);
-            fwrite(mem + r[0], 1, r[1] - r[0], f);
-            /* The first five words of each 24-byte descriptor (pc, key,
-             * entry, body, hash chain), as the scripts read them. */
-            for (k = 0; k < r[3]; k++) fwrite(mem + r[2] + 24 * k, 1, 20, f);
-            fwrite(execmap + (r[0] >> 2), 1, (r[1] - r[0]) >> 2, f);
-            fwrite(jitcyc + (r[0] >> 2), 4, (r[1] - r[0]) >> 2, f);
-            fclose(f);
-        }
-        f = fopen("codecnt.bin", "wb");
-        if (f) {
-            fwrite(jitcnt + (r[0] >> 2), 4, (r[1] - r[0]) >> 2, f);
-            fclose(f);
-        }
-        break;
-    }
+    case 11: dump_code(r[0], r[1], r[2], r[3]); break;
+    case 14: reg_code = r[0]; reg_code_end = r[1]; reg_blocks = r[2]; reg_nblocks = r[3]; reg_ctx = rd32(r[13]); break;
     default: fatal("unknown swi %x", n);
     }
 }
@@ -605,6 +677,12 @@ static void run(void)
             fatal("undefined instruction %08x", op);
         }
 account:
+        if (r[15] != pc + 4) {
+            /* The last taken branches, dumped by fatal(). */
+            jumps[njump & 31].from = pc;
+            jumps[njump & 31].to = r[15];
+            njump++;
+        }
         c0 = (cS - s0) * weightS + (cN - n0) * weightN + (cI - i0) * weightI;
         if (pc < img_end && pc >= LOAD_ADDR) { prof[(pc - LOAD_ADDR) >> 2] += c0; pcount[(pc - LOAD_ADDR) >> 2]++; }
         else { prof_jit += c0; execmap[pc >> 2] = 1; jitcyc[pc >> 2] += (float)c0; jitcnt[pc >> 2]++; }
@@ -753,6 +831,10 @@ int main(int argc, char **argv)
         double f = atof(getenv("SIMSCALE"));
         weightS *= f; weightN *= f; weightI *= f;
     }
+    if (getenv("SIMWATCH"))
+        watch_addr = (uint32_t)strtoul(getenv("SIMWATCH"), 0, 16);
+    if (getenv("SIMWATCHSKIP"))
+        watch_skip = (uint32_t)strtoul(getenv("SIMWATCHSKIP"), 0, 10);
     padenv = getenv("SIMPAD");
     if (padenv) {
         char *p = padenv;

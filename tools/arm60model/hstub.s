@@ -16,6 +16,7 @@
         EXPORT  sim_pad
         EXPORT  sim_mark
         EXPORT  sim_codedump
+        EXPORT  sim_register
         EXPORT  psg_update
         EXPORT  plat_mem_free
         IMPORT  hmain
@@ -58,6 +59,9 @@ sim_mark
         mov     pc,lr
 sim_codedump
         swi     0xF0000B
+        mov     pc,lr
+sim_register
+        swi     0xF0000E
         mov     pc,lr
 plat_mem_free
         swi     0xF0000D

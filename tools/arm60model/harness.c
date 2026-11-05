@@ -37,6 +37,9 @@ extern uint32 sim_arg(uint32 i);
 extern uint32 sim_pad(uint32 frame);
 extern void sim_mark(uint32 id);
 extern void sim_codedump(uint32 code, uint32 cur, uint32 blocks, uint32 nblocks);
+/* Registers the code buffer, the descriptors and the context with the
+ * simulator, which dumps them on a fatal error (code.bin, lookup.bin). */
+extern void sim_register(uint32 code, uint32 cur, uint32 blocks, uint32 nblocks, uint32 ctx);
 extern void dec_test(void);
 extern void ana_test(void);
 extern void emit_test(void);
@@ -710,6 +713,7 @@ void hmain(void)
         game_zones = sim_arg(27);       /* -zones n */
     if (game_init(&g, rom, size, sim_arg(24)) != 0)    /* -gg: the Game Gear mode */
         return;
+    sim_register((uint32)g.jit.code, (uint32)g.jit.code_end, (uint32)g.jit.blocks, g.jit.max_blocks, (uint32)g.ctx);
     if (sim_arg(4)) {
         /* -interp: nothing is translated, everything is interpreted. */
         z80j_set_interp(&g.jit, g.hot, 0, 0);

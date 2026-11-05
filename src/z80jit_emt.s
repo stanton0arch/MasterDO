@@ -307,6 +307,14 @@ W_CMP_R0_IMM    EQU     0xE3500000      ; CMP r0,#0 | bank
 
 RAM_INLINE_WORDS EQU    16              ; RAM blocks up to this size checked inline
 
+; Room the zone must have left before an instruction or a stub is emitted:
+; the largest emissions measured over random blocks are 46 words for an
+; instruction (with its segment and interrupt checks) and well under that
+; for a stub, so that nothing is ever written past the zone. A zone found
+; short stops the emission with error 4, and the block is emitted again in
+; the next zone (jit_translate_block).
+EMIT_ROOM_BYTES EQU     512
+
 ; Stack frame of the main routine.
 F_MISS          EQU     0               ; site of the bank check branch
 F_SIZE          EQU     4
@@ -397,6 +405,17 @@ F_SIZE          EQU     4
         str     $v,[$w,#GE_ERROR :AND: 0xFF]
         MEND
 
+; Stops the emission with error 4 when the zone has less than
+; EMIT_ROOM_BYTES left at the cursor. Uses $w.
+        MACRO
+        ROOM    $w
+        GETJ    $w
+        ldr     $w,[$w,#S_ZONE_END]
+        sub     $w,$w,r5
+        cmp     $w,#EMIT_ROOM_BYTES
+        blo     eb_full
+        MEND
+
 ; Counts a full flag computation.
         MACRO
         FULLF   $w,$v
@@ -454,7 +473,10 @@ F_SIZE          EQU     4
 ; chunk, the instructions with their segment checks and interrupt checks,
 ; the fall-through exit, then the stubs the code branched to. Leaves
 ; b->j->cur past the code, and b->j->error nonzero when an instruction could
-; not be encoded, a stub table overflowed or the zone is full.
+; not be encoded, a stub table overflowed or the zone is full: the room
+; left is checked before the first instruction, before every instruction
+; and before every stub (EMIT_ROOM_BYTES), so that the zone is filled to
+; within a block of its end and the emission never writes past it.
 ;----------------------------------------------------------------------------
 jit_emit_block
         stmfd   sp!,{r4-r9,r11,lr}
@@ -475,6 +497,7 @@ jit_emit_block
         cmp     r0,#2
         beq     eb_ram_check
 eb_body
+        ROOM    r0
         ; The run mark of the chunk holding the block: STR r10,[r10,#off].
         str     r5,[r4,#B_BODY]
         ldr     r0,[r4,#B_MARK_OFF]
@@ -486,6 +509,7 @@ eb_body
         ldr     r0,[r4,#B_N]
         RECORD  r7,r6,r0                ; the loop runs to the end
 eb_loop
+        ROOM    r0
         ; The EF_* flags of the instruction: its interrupt check, fused
         ; test, live flags and memory operand, then a segment check when
         ; it starts one. The words of the record from ei mem d dyn to
@@ -701,6 +725,7 @@ eb_stubs_ok
 eb_stub_loop
         cmp     r7,r9
         bhs     eb_end
+        ROOM    r0
         ldmia   r7!,{r0,r1,r2,r3}       ; branch | kind << 8 | t, site, pc, resume / reg / record
         and     r12,r0,#0xF00           ; the kind, shifted
         cmp     r12,#STUB_FORWARD :SHL: ST_KIND_SHIFT
@@ -731,8 +756,11 @@ st_taken
         bl      e_taken
         b       eb_stub_loop
 
-; Time-out: BL seg_timeout, then the T-states times CYCLE, the address
-; and the resume address.
+; Time-out: BL seg_timeout, then the Z80 address in the top half of a word
+; with the T-states times CYCLE in the bottom one (a segment has at most
+; SEG_MAX_T of them: the product stays below 65536), then the resume
+; address. Three words: one in ten words of the generated code is a
+; time-out stub.
 st_timeout
         sub     r0,r11,r5
         sub     r0,r0,#8
@@ -740,7 +768,8 @@ st_timeout
         mov     r0,r0,lsr #8
         orr     r0,r0,#BL_AL
         mov     r1,r6,lsl #8
-        stmia   r5!,{r0,r1,r2,r3}       ; BL, t * CYCLE, pc, resume
+        orr     r1,r1,r2,lsl #16
+        stmia   r5!,{r0,r1,r3}          ; BL, pc << 16 | t * CYCLE, resume
         b       eb_stub_loop
 ; Forward: the branch at the site goes to the code of the target record.
 st_forward
@@ -805,7 +834,10 @@ eb_exit
         str     r5,[r1,#S_CUR]
         add     sp,sp,#F_SIZE
         ldmfd   sp!,{r4-r9,r11,pc}
+        ; The zone is too full for this block (ROOM, or the end check): the
+        ; words written so far are left in it, unreachable.
 eb_full
+        GETJ    r1
         SETERR  r2,r3,4
         b       eb_exit
 

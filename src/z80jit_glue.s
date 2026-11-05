@@ -200,8 +200,10 @@ jit_exit
 ; its code, where execution resumes.
 ;----------------------------------------------------------------------------
 z80j_glue_seg_timeout
-        ldmia   lr,{r0-r2}              ; r1 = Z80 address, r2 = code
-        add     r8,r8,r0                ; give the segment T-states back
+        ldmia   lr,{r0,r2}              ; r0 = Z80 address << 16 | T-states * CYCLE, r2 = code
+        mov     r1,r0,lsr#16            ; r1 = Z80 address
+        mov     r0,r0,lsl#16
+        add     r8,r8,r0,lsr#16         ; give the segment T-states back
         ; The usual stretch end, without leaving the generated code: the
         ; machine event (through its assembly handler), a maskable
         ; interrupt in mode 1 (or 0) pushed to writable memory, the next

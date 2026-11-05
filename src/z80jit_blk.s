@@ -97,7 +97,12 @@ PAGE_KIND       EQU     0x0F
 
 KEY_FIXED       EQU     0
 KEY_RAM         EQU     0x80000
-BLOCK_BYTES     EQU     4096            ; free bytes required before a translation
+; Free bytes a zone must have before a translation starts in it: enough for
+; the entry check of a RAM block (at most 124 words measured) and the room
+; the emitter checks before every instruction and stub (EMIT_ROOM_BYTES,
+; z80jit_emt.s). A block that does not fit is emitted again in the next
+; zone, so that a zone is left with less than a block of space unused.
+BLOCK_BYTES     EQU     1024
 
 ; Stack frame: whether the emission was tried again in another zone.
 F_RETRIED       EQU     0
@@ -207,8 +212,8 @@ tb_zone
         ; The zone is emptied when it cannot take another block, or when
         ; no descriptor is free (an eviction frees some).
         ldmia   r6,{r0,r1}              ; cur, end
-        sub     r1,r1,r0
-        cmp     r1,#BLOCK_BYTES
+        sub     r2,r1,r0
+        cmp     r2,#BLOCK_BYTES
         blo     tb_next_zone
         add     r2,r4,#S_FREE_BLOCKS :AND: 0xFF00
         ldr     r2,[r2,#S_FREE_BLOCKS :AND: 0xFF]
@@ -279,8 +284,8 @@ tb_emit
         beq     tb_commit
         cmp     r0,#4
         bne     tb_failed
-        ; The zone was too full for this block: emit it again in the
-        ; next one, once.
+        ; The zone was too full for this block (the emitter stopped at
+        ; its room check): emit it again in the next one, once.
         ldr     r0,[sp,#F_RETRIED]
         cmp     r0,#0
         bne     tb_failed

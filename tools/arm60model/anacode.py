@@ -32,7 +32,7 @@ off = 16 + 4 * n
 blk = [struct.unpack('>5I', d[off + 20 * k: off + 20 * k + 20]) for k in range(nb)]
 executed = d[off + 20 * nb: off + 20 * nb + n]
 
-stub_data = {'z80j_glue_seg_timeout': 3, 'z80j_glue_link': 3, 'z80j_glue_write': 3}
+stub_data = {'z80j_glue_seg_timeout': 2, 'z80j_glue_link': 3, 'z80j_glue_write': 3}
 
 
 def target(i, w):
