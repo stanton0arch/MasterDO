@@ -60,6 +60,15 @@
  * costs the sprites' area instead of a full-screen cel, and without a
  * sprite nothing is drawn at all.
  *
+ * Cells off the picture: a changed entry, or a cell of a written tile, is
+ * only drawn when the picture shows its row and its column (the rows the
+ * lines of the frame reach at the vertical scroll, and, in Game Gear
+ * mode, the 20 or 21 columns the LCD window reaches at the horizontal
+ * scroll of each band; the Master System shows every column). The other
+ * cells wait stale, with their row and column noted, and are drawn in
+ * the update that first shows them, before the pieces are made. A game
+ * rewriting its whole table pays for the cells on the screen only.
+ *
  * Tiles are converted from the VDP's planar format into 8 bpp rows of 8
  * bytes (two words) the first time a cell or a sprite needs them after
  * they were written (a cell needing the conversion is drawn from its rows
@@ -212,10 +221,10 @@ typedef struct render_layer_s {
     uint8   pg_nrows[RENDER_NT_ROWS_MAX];
     uint8   pg_col0[RENDER_NT_ROWS_MAX];    /* first column */
     uint8   pg_col1[RENDER_NT_ROWS_MAX];    /* last column + 1 */
-    /* Cells of a written tile are only redrawn in the rows the picture
-     * shows (shown_rows, bit per name table row, from the bands of the
-     * update); the others are left stale (their stamp RENDER_STALE) and
-     * redrawn when their row is shown again. */
+    /* Cells are only drawn in the rows the picture shows (shown_rows, bit
+     * per name table row, from the bands of the update) and in its
+     * columns (shown_cols below); the others are left stale (their stamp
+     * RENDER_STALE) and drawn when the picture shows them. */
     uint32  stale_rows;     /* rows holding stale cells */
     uint32  shown_rows;     /* rows shown by the update */
     /* Size of the table drawn: 28 or 32 rows. */
@@ -235,6 +244,14 @@ typedef struct render_layer_s {
     uint32  pend_tile;
     uint32  pend_cell;
     uint32  rb_next;
+    /* The columns the picture shows (bit per name table column, from the
+     * line bands of the update: all of them on the Master System, on the
+     * Game Gear the LCD window's 20 or 21 columns at the scroll of each
+     * band), and the stale cells of each row (bit per column). A cell is
+     * drawn only when the picture shows its row and its column, the
+     * others wait stale; stale_cols says where render_stale_cells looks. */
+    uint32  shown_cols;
+    uint32  stale_cols[RENDER_NT_ROWS_MAX];
 } render_layer;
 
 #define RENDER_NO_TILE  0xFFFFFFFFu
@@ -403,14 +420,15 @@ void   render_prio_groups(render_layer *l);
  * the priority bitmap for entries with the priority bit), converting the
  * tiles found unconverted through render_tile_conv, stamping the cells
  * drawn and counting them.
+ * A cell the picture does not show (shown_rows, shown_cols) is left
+ * stale instead of drawn, whichever walk meets it.
  * render_entries: the n name table words listed in l->wlist (which has
  * room for an end mark after them), copied to the shadow; each entry
  * that differs is re-linked in the cell list of its tile, its priority
- * bookkeeping done, and drawn. render_tile_cells:
- * the cells of tile t not stamped in this update, those of the rows
- * not shown left stale. render_stale_cells: the stale cells of the rows
- * shown. render_rebuild_cells: every cell from the shadow, linked into
- * lists that must be empty. */
+ * bookkeeping done, and drawn. render_tile_cells: the cells of tile t
+ * not stamped in this update. render_stale_cells: the stale cells the
+ * picture shows. render_rebuild_cells: every cell from the shadow,
+ * linked into lists that must be empty. */
 void   render_entries(render_layer *l, const uint8 *vram, uint32 n);
 /* ORs RENDER_NEUTRAL into every byte of nwords words of stamps (a multiple
  * of 8): the wrap of the update stamps (render_a.s). */

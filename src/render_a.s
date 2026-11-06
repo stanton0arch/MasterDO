@@ -64,6 +64,8 @@ R_STTILECELLS   EQU     196
 R_STTILESCONV   EQU     200
 R_STALEROWS     EQU     336
 R_SHOWNROWS     EQU     340
+R_SHOWNCOLS     EQU     440
+R_STALECOLS     EQU     444
 R_NROWS         EQU     344
 R_NCELLS        EQU     348
 
@@ -297,7 +299,11 @@ spr_done
 ; render_stale_cells, render_rebuild_cells and their resumable forms):
 ; r9 = layer, r10 = VRAM, r11 = cursor, r4-r8 = fields of the layer each
 ; walk hoists (shadow, stamp...), which the drawing routine preserves. The
-; walks stamp and count the cells they draw.
+; walks stamp and count the cells they draw, and only draw a cell when the
+; picture shows both its row and its column (shown_rows, shown_cols): a
+; cell off the picture is left stale instead (its stamp STALE, its bit in
+; stale_cols[row], its row's bit in stale_rows) and render_stale_cells
+; draws it once the picture shows it.
 ;
 ; cell_draw: draws entry r1 into cell r0 of the bitmap (and of the priority
 ; bitmap when the entry has the priority bit): the rows of the tile store
@@ -305,8 +311,13 @@ spr_done
 ; with the palette bit OR-ed into every pixel, in reverse order for a
 ; vertical flip. A store found missing is filled by cell_conv, which
 ; converts the tile into the store and into the cell at once. Preserves
-; r4-r9 and r11, clobbers r0-r3, r12 and lr; the usual cell (no priority
+; r4-r11, clobbers r0-r3, r12 and lr; the usual cell (no priority
 ; bit, the store present) touches no memory but the rows.
+;
+; DRAWCELL is the form the walks use: the usual cell (no flip, no palette
+; bit, no priority bit, the plain store present) is copied in place, two
+; rows per load since the walks leave r0-r3, r12 and lr free, and the
+; others go through cell_draw. Same clobbers as cell_draw.
 ;----------------------------------------------------------------------------
 NONE            EQU     1024            ; end of a cell list
 STALE           EQU     0xFF            ; stamp of a stale cell (RENDER_STALE)
@@ -365,6 +376,84 @@ CELL_ROW        EQU     256             ; bytes per bitmap row
         add     r8,r8,#CELL_ROW
         MEND
 
+
+        MACRO
+        HIDDEN  $c,$label               ; to $label unless the picture shows the row and the column of cell $c (r2, r3 clobbered)
+        ldr     r2,[r9,#R_SHOWNROWS]
+        mov     r3,$c,lsr #5
+        mov     r2,r2,lsr r3
+        tst     r2,#1
+        ldrne   r2,[r9,#R_SHOWNCOLS]
+        andne   r3,$c,#31
+        movne   r2,r2,lsr r3
+        tstne   r2,#1
+        beq     $label
+        MEND
+
+        MACRO
+        LEAVESTALE $c,$st               ; cell $c (stamps at $st) waits stale: its row and column noted (r2, r3, r12 clobbered)
+        mov     r12,#STALE
+        strb    r12,[$st,$c]
+        mov     r3,$c,lsr #5            ; its row
+        ldr     r12,[r9,#R_STALEROWS]
+        mov     r2,#1
+        orr     r12,r12,r2,lsl r3
+        str     r12,[r9,#R_STALEROWS]
+        add     r12,r9,#R_STALECOLS
+        add     r12,r12,r3,lsl #2
+        and     r3,$c,#31               ; its column
+        mov     r2,r2,lsl r3
+        ldr     r3,[r12]
+        orr     r3,r3,r2
+        str     r3,[r12]
+        MEND
+
+        MACRO
+        COPYROWS $src,$dst              ; the eight rows at $src, two per load, into the cell at $dst (r0-r3 clobbered)
+        ldmia   $src!,{r0-r3}
+        stmia   $dst,{r0,r1}
+        add     $dst,$dst,#CELL_ROW
+        stmia   $dst,{r2,r3}
+        add     $dst,$dst,#CELL_ROW
+        ldmia   $src!,{r0-r3}
+        stmia   $dst,{r0,r1}
+        add     $dst,$dst,#CELL_ROW
+        stmia   $dst,{r2,r3}
+        add     $dst,$dst,#CELL_ROW
+        ldmia   $src!,{r0-r3}
+        stmia   $dst,{r0,r1}
+        add     $dst,$dst,#CELL_ROW
+        stmia   $dst,{r2,r3}
+        add     $dst,$dst,#CELL_ROW
+        ldmia   $src,{r0-r3}
+        stmia   $dst,{r0,r1}
+        add     $dst,$dst,#CELL_ROW
+        stmia   $dst,{r2,r3}
+        MEND
+
+        MACRO
+        DRAWCELL                        ; cell r0 takes entry r1: the usual cell copied here, the others drawn by cell_draw
+        tst     r1,#0x1E00              ; a flip, the palette bit or the priority bit
+        bne     %F8
+        ldmia   r9,{r2,r3,r12,lr}       ; the stores, t_ok, the bitmap
+        bic     r3,r1,#0xFE00           ; tile
+        ldrb    r12,[r12,r3]
+        tst     r12,#1                  ; its plain store present?
+        beq     %F7
+        add     r12,r2,r3,lsl #6        ; its rows
+        CELLOFF r3,r0,r2
+        add     lr,lr,r3                ; the cell's rows
+        COPYROWS r12,lr
+        b       %F9
+7
+        add     r2,r2,r3,lsl #6         ; missing: converted into the store and the cell
+        mov     r12,#1
+        bl      cell_conv
+        b       %F9
+8
+        bl      cell_draw
+9
+        MEND
 cell_draw
         bic     r12,r1,#0xFE00          ; tile
         ldr     r3,[r9,#R_TOK]
@@ -517,6 +606,10 @@ cd_prio
         cmp     r4,r10
         MEND
 
+; cell_conv: the store of the entry's tile missing (r0 = cell, r1 = entry,
+; r2 = the store's rows, r12 = its bit in t_ok, r10 = VRAM): the tile
+; converted into the store and the cell drawn in the same pass. Entered
+; from cell_draw, and directly by the walks for a plain store.
 cell_conv
         str     lr,[sp,#-4]!
         stmfd   sp!,{r4-r11}
@@ -629,10 +722,11 @@ render_tile_conv
 ; written after them): each of the word's two entries that differs from
 ; the shadow has its cell moved to the list of its new tile when the tile
 ; changed, its priority bookkeeping done when the priority bit changed,
-; stamped (which ends a stale state) and drawn; the word is then copied
-; to the shadow. The changes are tested on the word as it lies in memory:
-; an entry's low byte holds tile bits 0-7, its high byte tile bit 8 and
-; the priority bit (bit 4).
+; then, when the picture shows the cell, stamped (which ends a stale
+; state) and drawn, else left stale; the word is then copied to the
+; shadow. The changes are tested on the word as it lies in memory: an
+; entry's low byte holds tile bits 0-7, its high byte tile bit 8 and the
+; priority bit (bit 4).
 ;----------------------------------------------------------------------------
 HEAD_BYTES      EQU     2048            ; the heads of the cell lists, before the nodes
 
@@ -660,8 +754,6 @@ HEAD_BYTES      EQU     2048            ; the heads of the cell lists, before th
         addne   r2,lr,r2,lsl #3
         strne   r3,[r2,#4]              ; the former first cell is held by the node
 1
-        strb    r8,[r7,r0]              ; stamped
-        add     r8,r8,#256              ; counted
         MEND
 
 render_entries
@@ -689,7 +781,11 @@ re_loop
         and     r12,r1,#0x00FF0000
         orr     r1,r3,r12,lsr #8
         ENTRYCELL 0x10000,0xFF000000,0x100000
-        bl      cell_draw
+        HIDDEN  r0,re_hide1
+        strb    r8,[r7,r0]              ; stamped
+        add     r8,r8,#256              ; counted
+        DRAWCELL
+re_first_done
         ldr     r1,[r5,r11]             ; the word again
         ldr     r2,[r6,r11]
         eor     r2,r2,r1
@@ -704,8 +800,17 @@ re_second
         mov     r3,r3,lsr #8
         orr     r1,r3,r12,lsl #8
         ENTRYCELL 1,0xFF00,0x10
-        adr     lr,re_loop
-        b       cell_draw
+        HIDDEN  r0,re_hide2
+        strb    r8,[r7,r0]              ; stamped
+        add     r8,r8,#256              ; counted
+        DRAWCELL
+        b       re_loop
+re_hide1
+        LEAVESTALE r0,r7
+        b       re_first_done
+re_hide2
+        LEAVESTALE r0,r7
+        b       re_loop
 re_done
         mov     r8,r8,lsr #8
         ldr     r0,[r9,#R_STCELLS]
@@ -784,19 +889,27 @@ sw_loop
 ;
 ; Draws the cells of the list of tile t that are not stamped in this
 ; update, with their entry from the shadow; counts them in st.cells and
-; st.tile_cells. A cell of a row the update does not show (shown_rows) is
-; left stale instead, for render_stale_cells.
+; st.tile_cells. A cell the picture does not show (shown_rows,
+; shown_cols) is left stale instead, for render_stale_cells.
+;
+; uint32 render_tile_cells_part(render_layer *l, const uint8 *vram, uint32 t,
+;                               uint32 from, uint32 budget)
+;
+; The same for the list of tile t from cell from on (NONE: from the head
+; of the list), stopping once budget cells have been drawn. Returns the
+; cell to continue from, NONE when the list is done. Used by the catch-up
+; of the picture in spare time, which looks at the clock between two
+; calls; the cells drawn are no longer stale.
+;
+; The walk: r4 = shadow, r5 = stamps, r6 = stamp_now | cells drawn << 8,
+; r7 = nodes, r8 = the tile's plain store (bit 0 set until it is
+; converted, which cell_draw does at the first plain cell), r9 = layer,
+; r10 = bitmap (the VRAM, pushed at entry, is taken back from the stack
+; for cell_draw), r11 = cell. Every cell of the list shows the tile, so the usual cell
+; copies the one store without looking its tile up. A cell found stale
+; is off the picture (render_stale_cells, run before the tile walks of an
+; update, drew the stale cells the picture shows) and is passed over.
 ;----------------------------------------------------------------------------
-        MACRO
-        LEAVESTALE                      ; cell r11 of row r1: stale until its row is shown
-        mov     r0,#STALE
-        strb    r0,[r5,r11]
-        ldr     r0,[r9,#R_STALEROWS]
-        mov     r2,#1
-        orr     r0,r0,r2,lsl r1
-        str     r0,[r9,#R_STALEROWS]
-        MEND
-
         MACRO
         CELLENTRY                       ; r1 = entry of cell r11 from the shadow r4
         add     r1,r4,r11,lsl #1
@@ -805,116 +918,114 @@ sw_loop
         orr     r1,r0,r1,lsl #8
         MEND
 
-render_tile_cells
-        stmfd   sp!,{r4-r11,lr}
-        mov     r9,r0
-        mov     r10,r1
-        ldr     r4,[r9,#R_HEAD]
-        ldr     r11,[r4,r2,lsl #2]      ; first cell of the list
+        MACRO
+        TCSETUP $t                      ; the walk registers for tile $t (r11 = first cell)
+        ldr     r4,[r9,#R_TOK]
+        ldrb    r4,[r4,$t]
+        ldr     r8,[r9,#R_TILES]
+        add     r8,r8,$t,lsl #6         ; the tile's plain store
+        tst     r4,#1
+        orreq   r8,r8,#1                ; not converted yet
         add     r4,r9,#R_SHADOW
         ldmia   r4,{r4,r5,r6,r7}        ; shadow, stamps, stamp_now, nodes
-        ldr     r0,[r9,#R_SHOWNROWS]
-        str     r0,[sp,#-4]!
-        mov     r8,#0                   ; cells drawn
-tc_loop
+        ldr     r10,[r9,#R_BITMAP]
+        MEND
+
+        MACRO
+        TCWALK  $p,$vo                  ; the walk; $p names its labels, the VRAM lies at [sp,#$vo]
+tc_loop$p
         cmp     r11,#NONE
-        beq     tc_done
+        beq     tc_done$p
         ldrb    r0,[r5,r11]
-        cmp     r0,r6
-        beq     tc_next                 ; drawn in this update already
+        and     r1,r6,#0xFF
+        cmp     r0,r1
+        cmpne   r0,#STALE
+        beq     tc_next$p               ; drawn in this update already, or waiting off the picture
+        HIDDEN  r11,tc_stale$p
+        IF "$p" = "1"
         ldr     r0,[sp]
-        mov     r1,r11,lsr #5           ; row shown?
-        mov     r0,r0,lsr r1
-        tst     r0,#1
-        bne     tc_draw
-        LEAVESTALE
-        b       tc_next
-tc_draw
+        cmp     r0,#0                   ; budget spent: continue from this cell
+        beq     tc_done$p
+        sub     r0,r0,#1
+        str     r0,[sp]
+        ENDIF
         CELLENTRY
-        mov     r0,r11
         strb    r6,[r5,r11]             ; stamped
-        add     r8,r8,#1
-        bl      cell_draw
-tc_next
+        add     r6,r6,#256              ; counted
+        tst     r1,#0x1E00
+        bne     tc_slow$p               ; a flip, the palette bit or the priority bit
+        tst     r8,#1
+        bne     tc_conv$p               ; the plain store missing
+        CELLOFF lr,r11,r2
+        add     lr,lr,r10               ; the cell's rows
+        mov     r12,r8
+        COPYROWS r12,lr
+tc_next$p
         ldr     r11,[r7,r11,lsl #3]
-        b       tc_loop
-tc_done
-        add     sp,sp,#4
+        b       tc_loop$p
+tc_stale$p
+        LEAVESTALE r11,r5
+        b       tc_next$p
+tc_conv$p
+        mov     r0,r11
+        bic     r2,r8,#1                ; the store to fill
+        mov     r12,#1
+        ldr     r10,[sp,#$vo]           ; VRAM: cell_conv converts the store and draws the cell
+        bl      cell_conv
+        ldr     r10,[r9,#R_BITMAP]
+        bic     r8,r8,#1                ; the plain store is present from now on
+        b       tc_next$p
+tc_slow$p
+        mov     r0,r11
+        ldr     r10,[sp,#$vo]
+        bl      cell_draw
+        ldr     r10,[r9,#R_BITMAP]
+        b       tc_next$p
+tc_done$p
+        mov     r8,r6,lsr #8            ; cells drawn
         ldr     r0,[r9,#R_STCELLS]
         ldr     r1,[r9,#R_STTILECELLS]
         add     r0,r0,r8
         add     r1,r1,r8
         str     r0,[r9,#R_STCELLS]
         str     r1,[r9,#R_STTILECELLS]
+        MEND
+
+render_tile_cells
+        stmfd   sp!,{r4-r11,lr}
+        mov     r9,r0
+        str     r1,[sp,#-4]!            ; VRAM, for cell_draw
+        ldr     r4,[r9,#R_HEAD]
+        ldr     r11,[r4,r2,lsl #2]      ; first cell of the list
+        TCSETUP r2
+        TCWALK  0,0
+        add     sp,sp,#4
         ldmfd   sp!,{r4-r11,pc}
 
-;----------------------------------------------------------------------------
-; uint32 render_tile_cells_part(render_layer *l, const uint8 *vram, uint32 t,
-;                               uint32 from, uint32 budget)
-;
-; render_tile_cells for the list of tile t from cell from on (NONE: from
-; the head of the list), stopping once budget cells have been drawn.
-; Returns the cell to continue from, NONE when the list is done. Used by
-; the catch-up of the picture in spare time, which looks at the clock
-; between two calls; the cells drawn are no longer stale.
-;----------------------------------------------------------------------------
 render_tile_cells_part
         stmfd   sp!,{r4-r11,lr}
         mov     r9,r0
-        mov     r10,r1
         ldr     r0,[sp,#36]             ; budget
+        stmfd   sp!,{r0,r1}             ; the budget, the VRAM for cell_draw
         cmp     r3,#NONE
         ldreq   r4,[r9,#R_HEAD]
         ldreq   r11,[r4,r2,lsl #2]      ; from the head of the list
         movne   r11,r3
-        add     r4,r9,#R_SHADOW
-        ldmia   r4,{r4,r5,r6,r7}        ; shadow, stamps, stamp_now, nodes
-        ldr     r1,[r9,#R_SHOWNROWS]
-        stmfd   sp!,{r0,r1}             ; budget, rows shown
-        mov     r8,#0                   ; cells drawn
-tp_loop
-        cmp     r11,#NONE
-        beq     tp_done
-        ldrb    r0,[r5,r11]
-        cmp     r0,r6
-        beq     tp_next                 ; drawn in this update already
-        ldr     r0,[sp,#4]
-        mov     r1,r11,lsr #5           ; row shown?
-        mov     r0,r0,lsr r1
-        tst     r0,#1
-        bne     tp_draw
-        LEAVESTALE
-        b       tp_next
-tp_draw
-        ldr     r0,[sp]
-        cmp     r0,#0                   ; budget spent: continue from this cell
-        beq     tp_done
-        sub     r0,r0,#1
-        str     r0,[sp]
-        CELLENTRY
-        mov     r0,r11
-        strb    r6,[r5,r11]             ; stamped
-        add     r8,r8,#1
-        bl      cell_draw
-tp_next
-        ldr     r11,[r7,r11,lsl #3]
-        b       tp_loop
-tp_done
+        TCSETUP r2
+        TCWALK  1,4
         add     sp,sp,#8
-        ldr     r0,[r9,#R_STCELLS]
-        ldr     r1,[r9,#R_STTILECELLS]
-        add     r0,r0,r8
-        add     r1,r1,r8
-        str     r0,[r9,#R_STCELLS]
-        str     r1,[r9,#R_STTILECELLS]
         mov     r0,r11
         ldmfd   sp!,{r4-r11,pc}
 
 ;----------------------------------------------------------------------------
 ; void render_stale_cells(render_layer *l, const uint8 *vram)
 ;
-; Draws the stale cells of the rows the update shows (those not stamped
-; yet), from the shadow; those rows hold no stale cell afterwards.
+; Draws the stale cells the picture shows (stale_cols of the rows in
+; stale_rows, in the columns of shown_cols; those not stamped STALE any
+; more were drawn since and are only forgotten), from the shadow. A row
+; keeps its stale bit while cells of it wait in columns off the picture:
+; such a row costs the pass a load and a test every update (about ten
+; cycles).
 ;----------------------------------------------------------------------------
 render_stale_cells
         stmfd   sp!,{r4-r11,lr}
@@ -923,49 +1034,77 @@ render_stale_cells
         ldr     r0,[r9,#R_STALEROWS]
         ldr     r1,[r9,#R_SHOWNROWS]
         and     r11,r0,r1               ; rows to visit
-        bic     r0,r0,r1
-        str     r0,[r9,#R_STALEROWS]
+        ldr     r8,[r9,#R_SHOWNCOLS]
         add     r4,r9,#R_SHADOW
         ldmia   r4,{r4,r5,r6}           ; shadow, stamps, stamp_now
-        mov     r8,#0                   ; cell
+        mov     r7,#0                   ; row
 sc_rows
         movs    r11,r11,lsr #1
-        bcc     sc_skip_row
-sc_cells
-        ldrb    r0,[r5,r8]
+        bcc     sc_row_done
+        add     r12,r9,#R_STALECOLS
+        ldr     r2,[r12,r7,lsl #2]      ; the stale cells of the row
+        ands    r3,r2,r8                ; those shown are drawn,
+        bne     sc_row                  ; none: the row keeps waiting
+sc_row_done
+        add     r7,r7,#1
+        teq     r11,#0
+        bne     sc_rows
+        ldmfd   sp!,{r4-r11,pc}
+sc_row
+        bic     r2,r2,r8
+        str     r2,[r12,r7,lsl #2]      ; those off the picture stay
+        teq     r2,#0
+        ldreq   r2,[r9,#R_STALEROWS]    ; none left: the row is no longer stale
+        moveq   r12,#1
+        biceq   r2,r2,r12,lsl r7
+        streq   r2,[r9,#R_STALEROWS]
+        mov     r2,r3
+        mov     r3,r7,lsl #5            ; the row's first cell
+sc_bits                                 ; r2 = columns left, bit 0 for cell r3
+        tst     r2,#0xFF
+        moveq   r2,r2,lsr #8
+        addeq   r3,r3,#8
+        beq     sc_bits
+        tst     r2,#0xF
+        moveq   r2,r2,lsr #4
+        addeq   r3,r3,#4
+        tst     r2,#3
+        moveq   r2,r2,lsr #2
+        addeq   r3,r3,#2
+        tst     r2,#1
+        moveq   r2,r2,lsr #1
+        addeq   r3,r3,#1
+        ldrb    r0,[r5,r3]
         teq     r0,#STALE
-        bne     sc_next_cell
-        add     r1,r4,r8,lsl #1
+        bne     sc_cell_done            ; drawn since its entry changed
+        stmfd   sp!,{r2,r3}
+        add     r1,r4,r3,lsl #1
         ldrb    r0,[r1]
         ldrb    r1,[r1,#1]
-        orr     r1,r0,r1,lsl #8
-        mov     r0,r8
-        strb    r6,[r5,r8]              ; stamped
-        bl      cell_draw
-        ldr     r0,[r9,#R_STCELLS]
+        orr     r1,r0,r1,lsl #8         ; its entry
+        mov     r0,r3
+        strb    r6,[r5,r3]              ; stamped
+        DRAWCELL
+        ldr     r0,[r9,#R_STCELLS]      ; counted
         ldr     r1,[r9,#R_STTILECELLS]
         add     r0,r0,#1
         add     r1,r1,#1
         str     r0,[r9,#R_STCELLS]
         str     r1,[r9,#R_STTILECELLS]
-sc_next_cell
-        add     r8,r8,#1
-        tst     r8,#31
-        bne     sc_cells
+        ldmfd   sp!,{r2,r3}
+sc_cell_done
+        movs    r2,r2,lsr #1            ; the next column
+        add     r3,r3,#1
+        bne     sc_bits
         b       sc_row_done
-sc_skip_row
-        add     r8,r8,#32
-sc_row_done
-        teq     r11,#0
-        bne     sc_rows
-        ldmfd   sp!,{r4-r11,pc}
 
 ;----------------------------------------------------------------------------
 ; void render_rebuild_cells(render_layer *l, const uint8 *vram)
 ;
 ; Links every cell of the table (ncells) into the list of its tile (the
 ; heads must hold NONE), counts the priority cells of each row and draws
-; every cell, from the entries of the shadow.
+; every cell the picture shows, from the entries of the shadow; the
+; others are left stale.
 ;
 ; uint32 render_rebuild_cells_part(render_layer *l, const uint8 *vram,
 ;                                  uint32 from, uint32 budget)
@@ -988,9 +1127,10 @@ render_rebuild_cells_part
         movhi   r3,r0
         cmp     r11,r3
         bhs     rb_done
-        stmfd   sp!,{r2,r3}             ; first cell, last cell + 1
+        str     r3,[sp,#-4]!            ; last cell + 1
         add     r4,r9,#R_SHADOW
         ldmia   r4,{r4,r5,r6,r7}        ; shadow, stamps, stamp_now, nodes
+        mov     r8,#0                   ; cells drawn
 rb_loop
         add     r1,r4,r11,lsl #1
         ldrb    r0,[r1]
@@ -1007,30 +1147,33 @@ rb_loop
         addne   r3,r7,r3,lsl #3
         strne   r0,[r3,#4]              ; the former first cell is held by the node
         tst     r1,#0x1000
-        beq     rb_draw
+        beq     rb_shown
         mov     r2,r11,lsr #5           ; a priority cell: counted in its row
         add     r3,r9,#R_PRIOROWS
         ldrb    r0,[r3,r2]
         add     r0,r0,#1
         strb    r0,[r3,r2]
-rb_draw
+rb_shown
+        HIDDEN  r11,rb_stale
         mov     r0,r11
         strb    r6,[r5,r11]             ; stamped
-        bl      cell_draw
+        add     r8,r8,#1
+        DRAWCELL
+rb_next
         add     r11,r11,#1
-        ldr     r0,[sp,#4]
+        ldr     r0,[sp]
         cmp     r11,r0
         bne     rb_loop
-        ldmfd   sp!,{r1,r2}
-        sub     r2,r2,r1                ; cells drawn
+        add     sp,sp,#4
         ldr     r0,[r9,#R_STCELLS]
-        add     r0,r0,r2
+        add     r0,r0,r8
         str     r0,[r9,#R_STCELLS]
 rb_done
         mov     r0,r11
         ldmfd   sp!,{r4-r11,pc}
-
-
+rb_stale
+        LEAVESTALE r11,r5
+        b       rb_next
 ;----------------------------------------------------------------------------
 ; uint32 render_rect_pieces(piece_ctx *p, const uint8 *bm, uint32 bx0,
 ;                           uint32 bx1, uint32 by0, uint32 by1, uint32 lb,

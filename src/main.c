@@ -604,7 +604,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: code zones filled to their end, three-word time-out stubs; "
+    printf("masterdo: cells drawn only where the picture shows them, rows copied two at a time; "
            "Game Gear mode: 12-bit colours, 160x144 LCD window, START button, "
            "PSG stereo, Game Gear images listed from the gg directory\n");
     if (plat_init(&plat) < 0)

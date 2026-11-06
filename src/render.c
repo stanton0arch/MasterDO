@@ -43,6 +43,8 @@ CHECK_OFF(stale_rows, offsetof(render_layer, stale_rows) == 336);
 CHECK_OFF(shown_rows, offsetof(render_layer, shown_rows) == 340);
 CHECK_OFF(nrows, offsetof(render_layer, nrows) == 344);
 CHECK_OFF(ncells, offsetof(render_layer, ncells) == 348);
+CHECK_OFF(shown_cols, offsetof(render_layer, shown_cols) == 440);
+CHECK_OFF(stale_cols, offsetof(render_layer, stale_cols) == 444);
 CHECK_OFF(pg_n, offsetof(render_layer, pg_n) == 204);
 CHECK_OFF(pg_row0, offsetof(render_layer, pg_row0) == 208);
 CHECK_OFF(pg_nrows, offsetof(render_layer, pg_nrows) == 240);
@@ -267,6 +269,8 @@ static void set_mode(renderer *r, uint32 height, uint32 force)
             memset(l->tile_pend, 0, sizeof(l->tile_pend));
             l->stale_rows = 0;
             l->shown_rows = 0;
+            l->shown_cols = 0;
+            memset(l->stale_cols, 0, sizeof(l->stale_cols));
             l->pg_n = 0;
             memset(l->prio_rows, 0, sizeof(l->prio_rows));
             l->bitmap = r->bm_pool[0] + k * RENDER_BM_BYTES;
@@ -445,6 +449,7 @@ static void rebuild_start(render_layer *l, const uint8 *vram)
     memset(l->prio_dirty, 1, sizeof(l->prio_dirty));
     memset(l->stamp, RENDER_NEUTRAL, (size_t)l->cap_cells);
     l->stale_rows = 0;
+    memset(l->stale_cols, 0, sizeof(l->stale_cols));
     l->pend_tile = RENDER_NO_TILE;
     l->nt_pend[0] = l->nt_pend[1] = 0;
     memset(l->tile_pend, 0, sizeof(l->tile_pend));
@@ -836,6 +841,44 @@ static uint32 rows_of(uint32 ya, uint32 yb, uint32 vs, uint32 rows)
     m = (r1 >= r0) ? (((uint32)2 << r1) - ((uint32)1 << r0))
                    : ((((uint32)2 << r1) - 1) | ~(((uint32)1 << r0) - 1));
     return (rows >= 32) ? m : (m & (((uint32)1 << rows) - 1));
+}
+
+/* Name table columns the window reaches with horizontal scroll hs, as a
+ * bit mask: screen column x shows bitmap column (x - hs) & 255. */
+static uint32 cols_of(const renderer *r, uint32 hs)
+{
+    uint32 c0 = ((r->win_x - hs) & 255) >> 3;
+    uint32 c1 = ((r->win_x + r->win_w - 1 - hs) & 255) >> 3;
+
+    return (c1 >= c0) ? (((uint32)2 << c1) - ((uint32)1 << c0))
+                      : ((((uint32)2 << c1) - 1) | ~(((uint32)1 << c0) - 1));
+}
+
+/* The columns each layer shows in this update: every column when the
+ * window is as wide as the picture (Master System), else the union over
+ * the line bands of the window's columns at the scroll of each band, plus
+ * the unscrolled columns when the top rows do not scroll (register 0
+ * bit 6). The line bands were cut to the window by the caller. */
+static void shown_columns(renderer *r, const vdp_state *v)
+{
+    uint32 all = (r->win_w >= RENDER_W) ? 0xFFFFFFFFu : 0;
+    uint32 k;
+
+    for (k = 0; k < RENDER_LAYERS; k++)
+        r->layer[k].shown_cols = all;
+    if (all != 0)
+        return;
+    for (k = 0; k < r->nlb; k++) {
+        uint32 lb = r->lbands[k];
+
+        r->layer[(lb >> 24) & 1].shown_cols |= cols_of(r, (lb >> 16) & 0xFF);
+    }
+    if (v->reg[0] & 0x40) {
+        for (k = 0; k < RENDER_LAYERS; k++) {
+            if (r->layer[k].shown_cols != 0)
+                r->layer[k].shown_cols |= cols_of(r, 0);
+        }
+    }
 }
 
 /* Palette band holding line y. */
@@ -1567,6 +1610,7 @@ static void update_picture(renderer *r, vdp_state *v)
         r->display_on = 0;
         return;
     }
+    shown_columns(r, v);
     /* The sprites the hardware shows on each line, and the flags it sets
      * while drawing them. */
     k = vdp_sprites(v);
@@ -1890,8 +1934,10 @@ uint32 render_catch_up(renderer *r, vdp_state *v, uint32 (*now)(void), uint32 de
          * which cells of the written tiles are left stale; before the
          * first picture every row counts (the next update sets them
          * again from its bands). */
-        if (l->shown_rows == 0 && l->nrows != 0)
+        if (l->shown_rows == 0 && l->nrows != 0) {
             l->shown_rows = (l->nrows >= 32) ? 0xFFFFFFFFu : (((uint32)1 << l->nrows) - 1);
+            l->shown_cols = 0xFFFFFFFFu;
+        }
     }
 
     /* The changed entries of the pending chunks first (an entry decides
