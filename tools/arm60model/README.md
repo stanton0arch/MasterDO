@@ -166,6 +166,17 @@ Environment variables:
   that address (a stray store into a table or a state word is caught in
   the act); `SIMWATCHSKIP=n` lets the first n writes through, each printed
   with the writing function (the set-up of the watched word).
+- `SIMBLOCKLOG=file`: the translator's block descriptors are scanned at
+  the start of every frame (at no simulated cost) and their changes
+  written to the file: `T frame slot pc key entry` for a block
+  translated, `E frame slot pc key entry last runs` for a block evicted
+  (the last frame it ran and its entries), `R frame slot ...` for the
+  blocks entered in the frame (the first two words of the body counted:
+  the first, the chunk's run mark, is skipped by the links within a
+  zone). With it, a store into the code buffer clears the execution
+  counts of the word, so that `codecnt.bin` holds the counts of the code
+  the buffer holds at the end rather than those of every block that sat
+  at the address.
 
 A fatal error (a read or write outside the memory, an undefined
 instruction, a watched write) prints the registers with the symbols of pc
@@ -186,7 +197,16 @@ each code word since the `-from` frame):
   instruction;
 - `entries.py code.bin codecnt.bin [frames] [count]`: block entries (the
   executions of the first word of each block's body, where the links of
-  other blocks lead) in all and per frame, and the most entered blocks.
+  other blocks lead; the links within a zone land on the second word, so
+  the counts are those of the entries from outside the zone) in all and
+  per frame, and the most entered blocks.
+- `evictions.py DIR [DIR48]`: the code buffer evictions of a run made with
+  `SIMBLOCKLOG=DIR/blocks.txt -framelog` in DIR: per eviction the zone,
+  its blocks and bytes, how long ago they last ran, how many ran at all
+  and how many were translated again later; then how soon the evicted
+  blocks came back, how many in bursts, and the share of the translations
+  at once spent on them. DIR48 (the same play with `-zones 48 -dramfree
+  3000000`) gives the code size of each block.
 - `bursts.py DIR [sim.sym] [rom]`: the translation bursts of a run made
   with `-zones 48 -dramfree 3000000 -framelog` in DIR (`run.txt`,
   `code.bin`, `codecnt.bin`): per run of frames with 4 ms or more of

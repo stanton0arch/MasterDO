@@ -22,7 +22,9 @@
  * largest; SIMPROFALL=1 every function),
  * SIMALLOC=1 (every allocation with its size and memory type), SIMSCALE=f
  * (every cycle weight multiplied by f: another host timing),
- * SIMDIS=symbol (executions and cycles per instruction of a function).
+ * SIMDIS=symbol (executions and cycles per instruction of a function),
+ * SIMBLOCKLOG=file (the block descriptors scanned at every frame, see
+ * block_log).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,7 +66,6 @@ static uint32_t *pcount;
 static double prof_jit;
 static uint8_t *execmap;   /* one byte per word of memory above the image: executed */
 static float *jitcyc;      /* cycles per word of memory outside the image */
-static uint32_t *jitcnt;   /* executions per word of memory outside the image */
 
 typedef struct { uint32_t addr; char name[64]; } sym_t;
 static sym_t *syms;
@@ -159,9 +160,14 @@ static void watch_hit(uint32_t a, uint32_t v)
     fatal("watched write %08x = %08x", a, v);
 }
 
+/* With SIMBLOCKLOG, a store into the code buffer clears the execution
+ * count of the word, so that the counts are those of the code it holds. */
+static uint32_t blog_lo, blog_span;
+static uint32_t *jitcnt;   /* executions per word of memory outside the image */
 static inline void wr32(uint32_t a, uint32_t v)
 {
     if (a >= MEM_SIZE - 3 || a < 0x100) fatal("write32 %08x", a);
+    if (a - blog_lo < blog_span) jitcnt[a >> 2] = 0;
     if (a - watch_addr < 4u || watch_addr - a < 4u) watch_hit(a, v);
     if (a & 3) fatal("unaligned write32 %08x", a);
     mem[a] = v >> 24; mem[a + 1] = v >> 16; mem[a + 2] = v >> 8; mem[a + 3] = v;
@@ -174,6 +180,7 @@ static inline uint32_t rd8(uint32_t a)
 static inline void wr8(uint32_t a, uint32_t v)
 {
     if (a >= MEM_SIZE || a < 0x100) fatal("write8 %08x", a);
+    if (a - blog_lo < blog_span) jitcnt[a >> 2] = 0;
     if (a - watch_addr < 4u) watch_hit(a, v);
     mem[a] = (uint8_t)v;
 }
@@ -396,6 +403,69 @@ static void dump_code(uint32_t code, uint32_t cur, uint32_t blocks, uint32_t nbl
     }
 }
 
+/* SIMBLOCKLOG=file: the translator's block descriptors are scanned at the
+ * start of every frame (the pad service, called once per frame, costs no
+ * simulated cycle more), and the changes since the previous scan are
+ * written as lines of the frame that made them (the frame before; -1 is
+ * the translation before the run):
+ *   T frame slot pc key entry           a block translated
+ *   E frame slot pc key entry last runs a block evicted (or replaced): the
+ *                                       last frame it ran (-1: never) and
+ *                                       its entries since its translation
+ *   R frame slot slot ...               the blocks entered in the frame
+ * A block's entries are the executions of the first or the second word
+ * of its body, whichever ran more (the first word, the chunk mark store,
+ * is not where every entry lands). */
+static FILE *blog;
+static uint32_t *bl_entry, *bl_pc, *bl_key, *bl_body, *bl_cnt, *bl_runs;
+static int32_t *bl_last;
+static int32_t bl_frame = -2;
+
+static void block_log(int32_t frame)
+{
+    uint32_t k, n = reg_nblocks;
+    int32_t f = frame - 1;
+    int any = 0;
+    if (!blog || reg_blocks == 0 || frame <= bl_frame) return;
+    bl_frame = frame;
+    if (!bl_entry) {
+        bl_entry = calloc(n, 4); bl_pc = calloc(n, 4); bl_key = calloc(n, 4); bl_body = calloc(n, 4);
+        bl_cnt = calloc(n, 4); bl_runs = calloc(n, 4); bl_last = calloc(n, 4);
+    }
+    for (k = 0; k < n; k++) {
+        uint32_t d = reg_blocks + 24 * k;
+        uint32_t pc = rd32(d) & 0xFFFF, key = rd32(d + 4), entry = rd32(d + 8), body = rd32(d + 12);
+        /* A free descriptor keeps the pc, key and entry written before an
+         * emission stopped by the zone's room check (the block then takes
+         * another descriptor in the next zone): only a body within the
+         * entry check's reach of the entry tells a block in use. */
+        if (body - entry > 256u) entry = 0;
+        if (bl_entry[k] && (entry != bl_entry[k] || pc != bl_pc[k] || key != bl_key[k])) {
+            fprintf(blog, "E %d %u %04x %x %x %d %u\n", f, k, bl_pc[k], bl_key[k], bl_entry[k], bl_last[k], bl_runs[k]);
+            bl_entry[k] = 0;
+        }
+        if (entry && !bl_entry[k]) {
+            fprintf(blog, "T %d %u %04x %x %x\n", f, k, pc, key, entry);
+            bl_entry[k] = entry; bl_pc[k] = pc; bl_key[k] = key; bl_body[k] = body;
+            bl_cnt[k] = 0; bl_runs[k] = 0; bl_last[k] = -1;
+        }
+    }
+    for (k = 0; k < n; k++) {
+        uint32_t c;
+        if (!bl_entry[k]) continue;
+        c = jitcnt[bl_body[k] >> 2];
+        if (jitcnt[(bl_body[k] >> 2) + 1] > c) c = jitcnt[(bl_body[k] >> 2) + 1];
+        if (c != bl_cnt[k]) {
+            if (!any) { fprintf(blog, "R %d", f); any = 1; }
+            fprintf(blog, " %u", k);
+            bl_runs[k] += c > bl_cnt[k] ? c - bl_cnt[k] : c;    /* the word rewritten: counted again from 0 */
+            bl_cnt[k] = c;
+            bl_last[k] = f;
+        }
+    }
+    if (any) fprintf(blog, "\n");
+}
+
 static void do_swi(uint32_t n)
 {
     switch (n) {
@@ -455,7 +525,7 @@ static void do_swi(uint32_t n)
     case 6: r[0] = rom_size; break;
     case 7: do_dump(r[0], r[1], r[2], r[3]); break;
     case 8: r[0] = r[0] < 32 ? args[r[0]] : 0; break;
-    case 9: r[0] = pad_at(r[0]); break;
+    case 9: block_log((int32_t)r[0]); r[0] = pad_at(r[0]); break;
     case 10: {
         uint32_t id = r[0] & 15;
         if (id == 15) { memset(jitcyc, 0, (MEM_SIZE / 4) * sizeof(float)); memset(jitcnt, 0, (MEM_SIZE / 4) * sizeof(uint32_t)); memset(prof, 0, ((img_end - LOAD_ADDR) / 4 + 1) * sizeof(double)); memset(pcount, 0, ((img_end - LOAD_ADDR) / 4 + 1) * sizeof(uint32_t)); prof_jit = 0; break; }
@@ -464,7 +534,10 @@ static void do_swi(uint32_t n)
         break;
     }
     case 11: dump_code(r[0], r[1], r[2], r[3]); break;
-    case 14: reg_code = r[0]; reg_code_end = r[1]; reg_blocks = r[2]; reg_nblocks = r[3]; reg_ctx = rd32(r[13]); break;
+    case 14:
+        reg_code = r[0]; reg_code_end = r[1]; reg_blocks = r[2]; reg_nblocks = r[3]; reg_ctx = rd32(r[13]);
+        if (blog) { blog_lo = reg_code; blog_span = reg_code_end - reg_code; }
+        break;
     default: fatal("unknown swi %x", n);
     }
 }
@@ -853,7 +926,9 @@ int main(int argc, char **argv)
     r[13] = STACK_TOP;
     r[10] = STACK_TOP - 0x10000;
     r[14] = 0;
+    if (getenv("SIMBLOCKLOG")) blog = fopen(getenv("SIMBLOCKLOG"), "w");
     run();
+    if (blog) { block_log(bl_frame + 1); fclose(blog); }
     fprintf(stderr, "sim: %llu instructions, S %llu N %llu I %llu, %.0f us\n",
             (unsigned long long)ninsn, (unsigned long long)cS, (unsigned long long)cN,
             (unsigned long long)cI, cycles() * 0.08);
