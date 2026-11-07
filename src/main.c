@@ -604,7 +604,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: time-out stub data word with a zero top byte (T-states << 16 | Z80 address); "
+    printf("masterdo: code zone eviction with pending run marks and a six-round live horizon; "
            "Game Gear mode: 12-bit colours, 160x144 LCD window, START button, "
            "PSG stereo, Game Gear images listed from the gg directory\n");
     if (plat_init(&plat) < 0)

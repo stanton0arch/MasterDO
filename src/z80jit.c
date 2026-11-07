@@ -974,10 +974,14 @@ static uint32 chunk_of(const z80j_state *j, const uint32 *host)
     return (uint32)(host - j->code) >> j->chunk_shift;
 }
 
-/* Chunks of zone z run within the last ageing rounds, and in *freshest
- * the age of the one run last. */
-#define LIVE_AGE 2
-static uint32 zone_live(const z80j_state *j, uint32 z, uint32 *freshest)
+/* Chunks of zone z run within the last live_age ageing rounds, and in
+ * *freshest the age of the one run last. A chunk whose run mark is set
+ * has run since its zone was last aged: age 0. Without the marks, a zone
+ * filled since its last ageing round (one zone is aged per frame) would
+ * read as never run however hot its code, until its turn came. */
+#define LIVE_AGE 2              /* recent enough to put off an eviction ahead */
+#define PICK_LIVE_AGE 6         /* recent enough to keep a zone over another */
+static uint32 zone_live(const z80j_state *j, uint32 z, uint32 *freshest, uint32 live_age)
 {
     uint32 c0 = (z * j->zone_words) >> j->chunk_shift;
     uint32 c1 = ((z + 1) * j->zone_words) >> j->chunk_shift;
@@ -986,9 +990,9 @@ static uint32 zone_live(const z80j_state *j, uint32 z, uint32 *freshest)
     uint32 fresh = 255;
 
     for (c = c0; c < c1; c++) {
-        uint32 age = j->chunk_age[c];
+        uint32 age = j->ctx->chunk_mark[c] != 0 ? 0 : j->chunk_age[c];
 
-        if (age < LIVE_AGE)
+        if (age < live_age)
             live++;
         if (age < fresh)
             fresh = age;
@@ -1043,7 +1047,7 @@ static void evict_zone(z80j_state *j, uint32 z)
     {
         uint32 fresh;
 
-        j->stats.evicted_live += zone_live(j, z, &fresh);
+        j->stats.evicted_live += zone_live(j, z, &fresh, LIVE_AGE);
     }
     for (k = 0; k < Z80J_RESUMES; k++) {
         if (j->resume[k].host >= lo && j->resume[k].host < hi)
@@ -1062,8 +1066,11 @@ static void evict_zone(z80j_state *j, uint32 z)
 }
 
 /* The zone an area takes next: an empty one, else the one whose code
- * has run the least recently (the fewest live chunks, then the oldest
- * last run, then the oldest fill), whichever area owns it. The zones
+ * has run the least recently (the fewest chunks run within the last
+ * PICK_LIVE_AGE rounds, then the oldest last run, then the oldest fill),
+ * whichever area owns it. The longer horizon keeps the code of a scene
+ * left a second or two ago (a game coming back to it translates it again
+ * at once) over a zone holding less of what ran lately. The zones
  * the areas are filling are not candidates; with a single zone the area
  * takes it again (a flush). With full set, only the zones holding blocks
  * are candidates (a zone to empty for its descriptors), and j->nzones
@@ -1086,7 +1093,7 @@ static uint32 pick_zone(z80j_state *j, const z80j_area *a, uint32 full)
         if (j->zone_blocks[z] == 0)
             score = 0;
         else
-            score = 1 + (zone_live(j, z, &fresh) << 8) + (255 - fresh);
+            score = 1 + (zone_live(j, z, &fresh, PICK_LIVE_AGE) << 8) + (255 - fresh);
         if (score < best_score || (score == best_score && j->zone_fill[z] < best_fill)) {
             best = z;
             best_score = score;
@@ -1174,7 +1181,7 @@ uint32 z80j_evict_ahead(z80j_state *j, uint32 elapsed_us, uint32 margin_us)
         if (z >= j->nzones || z == j->area[0].zone ||
             (j->area[1].count != 0 && z == j->area[1].zone))
             return 0;
-        if (zone_live(j, z, &fresh) != 0) {
+        if (zone_live(j, z, &fresh, LIVE_AGE) != 0) {
             j->evict_ahead_wait = j->frame_no + j->nzones;
             return 0;
         }
