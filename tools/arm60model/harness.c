@@ -771,7 +771,8 @@ void hmain(void)
 
                 printf("Frame: %lu emu %lu upd %lu draw %lu spare %lu sync %lu sync_us %lu "
                        "forced %lu refused %lu spare_blocks %lu insns %lu shown %lu "
-                       "dataw %lu dirty %lu evict %lu evict_ahead %lu evict_us %lu repeat %lu\n",
+                       "dataw %lu dirty %lu evict %lu evict_ahead %lu evict_us %lu repeat %lu "
+                       "banks %lu %lu %lu\n",
                        (unsigned long)f, (unsigned long)g.last_us, (unsigned long)g.last_upd_us,
                        (unsigned long)draw, (unsigned long)g.last_spare_us,
                        (unsigned long)(s->sync - s0.sync), (unsigned long)(s->sync_us - s0.sync_us),
@@ -785,7 +786,9 @@ void hmain(void)
                        (unsigned long)(s->evictions - s0.evictions),
                        (unsigned long)(s->evict_ahead - s0.evict_ahead),
                        (unsigned long)(s->evict_us - s0.evict_us),
-                       (unsigned long)render_repeated(g.rd));
+                       (unsigned long)render_repeated(g.rd),
+                       (unsigned long)g.ctx->slot_bank[0], (unsigned long)g.ctx->slot_bank[1],
+                       (unsigned long)g.ctx->slot_bank[2]);
             }
         }
         if (sim_arg(15) && render_display_on(g.rd)) {

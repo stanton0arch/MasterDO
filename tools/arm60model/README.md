@@ -88,8 +88,9 @@ drawing times, spare time used, translations at once and their time,
 forced ones, refusals, blocks translated in spare time, interpreted
 instructions, display on, VDP data writes, dirty tiles left at the end
 of the frame, code buffer evictions, those made ahead in spare time and
-their time); `present.py` replays those lines through the queued
-presentation of the ISO.
+their time, the banks of the three paged slots at the end of the frame);
+`present.py` replays those lines through the queued presentation of the
+ISO.
 
 `-dumpdiff n` with `-dump`: the frames compared because of a scroll or
 display band are only written when they differ, the first n of them; the
@@ -215,6 +216,15 @@ each code word since the `-from` frame):
   (static exits, call return points, pointer tables of the ROM), how many
   are static successors of other blocks of the burst, and the translations
   that cost more than interpreting the block's later executions;
+- `announce.py DIR [rom] [depth]`: how much of each burst static analysis
+  of the code translated before it could announce, on a run made with
+  `SIMBLOCKLOG=DIR/blocks.txt -zones 48 -dramfree 3000000 -framelog`: the
+  pointer tables read by the blocks ending with `JP (HL)`, `JP (IX)`,
+  `JP (IY)` or a `PUSH` and `RET` of a word read from memory (found by an
+  abstract run of the block), their entries, the burst blocks reachable
+  from them, a walk of the given depth from them; and a static walk of
+  the exits of the code run in the 120 frames before the burst; for each
+  walk, the blocks it translates and the burst blocks among them;
 - `cmpcode.py A/code.bin A/sim.sym B/code.bin B/sim.sym`: the code buffers
   of two builds compared word for word (the branches leaving the buffer by
   the symbol they reach, since the image's layout moves between builds),
