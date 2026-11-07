@@ -1303,13 +1303,28 @@ void jit_link_stub(z80j_state *j, uint32 *d, uint32 host)
 }
 
 /* Queues a hot address for translation in spare time (a bitmap tells
- * the addresses already queued). When the queue is full, a few entries
- * from a rotating cursor are probed, and the address replaces the first
- * one that has a translation by now (translated at once since it was
- * queued) or is colder than itself; otherwise it is dropped. The queue
- * is only a hint for the spare time: a full scan at every call cost up
- * to 80 ms per frame when a game interprets a large working set. */
+ * the addresses already queued). An entry holds the address in its low
+ * half and the frame it was queued in, modulo 65 536, in its high half.
+ * When the queue is full, a few entries from a rotating cursor are
+ * probed, and the address replaces the first one that has a translation
+ * by now (translated at once since it was queued), is colder than itself
+ * or has waited too long (see QUEUE_FRESH); otherwise it is dropped. The
+ * queue is only a hint for the spare time: a full scan at every call cost
+ * up to 80 ms per frame when a game interprets a large working set. */
 #define QUEUE_PROBES 8
+
+/* Frames an address may wait in the queue. An address is queued when the
+ * frame cannot afford its translation, which is when the game runs a lot
+ * of new code at once (a scene or a level being set up); by the time the
+ * spare time comes back, most of the addresses queued long before have
+ * stopped running, and translating them only filled the code buffer with
+ * code that never ran again, at the price of evicting code that did. An
+ * address that waited longer is dropped from the queue and translated
+ * when it runs again (its count stays at the threshold). */
+#define QUEUE_FRESH 4
+
+#define QUEUE_PC(e)  ((e) & 0xFFFFu)
+#define QUEUE_AGE(j, e) (((j)->frame_no - ((e) >> 16)) & 0xFFFFu)
 
 static void queue_hot(z80j_state *j, uint32 pc)
 {
@@ -1322,17 +1337,18 @@ static void queue_hot(z80j_state *j, uint32 pc)
     if (j->queued[pc >> 5] & bit)
         return;
     if (j->nqueue < Z80J_QUEUE) {
-        j->queue[j->nqueue++] = pc;
+        j->queue[j->nqueue++] = pc | j->frame_no << 16;
         j->queued[pc >> 5] |= bit;
         return;
     }
     q = j->qcursor;
     for (k = 0; k < QUEUE_PROBES; k++) {
-        uint32 old = j->queue[q];
+        uint32 old = QUEUE_PC(j->queue[q]);
 
-        if (j->ctx->lookup[old] != j->glue.miss || j->hot[old] < j->hot[pc]) {
+        if (j->ctx->lookup[old] != j->glue.miss || j->hot[old] < j->hot[pc] ||
+            QUEUE_AGE(j, j->queue[q]) > QUEUE_FRESH) {
             j->queued[old >> 5] &= ~((uint32)1 << (old & 31));
-            j->queue[q] = pc;
+            j->queue[q] = pc | j->frame_no << 16;
             j->queued[pc >> 5] |= bit;
             j->qcursor = (q + 1) & (Z80J_QUEUE - 1);
             return;
@@ -1562,18 +1578,31 @@ static uint32 host_for(z80j_state *j, uint32 pc)
     return host_force(j, pc);
 }
 
+/* Translates the hottest address of the queue, after dropping the
+ * entries that waited more than QUEUE_FRESH frames. */
 uint32 z80j_prefetch(z80j_state *j)
 {
     while (j->nqueue != 0) {
-        uint32 best = 0;
+        uint32 best = Z80J_QUEUE;
         uint32 pc;
-        uint32 k;
+        uint32 k = 0;
 
-        for (k = 1; k < j->nqueue; k++) {
-            if (j->hot[j->queue[k]] > j->hot[j->queue[best]])
+        while (k < j->nqueue) {
+            uint32 e = j->queue[k];
+
+            if (QUEUE_AGE(j, e) > QUEUE_FRESH) {
+                pc = QUEUE_PC(e);
+                j->queued[pc >> 5] &= ~((uint32)1 << (pc & 31));
+                j->queue[k] = j->queue[--j->nqueue];
+                continue;
+            }
+            if (best == Z80J_QUEUE || j->hot[QUEUE_PC(e)] > j->hot[QUEUE_PC(j->queue[best])])
                 best = k;
+            k++;
         }
-        pc = j->queue[best];
+        if (best == Z80J_QUEUE)
+            break;
+        pc = QUEUE_PC(j->queue[best]);
         j->queue[best] = j->queue[--j->nqueue];
         j->queued[pc >> 5] &= ~((uint32)1 << (pc & 31));
         if (find_block(j, pc, jit_block_key(j->ctx, pc)) != 0)

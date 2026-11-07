@@ -351,16 +351,18 @@ typedef struct {
  * recently is known from the generated code itself: the code buffer is
  * made of chunks (2 KiB in the usual layout) and every block starts by
  * storing a mark for its chunk in the context (one store per block
- * entry); each frame the marks of one zone are turned into ages. A zone
- * is empty, or dead, or has as many live chunks as the eviction would
- * lose, and the least live one goes first. The code reachable from the
+ * entry); each frame the marks of one zone are turned into ages, and a
+ * mark not turned yet counts as age 0. The zone taken is an empty one,
+ * else the one with the fewest chunks run within the last few rounds,
+ * then the one whose last run is the oldest. The code reachable from the
  * entry points, translated before the run, goes to the cold area (or to
  * the hot one with seed_hot).
  *
  * With an interpreter (z80j_set_interp), code is interpreted the first
  * times it runs: a table counts the entries of each Z80 address, an
  * address reaching queue_at is queued for translation in spare time
- * (z80j_prefetch, the hottest first) and one reaching sync_at is
+ * (z80j_prefetch, the hottest first, dropped from the queue if the spare
+ * time does not come within a few frames) and one reaching sync_at is
  * translated at once, within a time budget per frame (z80j_frame_start):
  * a floor the caller sets, raised by the estimated cost of the
  * instructions the frame has already interpreted, so that a frame that
@@ -423,7 +425,8 @@ typedef struct {
     uint32      frame_us;       /* length of a frame */
     uint32      reserve_us;     /* time the frame still needs after the emulation */
     uint32      est_us;         /* running average of the cost of a translation */
-    uint32      queue[Z80J_QUEUE];  /* unordered; the hottest goes first */
+    uint32      queue[Z80J_QUEUE];  /* address | frame queued << 16; unordered,
+                                     * the hottest goes first */
     uint32      nqueue;
     uint32      qcursor;        /* where a full queue is probed next */
     uint32      queued[2048];   /* bitmap of the addresses in the queue */
