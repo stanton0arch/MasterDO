@@ -109,7 +109,9 @@ def main():
                 ntrans += 1
                 trans_frames[f] += 1
             k = (pc, key)
-            if evicted.get(k):
+            # A block translated again without an eviction in between (its first
+            # copy dropped by a room check retry) is not a second return.
+            if evicted.get(k) and len(evicted[k][-1]) == 3:
                 ef, last, runs = evicted[k][-1]
                 retrans.append((f, pc, key, f - ef, bsize(i, k), last, runs))
                 evicted[k][-1] = (ef, last, runs, 'back')
@@ -167,4 +169,5 @@ def main():
     print('  code translated again: %.0f KiB' % kib_back)
 
 
-main()
+if __name__ == '__main__':
+    main()
