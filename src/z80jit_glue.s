@@ -196,14 +196,15 @@ jit_exit
 
 ;----------------------------------------------------------------------------
 ; End of a stretch: a segment does not fit in the T-states left. Called by
-; "bl", followed by the segment's T-states (times 256), its Z80 address and
-; its code, where execution resumes.
+; "bl", followed by a word with the segment's T-states in bits 16-23 and
+; its Z80 address in bits 0-15 (top byte zero), then its code, where
+; execution resumes.
 ;----------------------------------------------------------------------------
 z80j_glue_seg_timeout
-        ldmia   lr,{r0,r2}              ; r0 = Z80 address << 16 | T-states * CYCLE, r2 = code
-        mov     r1,r0,lsr#16            ; r1 = Z80 address
-        mov     r0,r0,lsl#16
-        add     r8,r8,r0,lsr#16         ; give the segment T-states back
+        ldmia   lr,{r0,r2}              ; r0 = T-states << 16 | Z80 address, r2 = code
+        bic     r1,r0,#0xFF0000         ; r1 = Z80 address
+        sub     r0,r0,r1                ; T-states << 16
+        add     r8,r8,r0,lsr#8          ; give the segment T-states back (times CYCLE, 256)
         ; The usual stretch end, without leaving the generated code: the
         ; machine event (through its assembly handler), a maskable
         ; interrupt in mode 1 (or 0) pushed to writable memory, the next

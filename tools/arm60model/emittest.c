@@ -2448,7 +2448,7 @@ static void ref_emit_block_code(jit_block_ctx *b)
         case STUB_TIMEOUT:
             ref_patch_b(s->site, JIT_ADDR(j->cur));
             ref_emit_b(j, C_AL, 1, j->glue.seg_timeout);
-            emit(j, (s->pc << 16) | (s->t * CYCLE));
+            emit(j, (s->t << 16) | s->pc);
             emit(j, JIT_ADDR(s->resume));
             break;
         case STUB_FORWARD:

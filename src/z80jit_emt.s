@@ -756,20 +756,25 @@ st_taken
         bl      e_taken
         b       eb_stub_loop
 
-; Time-out: BL seg_timeout, then the Z80 address in the top half of a word
-; with the T-states times CYCLE in the bottom one (a segment has at most
-; SEG_MAX_T of them: the product stays below 65536), then the resume
-; address. Three words: one in ten words of the generated code is a
-; time-out stub.
+; Time-out: BL seg_timeout, then a word with the segment's T-states in
+; bits 16-23 (a segment has at most SEG_MAX_T of them, below 256) and the
+; Z80 address in bits 0-15, then the resume address. Three words: one in
+; ten words of the generated code is a time-out stub.
+; The data words placed in the generated code (stub operands: addresses,
+; keys, counts) all keep a top byte of zero, so that read as instructions
+; they decode as data processing under the EQ condition. A word holding
+; the Z80 address in its top byte would read as branches, block transfers,
+; coprocessor operations or SWI under any condition, which a decoder
+; running ahead of the execution (an emulator's translator, a
+; disassembler) has no reason to meet past a BL.
 st_timeout
         sub     r0,r11,r5
         sub     r0,r0,#8
         mov     r0,r0,lsl #6
         mov     r0,r0,lsr #8
         orr     r0,r0,#BL_AL
-        mov     r1,r6,lsl #8
-        orr     r1,r1,r2,lsl #16
-        stmia   r5!,{r0,r1,r3}          ; BL, pc << 16 | t * CYCLE, resume
+        orr     r1,r2,r6,lsl #16        ; (the decoder keeps addresses in 16 bits)
+        stmia   r5!,{r0,r1,r3}          ; BL, t << 16 | pc, resume
         b       eb_stub_loop
 ; Forward: the branch at the site goes to the code of the target record.
 st_forward
