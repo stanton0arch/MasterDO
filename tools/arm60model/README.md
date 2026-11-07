@@ -187,6 +187,14 @@ each code word since the `-from` frame):
 - `entries.py code.bin codecnt.bin [frames] [count]`: block entries (the
   executions of the first word of each block's body, where the links of
   other blocks lead) in all and per frame, and the most entered blocks.
+- `bursts.py DIR [sim.sym] [rom]`: the translation bursts of a run made
+  with `-zones 48 -dramfree 3000000 -framelog` in DIR (`run.txt`,
+  `code.bin`, `codecnt.bin`): per run of frames with 4 ms or more of
+  translations at once, the blocks, their time, the free time of the 120
+  frames before, how many the code translated before could have announced
+  (static exits, call return points, pointer tables of the ROM), how many
+  are static successors of other blocks of the burst, and the translations
+  that cost more than interpreting the block's later executions;
 - `cmpcode.py A/code.bin A/sim.sym B/code.bin B/sim.sym`: the code buffers
   of two builds compared word for word (the branches leaving the buffer by
   the symbol they reach, since the image's layout moves between builds),
