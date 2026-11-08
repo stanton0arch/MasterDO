@@ -49,6 +49,11 @@ $S/sim -img $S/sim.bin -sym $S/sim.sym -frames 3000 -dump 250 \
        -rom <repository>/takeme/roms/rom.sms                      # cartridge run
 ```
 
+`mk.sh -labels` builds the same image (byte for byte) with every label of
+the translator's assembly files exported in `sim.sym`: the profiles then
+split its routines at their labels, and the translation trace
+(`SIMTRLOG`) finds the loop heads it stamps.
+
 Options: `-frames n` frames of the cartridge run (after the translation of
 the reachable code), `-bench` benchmarks first, `-dump n` debug view every n
 frames, `-from n` profile only from frame n, `-rom file`, `-interp` run
@@ -182,7 +187,20 @@ Environment variables:
   entry (cartridge, frames, script), so that a run played on the console
   or on Phoenix is replayed here;
 - `SIMPROF=1`: cycles per function of the image, and of the generated code
-  (the 40 largest; `SIMPROFALL=1` lists every function with cycles);
+  (the 40 largest; `SIMPROFALL=1` lists every function with cycles), with
+  the executions of the first word of each (the entries, or the passes
+  through a label with `mk.sh -labels`);
+- `SIMTRLOG=file` (an image built with `mk.sh -labels`): the cost of every
+  block translation, written when it ends: the cycles of the whole
+  translation at once (`timed_translate`, its clock look included), of
+  `jit_translate_block` and of its three passes, each split into the
+  part charged to the instructions (the spans between the loop heads of
+  the decoder, of the analysis' backward walk and of the emitter) and the
+  block's own; the stubs by kind; a few callees timed whole (flag scans,
+  link lookups, output groups, busy-wait loops, zone changes); then one
+  line per instruction with its record and the cycles and words of each
+  pass (format in `tr_flush` of `sim.c`). `SIMTRWORDS=1` adds the words
+  emitted for each instruction. The trace costs no simulated time;
 - `SIMDIS=symbol[,symbol...]`: executions and cycles of each instruction of
   a function; with several names, each listing starts with a `dis name`
   line (two runs stopped at frames a and b, listings subtracted: the
@@ -255,6 +273,18 @@ each code word since the `-from` frame):
   block descriptors included; the check of a translator change that must
   leave the generated code as it was (`-frames 1` on each cartridge gives
   the ROM translation).
+
+- `trcost.py [-all] [-templates] [-estimate] DIR...`: the translation
+  costs of `SIMTRLOG` traces (`DIR/tr.txt`): per block and per
+  instruction for each part (wrapper and clock look, block management,
+  evictions, decoder, analysis, emitter, stubs), the callees, the stubs
+  by kind, the words emitted and the cost of each pass per instruction
+  class, for the translations at once (`-all`: every translation); with
+  `SIMTRWORDS` traces, `-templates` measures how much of the emitted code
+  is a function of the opcode, the flags written and read later, the fused
+  test and the checks (the template outputs, the size of a table of them,
+  a memo's hits), and `-estimate` the cost of the redesigned translator
+  sketched in the step 14 study, from the assumptions of its `PARAMS`.
 
 Pictures are PPM files; any image tool converts them.
 

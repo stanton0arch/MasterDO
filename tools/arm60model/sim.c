@@ -30,7 +30,10 @@
  * SIMBLOCKLOG=file (the block descriptors scanned at every frame, see
  * block_log), SIMCLOCK=us (cost of a kernel call of the system time,
  * default 26: 1 000 calls in 26 064 us on Phoenix; scaled by SIMSCALE
- * like every cycle).
+ * like every cycle), SIMTRLOG=file (the cost of every block translation,
+ * pass by pass and instruction by instruction, see tr_flush; needs an
+ * image built with mk.sh -labels; SIMTRWORDS=1 adds the words emitted
+ * for each instruction).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,6 +86,45 @@ static uint64_t clock_half = 163;
 
 static double cycles(void) { return cS * weightS + cN * weightN + cI * weightI; }
 static uint32_t usec_now(void) { return (uint32_t)(cycles() * 0.08); }
+
+/* Translation trace (SIMTRLOG). Time stamps are taken when the program
+ * reaches given labels of the translator (built with every label exported:
+ * mk.sh -labels): the entries and returns of timed_translate (a translation
+ * at once, the clock looks included), jit_translate_block and its three
+ * passes, the per-instruction loop heads of the decoder (db_loop), of the
+ * backward walk of the analysis (p3_loop) and of the emitter (eb_loop), the
+ * stub loop (eb_stub_loop) and the ends of those loops. The span between
+ * two stamps is charged to the instruction (or stub) whose loop head came
+ * last, whatever the code called in between; the rest is the block's.
+ * A few callees are also timed whole (calls and cycles per block). */
+static FILE *trlog;
+static int trwords;
+enum { TA_TT, TA_TB, TA_DEC, TA_ANA, TA_EMIT, TA_DBLOOP, TA_DBEND, TA_P3LOOP, TA_P4,
+       TA_P2, TA_EBLOOP, TA_EBEND, TA_EBSTUBS, TA_STUB, TA_N };
+#define TA_CALLS 5              /* the first five are timed to their return */
+#define TA_RET   16             /* event of the return of call k: TA_RET + k */
+static const char *ta_name[TA_N] = {
+    "timed_translate", "jit_translate_block", "jit_decode_block", "jit_analyse_block",
+    "jit_emit_block", "db_loop", "db_end", "p3_loop", "p4_start", "p2_start", "eb_loop",
+    "eb_noskip2", "eb_stubs", "eb_stub_loop" };
+static uint32_t ta_addr[TA_N], tr_lo = 0xFFFFFFFFu, tr_hi, tr_bctx;
+static uint32_t tr_ret[TA_CALLS];
+static int tr_on[TA_CALLS];
+static double tr_t0[TA_CALLS], tr_inc[TA_CALLS];
+#define TR_CALLEES 6
+static const char *tc_name[TR_CALLEES] = {
+    "jit_flags_needed", "jit_link_host", "jit_link_stub", "jit_out_groups", "jit_busy_loop",
+    "jit_next_zone" };
+static uint32_t tc_addr[TR_CALLEES], tc_ret[TR_CALLEES];
+static int tc_on[TR_CALLEES], tc_n[TR_CALLEES];
+static double tc_t0[TR_CALLEES], tc_cyc[TR_CALLEES];
+#define TR_MAXEV 8192
+static double ev_c[TR_MAXEV];
+static uint8_t ev_k[TR_MAXEV];
+static uint32_t ev_a[TR_MAXEV], ev_r5[TR_MAXEV];
+static int nev;
+static void tr_flush(int at_once);
+static void tr_event(int k, uint32_t a);
 
 static const char *sym_near(uint32_t a, uint32_t *off);
 static struct { uint32_t from, to; } jumps[32];
@@ -588,6 +630,168 @@ static void on_usr1(int sig)
             r[15], s1, o1, r[14], s2, o2, r[13], r[0], r[1], (unsigned long long)ninsn, cycles() * 0.08);
 }
 
+static void tr_event(int k, uint32_t a)
+{
+    if (nev < TR_MAXEV) {
+        ev_c[nev] = cycles();
+        ev_k[nev] = (uint8_t)k;
+        ev_a[nev] = a;
+        ev_r5[nev] = r[5];      /* the emitter's cursor */
+        nev++;
+    }
+}
+
+/* Called at each instruction while SIMTRLOG is set: the stamps. */
+static void tr_step(uint32_t pc)
+{
+    int k;
+
+    for (k = 0; k < TA_CALLS; k++)
+        if (tr_on[k] && pc == tr_ret[k]) {
+            tr_on[k] = 0;
+            tr_inc[k] = cycles() - tr_t0[k];
+            tr_event(TA_RET + k, 0);
+            if (k == TA_TB && !tr_on[TA_TT])
+                tr_flush(0);
+            if (k == TA_TT)
+                tr_flush(1);
+        }
+    for (k = 0; k < TR_CALLEES; k++) {
+        if (tc_on[k] && pc == tc_ret[k]) {
+            tc_on[k] = 0;
+            tc_cyc[k] += cycles() - tc_t0[k];
+        } else if (!tc_on[k] && pc == tc_addr[k]) {
+            tc_on[k] = 1;
+            tc_ret[k] = r[14];
+            tc_t0[k] = cycles();
+            tc_n[k]++;
+        }
+    }
+    if (pc < tr_lo || pc > tr_hi)
+        return;
+    for (k = 0; k < TA_N; k++) {
+        if (pc != ta_addr[k])
+            continue;
+        if (k < TA_CALLS) {
+            tr_on[k] = 1;
+            tr_ret[k] = r[14];
+            tr_t0[k] = cycles();
+            if (k == TA_TT || (k == TA_TB && !tr_on[TA_TT])) {
+                int q;
+                nev = 0;
+                for (q = 0; q < TR_CALLEES; q++) {
+                    tc_cyc[q] = 0;
+                    tc_n[q] = 0;
+                }
+            }
+        }
+        /* The stub loop: the first word of the stub record (r7, the end
+         * in r9), which holds its kind. */
+        tr_event(k, k == TA_STUB ? (r[7] < r[9] ? rd32(r[7]) : 0xFFFFFFFFu) : 0);
+    }
+}
+
+/* One translated block, written when jit_translate_block returns (or
+ * timed_translate, for a translation at once):
+ *   B pc key n at_once tt T tb T dec T ana T emit T decins T anains T
+ *     emitins T stubs T nstub n retry n wstub n wtail n sk n:T x 8
+ *     callees n:T x 6
+ * with T cycles: tt the whole timed_translate (0 when not at once), tb
+ * jit_translate_block, dec / ana / emit the three passes, decins / anains /
+ * emitins the parts charged to instructions, stubs the stub pass; nstub
+ * the stubs, retry the emissions made again in another zone, wstub and
+ * wtail the words of the stubs and of the code between the last
+ * instruction and the stubs; sk the stubs and their cycles by kind
+ * (STUB_TIMEOUT to STUB_DYN, z80jit_int.h); callees the calls and
+ * inclusive cycles of tc_name. Then one line per instruction:
+ *   I w0 ... w9 dec ana emit words
+ * the first ten words of its record (jit_insn) in hexadecimal, the cycles
+ * of the three passes charged to it and the words emitted for it (its
+ * segment check and interrupt check included), followed with SIMTRWORDS
+ * by a W line holding those words. */
+static void tr_flush(int at_once)
+{
+    uint32_t ins = rd32(tr_bctx + 4), n = rd32(tr_bctx + 8);
+    uint32_t key = rd32(tr_bctx + 16), pc = rd32(tr_bctx + 56);
+    double dec[64] = {0}, ana[64] = {0}, emi[64] = {0};
+    uint32_t wr[64] = {0}, w_end = 0, w_body = 0, w_stubs = 0, w_last = 0;
+    double dec_ins = 0, ana_ins = 0, emi_ins = 0, stub_tot = 0, stubc[16] = {0};
+    int stubn[16] = {0};
+    int idb = -1, ip3 = -1, ieb = -1, phase = -1, cur = -1, nstub = 0, retries = 0;
+    int i, k;
+
+    if (n > 64)
+        n = 64;
+    for (i = 0; i < nev; i++) {
+        if (i > 0) {
+            double d = ev_c[i] - ev_c[i - 1];
+            if (phase == 0 && idb >= 0) dec[idb] += d;
+            else if (phase == 1 && ip3 >= 0) ana[ip3] += d;
+            else if (phase == 2 && ieb >= 0) emi[ieb] += d;
+            else if (phase == 3 && cur >= 0) { stubc[cur] += d; stub_tot += d; }
+        }
+        k = ev_k[i];
+        switch (k) {
+        case TA_DBLOOP: phase = 0; idb++; if (idb > 63) idb = 63; break;
+        case TA_P3LOOP: phase = 1; ip3 = ip3 < 0 ? (int)n - 1 : (ip3 > 0 ? ip3 - 1 : 0); break;
+        case TA_EMIT:
+            /* An emission made again in the next zone: only the last counts. */
+            if (ieb >= 0) retries++;
+            ieb = -1; nstub = 0; stub_tot = 0;
+            memset(emi, 0, sizeof emi);
+            memset(stubc, 0, sizeof stubc);
+            memset(stubn, 0, sizeof stubn);
+            break;
+        case TA_EBLOOP:
+            phase = 2;
+            if (ieb >= 0) wr[ieb] = ev_r5[i];
+            else w_body = ev_r5[i];
+            if (ieb < 63) ieb++;
+            break;
+        case TA_EBEND: phase = -1; if (ieb >= 0) wr[ieb] = ev_r5[i]; w_end = ev_r5[i]; break;
+        case TA_EBSTUBS: phase = -1; w_stubs = ev_r5[i]; break;
+        case TA_STUB:
+            phase = 3;
+            cur = ev_a[i] == 0xFFFFFFFFu ? 15 : (int)((ev_a[i] >> 8) & 15);
+            if (cur != 15) { stubn[cur]++; nstub++; }
+            break;
+        case TA_RET + TA_EMIT: phase = -1; w_last = rd32(rd32(tr_bctx) + 12); break;    /* j->cur */
+        default: phase = -1; break;
+        }
+    }
+    for (i = 0; i < (int)n; i++) {
+        dec_ins += dec[i];
+        ana_ins += ana[i];
+        emi_ins += emi[i];
+    }
+    fprintf(trlog, "B %04x %x %u %d tt %.0f tb %.0f dec %.0f ana %.0f emit %.0f decins %.0f anains %.0f "
+            "emitins %.0f stubs %.0f nstub %d retry %d wstub %d wtail %d sk",
+            (unsigned)(pc & 0xFFFF), (unsigned)key, (unsigned)n, at_once, at_once ? tr_inc[TA_TT] : 0,
+            tr_inc[TA_TB], tr_inc[TA_DEC], tr_inc[TA_ANA], tr_inc[TA_EMIT], dec_ins, ana_ins, emi_ins,
+            stub_tot, nstub, retries, (int)(w_last - w_stubs) / 4, (int)(w_stubs - w_end) / 4);
+    for (k = 0; k < 8; k++)
+        fprintf(trlog, " %d:%.0f", stubn[k], stubc[k]);
+    fprintf(trlog, " callees");
+    for (k = 0; k < TR_CALLEES; k++)
+        fprintf(trlog, " %d:%.0f", tc_n[k], tc_cyc[k]);
+    fprintf(trlog, "\n");
+    for (i = 0; i < (int)n; i++) {
+        uint32_t a = ins + 48 * i, prev = i == 0 ? w_body : wr[i - 1], w;
+
+        fprintf(trlog, "I");
+        for (k = 0; k < 10; k++)
+            fprintf(trlog, " %08x", rd32(a + 4 * k));
+        fprintf(trlog, " %.0f %.0f %.0f %d\n", dec[i], ana[i], emi[i], (int)(wr[i] - prev) / 4);
+        if (trwords) {
+            fprintf(trlog, "W");
+            for (w = prev; w < wr[i] && w - prev < 256; w += 4)
+                fprintf(trlog, " %08x", rd32(w));
+            fprintf(trlog, "\n");
+        }
+    }
+    nev = 0;
+}
+
 static void run(void)
 {
     signal(SIGUSR1, on_usr1);
@@ -596,6 +800,9 @@ static void run(void)
         uint32_t op = rd32(pc);
         double c0 = 0;
         uint64_t s0 = cS, n0 = cN, i0 = cI;
+
+        if (trlog)
+            tr_step(pc);
 
         ninsn++;
         r[15] = pc + 4;
@@ -832,7 +1039,8 @@ static void report_profile(double total)
     fprintf(stderr, "  %-28s %12.0f cycles %6.2f%%\n", "(generated code)", prof_jit, 100.0 * prof_jit / total);
     /* The 40 largest, or every function with cycles (SIMPROFALL). */
     for (i = 0; i < ne && (i < 40 || getenv("SIMPROFALL")); i++)
-        fprintf(stderr, "  %-28s %12.0f cycles %6.2f%%\n", syms[e[i].i].name, e[i].c, 100.0 * e[i].c / total);
+        fprintf(stderr, "  %-28s %12.0f cycles %6.2f%% %10u entries\n", syms[e[i].i].name, e[i].c,
+                100.0 * e[i].c / total, pcount[(syms[e[i].i].addr - LOAD_ADDR) >> 2]);
 }
 
 int main(int argc, char **argv)
@@ -941,6 +1149,28 @@ int main(int argc, char **argv)
         }
     }
     load_syms(sym);
+    if (getenv("SIMTRLOG")) {
+        int k;
+
+        trlog = fopen(getenv("SIMTRLOG"), "w");
+        if (!trlog) { perror(getenv("SIMTRLOG")); return 1; }
+        trwords = getenv("SIMTRWORDS") != NULL;
+        for (k = 0; k < TA_N; k++) {
+            for (i = 0; i < nsyms; i++)
+                if (!strcmp(syms[i].name, ta_name[k])) ta_addr[k] = syms[i].addr;
+            if (!ta_addr[k]) fatal("SIMTRLOG: no symbol %s (build with mk.sh -labels)", ta_name[k]);
+            if (ta_addr[k] < tr_lo) tr_lo = ta_addr[k];
+            if (ta_addr[k] > tr_hi) tr_hi = ta_addr[k];
+        }
+        for (k = 0; k < TR_CALLEES; k++) {
+            for (i = 0; i < nsyms; i++)
+                if (!strcmp(syms[i].name, tc_name[k])) tc_addr[k] = syms[i].addr;
+            if (!tc_addr[k]) fatal("SIMTRLOG: no symbol %s", tc_name[k]);
+        }
+        for (i = 0; i < nsyms; i++)
+            if (!strcmp(syms[i].name, "jit_bctx")) tr_bctx = syms[i].addr;
+        if (!tr_bctx) fatal("SIMTRLOG: no symbol jit_bctx");
+    }
     for (i = 0; i < nsyms; i++) if (!strcmp(syms[i].name, "sim_start")) r[15] = syms[i].addr;
     if (!r[15]) r[15] = LOAD_ADDR;
     r[13] = STACK_TOP;
@@ -949,6 +1179,7 @@ int main(int argc, char **argv)
     if (getenv("SIMBLOCKLOG")) blog = fopen(getenv("SIMBLOCKLOG"), "w");
     run();
     if (blog) { block_log(bl_frame + 1); fclose(blog); }
+    if (trlog) fclose(trlog);
     fprintf(stderr, "sim: %llu instructions, S %llu N %llu I %llu, %.0f us\n",
             (unsigned long long)ninsn, (unsigned long long)cS, (unsigned long long)cN,
             (unsigned long long)cI, cycles() * 0.08);
