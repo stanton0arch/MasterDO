@@ -40,19 +40,16 @@
  * the frame.
  *
  * An address the budget keeps refusing is translated whatever the budget
- * from its HOT_FORCE_AT-th entry. A Z80 instruction costs about 6 us
- * interpreted and 60 to 75 us to translate: a block pays for its
- * translation after some 12 to 16 entries. A working set entered for the
- * first time (a level, a race or a match starting) holds set-up code that
- * runs a few times and stops; forced from a lower count, that code is
- * translated in the frames that can least afford it and never pays back,
- * while the code that keeps running is translated a few frames later, by
- * the budget, in spare time or by this rule. A game that stays over
- * budget for long pays the interpretation of its new code a little
- * longer. */
+ * from its HOT_FORCE_AT-th entry. A higher count, fixed or lowered frame
+ * by frame while the frames run over budget, does not make the bursts of
+ * a working set entered for the first time cheaper: the translations it
+ * holds back are made a few frames later, the code entered often keeps
+ * running interpreted meanwhile, and whether a burst shows fewer missed
+ * VBLs depends on how loaded the frames the work lands in are. Games that
+ * stay over budget (raster-heavy races) pay it on every new working set. */
 #define HOT_QUEUE_AT    2
 #define HOT_SYNC_AT     2
-#define HOT_FORCE_AT    16      /* translated whatever the budget from this entry */
+#define HOT_FORCE_AT    8       /* translated whatever the budget from this entry */
 #define HOT_SYNC_US     3000
 #define HOT_INT_COST    100
 /* A frame translates the addresses reaching HOT_FORCE_AT whatever the
