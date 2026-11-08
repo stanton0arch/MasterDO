@@ -8,7 +8,8 @@
         EXPORT  sprintf
         EXPORT  AllocMemFromMemLists
         EXPORT  FreeMemToMemLists
-        EXPORT  plat_usec_now
+        EXPORT  SampleSystemTimeTV
+        EXPORT  sim_time
         EXPORT  sim_rom
         EXPORT  sim_rom_size
         EXPORT  sim_dump
@@ -36,8 +37,14 @@ AllocMemFromMemLists
 FreeMemToMemLists
         swi     0xF00003
         mov     pc,lr
-plat_usec_now
-        swi     0xF00004
+; The kernel's system time, charged with the cost of the call on the
+; console (clock.c of the ISO runs over it).
+SampleSystemTimeTV
+        swi     0xF0000F
+        mov     pc,lr
+; The model's clock, free: for the harness's own accounts.
+sim_time
+        swi     0xF00010
         mov     pc,lr
 sim_rom
         swi     0xF00005

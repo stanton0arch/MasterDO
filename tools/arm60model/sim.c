@@ -14,7 +14,10 @@
  * 4 microsecond clock, 5 ROM address, 6 ROM size,
  * 7 picture dump (view_NNNNNN.ppm), 8 command-line argument, 9 pad
  * buttons of a frame, 10 time marks (15: reset the profile), 11 code
- * buffer dump (code.bin), 13 free memory (plat_mem_free).
+ * buffer dump (code.bin), 13 free memory (plat_mem_free), 15 the
+ * kernel's system time (SampleSystemTimeTV: the TimeVal at r0, the call
+ * charged as SIMCLOCK microseconds of I cycles, half before the sample
+ * and half after), 16 the microsecond clock without charge (sim_time).
  *
  * Options: -rom file, -frames n, -bench, -dump n, -from n, -img, -sym.
  * Environment: SIMPAD="frame:bits,..." (buttons held from that frame on,
@@ -25,7 +28,8 @@
  * SIMDIS=symbol[,symbol...] (executions and cycles per instruction of
  * functions; with several, each listing starts with a "dis name" line),
  * SIMBLOCKLOG=file (the block descriptors scanned at every frame, see
- * block_log).
+ * block_log), SIMCLOCK=us (cost of a kernel call of the system time,
+ * default 45, measured on Phoenix; scaled by SIMSCALE like every cycle).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,6 +77,8 @@ static sym_t *syms;
 static int nsyms;
 
 static double weightS = 1.05, weightN = 3.2, weightI = 1.0;
+/* Half the cost of a kernel call of the system time, in I cycles. */
+static uint64_t clock_half = 281;
 
 static double cycles(void) { return cS * weightS + cN * weightN + cI * weightI; }
 static uint32_t usec_now(void) { return (uint32_t)(cycles() * 0.08); }
@@ -522,6 +528,16 @@ static void do_swi(uint32_t n)
         wr32(r[1], vram_free);
         break;
     case 4: r[0] = usec_now(); break;
+    case 15: {
+        uint32_t t;
+        cI += clock_half;
+        t = usec_now();
+        wr32(r[0], t / 1000000u);
+        wr32(r[0] + 4, t % 1000000u);
+        cI += clock_half;
+        break;
+    }
+    case 16: r[0] = usec_now(); break;
     case 5: r[0] = ROM_ADDR; break;
     case 6: r[0] = rom_size; break;
     case 7: do_dump(r[0], r[1], r[2], r[3]); break;
@@ -905,6 +921,8 @@ int main(int argc, char **argv)
         double f = atof(getenv("SIMSCALE"));
         weightS *= f; weightN *= f; weightI *= f;
     }
+    if (getenv("SIMCLOCK"))
+        clock_half = (uint64_t)(atof(getenv("SIMCLOCK")) / 0.08 / 2 + 0.5);
     if (getenv("SIMWATCH"))
         watch_addr = (uint32_t)strtoul(getenv("SIMWATCH"), 0, 16);
     if (getenv("SIMWATCHSKIP"))

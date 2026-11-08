@@ -20,8 +20,9 @@ Usage (after make and mk.sh):
       cartridge and per window, the means over the scales of: vis (VBLs
       missed with a picture on the screen, as present.py counts them),
       long (long presents), worst (longest time a picture stays on the
-      screen, ms), exc (time over budget, ms: frame time plus 900 us past
-      16 683 us), emu (emulation, ms) and sync (translations at once, ms).
+      screen, ms), exc (time over budget, ms: frame time, its other field
+      included, plus 900 us past 16 683 us), emu (emulation, ms) and sync
+      (translations at once, ms).
       Windows: the whole play, each burst (frames with 4 ms or more of
       translations at once in either directory, merged when at most 10
       frames apart, from 5 frames before to 60 after) and, with -v, the
@@ -137,7 +138,7 @@ def window(run, a, b):
     if s is None:
         return None
     return {'vis': s['visible'], 'long': s['long'], 'worst': s['worst'] / 1000,
-            'exc': sum(max(0, e + u + d + 900 - P) for (_, e, u, d, _s, _o) in fr[a:b]) / 1000,
+            'exc': sum(max(0, e + u + d + o + 900 - P) for (_, e, u, d, _s, _n, o) in fr[a:b]) / 1000,
             'emu': sum(f[1] for f in fr[a:b]) / 1000, 'sync': sum(sy[a:b]) / 1000}
 
 

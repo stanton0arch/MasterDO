@@ -36,6 +36,8 @@ extern void sim_dump(const uint32 *fb, uint32 width, uint32 height, uint32 tag);
 extern uint32 sim_arg(uint32 i);
 extern uint32 sim_pad(uint32 frame);
 extern void sim_mark(uint32 id);
+/* The model's clock, without the charge of a kernel call. */
+extern uint32 sim_time(void);
 extern void sim_codedump(uint32 code, uint32 cur, uint32 blocks, uint32 nblocks);
 /* Registers the code buffer, the descriptors and the context with the
  * simulator, which dumps them on a fatal error (code.bin, lookup.bin). */
@@ -743,27 +745,48 @@ void hmain(void)
         if (f == sim_arg(3))
             sim_mark(15);           /* profile from here on */
         {
-            uint32 t0 = plat_usec_now();
+            /* The frame loop of the ISO (main.c, queued presentation) with
+             * its looks at the clock: the loop start, the end of the pad
+             * read (the read itself is not modelled), the drawing's start
+             * and end, and the presenter thread's look at its VBL, one per
+             * frame. "other" is the time of the frame outside the parts
+             * the Frame: line gives (emulation, update, drawing, spare
+             * time): those looks and the frame's bookkeeping. */
             z80j_stats s0 = g.jit.stats;
             uint32 i0 = g.ctx->int_insns;
-
+            uint32 c0 = sim_time();
+            uint32 t0 = plat_usec_now();
+            uint32 dc = 0;          /* DrawCels, modelled */
+            uint32 dl = 0;          /* the looks around it */
             uint32 draw;
+            uint32 other;
 
+            game_pad_time(&g, plat_usec_now() - t0);
             if (game_frame(&g, pad & 0x3F, (pad >> 8) & 1) != 0)
                 break;
             /* A DrawCels of 3.5 ms is added to the frame time, as on
              * the console, before the spare time is used (none with the
              * display off, and none for a picture identical to the
-             * previous one, which is shown again: nothing is drawn). */
-            draw = (render_display_on(g.rd) && !render_repeated(g.rd)) ? 3500 : 0;
-            /* The Game Gear's LCD window is drawn alone: the 3.5 ms
-             * scaled by its pixels, an estimate until measured on the
-             * console. */
-            if (g.sms->gg)
-                draw = draw * (render_win_w(g.rd) * render_win_h(g.rd)) / (256 * 192);
+             * previous one, which is shown again: nothing is drawn). The
+             * Game Gear's LCD window is drawn alone: the 3.5 ms scaled by
+             * its pixels, an estimate until measured on the console; with
+             * its display off, the blank window, not costed. */
+            if (!render_repeated(g.rd) && (render_display_on(g.rd) || g.sms->gg)) {
+                uint32 d0 = plat_usec_now();
+
+                dl = plat_usec_now() - d0;
+                if (render_display_on(g.rd))
+                    dc = 3500;
+                if (g.sms->gg)
+                    dc = dc * (render_win_w(g.rd) * render_win_h(g.rd)) / (256 * 192);
+            }
+            draw = dc + dl;
             rep_count += render_repeated(g.rd);
             game_frame_done(&g, draw);
-            game_spare_time(&g, t0 - draw, t0 - draw + PLAT_NTSC_FRAME_US);
+            game_spare_time(&g, t0 - dc, t0 - dc + PLAT_NTSC_FRAME_US);
+            (void)plat_usec_now();      /* the presenter thread's look */
+            other = sim_time() - c0 - (g.last_us + g.last_snd_us + g.last_upd_us + dl +
+                                       g.last_spare_us);
             if (sim_arg(19)) {
                 /* -framelog: one line per frame, for the presentation
                  * model (present.py) and the translation policy. */
@@ -772,7 +795,7 @@ void hmain(void)
                 printf("Frame: %lu emu %lu upd %lu draw %lu spare %lu sync %lu sync_us %lu "
                        "forced %lu refused %lu spare_blocks %lu insns %lu shown %lu "
                        "dataw %lu dirty %lu evict %lu evict_ahead %lu evict_us %lu repeat %lu "
-                       "banks %lu %lu %lu\n",
+                       "other %lu banks %lu %lu %lu\n",
                        (unsigned long)f, (unsigned long)g.last_us, (unsigned long)g.last_upd_us,
                        (unsigned long)draw, (unsigned long)g.last_spare_us,
                        (unsigned long)(s->sync - s0.sync), (unsigned long)(s->sync_us - s0.sync_us),
@@ -786,7 +809,7 @@ void hmain(void)
                        (unsigned long)(s->evictions - s0.evictions),
                        (unsigned long)(s->evict_ahead - s0.evict_ahead),
                        (unsigned long)(s->evict_us - s0.evict_us),
-                       (unsigned long)render_repeated(g.rd),
+                       (unsigned long)render_repeated(g.rd), (unsigned long)other,
                        (unsigned long)g.ctx->slot_bank[0], (unsigned long)g.ctx->slot_bank[1],
                        (unsigned long)g.ctx->slot_bank[2]);
             }

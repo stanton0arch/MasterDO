@@ -326,28 +326,47 @@ void plat_shutdown(platform *p)
         DeleteBasicDisplay(&p->sc);
 }
 
-static uint32 usec_sample(void)
+/* Cost of the clock, measured at start-up: kernel calls of the system
+ * time (the convenience call and the system call under it), looks at the
+ * clock as the program takes them, and reads of the VBL counter the
+ * graphics folio keeps (a memory read), with the counter's advance over
+ * the measure (its period). */
+#define CLOCK_BENCH_CALLS 1000
+
+void plat_clock_bench(void)
 {
     TimeVal tv;
+    volatile uint32 *vbl = &GrafBase->gf_VBLNumber;
+    uint32 t0;
+    uint32 t1;
+    uint32 t2;
+    uint32 t3;
+    uint32 t4;
+    uint32 v0;
+    uint32 v1;
+    int32 k;
 
-    SampleSystemTimeTV(&tv);
-    return (uint32)tv.tv_sec * 1000000u + (uint32)tv.tv_usec;
-}
-
-uint32 plat_usec_now(void)
-{
-    uint32 a = usec_sample();
-    uint32 b;
-
-    /* A sample is occasionally off by about a second (seconds and
-     * microseconds not read together): two samples taken in a row must
-     * agree, else sample again. */
-    for (;;) {
-        b = usec_sample();
-        if (b - a < 1000u)
-            return b;
-        a = b;
-    }
+    v0 = *vbl;
+    t0 = plat_usec_now();
+    for (k = 0; k < CLOCK_BENCH_CALLS; k++)
+        SampleSystemTimeTV(&tv);
+    t1 = plat_usec_now();
+    for (k = 0; k < CLOCK_BENCH_CALLS; k++)
+        (void)SampleSystemTime();
+    t2 = plat_usec_now();
+    for (k = 0; k < CLOCK_BENCH_CALLS; k++)
+        (void)plat_usec_now();
+    t3 = plat_usec_now();
+    for (k = 0; k < CLOCK_BENCH_CALLS; k++)
+        (void)*vbl;
+    t4 = plat_usec_now();
+    v1 = *vbl;
+    printf("Clock: %d calls of SampleSystemTimeTV in %lu us, of SampleSystemTime in %lu us, "
+           "looks (plat_usec_now) in %lu us, VBL counter reads in %lu us; "
+           "VBL counter %lu to %lu in %lu us\n",
+           CLOCK_BENCH_CALLS, (unsigned long)(t1 - t0), (unsigned long)(t2 - t1),
+           (unsigned long)(t3 - t2), (unsigned long)(t4 - t3), (unsigned long)v0,
+           (unsigned long)v1, (unsigned long)(t4 - t0));
 }
 
 Item plat_bitmap(const platform *p, int32 screen)

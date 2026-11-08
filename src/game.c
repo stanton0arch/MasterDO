@@ -110,7 +110,7 @@ static void print_window(const game_window_rec *p)
            "%lu ahead in spare time, %lu us), "
            "%lu returns resumed, pad read %lu us, sound %lu us average, %lu us worst, "
            "%lu knob tweaks, end PC $%04lx SP $%04lx IFF %lu, %lu links (%lu refused), "
-           "%lu descriptors\n",
+           "%lu descriptors, %lu clock looks (%lu calls)\n",
            (unsigned long)p->first, (unsigned long)p->last,
            (unsigned long)(w->us / frames), (unsigned long)w->max_us,
            (unsigned long)w->max_frame,
@@ -136,7 +136,8 @@ static void print_window(const game_window_rec *p)
            (unsigned long)(w->pad_us / frames), (unsigned long)(w->snd_us / frames),
            (unsigned long)w->max_snd_us, (unsigned long)d->tweaks,
            (unsigned long)p->end_pc, (unsigned long)p->end_sp, (unsigned long)p->end_iff,
-           (unsigned long)p->nlinks, (unsigned long)p->link_full, (unsigned long)p->nblocks);
+           (unsigned long)p->nlinks, (unsigned long)p->link_full, (unsigned long)p->nblocks,
+           (unsigned long)d->clock_looks, (unsigned long)d->clock_calls);
     printf("Picture: frames %lu-%lu: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
            "%lu cells for written tiles, %lu palettes, %lu backdrop changes, %lu sprite cels, "
            "%lu pieces, %lu priority strips, %lu priority patches, %lu frames in scroll bands, "
@@ -297,6 +298,7 @@ static void read_counters(const game *g, game_counters *c)
     c->forced = g->jit.stats.forced;
     c->resumed = g->jit.stats.resumed + g->ctx->resumed_count;
     c->tweaks = g->snd != NULL ? g->snd->tweaks : 0;
+    plat_clock_counts(&c->clock_looks, &c->clock_calls);
     c->vdp_data_w = g->data_w_total;
     c->vdp_data_r = g->sms->vdp.n_data_r;
     c->vdp_ctrl_w = g->sms->vdp.n_ctrl_w;
@@ -925,7 +927,7 @@ void game_log_summary(game *g)
            "instructions in %lu stretches, %lu evictions (%lu blocks, %lu live chunks, "
            "%lu ahead in spare time, %lu us), "
            "%lu busy-wait loops found (%lu waiting for a line), %lu RAM blocks cut at a seam, "
-           "%lu block descriptors in use at most, status %ld\n",
+           "%lu block descriptors in use at most, %lu clock looks (%lu calls), status %ld\n",
            (unsigned long)n, (unsigned long)avg,
            (unsigned long)percent(avg, g->frame_us), (int)g->frame_us,
            (unsigned long)g->max_us, (unsigned long)g->max_frame,
@@ -943,7 +945,8 @@ void game_log_summary(game *g)
            (unsigned long)d.evictions, (unsigned long)d.evicted, (unsigned long)d.evicted_live,
            (unsigned long)d.evict_ahead, (unsigned long)d.evict_us,
            (unsigned long)g->jit.stats.busy_loops, (unsigned long)g->jit.stats.line_loops,
-           (unsigned long)g->jit.stats.seams, (unsigned long)g->blocks_peak, (long)g->status);
+           (unsigned long)g->jit.stats.seams, (unsigned long)g->blocks_peak,
+           (unsigned long)d.clock_looks, (unsigned long)d.clock_calls, (long)g->status);
     printf("Game summary: picture: %lu tiles converted, %lu cells drawn, %lu rebuilds, "
            "%lu cells for written tiles, %lu palettes, %lu sprite cels, %lu pieces, %lu priority strips, "
            "%lu priority patches, %lu frames in bands, %lu frames partly blanked, "

@@ -512,6 +512,7 @@ static void run_benchmarks(platform *p, app_state *st)
 {
     bench_video bv;
 
+    plat_clock_bench();
     bench_cpu_run(&st->cpu);
     bench_cpu_log(&st->cpu);
     memset(&bv, 0, sizeof(bv));
@@ -604,7 +605,8 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: translator decoding from opcode records, segments cut while decoding, "
+    printf("masterdo: clock calls measured at start-up and counted per window; "
+           "translator decoding from opcode records, segments cut while decoding, "
            "flag scan in assembly; "
            "Game Gear mode: 12-bit colours, 160x144 LCD window, START button, "
            "PSG stereo, Game Gear images listed from the gg directory\n");

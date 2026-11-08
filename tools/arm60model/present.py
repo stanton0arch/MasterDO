@@ -9,9 +9,11 @@ replays those times through the frame loop of the ISO in its queued mode:
 three screens, the main task drawing a frame into a free screen and
 queueing it, a presenter showing at most one queued screen per VBL. The
 main task works ahead as long as a screen is free; it waits for the next
-VBL when the two others are shown and queued. Each frame also costs a
-fixed overhead outside the measured parts (the pad read, the presentation,
-the system), 900 us by default.
+VBL when the two others are shown and queued. Each frame also costs the
+time the model gives outside the measured parts (the `other` field: the
+frame loop's looks at the clock and its bookkeeping) and a fixed overhead
+for what the model does not run (the pad read, the presentation, the
+system), 900 us by default.
 
 Printed per run: the frames, the wall clock time per frame (16 683 us at
 60 fps on NTSC), the VBLs that showed no new picture (each one a stutter,
@@ -29,16 +31,20 @@ LONG = 25000            # a "long present", as the ISO counts them
 
 LINE = re.compile(r'^Frame: (\d+) emu (\d+) upd (\d+) draw (\d+) spare (\d+)')
 SHOWN = re.compile(r' shown (\d+)')
+OTHER = re.compile(r' other (\d+)')
 
 
 def frames_of(path):
-    """(frame, emulation, update, drawing, spare time, display on) per frame."""
+    """(frame, emulation, update, drawing, spare time, display on, other)
+    per frame; other is 0 in the logs of models without the field."""
     out = []
     for line in open(path, errors='replace'):
         m = LINE.match(line)
         if m:
             s = SHOWN.search(line)
-            out.append(tuple(int(x) for x in m.groups()) + (int(s.group(1)) if s else 1,))
+            o = OTHER.search(line)
+            out.append(tuple(int(x) for x in m.groups()) + (int(s.group(1)) if s else 1,
+                                                            int(o.group(1)) if o else 0))
     return out
 
 
@@ -57,12 +63,12 @@ def present(frames, overhead):
                 shown.append(vbl)
             vbl += P
 
-    for (_, emu, upd, draw, spare, _on) in frames:
+    for (_, emu, upd, draw, spare, _on, other) in frames:
         vbls_until(t)
         while len(queue) >= 2:          # no free screen: wait for a VBL
             t = vbl
             vbls_until(t)
-        t += emu + upd + draw + spare + overhead
+        t += emu + upd + draw + spare + other + overhead
         queue.append(t)
     while queue:
         vbls_until(vbl)

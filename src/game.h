@@ -46,6 +46,8 @@ typedef struct {
     uint32 forced;          /* translations at once past the forced count */
     uint32 resumed;         /* interrupt returns resumed inside their block */
     uint32 tweaks;          /* DSP knob tweaks of the PSG voices */
+    uint32 clock_looks;     /* looks at the clock (plat_usec_now), every task */
+    uint32 clock_calls;     /* kernel calls of the system time they made */
     uint32 vdp_data_w;
     uint32 vdp_data_r;
     uint32 vdp_ctrl_w;

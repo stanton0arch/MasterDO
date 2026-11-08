@@ -17,8 +17,14 @@ built. It is not part of the ISO and `make` does not use it.
   `STM` (n-1)S+2N, branch 2S+1N, multiply 1S+mI, unexecuted 1S). The time
   is S x 1.05 + N x 3.2 + I x 1 cycles of 80 ns, weights fitted on Phoenix.
 - The OS calls are replaced by host services: `printf`, memory allocation,
-  the microsecond clock (modelled time), the ROM image, dumps of the debug
-  view (`view_NNNNNN.ppm`) and of the code buffer (`code.bin`). The
+  the kernel's system time (`SampleSystemTimeTV`, modelled time, under the
+  ISO's own `src/clock.c`), the ROM image, dumps of the debug view
+  (`view_NNNNNN.ppm`) and of the code buffer (`code.bin`). A call of the
+  system time is charged as on the console (`SIMCLOCK` microseconds, 45 by
+  default, half before the sample and half after): the looks at the clock
+  of the frame loop, the translator and the spare time cost what they cost
+  on the console, and the model's frames, budgets and `regress.py` see
+  them. The
   allocations are counted against the memory Phoenix leaves to a
   cartridge's run (1 290 080 bytes of DRAM, 571 392 bytes of VRAM less the
   image): an allocation past it fails as `AllocMem` does, and the end of a
@@ -88,9 +94,14 @@ drawing times, spare time used, translations at once and their time,
 forced ones, refusals, blocks translated in spare time, interpreted
 instructions, display on, VDP data writes, dirty tiles left at the end
 of the frame, code buffer evictions, those made ahead in spare time and
-their time, the banks of the three paged slots at the end of the frame);
-`present.py` replays those lines through the queued presentation of the
-ISO.
+their time, the time of the frame outside the parts given (`other`: the
+looks at the clock of the frame loop, the frame's bookkeeping), the banks
+of the three paged slots at the end of the frame); `present.py` replays
+those lines through the queued presentation of the ISO. The harness runs
+the frame loop of `src/main.c` with its looks at the clock (the loop
+start, the end of the pad read, the drawing's start and end, the
+presenter thread's look, one per frame); `DrawCels` and the pad read
+themselves are not run.
 
 `-dumpdiff n` with `-dump`: the frames compared because of a scroll or
 display band are only written when they differ, the first n of them; the
