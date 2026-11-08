@@ -121,8 +121,10 @@ with differences (`Sprites:` lines).
 page ends and the wrap at $FFFF included), then `jit_decode_block` on
 60 000 random blocks over pages of every kind (fixed, paged slots, RAM
 with a mirror), comparing the number of instructions, the next address,
-the flags, every word set per instruction and the instruction map. It
-prints two `Decoder test:` lines with the differences found (0 expected).
+the flags (the request to cut the segments again included), the jumps
+back and every word set per instruction (the segment starts the decoder
+sets among them). It prints two `Decoder test:` lines with the
+differences found (0 expected).
 
 `-anatest` (no cartridge needed) checks the analysis passes of the
 translator in assembly (`src/z80jit_ana.s`) against the C passes they
@@ -131,10 +133,15 @@ templates (jumps and calls inside and outside the block, flag producers
 before conditional jumps, OUTI / OUTD / OUT (C),r runs, INI / OUTI loops (with NOP between), busy-wait
 loops reading memory or a line port, EI, BIT, block instructions) over
 pages of every kind are decoded by `jit_decode_block` and analysed both
-ways from the same records; the fields the analysis writes (internal
-targets, busy-wait loops, runs, segment starts, fused tests, flag
-liveness, segment T-states) and the counts are compared. It prints one
-`Analysis test:` line with the differences found (0 expected).
+ways from the same records, the C passes finding the internal targets
+and the segment starts again from nothing; the fields the analysis
+writes (internal targets, busy-wait loops, runs, segment starts, fused
+tests, flag liveness, segment T-states) and the counts are compared, and
+the forward flag scan of the assembly (`jit_scan_needed`,
+`jit_flags_needed`) is compared with its C reference from the targets,
+the block ends and random addresses. It prints one `Analysis test:` line
+with the differences found (0 expected) and the number of blocks whose
+segments the analysis cut again.
 
 `-emittest` (no cartridge needed) checks the code emitter in assembly
 (`src/z80jit_emt.s`) against the C emitter it replaced, kept in

@@ -19,6 +19,8 @@
 #include "stdio.h"
 #include "mem.h"
 
+#define SEG_MAX_T   200     /* a segment always fits in a fresh scanline */
+
 static uint32 ref_byte(const z80j_ctx *ctx, uint32 addr)
 {
     addr &= 0xFFFFu;
@@ -473,8 +475,11 @@ static void ref_decode(const z80j_ctx *c, uint32 pc, jit_insn *in)
  * them before the decoder took it over: a JR, JP, JR cc, JP cc, DJNZ or
  * repeated block instruction whose static target starts an instruction of
  * the block gets its index, the target starts a segment, and a JR, JP,
- * JR cc or JP cc to an instruction at or before it is a jump back. */
-static void ref_targets(jit_insn *ins, int32 n, uint32 pc, uint32 next, uint32 *back)
+ * JR cc or JP cc to an instruction at or before it is a jump back. A
+ * target that did not start a segment, before the last segment cut for
+ * its length (lastcut, -1: none), sets JIT_DEC_RECUT. */
+static void ref_targets(jit_insn *ins, int32 n, uint32 pc, uint32 next, uint32 *back,
+                        int32 lastcut, uint32 *flags)
 {
     uint32 span = (next - pc) & 0xFFFFu;
     int32 i;
@@ -500,6 +505,8 @@ static void ref_targets(jit_insn *ins, int32 n, uint32 pc, uint32 next, uint32 *
         if (k == n)
             continue;
         p->internal = (int8)k;
+        if (!ins[k].seg_start && lastcut > k)
+            *flags |= JIT_DEC_RECUT;
         ins[k].seg_start = 1;
         if (k <= i && (kd == K_JRCC || kd == K_JPCC || kd == K_JR || kd == K_JP))
             back[i >> 5] |= 1u << (i & 31);
@@ -513,6 +520,8 @@ static int32 ref_decode_block(const z80j_ctx *ctx, jit_insn *ins, uint32 pc, uin
     uint32 addr = pc & 0xFFFFu;
     uint32 page = addr >> 8;
     int32 n = 0;
+    uint32 run = 0;                     /* T-states of the segment so far */
+    int32 lastcut = -1;
 
     *flags = 0;
     for (;;) {
@@ -553,6 +562,19 @@ static int32 ref_decode_block(const z80j_ctx *ctx, jit_insn *ins, uint32 pc, uin
             else
                 in->irq_check = 1;
         }
+        /* The segment starts the decoder now sets ahead of the analysis:
+         * the block start, the instruction after a conditional one, and
+         * the one that would take its segment past SEG_MAX_T (the jump
+         * targets are not known yet). */
+        if (n == 1 || IS_COND(in[-1].kind)) {
+            in->seg_start = 1;
+            run = 0;
+        } else if (run + in->t > SEG_MAX_T) {
+            in->seg_start = 2;
+            run = 0;
+            lastcut = n - 1;
+        }
+        run += in->t;
         if (IS_END(in->kind) || n == MAX_INSNS)
             break;
         if ((addr >> 8) != page) {
@@ -562,7 +584,7 @@ static int32 ref_decode_block(const z80j_ctx *ctx, jit_insn *ins, uint32 pc, uin
         }
     }
     *next = addr;
-    ref_targets(ins, n, pc & 0xFFFFu, addr, back);
+    ref_targets(ins, n, pc & 0xFFFFu, addr, back, lastcut, flags);
     return n;
 }
 
@@ -746,7 +768,6 @@ void dec_test(void)
             uint32 na, nb_;
             uint32 nexta, fa;
             uint32 backa[2];
-            uint32 serial = ((round * 1500 + v) + 1) << 8;
             jit_block_ctx d;
             uint32 k;
             uint32 w;
@@ -765,7 +786,6 @@ void dec_test(void)
             d.pc = pc;
             d.ctx = c;
             d.key = key;
-            d.serial = serial;
             d.next_pc = 0;
             d.dec_flags = 0;
             d.back[0] = d.back[1] = 0x12345678u;
@@ -777,7 +797,7 @@ void dec_test(void)
             if (fa & JIT_DEC_DYN)
                 dyns++;
             if (nb_ != na || (na != 0 && d.next_pc != nexta) ||
-                (d.dec_flags & (JIT_DEC_SEAM | JIT_DEC_DYN)) != fa) {
+                (d.dec_flags & (JIT_DEC_SEAM | JIT_DEC_DYN | JIT_DEC_RECUT)) != fa) {
                 if (bad++ < 10)
                     printf("Decoder test: block at $%04lx (key %08lx): C %lu instructions to $%04lx, "
                            "flags %lx; assembly %lu to $%04lx, flags %lx\n",
@@ -808,14 +828,6 @@ void dec_test(void)
                 if (w != 0) {
                     if (bad++ < 10)
                         report("block record", ra[k].pc, k, w - 1, &ra[k], &rb[k]);
-                    break;
-                }
-                if (jit_dec_tab[256 + (ra[k].pc & 0xFFu)] != (serial | (k + 1))) {
-                    if (bad++ < 10)
-                        printf("Decoder test: map entry of $%04lx: %08lx, expected %08lx\n",
-                               (unsigned long)ra[k].pc,
-                               (unsigned long)jit_dec_tab[256 + (ra[k].pc & 0xFFu)],
-                               (unsigned long)(serial | (k + 1)));
                     break;
                 }
             }

@@ -48,6 +48,7 @@ S_ERROR         EQU     0x5FE8
 S_SEED_HOT      EQU     0x5FEC
 ST_TRANSLATIONS EQU     0x8850          ; then insns, code_bytes, fused
 ST_BUSY_LOOPS   EQU     0x8880          ; then line_loops
+ST_SCAN_HITS    EQU     0x8888
 ST_PROMOTED     EQU     0x8898
 ST_DYN_BLOCKS   EQU     0x88B4
 ST_SEAMS        EQU     0x88B8
@@ -68,6 +69,8 @@ BLK_BODY        EQU     12
 BLK_NEXT        EQU     16
 BLK_ZNEXT       EQU     20              ; the blocks of the same zone
 BLK_SCAN_VALID  EQU     0x80000000
+BLK_SCAN_SHIFT  EQU     16
+FL_ALL          EQU     0x3F
 
 ; jit_block_ctx
 B_J             EQU     0
@@ -79,13 +82,12 @@ B_HAS_DYN       EQU     36
 B_MARK_OFF      EQU     40
 B_BODY          EQU     44
 B_PC            EQU     56
-B_SERIAL        EQU     60
-B_CTX           EQU     64
-B_DEC_FLAGS     EQU     68
-B_BUSY          EQU     72              ; then line, fused
-B_FUSED         EQU     80
-B_TARGETS       EQU     84
-B_MAX_TARGETS   EQU     88
+B_CTX           EQU     60
+B_DEC_FLAGS     EQU     64
+B_BUSY          EQU     68              ; then line, fused
+B_FUSED         EQU     76
+B_TARGETS       EQU     80
+B_MAX_TARGETS   EQU     84
 DEC_SEAM        EQU     8
 
 ; z80j_ctx
@@ -233,13 +235,7 @@ tb_zone_ok
         str     r1,[r4,#S_ZONE_END]
         MARKOFF r0,r1
 
-        ; Decoding (jit_decode_block, z80jit_dec.s), the instruction map
-        ; entries tagged with the serial of this translation.
-        add     r12,r4,#ST_TRANSLATIONS :AND: 0xFF00
-        ldr     r12,[r12,#ST_TRANSLATIONS :AND: 0xFF]
-        add     r12,r12,#1
-        mov     r12,r12,lsl #8
-        str     r12,[r7,#B_SERIAL]
+        ; Decoding (jit_decode_block, z80jit_dec.s).
         mov     r0,r7
         bl      jit_decode_block
         movs    r8,r0
@@ -529,5 +525,101 @@ ul_mov_r0       DCD     0xE3A00C00      ; mov r0,#0
 ul_orr_r0       DCD     0xE3800000      ; orr r0,r0,#0
 
 tb_bctx         DCD     jit_bctx
+
+;----------------------------------------------------------------------------
+; uint32 jit_flags_needed(jit_block_ctx *b, uint32 pc)
+;
+; Flags the code at pc may read before writing them (jit_scan_needed), for
+; the block b; called by the analysis (z80jit_ana.s). The value depends on
+; the bytes at pc and on the key of the scanning block only, so for ROM
+; keys it is kept in two places: the descriptor of the block at pc with
+; the same key, where an exit leading to a translated block finds it with
+; the lookup the linker makes anyway, and a cache across blocks (slot (pc
+; ^ pc >> 9) mod 512: pc | the bank of the key << 16, the page kind of the
+; key, the value) for the other addresses. A RAM key is never cached (the
+; scan stops at RAM). The answers found in either place are counted in
+; stats.scan_hits.
+; r4 = pc | bank << 16, r5 = descriptor of the block at pc, r6 = cache
+; slot, r7 = b, r8 = j.
+;----------------------------------------------------------------------------
+        EXPORT  jit_flags_needed
+        IMPORT  jit_scan_needed
+jit_flags_needed
+        mov     r1,r1,lsl #16
+        mov     r1,r1,lsr #16           ; pc
+        ldr     r2,[r0,#B_KEY]
+        cmp     r2,#KEY_RAM
+        beq     jit_scan_needed
+        stmfd   sp!,{r4-r8,lr}
+        ldr     r8,[r0,#B_J]
+        mov     r7,r0
+        eor     r6,r1,r1,lsr #9
+        mov     r6,r6,lsl #23
+        mov     r6,r6,lsr #23           ; cache slot
+        orr     r4,r1,r2,lsl #16        ; pc and bank
+        add     r3,r8,#S_SCAN_KEY :AND: 0xFF00
+        add     r3,r3,r6,lsl #2
+        ldr     r3,[r3,#S_SCAN_KEY :AND: 0xFF]
+        cmp     r3,r4
+        bne     fn_miss
+        add     r3,r8,#S_SCAN_KIND :AND: 0xFF00
+        add     r3,r3,r6
+        ldrb    r12,[r3,#S_SCAN_KIND :AND: 0xFF]
+        cmp     r12,r2,lsr #16          ; page kind
+        bne     fn_miss
+        ldrb    r0,[r3,#(S_SCAN_KIND :AND: 0xFF) + S_SCAN_VAL - S_SCAN_KIND]
+        add     r3,r8,#ST_SCAN_HITS :AND: 0xFF00
+        ldr     r1,[r3,#ST_SCAN_HITS :AND: 0xFF]
+        add     r1,r1,#1
+        str     r1,[r3,#ST_SCAN_HITS :AND: 0xFF]
+        ldmfd   sp!,{r4-r8,pc}
+
+; Not in the cache: the descriptor of the block at pc with the same key
+; (find_block, z80jit.c), else the scan, whose value the descriptor keeps.
+fn_miss
+        mov     r3,r1,lsl #22
+        add     r5,r8,#S_HASH :AND: 0xFF00
+        add     r5,r5,r3,lsr #20
+        ldr     r5,[r5,#S_HASH :AND: 0xFF]      ; hash[pc & 1023]
+fn_find
+        cmp     r5,#0
+        beq     fn_scan
+        ldr     r3,[r5,#BLK_PC]
+        mov     r3,r3,lsl #16
+        cmp     r1,r3,lsr #16
+        ldreq   r3,[r5,#BLK_KEY]
+        cmpeq   r3,r2
+        ldrne   r5,[r5,#BLK_NEXT]
+        bne     fn_find
+        ldr     r3,[r5,#BLK_PC]
+        tst     r3,#BLK_SCAN_VALID
+        beq     fn_scan
+        mov     r0,r3,lsr #BLK_SCAN_SHIFT
+        and     r0,r0,#FL_ALL
+        add     r3,r8,#ST_SCAN_HITS :AND: 0xFF00
+        ldr     r1,[r3,#ST_SCAN_HITS :AND: 0xFF]
+        add     r1,r1,#1
+        str     r1,[r3,#ST_SCAN_HITS :AND: 0xFF]
+        b       fn_store
+fn_scan
+        mov     r0,r7
+        bl      jit_scan_needed
+        cmp     r5,#0
+        movne   r1,r4,lsl #16
+        movne   r1,r1,lsr #16
+        orrne   r1,r1,r0,lsl #BLK_SCAN_SHIFT
+        orrne   r1,r1,#BLK_SCAN_VALID
+        strne   r1,[r5,#BLK_PC]
+fn_store
+        add     r3,r8,#S_SCAN_KEY :AND: 0xFF00
+        add     r3,r3,r6,lsl #2
+        str     r4,[r3,#S_SCAN_KEY :AND: 0xFF]
+        ldr     r2,[r7,#B_KEY]
+        mov     r2,r2,lsr #16           ; page kind
+        add     r3,r8,#S_SCAN_KIND :AND: 0xFF00
+        add     r3,r3,r6
+        strb    r2,[r3,#S_SCAN_KIND :AND: 0xFF]
+        strb    r0,[r3,#(S_SCAN_KIND :AND: 0xFF) + S_SCAN_VAL - S_SCAN_KIND]
+        ldmfd   sp!,{r4-r8,pc}
 
         END

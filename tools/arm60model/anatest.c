@@ -20,7 +20,56 @@
 #include "mem.h"
 
 #define SEG_MAX_T   200
-#define jit_pcmap (jit_dec_tab + 256)
+
+/* The forward flag scan of jit_scan_needed (z80jit_dec.s), in C. */
+static int32 ref_scan_safe(const jit_block_ctx *b, uint32 pc)
+{
+    uint32 kind = (uint32)b->ctx->page_kind[(pc >> 8) & 0xFFu] & Z80J_PAGE_KIND;
+
+    if (kind == Z80J_PAGE_FIXED)
+        return 1;
+    if (kind >= Z80J_PAGE_SLOT(0) && kind <= Z80J_PAGE_SLOT(3))
+        return b->key == ((kind << 16) | (b->ctx->slot_bank[kind - 1] & 0xFFFFu));
+    return 0;
+}
+
+static uint32 ref_scan_needed(const jit_block_ctx *b, uint32 pc, int32 depth)
+{
+    uint32 defined = 0;
+    uint32 needed = 0;
+    uint32 safe_page = 0xFFFFFFFFu;
+    int32 k;
+    jit_insn in;
+
+    for (k = 0; k < JIT_SCAN_INSNS; k++) {
+        if ((pc >> 8) != safe_page) {
+            if (!ref_scan_safe(b, pc))
+                break;
+            safe_page = pc >> 8;
+        }
+        jit_decode(&in, pc, b->ctx);
+        needed |= in.use & ~defined;
+        defined |= in.def;
+        if ((defined | needed) == FL_ALL)
+            return needed;
+        switch (in.kind) {
+        case K_JR: case K_JP: case K_CALL: case K_RST:
+            pc = in.target;
+            continue;
+        case K_JRCC: case K_JPCC: case K_CALLCC: case K_DJNZ: case K_REP:
+            if (depth <= 0)
+                return needed | (FL_ALL & ~defined);
+            needed |= ref_scan_needed(b, in.target, depth - 1) & ~defined;
+            break;
+        case K_NORMAL:
+            break;
+        default:
+            return needed | (FL_ALL & ~defined);
+        }
+        pc = (pc + in.len) & 0xFFFFu;
+    }
+    return needed | (FL_ALL & ~defined);
+}
 
 static uint32 ref_run_elem(uint32 first, uint32 op, uint32 *outc)
 {
@@ -84,7 +133,7 @@ static uint32 ref_cc_fuse_need(uint32 cc)
 
 /* The passes of translate_block as they were. */
 static void ref_analyse(z80j_state *j, jit_block_ctx *bc, jit_insn *ins, int32 n,
-                        uint32 pc, uint32 next_pc, uint32 serial,
+                        uint32 pc, uint32 next_pc,
                         uint32 *busy, uint32 *line, uint32 *fused)
 {
     jit_insn *end = ins + n;
@@ -96,12 +145,18 @@ static void ref_analyse(z80j_state *j, jit_block_ctx *bc, jit_insn *ins, int32 n
     uint32 span;
     int32 k;
 
+    /* The segment starts and jump targets the decoder set, found again
+     * from nothing. */
+    for (p = ins; p < end; p++) {
+        p->seg_start = 0;
+        p->internal = -1;
+    }
+
     /* Jump targets inside the block become segment starts. */
     span = (addr - pc) & 0xFFFFu;
     for (p = ins; p < end; p++) {
         uint32 kd = p->kind;
         uint32 off;
-        uint32 m;
 
         if (!(IS_COND(kd) && kd != K_RETCC && kd != K_CALLCC) && kd != K_JR && kd != K_JP)
             continue;
@@ -110,9 +165,11 @@ static void ref_analyse(z80j_state *j, jit_block_ctx *bc, jit_insn *ins, int32 n
         off = (p->target - pc) & 0xFFFFu;
         if (off >= span)
             continue;
-        m = jit_pcmap[p->target & 0xFFu];
-        if ((m & ~0xFFu) == serial) {
-            k = (int32)(m & 0xFFu) - 1;
+        for (k = 0; k < n; k++) {
+            if (ins[k].pc == p->target)
+                break;
+        }
+        if (k < n) {
             p->internal = k;
             ins[k].seg_start = 1;
         }
@@ -140,7 +197,7 @@ static void ref_analyse(z80j_state *j, jit_block_ctx *bc, jit_insn *ins, int32 n
         if (p > ins && IS_COND(p[-1].kind))
             p->seg_start = 1;
         if (!p->seg_start && run + p->t > SEG_MAX_T)
-            p->seg_start = 1;
+            p->seg_start = 2;
         if (p->seg_start) {
             seg = p;
             run = 0;
@@ -512,6 +569,8 @@ void ana_test(void)
     uint32 ngroups = 0;
     uint32 ninternal = 0;
     uint32 nscans = 0;
+    uint32 nwalks = 0;
+    uint32 nrecut = 0;
     uint32 v;
     uint32 p;
     uint32 round;
@@ -561,7 +620,6 @@ void ana_test(void)
             uint32 pc = rnd() & 0xFFFFu;
             uint32 key;
             uint32 na;
-            uint32 serial = ((round * 1500 + v) + 1) << 8;
             uint32 ba = 0, la = 0, fa = 0;
             jit_block_ctx bca;
             jit_block_ctx bcb;
@@ -577,7 +635,6 @@ void ana_test(void)
             bca.pc = pc;
             bca.ctx = c;
             bca.key = key;
-            bca.serial = serial;
             na = (uint32)jit_decode_block(&bca);
             if (na == 0)
                 continue;
@@ -593,7 +650,9 @@ void ana_test(void)
              * it, so the cache starts empty for each block (the assembly
              * then finds what the C run cached, for the same code). */
             memset(j->scan_kind, 0xFF, sizeof(j->scan_kind));
-            ref_analyse(j, &bca, ra, (int32)na, pc, bca.next_pc, serial, &ba, &la, &fa);
+            if (bca.dec_flags & JIT_DEC_RECUT)
+                nrecut++;
+            ref_analyse(j, &bca, ra, (int32)na, pc, bca.next_pc, &ba, &la, &fa);
             bcb.busy = bcb.line = bcb.fused = 0x12345678u;
             jit_analyse_block(&bcb);
             blocks++;
@@ -643,14 +702,46 @@ void ana_test(void)
                     break;
             }
             nscans += j->stats.scan_hits;
+            /* The forward scan from the block, its end, the static targets
+             * of its instructions and a few other addresses. */
+            for (k = 0; k < na + 6; k++) {
+                uint32 a, x, y;
+
+                if (k < na) {
+                    if (ra[k].kind == K_NORMAL || ra[k].dyn)
+                        continue;
+                    a = ra[k].target;
+                } else if (k == na) {
+                    a = pc;
+                } else if (k == na + 1) {
+                    a = bca.next_pc;
+                } else {
+                    a = rnd() & 0xFFFFu;
+                    if (k & 1)
+                        a = (a & 0xFC00u) | (0x3F8u + (a & 7u));    /* near a 1 KiB page end */
+                }
+                a &= 0xFFFFu;
+                x = ref_scan_needed(&bca, a, JIT_SCAN_DEPTH);
+                y = jit_scan_needed(&bca, a);
+                nwalks++;
+                if (x == y)
+                    y = jit_flags_needed(&bca, a);      /* through the cache */
+                if (x != y) {
+                    if (bad++ < 10)
+                        printf("Analysis test: forward scan at $%04lx (key %08lx): C %02lx, "
+                               "assembly %02lx\n", (unsigned long)a, (unsigned long)key,
+                               (unsigned long)x, (unsigned long)y);
+                }
+            }
         }
     }
     printf("Analysis test: %lu blocks, %lu instructions, %lu internal targets, %lu busy-wait "
            "loops (%lu waiting for a line), %lu fused tests, %lu output runs, %lu port loops, "
-           "%lu output groups, %lu flag scans from the cache; %lu differences\n",
+           "%lu output groups, %lu flag scans from the cache, %lu forward scans compared, "
+           "%lu blocks cut again; %lu differences\n",
            (unsigned long)blocks, (unsigned long)insns, (unsigned long)ninternal,
            (unsigned long)nbusy, (unsigned long)nline, (unsigned long)nfused,
            (unsigned long)nruns, (unsigned long)nloops, (unsigned long)ngroups,
-           (unsigned long)nscans,
+           (unsigned long)nscans, (unsigned long)nwalks, (unsigned long)nrecut,
            (unsigned long)bad);
 }

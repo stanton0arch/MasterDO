@@ -604,7 +604,8 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: spare-time translation queue entries dropped after four frames; "
+    printf("masterdo: translator decoding from opcode records, segments cut while decoding, "
+           "flag scan in assembly; "
            "Game Gear mode: 12-bit colours, 160x144 LCD window, START button, "
            "PSG stereo, Game Gear images listed from the gg directory\n");
     if (plat_init(&plat) < 0)

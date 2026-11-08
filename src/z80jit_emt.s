@@ -317,7 +317,8 @@ EMIT_ROOM_BYTES EQU     512
 
 ; Stack frame of the main routine.
 F_MISS          EQU     0               ; site of the bank check branch
-F_SIZE          EQU     4
+F_LIMIT         EQU     4               ; the zone end less EMIT_ROOM_BYTES
+F_SIZE          EQU     8
 
 ;----------------------------------------------------------------------------
 ; Macros
@@ -406,14 +407,13 @@ F_SIZE          EQU     4
         MEND
 
 ; Stops the emission with error 4 when the zone has less than
-; EMIT_ROOM_BYTES left at the cursor. Uses $w.
+; EMIT_ROOM_BYTES left at the cursor (main routine only: the limit is in
+; its stack frame). Uses $w.
         MACRO
         ROOM    $w
-        GETJ    $w
-        ldr     $w,[$w,#S_ZONE_END]
-        sub     $w,$w,r5
-        cmp     $w,#EMIT_ROOM_BYTES
-        blo     eb_full
+        ldr     $w,[sp,#F_LIMIT]
+        cmp     r5,$w
+        bhi     eb_full
         MEND
 
 ; Counts a full flag computation.
@@ -484,6 +484,9 @@ jit_emit_block
         mov     r4,r0
         ldr     r1,[r4,#B_J]
         ldr     r5,[r1,#S_CUR]
+        ldr     r0,[r1,#S_ZONE_END]
+        sub     r0,r0,#EMIT_ROOM_BYTES
+        str     r0,[sp,#F_LIMIT]
         add     r8,r1,#S_GLUE :AND: 0xFF00
         add     r8,r8,#S_GLUE :AND: 0xFF
         ldr     r0,[r4,#B_STUBS]

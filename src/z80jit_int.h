@@ -117,8 +117,12 @@ typedef struct {
     uint8   busy;           /* 25 jump back of a busy-wait loop (analysis) */
     uint8   irq_check;      /* 26 instruction after EI: check for a pending */
                             /*    interrupt after it */
-    uint8   seg_start;      /* 27 a cycle check precedes the instruction (a */
-                            /*    jump target: block decoder; the rest: analysis) */
+    uint8   seg_start;      /* 27 a cycle check precedes the instruction: 1 at */
+                            /*    the block start, after a conditional */
+                            /*    instruction and at a jump target, 2 where */
+                            /*    the T-states of the segment would exceed */
+                            /*    SEG_MAX_T (the decoder; the analysis cuts */
+                            /*    again when a target moves the cuts) */
     uint32  run;            /* 28 first of a run of port outputs: its length, */
                             /*    the mask of its OUT (C),r elements << 8 and */
                             /*    the opcode of OUT (C),r << 24; RUN_PART for */
@@ -138,6 +142,12 @@ typedef struct {
 
 #define JIT_DEC_DYN   0x4u  /* some operand is read when it runs */
 #define JIT_DEC_SEAM  0x8u  /* the block was cut at a seam of RAM */
+#define JIT_DEC_EDIO  0x10u /* INI, IND, OUTI, OUTD or OUT (C),A / D / E met: */
+                            /* the analysis looks for runs and port loops */
+#define JIT_DEC_RECUT 0x20u /* a jump target lies before a segment the */
+                            /* decoder cut for its length: the analysis */
+                            /* cuts the segments again */
+#define JIT_DEC_NOUT_SHIFT 16 /* bits 16-31: OUTI, OUTD and OUT (n),A met */
 
 /* Branches resolved at the end of the block. CONTRACT with z80jit_emt.s
  * (offsets checked in z80jit.c). */
@@ -228,7 +238,6 @@ typedef struct jit_block_ctx_s {
     uint32     *skip_site;  /* branch past a port output loop, patched at */
     int32       skip_to;    /* the code of instruction skip_to */
     uint32      pc;         /* address of the block (16 bits) */
-    uint32      serial;     /* tag of the instruction map entries (a multiple of 256) */
     const z80j_ctx *ctx;
     uint32      dec_flags;  /* JIT_DEC_* of the decoding */
     uint32      busy;       /* out of the analysis: busy-wait loops found */
@@ -246,18 +255,28 @@ typedef struct jit_block_ctx_s {
 extern jit_block_ctx jit_bctx;
 
 /* z80jit_dec.s */
-/* Opcode properties (256 words, see main_info in z80jit.c), then the
- * instruction map of the block being decoded: entry (address & 255) holds
- * the serial of the decoding | the instruction's index + 1. */
-extern uint32 jit_dec_tab[512];
+/* Opcode records: two words per unprefixed opcode (see dec_entry in
+ * z80jit.c). */
+extern uint32 jit_dec_tab[2 * 256];
 /* Decodes the instruction at pc (16 bits): the first six words of *in. */
 void   jit_decode(jit_insn *in, uint32 pc, const z80j_ctx *c);
-/* Decodes the instructions of the block b (ins, pc, ctx, key and serial
- * set), with the marks of each (internal, dyn, irq_check, the seg_start
- * of the jump targets; busy, run and fused cleared): writes n, next_pc,
- * dec_flags, has_dyn and back, returns n, 0 when the first instruction
- * crosses a seam of RAM. */
+/* Decodes the instructions of the block b (ins, pc, ctx and key set),
+ * with the marks of each (internal, dyn, irq_check, and seg_start for the
+ * first instruction, those after a conditional one, the jump targets and
+ * those that would take their segment past SEG_MAX_T T-states; busy, run
+ * and fused cleared): writes n, next_pc, dec_flags, has_dyn and back,
+ * returns n, 0 when the first instruction crosses a seam of RAM. */
 int32  jit_decode_block(jit_block_ctx *b);
+
+/* z80jit_dec.s, for jit_flags_needed */
+#define JIT_SCAN_INSNS 8    /* instructions walked by the forward flag scan */
+#define JIT_SCAN_DEPTH 1    /* conditional jumps whose both arms it follows */
+/* Flags that code starting at pc may read before writing them: follows
+ * the unconditional static transfers and, JIT_SCAN_DEPTH deep, both arms
+ * of the conditional ones, over code that cannot change while the block
+ * b is valid (a fixed page, or a slot showing the bank of b's key);
+ * anything unknown counts as reading every flag. */
+uint32 jit_scan_needed(const jit_block_ctx *b, uint32 pc);
 
 /* z80jit_ana.s */
 /* Runs the analysis passes over the decoded block b (the busy-wait
@@ -266,9 +285,13 @@ int32  jit_decode_block(jit_block_ctx *b);
  * set, the static exits and ntargets. */
 void   jit_analyse_block(jit_block_ctx *b);
 
-/* z80jit.c, for z80jit_ana.s */
-/* Flags the code at pc may read before writing them, for the block b. */
+/* z80jit_blk.s, for z80jit_ana.s */
+/* Flags the code at pc may read before writing them, for the block b
+ * (jit_scan_needed, through the flag scan cache and the descriptor of the
+ * block at pc). */
 uint32 jit_flags_needed(jit_block_ctx *b, uint32 pc);
+
+/* z80jit.c, for z80jit_ana.s */
 /* Whether the loop from ins[h] to the jump back ins[e] waits for an
  * interrupt (1) or for a line (2); 0 when it may do something else. */
 int32  jit_busy_loop(const z80j_state *j, const jit_insn *ins, int32 n, int32 h, int32 e);

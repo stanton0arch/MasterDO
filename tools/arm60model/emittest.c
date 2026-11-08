@@ -2607,7 +2607,6 @@ void emit_test(void)
             uint32 pc = ernd() & 0xFFFFu;
             uint32 key;
             uint32 n;
-            uint32 serial = ((round * 1500 + v) + 1) << 8;
             jit_block_ctx bca;
             jit_block_ctx bcb;
             uint32 k;
@@ -2633,7 +2632,6 @@ void emit_test(void)
             bca.pc = pc;
             bca.ctx = c;
             bca.key = key;
-            bca.serial = serial;
             n = (uint32)jit_decode_block(&bca);
             if (n == 0)
                 continue;
