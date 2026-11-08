@@ -29,7 +29,8 @@
  * functions; with several, each listing starts with a "dis name" line),
  * SIMBLOCKLOG=file (the block descriptors scanned at every frame, see
  * block_log), SIMCLOCK=us (cost of a kernel call of the system time,
- * default 45, measured on Phoenix; scaled by SIMSCALE like every cycle).
+ * default 26: 1 000 calls in 26 064 us on Phoenix; scaled by SIMSCALE
+ * like every cycle).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,7 +79,7 @@ static int nsyms;
 
 static double weightS = 1.05, weightN = 3.2, weightI = 1.0;
 /* Half the cost of a kernel call of the system time, in I cycles. */
-static uint64_t clock_half = 281;
+static uint64_t clock_half = 163;
 
 static double cycles(void) { return cS * weightS + cN * weightN + cI * weightI; }
 static uint32_t usec_now(void) { return (uint32_t)(cycles() * 0.08); }

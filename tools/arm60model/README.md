@@ -20,8 +20,9 @@ built. It is not part of the ISO and `make` does not use it.
   the kernel's system time (`SampleSystemTimeTV`, modelled time, under the
   ISO's own `src/clock.c`), the ROM image, dumps of the debug view
   (`view_NNNNNN.ppm`) and of the code buffer (`code.bin`). A call of the
-  system time is charged as on the console (`SIMCLOCK` microseconds, 45 by
-  default, half before the sample and half after): the looks at the clock
+  system time is charged as on the console (`SIMCLOCK` microseconds, 26 by
+  default, the start-up `Clock:` line of the Phoenix logs: 1 000 calls in
+  26 064 us; half before the sample and half after): the looks at the clock
   of the frame loop, the translator and the spare time cost what they cost
   on the console, and the model's frames, budgets and `regress.py` see
   them. The
