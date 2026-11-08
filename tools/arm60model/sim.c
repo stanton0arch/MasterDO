@@ -22,7 +22,8 @@
  * largest; SIMPROFALL=1 every function),
  * SIMALLOC=1 (every allocation with its size and memory type), SIMSCALE=f
  * (every cycle weight multiplied by f: another host timing),
- * SIMDIS=symbol (executions and cycles per instruction of a function),
+ * SIMDIS=symbol[,symbol...] (executions and cycles per instruction of
+ * functions; with several, each listing starts with a "dis name" line),
  * SIMBLOCKLOG=file (the block descriptors scanned at every frame, see
  * block_log).
  */
@@ -938,12 +939,26 @@ int main(int argc, char **argv)
         if (mark_n[i + 1]) fprintf(stderr, "mark %d: %u spans, %.0f us average\n", i, mark_n[i + 1], mark_sum[i + 1] * 0.08 / mark_n[i + 1]);
     if (getenv("SIMPROF")) report_profile(cycles());
     if (getenv("SIMDIS")) {
-        const char *want = getenv("SIMDIS");
+        const char *list = getenv("SIMDIS");
         int k;
-        for (k = 0; k < nsyms; k++) if (!strcmp(syms[k].name, want)) {
-            uint32_t a, end = k + 1 < nsyms ? syms[k + 1].addr : syms[k].addr + 256;
-            for (a = syms[k].addr; a < end; a += 4)
-                fprintf(stderr, "%08x %08x %10u %12.0f\n", a, rd32(a), pcount[(a - LOAD_ADDR) >> 2], prof[(a - LOAD_ADDR) >> 2]);
+        for (k = 0; k < nsyms; k++) {
+            const char *w = list;
+            size_t n = strlen(syms[k].name);
+            int hit = 0;
+            while (*w) {                        /* names separated by commas */
+                const char *c = strchr(w, ',');
+                size_t len = c ? (size_t)(c - w) : strlen(w);
+                if (len == n && !strncmp(w, syms[k].name, n)) { hit = 1; break; }
+                if (!c) break;
+                w = c + 1;
+            }
+            if (hit) {
+                uint32_t a, end = k + 1 < nsyms ? syms[k + 1].addr : syms[k].addr + 256;
+                if (strchr(list, ','))
+                    fprintf(stderr, "dis %s\n", syms[k].name);
+                for (a = syms[k].addr; a < end; a += 4)
+                    fprintf(stderr, "%08x %08x %10u %12.0f\n", a, rd32(a), pcount[(a - LOAD_ADDR) >> 2], prof[(a - LOAD_ADDR) >> 2]);
+            }
         }
     }
     return 0;

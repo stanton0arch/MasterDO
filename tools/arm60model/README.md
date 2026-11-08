@@ -169,7 +169,10 @@ Environment variables:
   or on Phoenix is replayed here;
 - `SIMPROF=1`: cycles per function of the image, and of the generated code
   (the 40 largest; `SIMPROFALL=1` lists every function with cycles);
-- `SIMDIS=symbol`: executions and cycles of each instruction of a function;
+- `SIMDIS=symbol[,symbol...]`: executions and cycles of each instruction of
+  a function; with several names, each listing starts with a `dis name`
+  line (two runs stopped at frames a and b, listings subtracted: the
+  paths taken over that window only);
 - `SIMWATCH=hex`: the run stops at the first write into the four bytes at
   that address (a stray store into a table or a state word is caught in
   the act); `SIMWATCHSKIP=n` lets the first n writes through, each printed
