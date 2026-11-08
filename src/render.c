@@ -1817,10 +1817,14 @@ void render_update(renderer *r, vdp_state *v)
  * Catch-up in spare time
  *------------------------------------------------------------------------*/
 
-#define CATCH_BUDGET    32      /* cells drawn between two looks at the clock: a
-                                   look costs two system time samples, tens of
-                                   microseconds each on the console, so a look is
-                                   worth about a millisecond and a half of cells */
+#define CATCH_BUDGET    32      /* cells drawn between two looks at the clock (a
+                                   look is a kernel call of about 30 us on the
+                                   console; 32 cells copied from their store take
+                                   about 0.3 ms) */
+#define CATCH_CONV      4       /* a tile converted by the walk of its cells,
+                                   counted as that many cells drawn (its
+                                   conversion with its first cell takes about
+                                   four copies' time) */
 #define CATCH_SCANS     16      /* name table chunks compared between two looks,
                                    when the chunks hold few changed entries */
 
@@ -1878,6 +1882,7 @@ uint32 render_catch_up(renderer *r, vdp_state *v, uint32 (*now)(void), uint32 de
     const uint8 *vram = v->vram;
     uint32 t0 = now();
     uint32 pending = 0;
+    uint32 spent = 0;       /* work of the tile walks since the last look, in cells */
     uint32 cut = 0;
     uint32 nd;
     uint32 k;
@@ -2040,7 +2045,11 @@ uint32 render_catch_up(renderer *r, vdp_state *v, uint32 (*now)(void), uint32 de
     /* The cells of the pending tiles of each layer holding a table (a
      * layer being rebuilt has linked the cells drawn so far: the ones
      * to redraw), in the rows the last picture showed; the others are
-     * left stale, as the update leaves them. */
+     * left stale, as the update leaves them. After a large upload most
+     * lists are short (a tile shown in a few cells, converted with the
+     * first): the work is counted across the lists (cells drawn, tiles
+     * converted, one per list walked) and the clock looked at once it
+     * reaches the budget, wherever the list stands. */
     for (m = 0; m < RENDER_LAYERS; m++) {
         render_layer *l = &r->layer[m];
 
@@ -2057,18 +2066,27 @@ uint32 render_catch_up(renderer *r, vdp_state *v, uint32 (*now)(void), uint32 de
                 if (l->head[j] == NONE)
                     continue;
                 for (;;) {
-                    uint32 next = render_tile_cells_part(l, vram, j, from, CATCH_BUDGET);
+                    uint32 cells = l->cells;
+                    uint32 tiles = l->tiles_conv;
+                    uint32 next = render_tile_cells_part(l, vram, j, from, CATCH_BUDGET - spent);
 
+                    /* A list left unfinished has spent the budget. */
+                    spent += (l->cells - cells) + CATCH_CONV * (l->tiles_conv - tiles) + 1;
+                    if (spent >= CATCH_BUDGET) {
+                        spent = 0;
+                        if (past(now, deadline_us)) {
+                            /* The rest of this list is the cursor's. */
+                            if (next != NONE) {
+                                l->pend_tile = j;
+                                l->pend_cell = next;
+                            }
+                            cut = 1;
+                            goto out;
+                        }
+                    }
                     if (next == NONE)
                         break;
                     from = next;
-                    if (past(now, deadline_us)) {
-                        /* The rest of this list is the cursor's. */
-                        l->pend_tile = j;
-                        l->pend_cell = next;
-                        cut = 1;
-                        goto out;
-                    }
                 }
             }
         }
