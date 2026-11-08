@@ -956,6 +956,19 @@ static void free_block(z80j_state *j, z80j_block *blk)
     j->nblocks--;
 }
 
+/* The clock sample starting a timed operation: the one the caller has
+ * just taken (now_fresh), else a new look. A look at the clock is a kernel
+ * call on the console (tens of microseconds): adjacent looks are shared.
+ * The sample ending a timed operation is kept in now_us, for the caller. */
+static uint32 clock_start(z80j_state *j)
+{
+    if (j->now_fresh) {
+        j->now_fresh = 0;
+        return j->now_us;
+    }
+    return (j->clock != 0) ? j->clock() : 0;
+}
+
 /*
  * Empties zone z: its blocks (chained from zone_head) lose their
  * descriptors and their lookup entries, and every direct branch into the
@@ -977,7 +990,7 @@ static void evict_zone(z80j_state *j, uint32 z)
 
     if (j->zone_blocks[z] == 0)
         return;                         /* nothing to evict */
-    t0 = (j->clock != 0) ? j->clock() : 0;
+    t0 = clock_start(j);
     for (blk = j->zone_head[z]; blk != 0; blk = next) {
         next = blk->znext;
         unhash_block(j, blk);
@@ -1004,8 +1017,10 @@ static void evict_zone(z80j_state *j, uint32 z)
     j->generation++;
     j->stats.evictions++;
     if (j->clock != 0) {
-        uint32 dt = j->clock() - t0;
+        uint32 dt;
 
+        j->now_us = j->clock();
+        dt = j->now_us - t0;
         j->stats.evict_us += dt;
         j->evict_est_us = (j->evict_est_us + dt) >> 1;
     }
@@ -1094,14 +1109,14 @@ void jit_next_zone(z80j_state *j, z80j_area *a)
  * than this, calls for the next zone to be emptied ahead. */
 #define EVICT_AHEAD_BLOCKS 32
 
-uint32 z80j_evict_ahead(z80j_state *j, uint32 elapsed_us, uint32 margin_us)
+uint32 z80j_evict_ahead(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 margin_us)
 {
     uint32 a;
     uint32 z;
 
     if (j->nzones < 3 || (int32)(j->frame_no - j->evict_ahead_wait) < 0)
         return 0;
-    if (elapsed_us + j->evict_est_us + margin_us > j->frame_us)
+    if (now_us - origin_us + j->evict_est_us + margin_us > j->frame_us)
         return 0;
     for (a = 0; a < 2; a++) {
         const z80j_area *ar = &j->area[a];
@@ -1131,7 +1146,10 @@ uint32 z80j_evict_ahead(z80j_state *j, uint32 elapsed_us, uint32 margin_us)
             j->evict_ahead_wait = j->frame_no + j->nzones;
             return 0;
         }
+        j->now_us = now_us;             /* the caller's sample starts the eviction */
+        j->now_fresh = 1;
         evict_zone(j, z);
+        j->now_fresh = 0;
         j->stats.evict_ahead++;
         return 1;
     }
@@ -1355,11 +1373,18 @@ static uint32 sync_allowed(z80j_state *j)
     if (need <= paid)
         return 1;
     {
-        uint32 elapsed = (j->clock != 0) ? j->clock() - j->frame_start_us : 0;
-        uint32 end = elapsed + j->est_us + j->reserve_us;
+        uint32 elapsed = 0;
+        uint32 end;
 
-        if (j->sync_spent_us < j->sync_floor_us && end <= j->frame_us)
+        if (j->clock != 0) {
+            j->now_us = j->clock();
+            elapsed = j->now_us - j->frame_start_us;
+        }
+        end = elapsed + j->est_us + j->reserve_us;
+        if (j->sync_spent_us < j->sync_floor_us && end <= j->frame_us) {
+            j->now_fresh = j->clock != 0;   /* the translation that follows starts now */
             return 1;
+        }
     }
     j->stats.sync_refused++;
     if (j->int_cost != 0)
@@ -1370,15 +1395,18 @@ static uint32 sync_allowed(z80j_state *j)
 }
 
 /* Translates pc now and keeps the running average of the cost. A clock
- * sample force_room has just taken starts the measure (the clock can be a
- * costly system call). */
+ * sample force_room or sync_allowed has just taken starts the measure. */
 static uint32 timed_translate(z80j_state *j, uint32 pc, uint32 *dt)
 {
-    uint32 t0 = j->now_fresh ? j->now_us : (j->clock != 0) ? j->clock() : 0;
+    uint32 t0 = clock_start(j);
     uint32 host = host_force(j, pc);
 
-    j->now_fresh = 0;
-    *dt = (j->clock != 0) ? j->clock() - t0 : j->est_us;
+    if (j->clock != 0) {
+        j->now_us = j->clock();
+        *dt = j->now_us - t0;
+    } else {
+        *dt = j->est_us;
+    }
     j->est_us = (j->est_us * 3 + *dt) >> 2;
     return host;
 }
@@ -1525,8 +1553,10 @@ static uint32 host_for(z80j_state *j, uint32 pc)
 }
 
 /* Translates the hottest address of the queue, after dropping the
- * entries that waited more than QUEUE_FRESH frames. */
-uint32 z80j_prefetch(z80j_state *j)
+ * entries that waited more than QUEUE_FRESH frames; the caller's clock
+ * sample now_us starts the measure, the one ending it is left in
+ * j->now_us. */
+uint32 z80j_prefetch(z80j_state *j, uint32 now_us)
 {
     while (j->nqueue != 0) {
         uint32 best = Z80J_QUEUE;
@@ -1553,16 +1583,14 @@ uint32 z80j_prefetch(z80j_state *j)
         j->queued[pc >> 5] &= ~((uint32)1 << (pc & 31));
         if (find_block(j, pc, jit_block_key(j->ctx, pc)) != 0)
             continue;
-        {
-            uint32 t0 = (j->clock != 0) ? j->clock() : 0;
-
-            j->error = 0;
-            if (translate_block(j, pc, 0, 0) != 0)
-                j->stats.prefetched++;
-            else if (j->error == 5)
-                j->hot[pc] = 255;       /* not translatable: interpreted for good */
-            if (j->clock != 0)
-                j->est_us = (j->est_us * 3 + (j->clock() - t0)) >> 2;
+        j->error = 0;
+        if (translate_block(j, pc, 0, 0) != 0)
+            j->stats.prefetched++;
+        else if (j->error == 5)
+            j->hot[pc] = 255;           /* not translatable: interpreted for good */
+        if (j->clock != 0) {
+            j->now_us = j->clock();
+            j->est_us = (j->est_us * 3 + (j->now_us - now_us)) >> 2;
         }
         return 1;
     }

@@ -194,6 +194,7 @@ typedef struct {
     uint32        last_draw_us;
     uint32        last_spare_us;
     uint32        last_pad_us;
+    uint32        upd_end_us;     /* clock at the end of the last picture update */
     uint32        long_logged;
     uint32        total_us; /* emulation */
     uint32        max_us;
@@ -256,10 +257,14 @@ void  game_reset(game *g);
 /* Runs one frame with the buttons held (SMS_PAD_*) and the PAUSE button
  * (pressed in this frame), or in Game Gear mode the START button (held),
  * then updates the picture; returns 0, or the translator exit reason once
- * the run has stopped. The caller then draws render_chain(g->rd) when
- * render_display_on(g->rd), and calls game_frame_done() with the
- * drawing time. */
-int32 game_frame(game *g, uint32 pad, uint32 pause);
+ * the run has stopped. start_us is a clock sample the caller has just
+ * taken (the start of the emulation); the sample ending the picture
+ * update is left in g->upd_end_us, the start of the drawing. The caller
+ * then draws render_chain(g->rd) when render_display_on(g->rd), and calls
+ * game_frame_done() with the drawing time. Every look at the clock is a
+ * kernel call of tens of microseconds on the console: the frame loop
+ * shares adjacent ones. */
+int32 game_frame(game *g, uint32 pad, uint32 pause, uint32 start_us);
 void  game_frame_done(game *g, uint32 draw_us);
 
 /* Notes of the caller about the frame: a DrawCels error, a frame whose
@@ -283,12 +288,11 @@ void  game_set_name(game *g, const char *name);
  * caller silences them when the run pauses or ends. */
 void  game_set_sound(game *g, psg_dsp *snd);
 
-/* Spare time at the end of a frame that began at frame_start
- * (microsecond clock): translates queued code ahead while a translation
- * still fits before deadline_us (a clock value: the end of the frame, or
- * later when the presentation queue gives more time); returns the time
- * it used. */
-uint32 game_spare_time(game *g, uint32 frame_start, uint32 deadline_us);
+/* Spare time at the end of a frame: translates queued code ahead while a
+ * translation still fits before deadline_us (a clock value: the end of
+ * the frame, or later when the presentation queue gives more time);
+ * returns its last clock sample (the end of the spare time). */
+uint32 game_spare_time(game *g, uint32 deadline_us);
 
 /* Writes out the records buffered during the run (printing costs about
  * 35 us per character on the debug link, so the run only buffers them):

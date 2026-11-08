@@ -28,7 +28,12 @@ Usage (after make and mk.sh):
       frames apart, from 5 frames before to 60 after) and, with -v, the
       100-frame windows. Then the regressions: a window where NEW's mean
       is worse by 0.25 VBL, 0.5 long present or 2 ms of worst time, marked
-      with * when the difference exceeds twice its standard error.
+      with * when the difference exceeds twice its standard error. Last,
+      the pictures (display on) NEW shows later than BASE, frame by frame,
+      summed over the scales: a window marked while NEW shows every
+      picture at the same VBL as BASE or earlier is a phase of the
+      presentation (a picture shown earlier lengthens the hold before the
+      next one), not a frame shown late.
 
 Two runs of the same build at two sets of scales show only noise: a few
 unmarked differences on the games that stay over budget (Road Rash).
@@ -210,6 +215,25 @@ def cmd_compare(a):
               (cart, name, k, mb, mn, se, '  *' if mn - mb > 2 * se else ''))
     print('%d marked, on %d cartridges' % (sum(1 for r in regs if r[4] - r[3] > 2 * r[5]),
                                           len(set(r[0] for r in regs if r[4] - r[3] > 2 * r[5]))))
+    print('Pictures shown later by %s than by %s (display on, over the scales):' % (new, base))
+    nlate = 0
+    for cart in carts:
+        if only and not cart.startswith(only) or not scales_of(new, cart):
+            continue
+        frames, worst, scales = 0, 0, 0
+        for sc in [s for s in scales_of(base, cart) if s in scales_of(new, cart)]:
+            fb, _, sb = load(base, cart, sc)
+            fn, _, sn = load(new, cart, sc)
+            late = [(sn[k] - sb[k]) // P for k in range(min(len(sb), len(sn), len(fn)))
+                    if sn[k] > sb[k] and fn[k][5]]
+            frames += len(late)
+            scales += 1 if late else 0
+            worst = max([worst] + late)
+        if frames:
+            nlate += 1
+            print('  %-26s %d frames on %d scales, at most %d VBL(s) later' % (cart, frames, scales, worst))
+    if nlate == 0:
+        print('  none')
 
 
 def main():

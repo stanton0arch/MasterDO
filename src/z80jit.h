@@ -447,8 +447,8 @@ typedef struct {
     uint32      force_limit_us; /* elapsed time of a frame past which the addresses */
                                 /* past force_at wait for the next frame (0: never) */
     uint32      force_closed;   /* the frame has run past force_limit_us */
-    uint32      now_us;         /* clock sample of force_room */
-    uint32      now_fresh;      /* now_us starts the next timed translation */
+    uint32      now_us;         /* last clock sample of a timed operation */
+    uint32      now_fresh;      /* now_us starts the next timed operation */
     uint32      nwaiting;       /* addresses kept waiting by the limit this frame */
     uint16      waiting[Z80J_WAITING];
 } z80j_state;
@@ -524,12 +524,16 @@ void   z80j_frame_start(z80j_state *j, uint32 start_us, uint32 reserve_us);
 uint32 z80j_spare_fits(const z80j_state *j, uint32 elapsed_us, uint32 margin_us);
 
 /* Translates one queued hot address; returns 0 when the queue is empty.
- * Meant for the spare time at the end of a frame. */
-uint32 z80j_prefetch(z80j_state *j);
+ * Meant for the spare time at the end of a frame. now_us is a clock
+ * sample just taken (the start of the translation); the one taken at its
+ * end is left in j->now_us. */
+uint32 z80j_prefetch(z80j_state *j, uint32 now_us);
 /* Empties ahead, in spare time, the zone the next area to fill up would
- * evict, when the frame (elapsed_us into it) has room for the usual cost
- * of an eviction plus margin_us; returns nonzero when a zone was emptied. */
-uint32 z80j_evict_ahead(z80j_state *j, uint32 elapsed_us, uint32 margin_us);
+ * evict, when the frame (begun at origin_us, now_us being a clock sample
+ * just taken) has room for the usual cost of an eviction plus margin_us;
+ * returns nonzero when a zone was emptied, the clock sample taken at the
+ * end left in j->now_us. */
+uint32 z80j_evict_ahead(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 margin_us);
 
 /* Translates the block at pc if needed, and reports its static exits
  * (jump and call targets, fall-through) in targets. Returns the number of

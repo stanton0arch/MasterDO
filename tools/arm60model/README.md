@@ -98,9 +98,11 @@ their time, the time of the frame outside the parts given (`other`: the
 looks at the clock of the frame loop, the frame's bookkeeping), the banks
 of the three paged slots at the end of the frame); `present.py` replays
 those lines through the queued presentation of the ISO. The harness runs
-the frame loop of `src/main.c` with its looks at the clock (the loop
-start, the end of the pad read, the drawing's start and end, the
-presenter thread's look, one per frame); `DrawCels` and the pad read
+the frame loop of `src/main.c` with its looks at the clock (the end of
+the pad read, which starts the emulation, the end of the drawing, which
+the end of the update starts, the presenter thread's look, one per
+frame; a frame starts at the previous frame's last look, the harness's
+own checks between two frames left out); `DrawCels` and the pad read
 themselves are not run.
 
 `-dumpdiff n` with `-dump`: the frames compared because of a scroll or
@@ -318,7 +320,11 @@ a picture on the screen, the long presents, the longest time a picture
 stays on the screen, the time over budget, the emulation and the
 translations at once, then every window where the new build is worse
 (0.25 VBL, 0.5 long present or 2 ms), marked with `*` when the difference
-exceeds twice its standard error. Running one build twice at two sets of
+exceeds twice its standard error, and last the pictures the new build
+shows later than the base (display on, frame by frame): a window marked
+while no picture is shown later is a phase of the presentation (a
+picture shown one VBL earlier lengthens the hold before the next one,
+shown at the same VBL as before). Running one build twice at two sets of
 scales marks nothing. A whole run of the 24 plays takes about 90 seconds
 on 16 cores; `-args` passes options to `sim` (`-force 16`), `-only`
 restricts the cartridges.

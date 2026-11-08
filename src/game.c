@@ -330,11 +330,11 @@ static uint32 percent(uint32 part, uint32 whole)
     return (part * 100u) / whole;
 }
 
-static void window_start(game *g)
+static void window_start(game *g, uint32 now_us)
 {
     memset(&g->win, 0, sizeof(g->win));
     read_counters(g, &g->win_start);
-    g->win.start_us = plat_usec_now();
+    g->win.start_us = now_us;
 }
 
 void game_free(game *g)
@@ -617,7 +617,7 @@ void game_reset(game *g)
     g->win_total_us = 0;
     g->win_idle_pct = 0;
     read_counters(g, &g->run_start);
-    window_start(g);
+    window_start(g, plat_usec_now());
 }
 
 /* Closes the window into a log record and starts a new one. */
@@ -626,6 +626,7 @@ static void window_close(game *g)
     game_window *w = &g->win;
     game_counters now;
     game_window_rec *p;
+    uint32 now_us;
 
     if (w->frames == 0)
         return;
@@ -633,7 +634,8 @@ static void window_close(game *g)
     g->win_avg_us = w->us / w->frames;
     g->win_max_us = w->max_us;
     g->win_total_us = w->total_us / w->frames;
-    w->real_us = plat_usec_now() - w->start_us;
+    now_us = plat_usec_now();
+    w->real_us = now_us - w->start_us;
     p = (game_window_rec *)rec_alloc(g, GAME_REC_WINDOW, sizeof(*p));
     if (p != NULL) {
         p->first = g->frame - w->frames;
@@ -648,10 +650,10 @@ static void window_close(game *g)
         p->link_full = g->jit.stats.link_full;
         p->nblocks = g->jit.nblocks;
     }
-    window_start(g);
+    window_start(g, now_us);
 }
 
-int32 game_frame(game *g, uint32 pad, uint32 pause)
+int32 game_frame(game *g, uint32 pad, uint32 pause, uint32 start_us)
 {
     z80j_ctx *ctx = g->ctx;
     uint32 idle0;
@@ -683,7 +685,7 @@ int32 game_frame(game *g, uint32 pad, uint32 pause)
         }
     }
 
-    t0 = plat_usec_now();
+    t0 = start_us;
     z80j_frame_start(&g->jit, t0, g->last_snd_us + g->last_upd_us + g->last_draw_us +
                      FRAME_MARGIN_US);
     sms_frame(g->sms, pad, pause);
@@ -704,21 +706,23 @@ int32 game_frame(game *g, uint32 pad, uint32 pause)
 
     /* The PSG registers as the frame leaves them go to the DSP voices
      * before the picture is built: the sound of the frame then plays
-     * while its picture waits for its VBL. */
+     * while its picture waits for its VBL. It is timed when it tweaked
+     * knobs (kernel calls); otherwise it is a few compares, left in the
+     * update's time. */
     g->last_snd_us = 0;
-    if (g->snd != NULL) {
-        uint32 t2;
-
+    if (g->snd != NULL &&
         psg_update(g->snd, g->sms->psg_reg,
                    g->sms->vdp.lines == VDP_LINES_PAL ? PSG_CLOCK_PAL : PSG_CLOCK_NTSC,
-                   g->sms->gg_port[6]);
-        t2 = plat_usec_now();
+                   g->sms->gg_port[6]) != 0) {
+        uint32 t2 = plat_usec_now();
+
         g->last_snd_us = t2 - t1;
         t1 = t2;
     }
 
     render_update(g->rd, &g->sms->vdp);
-    g->last_upd_us = plat_usec_now() - t1;
+    g->upd_end_us = plat_usec_now();
+    g->last_upd_us = g->upd_end_us - t1;
     return 0;
 }
 
@@ -848,13 +852,12 @@ void game_set_frame_us(game *g, uint32 us)
     z80j_set_force_limit(&g->jit, FORCE_PERIODS * us);
 }
 
-uint32 game_spare_time(game *g, uint32 frame_start, uint32 deadline_us)
+uint32 game_spare_time(game *g, uint32 deadline_us)
 {
     uint32 t0 = plat_usec_now();
     uint32 now = t0;
     uint32 origin = deadline_us - g->frame_us;  /* the frame the deadline ends */
 
-    (void)frame_start;
     /* With the display off the picture's catch-up comes first (the work
      * the first frame with the display on would pay), then the
      * translation of queued code in what is left. */
@@ -864,17 +867,18 @@ uint32 game_spare_time(game *g, uint32 frame_start, uint32 deadline_us)
     }
     /* The zone the next translations would have to empty is emptied now
      * when the frame has room for it, so that no frame pays an eviction
-     * with a translation at once. */
-    if (z80j_evict_ahead(&g->jit, now - origin, FRAME_MARGIN_US))
-        now = plat_usec_now();
+     * with a translation at once. Each translation starts at the clock
+     * sample ending the previous step. */
+    if (z80j_evict_ahead(&g->jit, now, origin, FRAME_MARGIN_US))
+        now = g->jit.now_us;
     while (z80j_spare_fits(&g->jit, now - origin, FRAME_MARGIN_US)) {
-        if (!z80j_prefetch(&g->jit))
+        if (!z80j_prefetch(&g->jit, now))
             break;
-        now = plat_usec_now();
+        now = g->jit.now_us;
     }
     g->win.spare_us += now - t0;
     g->last_spare_us = now - t0;
-    return now - t0;
+    return now;
 }
 
 void game_note_draw_error(game *g)

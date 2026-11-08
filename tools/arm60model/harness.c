@@ -686,6 +686,8 @@ void hmain(void)
     uint32 dump_diff = sim_arg(17);
     uint32 diff_written = 0;
     uint32 f;
+    uint32 last;            /* the frame loop's last look at the clock */
+    uint32 last_end;        /* the model's clock at the end of the frame loop's work */
     uint32 ndiff;
     uint32 outside;
 
@@ -739,6 +741,8 @@ void hmain(void)
         z80j_set_budget(&g.jit, plat_usec_now, sim_arg(5), sim_arg(6), PLAT_NTSC_FRAME_US);
     }
     game_reset(&g);
+    last = plat_usec_now();
+    last_end = sim_time();
     for (f = 0; f < frames; f++) {
         uint32 pad = sim_pad(f);
 
@@ -746,23 +750,28 @@ void hmain(void)
             sim_mark(15);           /* profile from here on */
         {
             /* The frame loop of the ISO (main.c, queued presentation) with
-             * its looks at the clock: the loop start, the end of the pad
-             * read (the read itself is not modelled), the drawing's start
-             * and end, and the presenter thread's look at its VBL, one per
-             * frame. "other" is the time of the frame outside the parts
+             * its looks at the clock: the end of the pad read (the read
+             * itself is not modelled), which starts the emulation, the
+             * drawing's end (the update's end starts it), and the presenter
+             * thread's look at its VBL, one per frame. A frame starts at
+             * the previous one's last look (the model never waits for a
+             * screen). "other" is the time of the frame outside the parts
              * the Frame: line gives (emulation, update, drawing, spare
              * time): those looks and the frame's bookkeeping. */
             z80j_stats s0 = g.jit.stats;
             uint32 i0 = g.ctx->int_insns;
             uint32 c0 = sim_time();
-            uint32 t0 = plat_usec_now();
+            /* The harness's own work between two frames (its checks) is
+             * not the frame loop's: the frame starts that much later. */
+            uint32 t0 = last + (c0 - last_end);
+            uint32 now = plat_usec_now();
             uint32 dc = 0;          /* DrawCels, modelled */
-            uint32 dl = 0;          /* the looks around it */
+            uint32 dl = 0;          /* the look ending it */
             uint32 draw;
             uint32 other;
 
-            game_pad_time(&g, plat_usec_now() - t0);
-            if (game_frame(&g, pad & 0x3F, (pad >> 8) & 1) != 0)
+            game_pad_time(&g, now - t0);
+            if (game_frame(&g, pad & 0x3F, (pad >> 8) & 1, now) != 0)
                 break;
             /* A DrawCels of 3.5 ms is added to the frame time, as on
              * the console, before the spare time is used (none with the
@@ -772,9 +781,7 @@ void hmain(void)
              * its pixels, an estimate until measured on the console; with
              * its display off, the blank window, not costed. */
             if (!render_repeated(g.rd) && (render_display_on(g.rd) || g.sms->gg)) {
-                uint32 d0 = plat_usec_now();
-
-                dl = plat_usec_now() - d0;
+                dl = plat_usec_now() - g.upd_end_us;
                 if (render_display_on(g.rd))
                     dc = 3500;
                 if (g.sms->gg)
@@ -783,10 +790,11 @@ void hmain(void)
             draw = dc + dl;
             rep_count += render_repeated(g.rd);
             game_frame_done(&g, draw);
-            game_spare_time(&g, t0 - dc, t0 - dc + PLAT_NTSC_FRAME_US);
+            last = game_spare_time(&g, t0 - dc + PLAT_NTSC_FRAME_US);
             (void)plat_usec_now();      /* the presenter thread's look */
-            other = sim_time() - c0 - (g.last_us + g.last_snd_us + g.last_upd_us + dl +
-                                       g.last_spare_us);
+            last_end = sim_time();
+            other = last_end - c0 - (g.last_us + g.last_snd_us + g.last_upd_us + dl +
+                                      g.last_spare_us);
             if (sim_arg(19)) {
                 /* -framelog: one line per frame, for the presentation
                  * model (present.py) and the translation policy. */

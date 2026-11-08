@@ -205,10 +205,12 @@ static void fill_border(platform *p, app_state *st, uint32 force)
 }
 
 /* Draws the cels of the current picture into the back screen; returns
- * the DrawCels time. */
+ * the drawing time, from the end of the picture update (the last look at
+ * the clock: the border fill, when its colour changes, is counted with
+ * the drawing). */
 static uint32 draw_picture(platform *p, app_state *st)
 {
-    uint32 t0;
+    uint32 t0 = g.upd_end_us;
     uint32 dt;
     Err err;
 
@@ -217,7 +219,6 @@ static uint32 draw_picture(platform *p, app_state *st)
         return 0;
     }
     fill_border(p, st, 0);
-    t0 = plat_usec_now();
     /* Game Gear with no line displayed: the LCD window in the backdrop
      * colour, the case left black. */
     err = DrawCels(plat_bitmap(p, p->back), render_display_on(g.rd) ? render_chain(g.rd)
@@ -314,10 +315,18 @@ static void reset_borders(app_state *st)
         st->border[i] = NO_COLOR;
 }
 
+/* The frame loop looks at the clock (a kernel call of tens of
+ * microseconds on the console) at the end of the pad read, which starts
+ * the emulation, at the ends of the emulation, of the picture update
+ * (the start of the drawing) and of the drawing, and in the spare time.
+ * A frame starts at the loop's last look: the end of the previous
+ * frame's spare time, or the presentation that freed the screen the loop
+ * waited for (the presenter thread looks at the clock then). */
 static void run_game(platform *p, app_state *st)
 {
     uint32 prev = plat_pad_state();
     uint32 shown = plat_usec_now();     /* direct mode: return of the last presentation */
+    uint32 last = shown;                /* the loop's last look at the clock */
     uint32 longs = p->long_presents;    /* queued mode: long presents seen */
     uint32 queued = plat_has_presenter(p) && !st->direct;
     char buf[48];
@@ -327,14 +336,14 @@ static void run_game(platform *p, app_state *st)
     set_picture(p, st, render_win_w(g.rd), render_win_h(g.rd));
     render_forget_picture(g.rd);
     for (;;) {
-        uint32 t0 = plat_usec_now();
+        uint32 t0 = last;
         uint32 held = plat_pad_state();
         uint32 pressed = held & ~prev;
         uint32 draw_us;
         uint32 again;
-        uint32 now;
+        uint32 now = plat_usec_now();
 
-        game_pad_time(&g, plat_usec_now() - t0);
+        game_pad_time(&g, now - t0);
         prev = held;
         if (pressed & ControlX)
             break;
@@ -349,6 +358,7 @@ static void run_game(platform *p, app_state *st)
             set_picture(p, st, st->pic_w, st->pic_h);
             render_forget_picture(g.rd);
             shown = plat_usec_now();
+            last = shown;
             longs = p->long_presents;
             continue;
         }
@@ -360,13 +370,14 @@ static void run_game(platform *p, app_state *st)
                    queued ? "queued (presenter thread)" : "direct (present, then wait for the VBL)");
             render_forget_picture(g.rd);
             shown = plat_usec_now();
+            now = shown;
             longs = p->long_presents;
         }
 
         /* P: the PAUSE button when pressed, or START while held on the
          * Game Gear. */
         if (game_frame(&g, sms_buttons(held),
-                       ((st->gg ? held : pressed) & ControlStart) != 0) != 0) {
+                       ((st->gg ? held : pressed) & ControlStart) != 0, now) != 0) {
             plat_drain(p);
             plat_reset_clip(p);
             sprintf(buf, "RUN STOPPED AT PC %04lX", (unsigned long)g.stop_pc);
@@ -409,14 +420,18 @@ static void run_game(platform *p, app_state *st)
                 if ((int32)(vbl - deadline) > 0)
                     deadline = vbl;
             }
-            game_spare_time(&g, t0, deadline);
+            last = game_spare_time(&g, deadline);
             plat_next_screen(p);
+            /* A presentation after the last look freed the screen waited
+             * for: the next frame starts with it. */
+            if ((int32)(p->shown_us - last) > 0)
+                last = p->shown_us;
             if (p->long_presents != longs) {
                 longs = p->long_presents;
                 game_note_long_vbl(&g, p->long_us);
             }
         } else {
-            game_spare_time(&g, t0, t0 + p->frame_us);
+            game_spare_time(&g, t0 + p->frame_us);
             if (again)
                 plat_present_again(p);
             else
@@ -425,6 +440,7 @@ static void run_game(platform *p, app_state *st)
             if (now - shown >= PLAT_LONG_US)
                 game_note_long_vbl(&g, now - shown);
             shown = now;
+            last = now;
         }
     }
     plat_drain(p);
@@ -605,7 +621,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: clock calls measured at start-up and counted per window; "
+    printf("masterdo: one kernel call per look at the clock, adjacent looks shared; "
            "translator decoding from opcode records, segments cut while decoding, "
            "flag scan in assembly; "
            "Game Gear mode: 12-bit colours, 160x144 LCD window, START button, "
