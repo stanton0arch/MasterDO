@@ -604,7 +604,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: translation forced from the sixteenth entry; "
+    printf("masterdo: spare-time translation queue entries dropped after four frames; "
            "Game Gear mode: 12-bit colours, 160x144 LCD window, START button, "
            "PSG stereo, Game Gear images listed from the gg directory\n");
     if (plat_init(&plat) < 0)

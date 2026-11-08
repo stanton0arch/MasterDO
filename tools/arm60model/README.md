@@ -276,6 +276,32 @@ Images with a 512-byte copier header are loaded past it, as on the console.
 Requirements: `gcc`, `python3`, and the compiler tools of the SDK in
 `bin/compiler/linux`.
 
+## Regression check
+
+`regress.py` judges a change on the recorded plays of both panels. A
+replayed play depends on its own timing (a few microseconds in a frame
+change which translations the budget lets through, and the course of the
+run with them), so each play is run at eleven timing scales (`SIMSCALE`
+0.9975 to 1.0025) and the means are compared, per cartridge, per burst
+window and per 100-frame window:
+
+```
+cp tools/arm60model/sim tools/arm60model/sim.bin tools/arm60model/sim.sym OLD/   # build replaced
+tools/arm60model/regress.py run RUNS/old -img OLD
+tools/arm60model/regress.py run RUNS/new                 # the build of this directory
+tools/arm60model/regress.py compare RUNS/old RUNS/new    # -v: 100-frame windows too
+```
+
+The comparison prints, per cartridge and per burst, the VBLs missed with
+a picture on the screen, the long presents, the longest time a picture
+stays on the screen, the time over budget, the emulation and the
+translations at once, then every window where the new build is worse
+(0.25 VBL, 0.5 long present or 2 ms), marked with `*` when the difference
+exceeds twice its standard error. Running one build twice at two sets of
+scales marks nothing. A whole run of the 24 plays takes about 90 seconds
+on 16 cores; `-args` passes options to `sim` (`-force 16`), `-only`
+restricts the cartridges.
+
 `../z80int_test/` holds the reference Z80 interpreter in C (the assembly
 one of `src/z80int_a.s` follows it) with a native ZEXDOC harness; see the
 comment at the top of `zex.c` for building and running it. `smsref.c`
