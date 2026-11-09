@@ -130,7 +130,7 @@ typedef struct {
                             /* past hot_sync_at is handed to the C side again */
     uint32 hot_force_at;    /* +0x4D4: count at which it is handed over regardless */
     uint32 resume_tab;      /* +0x4D8: interrupted segments (z80j_resume[Z80J_RESUMES]) */
-    uint32 event_a;         /* +0x4DC: machine event handler in assembly, or 0 */
+    uint32 event_a;         /* +0x4DC: machine event handler in assembly (see below) */
     uint32 irq_count;       /* +0x4E0: maskable interrupts taken by the glue */
     uint32 resumed_count;   /* +0x4E4: returns resumed by the glue */
     uint32 port_inn;        /* +0x4E8: 256 handlers of INI / IND runs */
@@ -154,10 +154,13 @@ typedef struct {
 /*
  * Emulated machine: I/O ports, special writes and scanline events. The
  * machine may also give the context an event handler in assembly
- * (ctx->event_a, called by the glue at a stretch end with r0 = ctx->line
- * and r10 = global pointer, preserving r1-r11, returning r0 = 0 when it
- * handled the event, with r12 = the new ctx->event_line, and nonzero,
- * with nothing changed, when the C callback must).
+ * (ctx->event_a; z80j_init sets z80j_event_c, which declines every event).
+ * The glue jumps to it at the end of a stretch on the event line, with
+ * r0 = ctx->line, r10 = global pointer and lr = a return address; it
+ * preserves r1-r11 and returns, once it has handled the event, to lr when
+ * the maskable interrupt line (ctx->irq_line) is high and to lr - 4 when
+ * it is low (the glue does not read the line again), or to lr - 8, with
+ * nothing changed, when the C callback must handle the event.
  *
  * Time is counted in scanlines of 228 T-states. The Z80 runs in stretches
  * that end at the start of scanline ctx->line: the next event line or the
@@ -568,6 +571,7 @@ void   z80i_loop(void);
 void   z80j_glue_link(void);
 void   z80j_glue_miss(void);
 void   z80j_glue_seg_timeout(void);
+void   z80j_event_c(void);
 void   z80j_glue_leave(void);
 void   z80j_glue_halt(void);
 void   z80j_glue_abort(void);

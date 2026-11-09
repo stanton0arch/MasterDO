@@ -2061,6 +2061,7 @@ void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
     j->evict_est_us = 4000;         /* until one is measured */
     memcpy(&j->glue, glue, sizeof(j->glue));
     ctx->resume_tab = JIT_ADDR(j->resume);
+    ctx->event_a = JIT_ADDR(z80j_event_c);  /* a machine may set its own */
     ctx->irq_count = 0;
     ctx->resumed_count = 0;
 

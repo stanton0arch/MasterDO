@@ -1013,20 +1013,69 @@ wm_slow_put
 
 ;----------------------------------------------------------------------------
 ; Machine event at the end of a stretch (ctx->event_a): vdp_event in
-; assembly. In: r0 = ctx->line, r10 = global pointer. Preserves r1-r11.
-; Out: r0 = 0 when handled, with r12 = the new ctx->event_line; r0 = 1 when
-; the C callback must run instead (the line counter crossed an underflow
-; with lines left over, which needs a division): nothing is changed in
-; that case. The timing fields are loaded together (frame base, VBlank
-; done, line counter), registers 0-3 as one word.
+; assembly, with the conventions of z80j_machine (z80jit.h). In: r0 =
+; ctx->line, r10 = global pointer, lr = return address. Preserves r1-r11.
+; Returns to lr when the interrupt line is high after the event, to lr - 4
+; when it is low, and to lr - 8, with nothing changed, when the C callback
+; must run instead (the line counter crossed an underflow with lines left
+; over, which needs a division).
+;
+; The event of a game raising line interrupts, the line counter
+; underflowing on the event line inside the active display (VBlank flag
+; not set yet) with line interrupts enabled, takes a short path: the
+; counter reloads from register 10, the line flag and the interrupt line
+; go high, the next event is the next underflow, at most the line after
+; the active display. Every other event takes the full path, where the
+; timing fields are loaded together (frame base, VBlank done, line
+; counter), registers 0-3 as one word.
 ;----------------------------------------------------------------------------
 sms_vdp_event_a
-        VDP
-        stmfd   sp!,{r1-r7}
-        add     r1,r12,#V_FRAMEBASE
-        ldmia   r1,{r1-r4}              ; frame base, VBlank done, lc_k, lc_val
-        ldr     r5,[r12,#V_ACTIVE]      ; a, active lines
+        stmfd   sp!,{r1,r2,lr}
+        add     lr,r10,#VDP_OFFSET
+        add     lr,lr,#V_FRAMEBASE
+        ldmia   lr,{r1,r2,r12,lr}       ; frame base, VBlank done, lc_k, lc_val
         sub     r0,r0,r1                ; k = line of the frame
+        add     r12,r12,lr
+        add     r12,r12,#1              ; line of the next underflow
+        teq     r12,r0
+        teqeq   r2,#0
+        bne     ev_full_a               ; no underflow here, or past the VBlank line
+        VDP
+        ldr     r2,[r12,#V_ACTIVE]
+        cmp     r0,r2
+        bhi     ev_full                 ; past the active display
+        ldr     lr,[r12,#V_REG]
+        tst     lr,#0x10000000          ; R0 bit 4: line interrupts enabled
+        beq     ev_full
+        ldrb    lr,[r12,#V_REG+10]      ; the counter reloads
+        sub     r2,r2,r0                ; lines to the end of the active display
+        cmp     lr,r2
+        movlo   r2,lr
+        add     r1,r1,r0
+        add     r1,r1,r2
+        add     r1,r1,#1                ; the next underflow, at most line a + 1
+        str     r1,[r10,#EVENT_LINE]
+        mov     r2,#1
+        str     r2,[r12,#V_LINEFLAG]
+        str     r2,[r10,#IRQ_LINE]
+        add     r12,r12,#V_LCK
+        stmia   r12,{r0,lr}             ; lc_k = k, lc_val = register 10
+        ldmfd   sp!,{r1,r2,pc}          ; the interrupt line high
+ev_full                                 ; r0 = k, r1 = frame base
+        stmfd   sp!,{r3-r7}
+        VDP
+        add     r2,r12,#V_VBLDONE
+        ldmia   r2,{r2-r4}              ; VBlank done, lc_k, lc_val
+        ldr     r5,[r12,#V_ACTIVE]      ; a, active lines
+        b       ev_sync
+ev_full_a                               ; r0 = k, r1 = frame base, r2 = VBlank done,
+        stmfd   sp!,{r3-r7}             ; r12 = lc_k + lc_val + 1, lr = lc_val
+        sub     r3,r12,lr
+        sub     r3,r3,#1                ; lc_k
+        mov     r4,lr                   ; lc_val
+        VDP
+        ldr     r5,[r12,#V_ACTIVE]      ; a, active lines
+ev_sync
         ; lc_sync(k)
         cmp     r0,r3
         bls     ev_synced               ; k <= lc_k
@@ -1072,6 +1121,7 @@ ev_irq
         andeqs  r6,r0,r7,lsl#28         ; line flag against R0 bit 4
         movne   r6,#1
         str     r6,[r10,#IRQ_LINE]
+        mov     lr,r6                   ; for the return
         ; next event: VBlank, or the next counter underflow while line
         ; interrupts are enabled, else the end of the frame
         ldr     r6,[r12,#V_LINES]
@@ -1091,12 +1141,14 @@ ev_irq
 ev_sched
         add     r12,r6,r1
         str     r12,[r10,#EVENT_LINE]
-        mov     r0,#0
-        ldmfd   sp!,{r1-r7}
-        mov     pc,lr
+        teq     lr,#0
+        ldmfd   sp!,{r3-r7}
+        ldmfd   sp!,{r1,r2,lr}
+        movne   pc,lr                   ; the interrupt line high
+        sub     pc,lr,#4                ; low
 ev_fallback
-        mov     r0,#1
-        ldmfd   sp!,{r1-r7}
-        mov     pc,lr
+        ldmfd   sp!,{r3-r7}
+        ldmfd   sp!,{r1,r2,lr}
+        sub     pc,lr,#8                ; declined: the C callback
 
         END

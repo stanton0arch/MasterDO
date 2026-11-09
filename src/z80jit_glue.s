@@ -19,6 +19,7 @@
         EXPORT  z80j_glue_link
         EXPORT  z80j_glue_miss
         EXPORT  z80j_glue_seg_timeout
+        EXPORT  z80j_event_c
         EXPORT  z80j_glue_leave
         EXPORT  z80j_glue_halt
         EXPORT  z80j_glue_abort
@@ -209,9 +210,9 @@ z80j_glue_seg_timeout
         ; machine event (through its assembly handler), a maskable
         ; interrupt in mode 1 (or 0) pushed to writable memory, the next
         ; stretch, then the vector or the interrupted segment. Anything
-        ; else (end of the run, no assembly handler or one declining,
-        ; NMI, mode 2, a push to a special page or across two pages, HALT)
-        ; takes the C path, which resumes the segment from the context.
+        ; else (end of the run, a handler declining, NMI, mode 2, a push
+        ; to a special page or across two pages, HALT) takes the C path,
+        ; which resumes the segment from the context.
         add     r12,r10,#RUN_END :AND: 0xF00
         add     r12,r12,#RUN_END :AND: 0xFF
         ldmia   r12,{r0,r12,lr}         ; run end, line, event line
@@ -219,49 +220,51 @@ z80j_glue_seg_timeout
         beq     seg_slow
         cmp     r12,lr
         bne     seg_no_event
+        ; The machine event: its handler preserves r1-r11 and returns to
+        ; one of the three places below (see z80j_machine in z80jit.h).
         mov     r0,r12                  ; the line, for the handler
-        ldr     r12,[r10,#EVENT_A]
-        teq     r12,#0
-        beq     seg_slow
-        mov     lr,pc
-        mov     pc,r12                  ; r1-r11 preserved
-        teq     r0,#0
-        bne     seg_slow                ; the handler declined (nothing changed)
-seg_no_event
+        adr     lr,seg_raised
+        ldr     pc,[r10,#EVENT_A]
+        b       seg_slow                ; lr - 8: declined, nothing changed
+        b       seg_low                 ; lr - 4: handled, the interrupt line low
+seg_raised                              ; lr: handled, the interrupt line high
         ldr     r0,[r10,#NMI]
+        ldr     r12,[r10,#IFF1]
         teq     r0,#0
         bne     seg_slow
-        ldr     r0,[r10,#IRQ_LINE]
-        ldr     r12,[r10,#IFF1]
-        ands    r0,r0,r12
-        beq     seg_resume
+        teq     r12,#0
+        beq     seg_resume              ; maskable interrupts disabled
         ldr     r0,[r10,#IM]
         cmp     r0,#2
         beq     seg_slow
-        ; Remember the interrupted segment for the return (not for RAM
-        ; code, whose entry check alone notices a rewrite)
-        bl      seg_key                 ; r12 = key of the code at r1, or -1 for RAM
-        cmn     r12,#1
-        beq     seg_push
+seg_take
+        ; Remember the interrupted segment for the return, under the key
+        ; of its code (jit_block_key): 0 for a fixed page, (kind << 16) |
+        ; bank for a paged slot; not for RAM code, whose entry check alone
+        ; notices a rewrite.
+        add     r12,r10,#PAGE_KIND
+        ldrb    r12,[r12,r1,lsr#8]
+        ands    r12,r12,#PAGE_KIND_MASK
+        bne     seg_take_slot
+seg_take_key
         ldr     r0,[r10,#RESUME_TAB]
         eor     lr,r1,r1,lsr#6
         and     lr,lr,#63
         add     r0,r0,lr,lsl#4
         stmia   r0,{r1,r2,r12}
 seg_push
-        ; The return address pushed, both bytes in one writable page
-        mov     r0,r11,lsr#16
-        sub     r0,r0,#2
-        bic     r0,r0,#0x10000          ; new SP
-        mov     r12,r0,lsr#8
+        ; The return address pushed, both bytes in one writable page (SP
+        ; in bits 16-31 of r11, the low half zero)
+        sub     r0,r11,#0x20000         ; new SP
+        mov     r12,r0,lsr#24
         ldr     r12,[r10,r12,lsl#2]     ; write entry of its page
         teq     r12,#0
         beq     seg_slow
-        and     lr,r0,#0xFF
-        teq     lr,#0xFF
+        and     lr,r0,#0xFF0000
+        teq     lr,#0xFF0000
         beq     seg_slow                ; the second byte in the next page
-        mov     r11,r0,lsl#16           ; SP -= 2
-        add     r12,r12,r0
+        mov     r11,r0                  ; SP -= 2
+        add     r12,r12,r0,lsr#16
         strb    r1,[r12]                ; low byte of the return address
         mov     r1,r1,lsr#8
         strb    r1,[r12,#1]
@@ -277,6 +280,30 @@ seg_push
         add     r1,r10,#LOOKUP
         mov     r0,#0x38                ; for the miss glue, should the entry be gone
         ldr     pc,[r1,#0x38*4]         ; the vector (the entry checks its bank or bytes)
+seg_take_slot
+        cmp     r12,#4
+        bhi     seg_push                ; RAM (or unknown): no entry
+        add     r0,r10,#0x400
+        add     r0,r0,#SLOT_BANK-4-0x400
+        ldr     r0,[r0,r12,lsl#2]       ; slot_bank[kind - 1]
+        orr     r12,r0,r12,lsl#16
+        b       seg_take_key
+seg_no_event
+        ldr     r0,[r10,#NMI]
+        teq     r0,#0
+        bne     seg_slow
+        ldr     r0,[r10,#IRQ_LINE]
+        ldr     r12,[r10,#IFF1]
+        ands    r0,r0,r12
+        beq     seg_resume
+        ldr     r0,[r10,#IM]
+        cmp     r0,#2
+        bne     seg_take
+        b       seg_slow
+seg_low
+        ldr     r0,[r10,#NMI]
+        teq     r0,#0
+        bne     seg_slow
 seg_resume
         STRETCH
         mov     pc,r2                   ; the interrupted segment
@@ -288,21 +315,10 @@ seg_slow
         callc   z80j_stretch_end
         b       jit_continue
 
-; Key of the code at the Z80 address in r1 (jit_block_key): 0 for a fixed
-; page, (kind << 16) | bank for a paged slot, -1 for RAM. Uses r0, r12.
-seg_key
-        add     r12,r10,#PAGE_KIND
-        ldrb    r12,[r12,r1,lsr#8]
-        ands    r12,r12,#PAGE_KIND_MASK
-        moveq   pc,lr                   ; fixed: 0
-        cmp     r12,#4
-        mvnhi   r12,#0                  ; RAM (or unknown): -1
-        movhi   pc,lr
-        add     r0,r10,#0x400
-        add     r0,r0,#SLOT_BANK-4-0x400
-        ldr     r0,[r0,r12,lsl#2]       ; slot_bank[kind - 1]
-        orr     r12,r0,r12,lsl#16
-        mov     pc,lr
+; Machine event handler of a machine without one in assembly (the default
+; ctx->event_a set by z80j_init): declines, so that the C callback runs.
+z80j_event_c
+        sub     pc,lr,#8
 
 ;----------------------------------------------------------------------------
 ; Leaves the block: the machine may have raised an interrupt or moved its
@@ -346,9 +362,19 @@ z80j_glue_miss
         bne     miss_c
         teq     r2,#0
         beq     miss_c
-        stmfd   sp!,{r0,lr}
-        bl      seg_key                 ; r12 = key of the code at r1 now
-        ldmfd   sp!,{r0,lr}
+        ; The key of the code at that address now (as seg_take computes
+        ; it; RAM code is never remembered)
+        add     r12,r10,#PAGE_KIND
+        ldrb    r12,[r12,r0,lsr#8]
+        ands    r12,r12,#PAGE_KIND_MASK
+        beq     miss_key                ; fixed page: 0
+        cmp     r12,#4
+        bhi     miss_c                  ; RAM (or unknown)
+        add     r1,r10,#0x400
+        add     r1,r1,#SLOT_BANK-4-0x400
+        ldr     r1,[r1,r12,lsl#2]       ; slot_bank[kind - 1]
+        orr     r12,r1,r12,lsl#16
+miss_key
         cmp     r12,lr
         bne     miss_c
         ldr     r1,[r10,#RESUMED_COUNT]
