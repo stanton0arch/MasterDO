@@ -78,6 +78,7 @@
         IMPORT  jit_link_stub
         IMPORT  z80j_glue_out_split
         IMPORT  z80j_glue_pop_af
+        IMPORT  z80j_glue_pair_one
 
 ; jit_insn (z80jit_int.h; offsets checked in z80jit.c). The fields of a
 ; byte are given by their byte offset in the big-endian words.
@@ -146,6 +147,7 @@ STUB_TAKEN      EQU     3
 STUB_WRITE      EQU     4
 STUB_LEAVE      EQU     5
 STUB_DYN        EQU     6
+STUB_PAIR       EQU     7
 
 ; z80j_state: the glue comes first for the emitter (r8), the rest is
 ; addressed from it (offsets checked in z80jit.c).
@@ -178,6 +180,8 @@ C_WTAB          EQU     0x100
 C_PORT_IN       EQU     0x59C
 C_PORT_OUT      EQU     0x5A0
 C_PORT_OUTN     EQU     0x5A4
+C_PAIR_A        EQU     0x5EC
+C_PAIR_CHK      EQU     0x5F4
 C_PAGE_KIND     EQU     0x600
 GOFF_IY         EQU     0x424
 GOFF_BC2        EQU     0x430
@@ -192,6 +196,7 @@ GOFF_LINE       EQU     0x460
 GOFF_SLOT_BANK  EQU     0x47C
 GOFF_SCRATCH    EQU     0x494
 GOFF_IDLE       EQU     0x498
+GOFF_PAIR       EQU     0x4F0
 PZST_OFF        EQU     0x600
 FENC_OFF        EQU     0x700
 FDEC_OFF        EQU     0x800
@@ -211,6 +216,8 @@ RUN_GRP_HASC    EQU     0x01000000
 RUN_BUF_HI      EQU     0x20            ; Z80J_RUN_BUF >> 8
 RUN_BUF_N_HI    EQU     0x40            ; Z80J_RUN_BUF_N >> 8
 OBUF_N          EQU     0x10000         ; Z80J_OBUF_N
+RUN_PAIR        EQU     0x20000000      ; a pair of outputs (z80jit_int.h)
+RUN_PAIR_LAST   EQU     0x10000000
 
 K_JRCC          EQU     1
 K_CALLCC        EQU     3
@@ -302,6 +309,7 @@ W_MOV_R12_R     EQU     0xE1A0C000      ; MOV r12,r0 | register
 W_MOV_R2_LR     EQU     0xE1A0200E      ; MOV r2,lr
 W_MOV_R1_IMM    EQU     0xE3A01000      ; MOV r1,#0 | immediate
 W_TEQ_R0        EQU     0xE3300000      ; TEQ r0,#0
+W_ADD_R2_R8     EQU     0xE2882000      ; ADD r2,r8,#0
 W_LDR_R0_G      EQU     0xE59A0000      ; LDR r0,[r10] | offset
 W_CMP_R0_IMM    EQU     0xE3500000      ; CMP r0,#0 | bank
 
@@ -749,6 +757,8 @@ eb_stub_loop
         beq     st_link
         cmp     r12,#STUB_LEAVE :SHL: ST_KIND_SHIFT
         beq     st_leave
+        cmp     r12,#STUB_PAIR :SHL: ST_KIND_SHIFT
+        beq     st_pair
         mov     r6,r3                   ; the instruction, for the helpers
         cmp     r12,#STUB_TAKEN :SHL: ST_KIND_SHIFT
         beq     st_taken
@@ -818,6 +828,23 @@ st_write
         ldr     r12,[r4,#B_KEY]
         stmia   r5!,{r0,r1,r2,r3,r12}   ; MOV r2,lr; BL; pc; t * CYCLE; key
         b       eb_stub_loop
+t_pair_one      DCD     z80j_glue_pair_one
+; Pair: the first output of a pair, a word being half written, sent
+; alone: MOV r1,#port, ADD r2,r8,#t * CYCLE, BL z80j_glue_pair_one, B
+; back after the branch to the stub (where the glue returns when the
+; output does not leave), then a leave after the first output.
+st_pair
+        MOVW    r0,W_MOV_R1_IMM
+        orr     r0,r0,r3
+        EMIT    r0
+        MOVW    r0,W_ADD_R2_R8
+        orr     r0,r0,#0xC00            ; t * CYCLE, a byte in bits 8-15 (t is
+        orr     r0,r0,r6                ; never zero: the second output follows)
+        EMIT    r0
+        ldr     r0,t_pair_one
+        EMITB   r12,r0,BL_AL
+        add     r0,r1,#4                ; after the branch to the stub
+        EMITB   r12,r0,B_AL
 ; Leave: r0 = the next address, r1 = the T-states times CYCLE, B leave.
 st_leave
         mov     r0,r2
@@ -4227,7 +4254,7 @@ m_jp_static
 m_out_n                                 ; OUT (n),A
         ldr     r0,[r6,#I_RUN]
         cmp     r0,#0
-        bne     mon_grp
+        bne     mon_run
         ldr     r1,[r6,#I_N]
         and     r1,r1,#0xFF
         TMPL    r0,t4_mov_r1_imm
@@ -4240,7 +4267,10 @@ m_out_n                                 ; OUT (n),A
         EMITB   r1,r0,BL_AL
         bl      e_leave_check
         b       eb_done
-mon_grp                                 ; in a group of outputs (jit_out_groups)
+mon_run
+        tst     r0,#RUN_GRP
+        beq     mon_pair
+                                        ; in a group of outputs (jit_out_groups)
         TMPL    r0,t_mov_r0_a24
         EMIT    r0
         bl      e_grp_out
@@ -4611,5 +4641,48 @@ cb_reg_setres
         b       eb_done
 t_bic_pair_bit  BIC     r0,r0,#0        ; | pair, bit
 t_orr_pair_bit  ORR     r0,r0,#0
+
+; OUT (n),A in a pair of outputs (m_out_n; placed here, past the template
+; loads that reach back across the instruction handlers). The first: the
+; test of a half-written word (ctx->pair_chk: ADD r12,r10,#hi, LDR
+; r12,[r12,#lo], then TST r12,#mask), ORR r0,r4,#d and STR r0,[r10,#pair]
+; between, then BNE to a pair stub (st_pair) with the next address, the
+; T-states after it and the port. The second: r2 = the T-states left, BL
+; to the pair handler, the leave check.
+mon_pair
+        tst     r0,#RUN_PAIR_LAST
+        bne     mon_pair_last
+        and     r1,r0,#0x3F             ; d
+        TMPL    r0,t_orr_r0_a_imm
+        orr     r0,r0,r1
+        TMPL    r1,t_str_pair
+        GETCTX  r2
+        add     r2,r2,#C_PAIR_CHK :AND: 0xF00
+        add     r2,r2,#C_PAIR_CHK :AND: 0xFF
+        ldmia   r2,{r2,r3,r12}          ; ADD, LDR, TST
+        stmia   r5!,{r2,r3}
+        stmia   r5!,{r0,r1,r12}
+        ldr     r2,[r6,#I_PC]
+        ldrb    r1,[r6,#I_LEN]
+        add     r2,r2,r1
+        mov     r2,r2,lsl #16
+        mov     r2,r2,lsr #16           ; the next instruction
+        ldr     r3,[r6,#I_N]
+        and     r3,r3,#0xFF             ; the port
+        ldrb    r0,[r6,#I_T_AFTER]
+        orr     r0,r0,#B_NE
+        orr     r0,r0,#STUB_PAIR :SHL: ST_KIND_SHIFT
+        SITE
+        STUB    r12
+        b       eb_done
+mon_pair_last
+        bl      e_time_left
+        GETCTX  r0
+        ldr     r0,[r0,#C_PAIR_A]
+        EMITB   r1,r0,BL_AL
+        bl      e_leave_check
+        b       eb_done
+t_orr_r0_a_imm  ORR     r0,r4,#0        ; | d
+t_str_pair      STR     r0,[r10,#GOFF_PAIR]
 
         END

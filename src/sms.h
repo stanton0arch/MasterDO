@@ -36,6 +36,11 @@
  * run handler takes the buffered runs (z80j_set_buffer_port). */
 #define SMS_PORT_DATA(p) (((p) & 0xC1u) == 0x80u)
 
+/* VDP control port: a control word takes two writes, sent in one call of
+ * the pair handler when they come together (z80j_set_pair_port); the
+ * VDP's access word tells when one is half written (sms_pair_check). */
+#define SMS_PORT_CTRL(p) (((p) & 0xC1u) == 0x81u)
+
 /* Buttons of pad 1 (sms_frame argument). */
 #define SMS_PAD_UP     0x01
 #define SMS_PAD_DOWN   0x02
@@ -111,6 +116,8 @@ void sms_vdp_event_a(void);
 void sms_vdp_vc_r(void);
 void sms_vdp_hc_r(void);
 void sms_vdp_ctrl_w(void);
+void sms_vdp_ctrl_pw(void);
+void sms_pair_check(z80j_state *j);
 void sms_vdp_data_wn(void);
 void sms_vdp_data_rn(void);
 void sms_psg_w(void);

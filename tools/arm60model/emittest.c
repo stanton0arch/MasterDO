@@ -2133,9 +2133,25 @@ static void emit_main(jit_block_ctx *b, jit_insn *in, int32 index)
                 }
                 break;
             case 2:                                 /* OUT (n),A */
-                if (in->run != 0) {                 /* in a group of outputs */
+                if (in->run & RUN_GRP) {            /* in a group of outputs */
                     mov_r(j, R0, RA, SH_LSR, 24);
                     emit_grp_out(b, in);
+                    break;
+                }
+                if (in->run & RUN_PAIR) {           /* a pair of outputs */
+                    if ((in->run & RUN_PAIR_LAST) == 0) {
+                        emit(j, j->ctx->pair_chk[0]);
+                        emit(j, j->ctx->pair_chk[1]);
+                        dp_i(j, C_AL, OP_ORR, 0, R0, RA, in->run & 0x3Fu);
+                        str_g(j, R0, GOFF(pair));
+                        emit(j, j->ctx->pair_chk[2]);
+                        emit_stub_branch(b, C_NE, 0, STUB_PAIR, (in->pc + in->len) & 0xFFFFu,
+                                         in->t_after, in->n & 0xFFu);
+                        break;
+                    }
+                    time_left(j, in);
+                    ref_emit_b(j, C_AL, 1, j->ctx->pair_a);
+                    emit_leave_check(b, in);
                     break;
                 }
                 dp_i(j, C_AL, OP_MOV, 0, R1, 0, in->n & 0xFFu);
@@ -2483,6 +2499,16 @@ static void ref_emit_block_code(jit_block_ctx *b)
             emit(j, s->t * CYCLE);
             emit(j, b->key);
             break;
+        case STUB_PAIR:
+            ref_patch_b(s->site, JIT_ADDR(j->cur));
+            dp_i(j, C_AL, OP_MOV, 0, R1, 0, s->reg);
+            dp_i(j, C_AL, OP_ADD, 0, R2, RCYC, s->t * CYCLE);
+            ref_emit_b(j, C_AL, 1, JIT_ADDR(z80j_glue_pair_one));
+            ref_emit_b(j, C_AL, 0, JIT_ADDR(s->site + 1));
+            emit_mov32(j, R0, s->pc);
+            dp_i(j, C_AL, OP_MOV, 0, R1, 0, s->t * CYCLE);
+            ref_emit_b(j, C_AL, 0, j->glue.leave);
+            break;
         default:                                    /* STUB_LEAVE */
             ref_patch_b(s->site, JIT_ADDR(j->cur));
             emit_mov32(j, R0, s->pc);
@@ -2558,8 +2584,12 @@ void emit_test(void)
     z80j_default_glue(&glue);
     z80j_init(j, c, code, CODE_WORDS, 1, 0, descs, 4, 0, 0, &glue);
     z80j_set_line_port(j, 0x7E);
-    for (v = 0x80; v < 0xC0; v += 2)
+    for (v = 0x80; v < 0xC0; v += 2) {
         z80j_set_buffer_port(j, v);
+        z80j_set_pair_port(j, v + 1);
+    }
+    c->pair_a = JIT_ADDR(z80j_port_out_c);      /* any routine: the code does not run */
+    z80j_set_pair_check(j, 0x44000, 0x10000);
 
     /* Pages: 0-3F fixed, 40-7F slot 1, 80-BF slot 2, C0-FF RAM with E0-FF
      * mirroring C0-DF; the RAM and the fixed pages have fixed mappings

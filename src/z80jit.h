@@ -134,7 +134,9 @@ typedef struct {
     uint32 irq_count;       /* +0x4E0: maskable interrupts taken by the glue */
     uint32 resumed_count;   /* +0x4E4: returns resumed by the glue */
     uint32 port_inn;        /* +0x4E8: 256 handlers of INI / IND runs */
-    uint32 pad0[5];
+    uint32 pair_a;          /* +0x4EC: handler of the output pairs, or 0 (see below) */
+    uint32 pair;            /* +0x4F0: first byte of an output pair and its time */
+    uint32 pair_chk[3];     /* +0x4F4: test of a half-written word (z80j_set_pair_check) */
     uint8  page_kind[256];  /* +0x500 */
     uint8  pzst[256];       /* +0x600: sign / zero / parity flags of a byte */
     uint8  fenc[256];       /* +0x700: internal flags -> Z80 F */
@@ -207,6 +209,20 @@ typedef struct {
  *        from the end read 16 (n - 1) T-states earlier; returns nothing.
  *        The glue (z80j_glue_io_inn) calls it once per destination page,
  *        and only when every page of the run takes plain writes.
+ *   pair (two OUT (n),A to a port declared by z80j_set_pair_port, see
+ *        there): the first one stores A | d in ctx->pair (A in bits 24-31,
+ *        d in bits 0-5: the T-states from the end of the first output to
+ *        the end of the second) and tests the word declared by
+ *        z80j_set_pair_check; when it shows a word half written, the
+ *        first output goes to the port's output handler as a single one
+ *        (z80j_glue_pair_one), then, if that asks to leave, the block is
+ *        left after it, else ctx->pair is set to Z80J_PAIR_SENT. The
+ *        second output calls ctx->pair_a with r1 = port, r2 = T-states
+ *        left after it and its byte in A (r4, bits 24-31, bits 0-23
+ *        clear); the handler sends it alone, as a single output, when
+ *        ctx->pair has Z80J_PAIR_SENT set, else both bytes as one word,
+ *        the first one d T-states earlier, no word having been started
+ *        before the first; it returns r0 as the output handler does.
  * r10 is the global pointer; r3-r11 must be preserved, r0-r2, r12 and lr
  * may be lost. The tables (in_tab, out_tab, outn_tab and inn_tab of the
  * context) start with the generic handlers of the glue, which call the
@@ -454,6 +470,7 @@ typedef struct {
     uint32      now_fresh;      /* now_us starts the next timed operation */
     uint32      nwaiting;       /* addresses kept waiting by the limit this frame */
     uint16      waiting[Z80J_WAITING];
+    uint32      pair_ports[8];  /* bitmap of the ports set by z80j_set_pair_port */
 } z80j_state;
 
 /* Memory for max_blocks block descriptors, and for a link log of
@@ -490,6 +507,30 @@ void   z80j_set_line_port(z80j_state *j, uint32 port);
  * port writes do not change what the Z80 reads from memory, since the
  * memory reads between the outputs of a group run before them. */
 void   z80j_set_buffer_port(z80j_state *j, uint32 port);
+
+/* Declares an output port written in pairs of bytes (a control port whose
+ * words take two writes), served by the pair handler the machine put in
+ * ctx->pair_a (see the port handlers): two OUT (n),A to the same declared
+ * port inside one segment, the first without an interrupt check after it,
+ * with only instructions that cannot leave the block between them (no
+ * port access, memory write but a push, transfer or interrupt state
+ * change), are sent in one call at the second. Declaring one also says
+ * that the machine's port writes do not change what the Z80 reads from
+ * memory, since the instructions between the two run before the first
+ * byte is sent. Pairs are formed only once z80j_set_pair_check has been
+ * called. */
+void   z80j_set_pair_port(z80j_state *j, uint32 port);
+
+/* Declares where the machine shows that a word of a pair port is half
+ * written: the word at the global pointer plus offset has a bit of mask
+ * set exactly then. The first output of a pair tests it. Returns 0 (and
+ * no pairs are formed) when offset less its low 12 bits, or mask, is not
+ * an immediate of an ARM data processing instruction. */
+int32  z80j_set_pair_check(z80j_state *j, uint32 offset, uint32 mask);
+
+/* ctx->pair when the first output of a pair went out alone (see the port
+ * handlers). */
+#define Z80J_PAIR_SENT 0x40u
 
 /* Forgets every translation. */
 void   z80j_flush(z80j_state *j);
@@ -581,6 +622,7 @@ void   z80j_glue_io_outn(void);
 void   z80j_glue_io_inn(void);
 void   z80j_glue_out_split(void);   /* buffered run whose ports differ */
 void   z80j_glue_pop_af(void);      /* POP AF after a push to a special page */
+void   z80j_glue_pair_one(void);    /* first output of a pair sent alone */
 void   z80j_glue_interp(void);
 
 /* Generic port handlers (machine C callbacks), for the port tables. */

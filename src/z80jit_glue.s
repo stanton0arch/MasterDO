@@ -44,6 +44,7 @@
         EXPORT  z80j_glue_daa
         EXPORT  z80j_glue_push_slow
         EXPORT  z80j_glue_pop_af
+        EXPORT  z80j_glue_pair_one
         EXPORT  z80j_glue_ldir
         EXPORT  z80j_glue_lddr
 
@@ -93,6 +94,8 @@ PORT_IN         EQU     0x49C
 PORT_OUT        EQU     0x4A0
 PORT_OUTN       EQU     0x4A4
 PORT_INN        EQU     0x4E8
+PAIR            EQU     0x4F0           ; first byte of an output pair
+PAIR_SENT       EQU     0x40            ; Z80J_PAIR_SENT
 OBUF_OFF        EQU     0xD00           ; obuf: bytes of a buffered run
 WRITE_A         EQU     0x4AC
 PZST            EQU     0x600
@@ -747,6 +750,27 @@ z80j_glue_pop_af
         ldrb    r3,[r0,r2]
         mov     r4,r1,lsl #24
         mov     pc,lr
+
+;----------------------------------------------------------------------------
+; First output of a pair sent alone, a word of its port being half written
+; before it (z80jit_emt.s, st_pair): r1 = port, r2 = T-states left, the
+; byte in A, through the port's output handler. Called by "bl", followed by
+; the branch back into the block and the leave after the output: returns to
+; the branch, ctx->pair set to Z80J_PAIR_SENT (the second output then goes
+; alone too), unless the handler asks to leave, then to the leave.
+;----------------------------------------------------------------------------
+z80j_glue_pair_one
+        str     lr,[sp,#-4]!
+        mov     r0,r4,lsr#24
+        ldr     r12,[r10,#PORT_OUT]
+        mov     lr,pc
+        ldr     pc,[r12,r1,lsl#2]
+        ldr     lr,[sp],#4
+        teq     r0,#0
+        moveq   r0,#PAIR_SENT
+        streq   r0,[r10,#PAIR]
+        moveq   pc,lr
+        add     pc,lr,#4
 
 ;----------------------------------------------------------------------------
 ; Entry of a block translated from RAM: called by "bl", followed by its Z80

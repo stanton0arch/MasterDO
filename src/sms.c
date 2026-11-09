@@ -198,9 +198,9 @@ void sms_reset(sms_machine *s)
 
 /* Port handlers, written into the tables of the context: the C callbacks
  * above, except for the VDP data port (its reads, writes and runs both
- * ways), the status read, the control port, the V and H counter reads and
- * the PSG writes, handled in assembly (the C callbacks remain their slow
- * paths). */
+ * ways), the status read, the control port (single writes and pairs), the
+ * V and H counter reads and the PSG writes, handled in assembly (the C
+ * callbacks remain their slow paths). */
 static void sms_ports(sms_machine *s)
 {
     z80j_ctx *ctx = s->ctx;
@@ -233,6 +233,7 @@ static void sms_ports(sms_machine *s)
     ctx->port_inn = JIT_ADDR(ctx->inn_tab);
     ctx->mdata = JIT_ADDR(&s->vdp);
     ctx->event_a = JIT_ADDR(sms_vdp_event_a);
+    ctx->pair_a = JIT_ADDR(sms_vdp_ctrl_pw);
 }
 
 uint32 sms_rom_region(const uint8 *rom, uint32 rom_size)
@@ -264,6 +265,14 @@ void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
     vdp_init(&s->vdp, ctx, lines);
     sms_ports(s);
     sms_reset(s);
+}
+
+/* The pairs of control port writes test the latch of the VDP's access
+ * word, at SMS_VDP_OFFSET from the context. */
+void sms_pair_check(z80j_state *j)
+{
+    z80j_set_pair_check(j, SMS_VDP_OFFSET - offsetof(z80j_ctx, wtab) + offsetof(vdp_state, acc),
+                        VDP_PENDING);
 }
 
 void sms_frame(sms_machine *s, uint32 pad, uint32 pause)

@@ -474,7 +474,10 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
             z80j_set_line_port(&g->jit, k);
         if (SMS_PORT_DATA(k))
             z80j_set_buffer_port(&g->jit, k);
+        if (SMS_PORT_CTRL(k))
+            z80j_set_pair_port(&g->jit, k);
     }
+    sms_pair_check(&g->jit);
     printf("Cartridge RAM: %lu bytes in %s; entry counters in %s; log arena %s, pad log %s\n",
            (unsigned long)g->cart_ram_size,
            g->cart_ram == NULL ? "no memory" : g->cart_ram_vram ? "VRAM" : "DRAM",

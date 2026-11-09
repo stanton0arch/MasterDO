@@ -126,8 +126,8 @@ typedef struct {
     uint32  run;            /* 28 first of a run of port outputs: its length, */
                             /*    the mask of its OUT (C),r elements << 8 and */
                             /*    the opcode of OUT (C),r << 24; RUN_PART for */
-                            /*    the others; RUN_LOOP | NOP count; or RUN_GRP */
-                            /*    (below) */
+                            /*    the others; RUN_LOOP | NOP count; RUN_GRP or */
+                            /*    RUN_PAIR (below) */
                             /*    (analysis) */
     uint8   fused;          /* 32 FU_* valid in the ARM flags for the next jump */
     uint8   pad[3];
@@ -158,6 +158,7 @@ typedef struct {
 #define STUB_WRITE   4      /* special write */
 #define STUB_LEAVE   5      /* leave the block after a special write / OUT */
 #define STUB_DYN     6      /* conditional JP in RAM taken: dynamic target */
+#define STUB_PAIR    7      /* first output of a pair, a word half written */
 
 typedef struct {
     uint32  kind;
@@ -194,6 +195,13 @@ typedef struct {
 #define RUN_GRP_N    0x04000000u
 #define RUN_GRP_HASN 0x02000000u
 #define RUN_GRP_HASC 0x01000000u
+/* Pair of OUT (n),A sent in one call (jit_out_groups, see
+ * z80j_set_pair_port): the first RUN_PAIR | d, d (below RUN_PAIR_DMAX) the
+ * T-states from its end to the end of the second; the second RUN_PAIR |
+ * RUN_PAIR_LAST. */
+#define RUN_PAIR      0x20000000u
+#define RUN_PAIR_LAST 0x10000000u
+#define RUN_PAIR_DMAX 64u
 
 #define MAX_INSNS  64
 #define MAX_STUBS  (4 * MAX_INSNS)
@@ -295,7 +303,8 @@ uint32 jit_flags_needed(jit_block_ctx *b, uint32 pc);
 /* Whether the loop from ins[h] to the jump back ins[e] waits for an
  * interrupt (1) or for a line (2); 0 when it may do something else. */
 int32  jit_busy_loop(const z80j_state *j, const jit_insn *ins, int32 n, int32 h, int32 e);
-/* Marks the groups of port outputs of the block sent in one call. */
+/* Marks the groups and pairs of port outputs of the block sent in one
+ * call. */
 void   jit_out_groups(const z80j_state *j, jit_insn *ins, int32 n);
 
 /* z80jit_emit.c */

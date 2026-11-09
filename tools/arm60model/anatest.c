@@ -528,6 +528,47 @@ void ana_gen_code(const z80j_ctx *c, uint32 pc, uint32 len)
             at += nb;
             continue;
         }
+        case 22: {                              /* OUT (n),A pairs with instructions between them */
+            uint8 gb[24];
+            uint32 m = r & 3;
+            uint32 q;
+
+            nb = 0;
+            if (r & 4)
+                gb[nb++] = 0xFB;                                            /* EI */
+            gb[nb++] = 0x3E; gb[nb++] = (uint8)(r >> 8);                   /* LD A,n */
+            gb[nb++] = 0xD3; gb[nb++] = 0xBF;                               /* OUT ($BF),A */
+            for (q = 0; q < m; q++) {
+                uint32 t = rnd();
+
+                switch (t & 15) {
+                case 0: case 1: gb[nb++] = 0x3E; gb[nb++] = (uint8)(t >> 8); break;         /* LD A,n */
+                case 2: gb[nb++] = 0x7C; break;                                            /* LD A,H */
+                case 3: gb[nb++] = 0xF6; gb[nb++] = 0x40; break;                           /* OR $40 */
+                case 4: gb[nb++] = 0x7E; break;                                            /* LD A,(HL) */
+                case 5: gb[nb++] = 0x3A; gb[nb++] = (uint8)(t >> 8);
+                        gb[nb++] = (uint8)(t >> 16); break;                                /* LD A,(nn) */
+                case 6: gb[nb++] = 0x3C; break;                                            /* INC A */
+                case 7: gb[nb++] = 0x00; break;                                            /* NOP */
+                case 8: gb[nb++] = 0xDD; gb[nb++] = 0x7E; gb[nb++] = (uint8)(t >> 8); break; /* LD A,(IX+d) */
+                case 9: gb[nb++] = 0x67; break;                                            /* LD H,A */
+                case 10: gb[nb++] = 0x23; break;                                           /* INC HL */
+                case 11: gb[nb++] = 0xF5; break;                                           /* PUSH AF */
+                case 12: gb[nb++] = 0xD3; gb[nb++] = 0xBE; break;                          /* OUT ($BE),A */
+                case 13: gb[nb++] = 0xFB; break;                                           /* EI */
+                case 14: gb[nb++] = 0x18; gb[nb++] = 0x00; break;                          /* JR +0 */
+                default: gb[nb++] = 0xB7; break;                                           /* OR A */
+                }
+            }
+            gb[nb++] = 0xD3; gb[nb++] = (r & 0x30) ? 0xBF : 0xBD;          /* OUT ($BF),A */
+            if (r & 8) {
+                gb[nb++] = 0xD3; gb[nb++] = 0xBF;                           /* a third one */
+            }
+            for (q = 0; q < nb; q++)
+                *host_of(c, pc + at + q) = gb[q];
+            at += nb;
+            continue;
+        }
         case 17:                                /* LD r,n, LD rr,nn */
             if (r & 1) {
                 b[0] = (uint8)(0x06 | (((r >> 1) & 7) << 3));
@@ -567,6 +608,7 @@ void ana_test(void)
     uint32 nruns = 0;
     uint32 nloops = 0;
     uint32 ngroups = 0;
+    uint32 npairs = 0;
     uint32 ninternal = 0;
     uint32 nscans = 0;
     uint32 nwalks = 0;
@@ -582,8 +624,12 @@ void ana_test(void)
     z80j_default_glue(&glue);
     z80j_init(j, c, code, 1024, 1, 0, descs, 4, 0, 0, &glue);
     z80j_set_line_port(j, 0x7E);
-    for (v = 0x80; v < 0xC0; v += 2)
+    for (v = 0x80; v < 0xC0; v += 2) {
         z80j_set_buffer_port(j, v);
+        z80j_set_pair_port(j, v + 1);
+    }
+    c->pair_a = JIT_ADDR(z80j_port_out_c);      /* any routine: the code does not run */
+    z80j_set_pair_check(j, 0x44000, 0x10000);
 
     /* Pages: 0-3F fixed, 40-7F slot 1, 80-BF slot 2, C0-FF RAM with E0-FF
      * mirroring C0-DF; layouts changing per round. */
@@ -677,10 +723,14 @@ void ana_test(void)
                 if (ra[k].internal >= 0)
                     ninternal++;
                 if (ra[k].run != 0 && ra[k].run != RUN_PART && !RUN_IS_LOOP(ra[k].run)) {
-                    if ((ra[k].run & RUN_GRP) == 0)
+                    if (ra[k].run & RUN_PAIR) {
+                        if (ra[k].run & RUN_PAIR_LAST)
+                            npairs++;
+                    } else if ((ra[k].run & RUN_GRP) == 0) {
                         nruns++;
-                    else if (ra[k].run & RUN_GRP_LAST)
+                    } else if (ra[k].run & RUN_GRP_LAST) {
                         ngroups++;
+                    }
                 }
                 if (RUN_IS_LOOP(ra[k].run))
                     nloops++;
@@ -737,11 +787,12 @@ void ana_test(void)
     }
     printf("Analysis test: %lu blocks, %lu instructions, %lu internal targets, %lu busy-wait "
            "loops (%lu waiting for a line), %lu fused tests, %lu output runs, %lu port loops, "
-           "%lu output groups, %lu flag scans from the cache, %lu forward scans compared, "
-           "%lu blocks cut again; %lu differences\n",
+           "%lu output groups, %lu output pairs, %lu flag scans from the cache, "
+           "%lu forward scans compared, %lu blocks cut again; %lu differences\n",
            (unsigned long)blocks, (unsigned long)insns, (unsigned long)ninternal,
            (unsigned long)nbusy, (unsigned long)nline, (unsigned long)nfused,
            (unsigned long)nruns, (unsigned long)nloops, (unsigned long)ngroups,
+           (unsigned long)npairs,
            (unsigned long)nscans, (unsigned long)nwalks, (unsigned long)nrecut,
            (unsigned long)bad);
 }

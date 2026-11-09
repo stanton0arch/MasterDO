@@ -56,6 +56,9 @@ CHECK_OFF(resume_tab, GOFF(resume_tab) == 0x4D8);
 CHECK_OFF(event_a, GOFF(event_a) == 0x4DC);
 CHECK_OFF(irq_count, GOFF(irq_count) == 0x4E0);
 CHECK_OFF(resumed_count, GOFF(resumed_count) == 0x4E4);
+CHECK_OFF(pair_a, GOFF(pair_a) == 0x4EC);
+CHECK_OFF(pair, GOFF(pair) == 0x4F0);
+CHECK_OFF(pair_chk, GOFF(pair_chk) == 0x4F4);
 CHECK_OFF(f2, GOFF(f2) == 0x428);
 CHECK_OFF(bc2, GOFF(bc2) == 0x430);
 CHECK_OFF(slot_bank, GOFF(slot_bank) == 0x47C);
@@ -121,6 +124,8 @@ CHECK_OFF(scratch, GOFF(scratch) == 0x494);
 CHECK_OFF(c_port_in, offsetof(z80j_ctx, port_in) == 0x59C);
 CHECK_OFF(c_port_out, offsetof(z80j_ctx, port_out) == 0x5A0);
 CHECK_OFF(c_port_inn, offsetof(z80j_ctx, port_inn) == 0x5E8);
+CHECK_OFF(c_pair_a, offsetof(z80j_ctx, pair_a) == 0x5EC);
+CHECK_OFF(c_pair_chk, offsetof(z80j_ctx, pair_chk) == 0x5F4);
 CHECK_OFF(i_pc, offsetof(jit_insn, pc) == 0);
 CHECK_OFF(i_d, offsetof(jit_insn, d) == 10);
 CHECK_OFF(i_n, offsetof(jit_insn, n) == 12);
@@ -809,6 +814,30 @@ static void grp_close(jit_insn *ins, const int32 *el, int32 ne, uint32 has, uint
     last->run = RUN_GRP | RUN_GRP_LAST | has | (port << 16) | ((uint32)ne << 8);
 }
 
+/* A port declared by z80j_set_pair_port, and the length of jit_out_groups'
+ * list of the outputs that may write to one (MAX_INSNS fit in a byte). */
+#define PAIR_PORT(j, p) ((((j)->pair_ports[((p) & 0xFFu) >> 5]) >> ((p) & 31u)) & 1u)
+#define PAIR_LIST 32
+#define PAIR_LIST_C 0x80u
+#define PAIR_LIST_LDC 0x40u
+
+/* One bit per opcode, for the instructions without prefix or with DD or
+ * FD: those pair_between allows (its kind and interrupt check aside), and
+ * those that may write C (the last case of pair_writes_c). */
+static const uint32 pair_bw[8] = {
+    0xFFFBFFFBu, 0xFF8BFFFBu, 0xFFFFFFFFu, 0xFF00FFFFu,
+    0xFFFFFFFFu, 0xFFFFFFFFu, 0x62626262u, 0x62626A62u
+};
+static const uint32 pair_cw[8] = {
+    0x0000780Au, 0, 0x0000FF00u, 0, 0, 0, 0x02000002u, 0
+};
+
+static void out_pairs(const z80j_state *j, jit_insn *ins, const uint8 *outs, int32 no);
+
+/* An output through C: OUT (C),r, OUTI, OUTD. */
+#define PAIR_OUT_C(in) ((in)->pre == PRE_ED && \
+                        (((in)->op & 0xC7u) == 0x41u || (in)->op == 0xA3u || (in)->op == 0xABu))
+
 /*
  * Groups of port outputs sent in one call: inside a segment, OUTI and
  * OUTD that are not in a run or a loop, and OUT (n),A to a port declared
@@ -821,14 +850,25 @@ static void grp_close(jit_insn *ins, const int32 *el, int32 ne, uint32 has, uint
  * elements before the last one are stored in ctx->obuf and the last one
  * sends them all through the run handler (see emit_ed and m_out_n). The
  * time of each byte is kept: d, the T-states between the element and the
- * last one. Called by z80jit_ana.s after the other passes when the block
- * holds at least two outputs.
+ * last one.
+ *
+ * Also lists, for out_pairs, the outputs that may write a byte of a word
+ * of a port declared by z80j_set_pair_port: OUT (n),A to such a port, the
+ * loads of such a port in C (LD C,n, LD BC,nn; their index or
+ * PAIR_LIST_LDC) and, after the first of them, the outputs through C
+ * (OUT (C),r, OUTI, OUTD, run heads; or PAIR_LIST_C), at most PAIR_LIST,
+ * and calls out_pairs with them.
+ *
+ * Called by z80jit_ana.s after the other passes when the block holds at
+ * least two outputs.
  */
 void jit_out_groups(const z80j_state *j, jit_insn *ins, int32 n)
 {
     int32 el[Z80J_RUN_MAX];
-    int32 ne = 0;
-    uint32 port = 0;
+    uint8 outs[PAIR_LIST + 2];  /* the list for out_pairs, its length first, */
+    int32 ne = 0;               /* then whether a load of C is in it (kept */
+    uint32 port = 0;            /* in memory: a register more in the loop */
+                                /* would cost a load per instruction) */
     uint32 has = 0;
     int32 i;
 
@@ -836,15 +876,39 @@ void jit_out_groups(const z80j_state *j, jit_insn *ins, int32 n)
         ;
     if (i == 8)
         return;                                     /* the machine declared none */
+    outs[0] = 0;
+    outs[PAIR_LIST + 1] = 0;
     for (i = 0; i < n; i++) {
         jit_insn *in = &ins[i];
         uint32 kind = 0;                            /* 1 through C, 2 constant port */
 
-        if (in->pre == PRE_ED && (in->op == 0xA3 || in->op == 0xAB) && in->run == 0)
-            kind = 1;
-        else if (in->pre == PRE_NONE && in->op == 0xD3 &&
-                 (j->buf_ports[(in->n & 0xFFu) >> 5] >> (in->n & 31u)) & 1u)
-            kind = 2;
+        if (in->pre == PRE_ED) {
+            uint32 op = in->op;
+
+            if (op == 0xA3u || op == 0xABu || (op & 0xC7u) == 0x41u) {
+                uint32 r = in->run;
+
+                if (r != RUN_PART) {                /* the head of a run only, */
+                    if (r == 0 && (op & 0xC7u) != 0x41u)    /* after a load */
+                        kind = 1;                           /* of C */
+                    if (outs[PAIR_LIST + 1] && !RUN_IS_LOOP(r) && outs[0] < PAIR_LIST)
+                        outs[++outs[0]] = (uint8)(i | PAIR_LIST_C);
+                }
+            }
+        } else if (in->pre == PRE_NONE) {
+            uint32 op = in->op;
+
+            if (op == 0xD3u) {
+                if ((j->buf_ports[(in->n & 0xFFu) >> 5] >> (in->n & 31u)) & 1u)
+                    kind = 2;
+                else if (outs[0] < PAIR_LIST && PAIR_PORT(j, in->n & 0xFFu))
+                    outs[++outs[0]] = (uint8)i;
+            } else if ((op == 0x0Eu || op == 0x01u) && outs[0] < PAIR_LIST &&
+                       PAIR_PORT(j, in->n & 0xFFu)) {
+                outs[++outs[0]] = (uint8)(i | PAIR_LIST_LDC);
+                outs[PAIR_LIST + 1] = 1;
+            }
+        }
         /* The open group ends before this instruction. */
         if (ne != 0 && (in->seg_start || ne == Z80J_RUN_MAX ||
                         (kind == 0 && !grp_between(in)) ||
@@ -870,6 +934,193 @@ void jit_out_groups(const z80j_state *j, jit_insn *ins, int32 n)
     }
     if (ne != 0)
         grp_close(ins, el, ne, has, port);
+    if (outs[0] > 1)
+        out_pairs(j, ins, outs + 1, outs[0]);
+}
+
+/*
+ * An instruction allowed between the two outputs of a pair: it cannot
+ * leave the block, nor see or change what the outputs do: no transfer, no
+ * port access, no memory write (a push aside: its slow path never leaves
+ * the block), no interrupt state change, no interrupt check after it.
+ * ED instructions are not allowed.
+ */
+static int32 pair_between(const jit_insn *in)
+{
+    uint32 op = in->op;
+    uint32 x = op >> 6;
+    uint32 y = (op >> 3) & 7;
+    uint32 z = op & 7;
+
+    if (in->kind != K_NORMAL || in->irq_check)
+        return 0;
+    switch (in->pre) {
+    case PRE_ED:
+        return 0;
+    case PRE_CB:
+    case PRE_DDCB:
+    case PRE_FDCB:
+        return x == 1 || !in->mem;                  /* BIT; no write of (HL) */
+    default:
+        break;
+    }
+    switch (x) {
+    case 0:
+        switch (z) {
+        case 2:
+            return y & 1;                           /* loads, not stores */
+        case 4:
+        case 5:
+        case 6:
+            return y != 6;                          /* not (HL) */
+        default:
+            return 1;                               /* NOP, EX AF,AF', 16-bit loads */
+        }                                           /* and arithmetic, rotations */
+    case 1:
+        return op != 0x76 && y != 6;                /* not HALT, stores */
+    case 2:
+        return 1;
+    default:
+        switch (z) {
+        case 1:                                     /* POP, EXX, LD SP,HL */
+        case 5:                                     /* PUSH */
+        case 6:                                     /* ALU A,n */
+            return 1;
+        case 3:
+            return y == 5;                          /* EX DE,HL */
+        default:
+            return 0;
+        }
+    }
+}
+
+/*
+ * Whether an instruction may change C (for the outputs through C that
+ * out_pairs follows): transfers, ED instructions but the outputs, and the
+ * others that write C.
+ */
+static int32 pair_writes_c(const jit_insn *in)
+{
+    uint32 op = in->op;
+
+    if (in->kind != K_NORMAL)
+        return 1;
+    switch (in->pre) {
+    case PRE_ED:
+        return !PAIR_OUT_C(in);
+    case PRE_CB:
+    case PRE_DDCB:
+    case PRE_FDCB:
+        return (op & 7u) == 1u && (op >> 6) != 1u;  /* rotations, RES, SET of C */
+    default:                                        /* LD BC,nn, INC / DEC BC, */
+        return op == 0x01u || op == 0x03u || op == 0x0Bu || op == 0x0Cu ||
+               op == 0x0Du || op == 0x0Eu || (op >= 0x48u && op <= 0x4Fu) ||
+               op == 0xC1u || op == 0xD9u;          /* INC / DEC C, LD C,n, */
+    }                                               /* LD C,r, POP BC, EXX */
+}
+
+/*
+ * Pairs of OUT (n),A sent in one call (see z80j_set_pair_port and
+ * RUN_PAIR): the first to a declared port with no interrupt check after
+ * it, then, in its segment, instructions pair_between allows, then an
+ * OUT (n),A to the same port less than RUN_PAIR_DMAX T-states after the
+ * first. Only when the machine has a pair handler and a pair check.
+ *
+ * A pair is only formed where the block's own outputs leave no word of
+ * the port half written, counted from the block start (jit_out_groups lists
+ * them): every OUT (n),A to
+ * a declared port outside a pair, and the outputs through C (OUT (C),r,
+ * OUTI, OUTD, their runs) while C holds a declared port loaded by the
+ * block in the same segment (LD C,n or LD BC,nn, C not written since:
+ * pair_cw, pair_writes_c), each write a byte of a word. A word left
+ * half written by earlier code is caught at run time by the pair check;
+ * this only keeps the pairs in step with the words where the block shows
+ * them (a word started by OUTI, ended by OUT (n),A, then a pair).
+ */
+static void out_pairs(const z80j_state *j, jit_insn *ins, const uint8 *outs, int32 no)
+{
+    int32 m;
+    int32 k;
+    uint32 half = 0;            /* a word taken as half written */
+    int32 ldc = -1;             /* C holds a declared port loaded here, */
+    int32 cpos = 0;             /* not written up to this instruction */
+
+    if (j->ctx->pair_a == 0 || j->ctx->pair_chk[0] == 0)
+        return;
+    for (m = k = 0; m < no; m++) {      /* two OUT (n),A at least; the */
+        if ((outs[m] & (PAIR_LIST_C | PAIR_LIST_LDC)) == 0) {   /* list ends */
+            half++;                     /* with the last one */
+            k = m + 1;
+        }
+    }
+    if (half < 2)
+        return;
+    half = 0;
+    no = k;
+    for (m = 0; m < no; m++) {
+        int32 i = (int32)((uint32)outs[m] & (PAIR_LIST_LDC - 1u));
+        jit_insn *a = &ins[i];
+        uint32 port;
+        int32 paired = 0;
+        int32 m2;
+
+        if (outs[m] & PAIR_LIST_LDC) {
+            ldc = i;
+            cpos = i + 1;
+            continue;
+        }
+        if (outs[m] & PAIR_LIST_C) {                /* through C */
+            for (k = cpos; k <= i && ldc >= 0; k++) {
+                const jit_insn *in = &ins[k];
+                uint32 op = in->op;
+                uint32 pre = in->pre;
+
+                if (in->seg_start == 1 || in->kind != K_NORMAL ||   /* a jump target, */
+                    ((pre == PRE_NONE || pre == PRE_DD || pre == PRE_FD) ?  /* perhaps */
+                     (pair_cw[op >> 5] >> (op & 31u)) & 1u : pair_writes_c(in)))
+                    ldc = -1;
+            }
+            cpos = i + 1;
+            if (ldc >= 0 && (a->run & (RUN_GRP | RUN_PAIR)) == 0)
+                half ^= a->run == 0 ? 1u : a->run & 1u;
+            continue;
+        }
+        port = a->n & 0xFFu;
+        for (m2 = m + 1; m2 < no && (outs[m2] & PAIR_LIST_LDC); m2++)
+            ;                                       /* the second can only be */
+        if (!half && !a->irq_check && a->run == 0 && m2 < no &&     /* the next */
+            (outs[m2] & PAIR_LIST_C) == 0) {        /* output in the list */
+            int32 e = outs[m2];
+            jit_insn *b = &ins[e];
+
+            if ((b->n & 0xFFu) == port && b->run == 0 &&
+                (uint32)a->t_after - (uint32)b->t_after < RUN_PAIR_DMAX) {
+                for (k = i + 1; k < e; k++) {      /* pair_between, inline */
+                    const jit_insn *in = &ins[k];
+                    uint32 op = in->op;
+                    uint32 pre = in->pre;
+
+                    if (in->seg_start || in->kind != K_NORMAL || in->irq_check ||
+                        ((pre == PRE_NONE || pre == PRE_DD || pre == PRE_FD) ?
+                         ((pair_bw[op >> 5] >> (op & 31u)) & 1u) == 0 : !pair_between(in)))
+                        break;
+                }
+                if (k == e && !b->seg_start) {
+                    a->run = RUN_PAIR | ((uint32)a->t_after - (uint32)b->t_after);
+                    b->run = RUN_PAIR | RUN_PAIR_LAST;
+                    paired = 1;
+                }
+            }
+        }
+        if (paired) {
+            for (m++; m < m2; m++) {                /* loads of C between them */
+                ldc = (int32)((uint32)outs[m] & (PAIR_LIST_LDC - 1u));
+                cpos = ldc + 1;
+            }
+        } else {
+            half ^= 1u;
+        }
+    }
 }
 
 /*--------------------------------------------------------------------------
@@ -1624,6 +1875,42 @@ void z80j_set_buffer_port(z80j_state *j, uint32 port)
     j->buf_ports[(port & 0xFFu) >> 5] |= (uint32)1 << (port & 31u);
 }
 
+void z80j_set_pair_port(z80j_state *j, uint32 port)
+{
+    j->pair_ports[(port & 0xFFu) >> 5] |= (uint32)1 << (port & 31u);
+}
+
+/* The operand field (rotation and byte) of an ARM data processing
+ * immediate equal to v, or 0xFFFFFFFF when there is none. */
+static uint32 arm_imm_field(uint32 v)
+{
+    uint32 r;
+
+    for (r = 0; r < 16; r++) {
+        uint32 x = r == 0 ? v : (v << (2 * r)) | (v >> (32 - 2 * r));
+
+        if (x < 256)
+            return (r << 8) | x;
+    }
+    return 0xFFFFFFFFu;
+}
+
+/* The first output of a pair tests the word with ADD r12,r10,#hi, LDR
+ * r12,[r12,#lo] and TST r12,#mask, kept in the context for the emitter. */
+int32 z80j_set_pair_check(z80j_state *j, uint32 offset, uint32 mask)
+{
+    uint32 hi = arm_imm_field(offset & ~0xFFFu);
+    uint32 m = arm_imm_field(mask);
+
+    j->ctx->pair_chk[0] = 0;
+    if (hi == 0xFFFFFFFFu || m == 0xFFFFFFFFu || mask == 0)
+        return 0;
+    j->ctx->pair_chk[0] = 0xE28AC000u | hi;                 /* ADD r12,r10,#hi */
+    j->ctx->pair_chk[1] = 0xE59CC000u | (offset & 0xFFFu);  /* LDR r12,[r12,#lo] */
+    j->ctx->pair_chk[2] = 0xE31C0000u | m;                  /* TST r12,#mask */
+    return 1;
+}
+
 void z80j_set_force(z80j_state *j, uint32 force_at)
 {
     j->force_at = force_at;
@@ -2062,6 +2349,8 @@ void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
     memcpy(&j->glue, glue, sizeof(j->glue));
     ctx->resume_tab = JIT_ADDR(j->resume);
     ctx->event_a = JIT_ADDR(z80j_event_c);  /* a machine may set its own */
+    ctx->pair_a = 0;                        /* no output pairs unless the machine sets */
+    ctx->pair_chk[0] = 0;                   /* its handler and its check */
     ctx->irq_count = 0;
     ctx->resumed_count = 0;
 

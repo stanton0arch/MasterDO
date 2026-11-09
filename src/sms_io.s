@@ -18,6 +18,7 @@
         EXPORT  sms_vdp_data_w
         EXPORT  sms_vdp_data_r
         EXPORT  sms_vdp_ctrl_w
+        EXPORT  sms_vdp_ctrl_pw
         EXPORT  sms_vdp_data_wn
         EXPORT  sms_vdp_data_rn
         EXPORT  sms_vdp_stat_r
@@ -33,6 +34,8 @@
 IRQ_LINE        EQU     0x454
 LINE            EQU     0x460
 EVENT_LINE      EQU     0x464
+PAIR            EQU     0x4F0           ; ctx->pair (output pairs, z80jit.h)
+PAIR_SENT       EQU     0x40            ; Z80J_PAIR_SENT
 OBUF_OFF        EQU     0xD00           ; ctx->obuf (buffered runs, z80jit.h)
 VDP_OFFSET      EQU     0x44000         ; the vdp_state: SMS_VDP_OFFSET of sms.h from the
                                         ; context, less the read table below the global pointer
@@ -556,22 +559,23 @@ ctrl_addr
         MEND
 
 ; Appends (r1 << 8) | r2 to the log at $off of the vdp_state ($max
-; entries, its count first) when the line r1 is in the active display.
+; entries, its count first) when the line r1 is in the active display,
+; then goes to $done.
         MACRO
-        RASTERLOG $off,$max
+        RASTERLOG $off,$max,$done
         ldr     r0,[r12,#V_ACTIVE]
         cmp     r1,r0
-        bhs     ctrl_count
+        bhs     $done
         orr     r1,r2,r1,lsl#8
         add     r2,r12,#$off :AND: 0xFF00
         add     r2,r2,#$off :AND: 0xFF
         ldr     r0,[r2]
         cmp     r0,#$max
-        bhs     ctrl_count
+        bhs     $done
         add     r0,r0,#1
         str     r0,[r2],r0,lsl#2        ; to the new entry (the count is just below the log)
         str     r1,[r2]
-        b       ctrl_count
+        b       $done
         MEND
 
 ctrl_reg8
@@ -579,7 +583,7 @@ ctrl_reg8
         bmi     ctrl_slow8
         REGSTORE 8
         add     r1,r1,#1                ; shows from the next line on
-        RASTERLOG V_HSN,VDP_HS_LOG
+        RASTERLOG V_HSN,VDP_HS_LOG,ctrl_count
 ctrl_slow8
         mov     r0,#0x88
         mov     r1,#0xBF
@@ -590,7 +594,7 @@ ctrl_reg2
         bmi     ctrl_slow2
         REGSTORE 2
         add     r1,r1,#1
-        RASTERLOG V_NTN,VDP_NT_LOG
+        RASTERLOG V_NTN,VDP_NT_LOG,ctrl_count
 ctrl_slow2
         mov     r0,#0x82
         mov     r1,#0xBF
@@ -634,6 +638,94 @@ ctrl_slow10
         mov     r0,#0x8A
         mov     r1,#0xBF
         b       z80j_port_out_c
+
+;----------------------------------------------------------------------------
+; Pair of OUT to the control port (the pair handler of z80jit.h, see
+; z80j_set_pair_port), at the second output: the first byte in bits 24-31
+; of ctx->pair, the second in A (r4, bits 24-31), r2 = T-states left after
+; it. When the first byte went out alone (Z80J_PAIR_SENT), the second is a
+; single output. Otherwise no word was started before the first byte (the
+; code tested the access word's latch before it), so the two bytes make
+; one, handled as the second of two single outputs would handle it (the
+; first only sets the latch, which nothing reads between the two) and
+; counted as two control writes: data codes and register 8 here, the
+; other registers through the single output's paths once the first byte
+; is latched.
+;----------------------------------------------------------------------------
+sms_vdp_ctrl_pw
+        VDP
+        cmp     r4,#0x88000000
+        beq     pw_reg8
+        and     r1,r4,#0xC0000000       ; the code
+        cmp     r1,#0x80000000
+        beq     pw_latch                ; a register but 8
+        ldr     r0,[r10,#PAIR]
+        tst     r0,#PAIR_SENT
+        bne     pw_single
+        ldr     r2,[r12,#V_ACC]         ; (left is not needed by the data codes)
+        mov     r2,r2,lsl#18
+        mov     r2,r2,lsr#18            ; the data writes of the frame
+        orr     r0,r2,r0,lsr#6          ; address bits 0-7: the first byte (d falls out)
+        orr     r0,r0,r4,lsl#2          ; address bits 8-13: bits 0-5 of the second
+        orr     r0,r0,r1,lsr#16         ; the code
+        cmp     r1,#0xC0000000
+        orreq   r0,r0,#ACC_SLOW         ; colour RAM writes take the slow path
+        teq     r1,#0
+        beq     pw_read
+pw_addr
+        str     r0,[r12,#V_ACC]
+pw_count2
+        ldr     r1,[r12,#V_NCTRLW]
+        add     r1,r1,#2
+        str     r1,[r12,#V_NCTRLW]
+        mov     r0,#0
+        mov     pc,lr
+pw_single                               ; the first byte went out alone
+        mov     r0,r4,lsr#24
+        b       sms_vdp_ctrl_w
+pw_read                                 ; read code: read ahead
+        mov     r1,r0,lsr#18
+        add     r1,r12,r1
+        ldrb    r1,[r1,#V_VRAM]
+        str     r1,[r12,#V_BUFFER]
+        add     r0,r0,#ACC_ADDR1        ; (0x4000 wraps to 0 in the word)
+        b       pw_addr
+
+; Register 8, as ctrl_reg8 does.
+pw_reg8
+        ACCLINE
+        bmi     pw_latch                ; it ends the previous frame
+        ldr     r0,[r10,#PAIR]
+        tst     r0,#PAIR_SENT
+        bne     pw_single
+        ldr     r2,[r12,#V_ACC]
+        mov     r2,r2,lsl#18
+        mov     r2,r2,lsr#18            ; the data writes of the frame
+        orr     r2,r2,#0x8000           ; code 2
+        orr     r2,r2,#8:SHL:26         ; address bits 8-11: the register
+        orr     r2,r2,r0,lsr#6          ; address bits 0-7: the first byte
+        str     r2,[r12,#V_ACC]
+        mov     r2,r0,lsr#24
+        strb    r2,[r12,#V_REG+8]
+        add     r1,r1,#1                ; shows from the next line on
+        RASTERLOG V_HSN,VDP_HS_LOG,pw_count2
+
+; The first byte latched as a single output does it, counted, then the
+; second through the single output's paths. In: r2 = T-states left.
+pw_latch
+        ldr     r1,[r10,#PAIR]
+        ldr     r0,[r12,#V_ACC]
+        tst     r1,#PAIR_SENT
+        bne     pw_single
+        bic     r0,r0,#0x03FC0000
+        orr     r1,r0,r1,lsr#6
+        orr     r1,r1,#ACC_PENDING+ACC_SLOW
+        str     r1,[r12,#V_ACC]
+        ldr     r0,[r12,#V_NCTRLW]
+        add     r0,r0,#1
+        str     r0,[r12,#V_NCTRLW]
+        mov     r0,r4,lsr#24
+        b       ctrl_second             ; r0 = byte, r1 = access word, r2 = left
 
 ;----------------------------------------------------------------------------
 ; Run of OUTI / OUTD to the data port. In: r0 = count (negative for OUTD),
