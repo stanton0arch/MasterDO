@@ -50,6 +50,10 @@ B_PC            EQU     56
 B_CTX           EQU     60
 B_DEC_FLAGS     EQU     64
 B_BACK          EQU     92
+B_KONST         EQU     100
+B_DYNM          EQU     108
+B_WMASK         EQU     116
+B_WANY          EQU     124
 
 ; z80j_ctx, from its start (z80jit.h).
 C_SLOT_BANK     EQU     0x57C
@@ -71,6 +75,14 @@ C_SLOW          EQU     0x00800000      ; a prefix, EI or OUT (n),A
 C_ROM           EQU     0x00C00000      ; not a plain instruction
 C_SLOW_RAM      EQU     0x03800000      ; any opcode (its length is 1 to 3)
 C_RAM           EQU     0x01000000      ; in C_SLOW_RAM, not in C_ROM
+
+; Memory classes of the opcodes alone or after DD / FD (JIT_WR_TAB: bytes
+; after the records, see jit_ram_operands).
+WR_TAB          EQU     0x800           ; offset of the bytes from jit_dec_tab
+WRC_LOAD        EQU     1               ; LD A,(nn), LD HL / IX / IY,(nn)
+WRC_STORE       EQU     2               ; LD (nn),A, LD (nn),HL / IX / IY
+WRC_ANY         EQU     3               ; a store through BC, DE, HL, IX + d,
+                                        ; IY + d or SP
 
 PRE_NONE        EQU     0
 PRE_CB          EQU     1
@@ -132,6 +144,8 @@ DF_DYN          EQU     4               ; some operand is read when it runs
 DF_SEAM         EQU     8               ; the block ends at a seam
 DF_EDIO         EQU     0x10            ; INI, IND, OUTI, OUTD, OUT (C),A / D / E
 DF_RECUT        EQU     0x20            ; the segments are to be cut again
+DF_LOOP         EQU     0x40            ; a jump to an instruction before it, or
+                                        ; a JP read when it runs that leads there
 NOUT_SHIFT      EQU     16              ; OUTI, OUTD and OUT (n),A met
 
 ; The segment of the instruction being decoded (r8 its marks, $len its len
@@ -661,8 +675,9 @@ sn_core
 ; segments as the analysis cuts them, but for the jump targets: see
 ; below), irq_check set when it follows EI and is no transfer or
 ; conditional (the EI gets it otherwise), dyn set in RAM for JP / CALL
-; and the absolute loads and stores of A and HL, internal the index of
-; the instruction its static target starts, or -1.
+; and the absolute loads and stores of A and HL (but for those whose bit
+; is set in b->konst), internal the index of the instruction its static
+; target starts, or -1.
 ;
 ; The jumps with a static target (JR, JP, JR cc, JP cc, DJNZ, a repeated
 ; block instruction) are listed as they are met and resolved once the
@@ -678,7 +693,8 @@ sn_core
 ;
 ; b->n receives the count, b->next_pc the address after the last
 ; instruction, b->dec_flags DF_DYN, DF_SEAM, DF_EDIO, DF_RECUT and the
-; outputs met (JIT_DEC_*), b->has_dyn whether DF_DYN is set.
+; outputs met (JIT_DEC_*), DF_LOOP, b->has_dyn whether DF_DYN is set; a RAM block
+; b->dynm, b->wmask and b->wany (db_ram).
 ;
 ; The instructions of a block of fixed or paged code not in the last
 ; three bytes of a 1 KiB page are decoded inline when they are unprefixed
@@ -715,6 +731,12 @@ jit_decode_block
         mov     r3,#0
         str     r3,[sp,#F_NJUMPS]       ; no jump yet
         str     r3,[sp,#F_LASTCUT]      ; no segment cut yet
+        addeq   r7,r0,#B_DYNM           ; RAM: no operand read when it runs,
+        moveq   r5,#0                   ; no store met yet
+        moveq   r6,#0
+        moveq   r12,#0
+        moveq   lr,#MAX_INSNS
+        stmeqia r7,{r3,r5,r6,r12,lr}    ; dynm, wmask, wany
         mov     r0,r4
         mov     r8,#M_NONE
         orr     r8,r8,#M_SEG            ; the first instruction starts a segment
@@ -1117,6 +1139,9 @@ db_found
 db_started
         cmp     r3,r1                   ; a jump back, or to itself
         bhi     db_resolve
+        ldrlo   r10,[sp,#F_FLAGS]
+        orrlo   r10,r10,#DF_LOOP        ; back
+        strlo   r10,[sp,#F_FLAGS]
         mov     r10,r7,lsr #24          ; kind
         cmp     r10,#K_JRCC
         cmpne   r10,#K_JPCC
@@ -1161,7 +1186,31 @@ db_jump
 ; RAM code: the block may not reach a page whose host memory does not follow
 ; that of its first page (the entry check reads it as consecutive words);
 ; the operands of jumps and of the absolute loads and stores are read when
-; they run.
+; they run, but for those taken as immediates (the bit of the instruction
+; in the block context's konst mask, set by jit_ram_operands). For
+; jit_ram_operands, the block context receives a bit per instruction in
+; dynm (operand read when it runs) and wmask (a store to the address of
+; its operand: LD (nn),A, LD (nn),HL / IX / IY, LD (nn),rr), and in wany
+; the index of the first store through a register pair, an index register
+; or SP (MAX_INSNS: none), from the class bytes of the opcodes alone or
+; after DD / FD (WR_TAB), CB, ED, DD CB and FD CB apart.
+
+; Sets the bit of the instruction (r10) in the mask at offset $field of the
+; block context. Uses r3, r4, r5 and r6.
+        MACRO
+        WRBIT   $field
+        ldr     r3,[sp,#F_ARGS]
+        and     r5,r10,#0xFF
+        sub     r5,r5,#1                ; index of this instruction
+        cmp     r5,#32
+        addhs   r3,r3,#4
+        subhs   r5,r5,#32
+        ldr     r6,[r3,#$field]
+        mov     r4,#1
+        orr     r6,r6,r4,lsl r5
+        str     r6,[r3,#$field]
+        MEND
+
 db_ram
         sub     r3,r1,#1
         mov     r3,r3,lsl #16
@@ -1181,15 +1230,97 @@ db_ram
         cmpne   r2,#K_JP
         cmpne   r2,#K_CALL
         beq     db_dyn
-        tst     r12,#0xFF0000           ; prefix
+        ands    r3,r12,#0xFF0000        ; prefix
+        cmpne   r3,#PRE_DD :SHL: 16
+        cmpne   r3,#PRE_FD :SHL: 16
+        bne     db_wr_pre               ; CB, ED, DD CB, FD CB
+        add     r3,r11,#WR_TAB
+        and     r5,r12,#0xFF00
+        ldrb    r3,[r3,r5,lsr #8]       ; class of the opcode
+        cmp     r3,#0
+        beq     db_ei                   ; no memory written, no operand read
+        cmp     r3,#WRC_ANY
+        beq     db_wr_any
+        tst     r12,#0xFF0000
+        bne     db_wr_xy                ; after DD / FD: the operand is not read
+        cmp     r3,#WRC_STORE
+        bne     db_dyn                  ; LD A,(nn), LD HL,(nn)
+        WRBIT   B_WMASK                 ; LD (nn),A, LD (nn),HL
+        mov     r6,#0                   ; dyn
+        b       db_dyn
+db_wr_xy
+        cmp     r3,#WRC_STORE
         bne     db_ei
-        and     r3,r12,#0xFF00          ; opcode
-        cmp     r3,#0x3A00              ; LD A,(nn)
-        cmpne   r3,#0x3200              ; LD (nn),A
-        cmpne   r3,#0x2A00              ; LD HL,(nn)
-        cmpne   r3,#0x2200              ; LD (nn),HL
-        bne     db_ei
+db_wr_const
+        WRBIT   B_WMASK
+        mov     r6,#0                   ; dyn
+        b       db_ei
+db_wr_any
+        ldr     r3,[sp,#F_ARGS]
+        ldr     r5,[r3,#B_WANY]
+        cmp     r5,#MAX_INSNS
+        bne     db_ei                   ; not the first
+        and     r5,r10,#0xFF
+        sub     r5,r5,#1                ; index of this instruction
+        str     r5,[r3,#B_WANY]
+        b       db_ei
+db_wr_pre
+        and     r5,r12,#0xFF00          ; opcode << 8
+        cmp     r3,#PRE_ED :SHL: 16
+        beq     db_wr_ed
+        cmp     r3,#PRE_CB :SHL: 16
+        bne     db_wr_xycb
+        and     r3,r5,#0x0700
+        cmp     r3,#0x0600
+        bne     db_ei                   ; CB on a register
+db_wr_xycb
+        and     r3,r5,#0xC000
+        cmp     r3,#0x4000
+        bne     db_wr_any               ; rotation, shift, RES, SET on memory
+        b       db_ei                   ; BIT
+db_wr_ed
+        and     r3,r5,#0xCF00
+        cmp     r3,#0x4300              ; LD (nn),BC / DE / HL / SP
+        beq     db_wr_const
+        cmp     r5,#0x6700              ; RRD
+        cmpne   r5,#0x6F00              ; RLD
+        beq     db_wr_any
+        and     r3,r5,#0xE500
+        cmp     r3,#0xA000              ; LDI, LDD, INI, IND and their repeats
+        beq     db_wr_any
+        b       db_ei
+
 db_dyn
+        ldr     r3,[sp,#F_ARGS]
+        and     r5,r10,#0xFF
+        sub     r5,r5,#1                ; index of this instruction
+        cmp     r5,#32
+        addhs   r3,r3,#4
+        subhs   r5,r5,#32
+        ldr     r6,[r3,#B_KONST]
+        mov     r6,r6,lsr r5
+        ands    r6,r6,#1
+        movne   r6,#0                   ; dyn
+        bne     db_ei                   ; an immediate
+        cmp     r2,#K_JP
+        cmpne   r2,#K_JPCC
+        bne     db_dynm
+        ldr     r6,[r0,#I_PC - I_CORE]
+        ldr     r5,[sp,#F_PC0]
+        sub     r6,r6,r5
+        sub     r5,r4,r5
+        mov     r6,r6,lsl #16           ; offset of the instruction
+        cmp     r6,r5,lsl #16           ; and of its target
+        orrhi   lr,lr,#DF_LOOP          ; a JP back as decoded
+        and     r5,r10,#0xFF
+        sub     r5,r5,#1
+        cmp     r5,#32
+        subhs   r5,r5,#32
+db_dynm
+        ldr     r6,[r3,#B_DYNM]
+        mov     r4,#1
+        orr     r6,r6,r4,lsl r5
+        str     r6,[r3,#B_DYNM]
         mov     r6,#1
         strb    r6,[r0,#I_DYN - I_CORE]
         orr     lr,lr,#DF_DYN

@@ -101,8 +101,9 @@ typedef struct {
     uint8   ei;             /*  8 EI: the block ends after the next instruction */
     uint8   mem;            /*  9 (HL) or (IX+d) operand: H and L stay H and L */
     int8    d;              /* 10 (IX+d) displacement */
-    uint8   dyn;            /* 11 JP / CALL in RAM: the target is read from */
-                            /*    memory when the instruction runs (block decoder) */
+    uint8   dyn;            /* 11 JP, CALL or LD (nn) in RAM: the operand is read */
+                            /*    from memory when the instruction runs (block */
+                            /*    decoder; see jit_ram_operands) */
     uint32  n;              /* 12 immediate, 8 or 16 bits */
     uint8   len;            /* 16 */
     uint8   pre;            /* 17 PRE_* */
@@ -147,6 +148,9 @@ typedef struct {
 #define JIT_DEC_RECUT 0x20u /* a jump target lies before a segment the */
                             /* decoder cut for its length: the analysis */
                             /* cuts the segments again */
+#define JIT_DEC_LOOP  0x40u /* a jump inside the block to an instruction */
+                            /* before it, or a JP read when it runs whose */
+                            /* operand, as decoded, leads there */
 #define JIT_DEC_NOUT_SHIFT 16 /* bits 16-31: OUTI, OUTD and OUT (n),A met */
 
 /* Branches resolved at the end of the block. CONTRACT with z80jit_emt.s
@@ -258,6 +262,20 @@ typedef struct jit_block_ctx_s {
                              * jumps back (JR, JP, JR cc, JP cc to an
                              * instruction of the block at or before them)
                              * the busy-wait loop analysis looks at */
+    uint32      konst[2];   /* into the decoder, RAM blocks: a bit per
+                             * instruction, the JP, CALL and LD (nn) whose
+                             * operand is taken as an immediate, covered by
+                             * the entry check, instead of being read when
+                             * it runs (jit_ram_operands; 0 otherwise) */
+    uint32      dynm[2];    /* out of the decoder, RAM blocks: a bit per
+                             * instruction, those whose operand is read
+                             * when it runs (dyn) */
+    uint32      wmask[2];   /* the same, the stores to the address of their
+                             * operand (LD (nn),A, LD (nn),HL / IX / IY,
+                             * LD (nn),rr) */
+    uint32      wany;       /* the same, index of the first store through a
+                             * register pair, an index register or SP
+                             * (MAX_INSNS: none) */
 } jit_block_ctx;
 
 extern jit_block_ctx jit_bctx;
@@ -265,7 +283,14 @@ extern jit_block_ctx jit_bctx;
 /* z80jit_dec.s */
 /* Opcode records: two words per unprefixed opcode (see dec_entry in
  * z80jit.c). */
-extern uint32 jit_dec_tab[2 * 256];
+/* The records of the unprefixed opcodes (two words each), then the memory
+ * class of each opcode alone or after DD / FD (JIT_WRC_*, a byte each at
+ * byte offset JIT_WR_TAB). */
+#define JIT_WR_TAB    0x800
+#define JIT_WRC_LOAD  1     /* LD A,(nn), LD HL / IX / IY,(nn) */
+#define JIT_WRC_STORE 2     /* LD (nn),A, LD (nn),HL / IX / IY */
+#define JIT_WRC_ANY   3     /* a store through BC, DE, HL, IX + d, IY + d or SP */
+extern uint32 jit_dec_tab[2 * 256 + 64];
 /* Decodes the instruction at pc (16 bits): the first six words of *in. */
 void   jit_decode(jit_insn *in, uint32 pc, const z80j_ctx *c);
 /* Decodes the instructions of the block b (ins, pc, ctx and key set),
@@ -275,6 +300,14 @@ void   jit_decode(jit_insn *in, uint32 pc, const z80j_ctx *c);
  * and fused cleared): writes n, next_pc, dec_flags, has_dyn and back,
  * returns n, 0 when the first instruction crosses a seam of RAM. */
 int32  jit_decode_block(jit_block_ctx *b);
+
+/* z80jit.c, for z80jit_blk.s */
+/* A RAM block decoded with the operands of its JP, CALL and LD (nn) read
+ * when they run (has_dyn set): those that may be immediates are taken as
+ * such, their records changed as the decoder would make them with konst
+ * (the block decoded again with konst when one is a JP to an address of
+ * the block); returns the count of instructions. */
+int32  jit_ram_operands(jit_block_ctx *b);
 
 /* z80jit_dec.s, for jit_flags_needed */
 #define JIT_SCAN_INSNS 8    /* instructions walked by the forward flag scan */

@@ -477,7 +477,8 @@ static void ref_decode(const z80j_ctx *c, uint32 pc, jit_insn *in)
  * the block gets its index, the target starts a segment, and a JR, JP,
  * JR cc or JP cc to an instruction at or before it is a jump back. A
  * target that did not start a segment, before the last segment cut for
- * its length (lastcut, -1: none), sets JIT_DEC_RECUT. */
+ * its length (lastcut, -1: none), sets JIT_DEC_RECUT; a target before the
+ * jump JIT_DEC_LOOP. */
 static void ref_targets(jit_insn *ins, int32 n, uint32 pc, uint32 next, uint32 *back,
                         int32 lastcut, uint32 *flags)
 {
@@ -508,14 +509,45 @@ static void ref_targets(jit_insn *ins, int32 n, uint32 pc, uint32 next, uint32 *
         if (!ins[k].seg_start && lastcut > k)
             *flags |= JIT_DEC_RECUT;
         ins[k].seg_start = 1;
+        if (k < i)
+            *flags |= JIT_DEC_LOOP;
         if (k <= i && (kd == K_JRCC || kd == K_JPCC || kd == K_JR || kd == K_JP))
             back[i >> 5] |= 1u << (i & 31);
     }
 }
 
-/* The block decoding loop of translate_block before z80jit_dec.s. */
+/* The stores of a decoded instruction, for jit_ram_operands: 2 a store to
+ * the address of its operand, 1 a store through a register pair, an index
+ * register or SP, 0 none (CALL, RST and CALL cc push once they leave the
+ * block). */
+static uint32 ref_store(const jit_insn *in)
+{
+    uint32 op = in->op;
+
+    switch (in->pre) {
+    case PRE_CB:
+        return ((op & 7) == 6 && (op & 0xC0) != 0x40) ? 1 : 0;
+    case PRE_DDCB:
+    case PRE_FDCB:
+        return ((op & 0xC0) != 0x40) ? 1 : 0;
+    case PRE_ED:
+        if ((op & 0xCF) == 0x43)
+            return 2;
+        return (op == 0x67 || op == 0x6F || (op & 0xE5) == 0xA0) ? 1 : 0;
+    default:
+        if (op == 0x22 || op == 0x32)
+            return 2;
+        return (op == 0x02 || op == 0x12 || (op >= 0x34 && op <= 0x36) ||
+                (op >= 0x70 && op <= 0x77 && op != 0x76) || (op & 0xCF) == 0xC5 ||
+                op == 0xE3) ? 1 : 0;
+    }
+}
+
+/* The block decoding loop of translate_block before z80jit_dec.s; a RAM
+ * block's masks for jit_ram_operands in m: dynm, wmask, wany. */
 static int32 ref_decode_block(const z80j_ctx *ctx, jit_insn *ins, uint32 pc, uint32 key,
-                              uint32 *next, uint32 *flags, uint32 *back)
+                              uint32 *next, uint32 *flags, uint32 *back, const uint32 *konst,
+                              uint32 *m)
 {
     uint32 addr = pc & 0xFFFFu;
     uint32 page = addr >> 8;
@@ -524,6 +556,8 @@ static int32 ref_decode_block(const z80j_ctx *ctx, jit_insn *ins, uint32 pc, uin
     int32 lastcut = -1;
 
     *flags = 0;
+    m[0] = m[1] = m[2] = m[3] = 0;
+    m[4] = MAX_INSNS;
     for (;;) {
         jit_insn *in = &ins[n++];
 
@@ -546,15 +580,32 @@ static int32 ref_decode_block(const z80j_ctx *ctx, jit_insn *ins, uint32 pc, uin
             addr = in->pc;
             break;
         }
+        /* (the operand taken as an immediate when the bit of the
+         * instruction is set in konst) */
         if (key == KEY_RAM && (in->kind == K_JP || in->kind == K_JPCC ||
-                               in->kind == K_CALL || in->kind == K_CALLCC)) {
+                               in->kind == K_CALL || in->kind == K_CALLCC) &&
+            (konst[(n - 1) >> 5] & ((uint32)1 << ((n - 1) & 31))) == 0) {
             in->dyn = 1;
             *flags |= JIT_DEC_DYN;
         }
         if (key == KEY_RAM && in->pre == PRE_NONE &&
-            (in->op == 0x3A || in->op == 0x32 || in->op == 0x2A || in->op == 0x22)) {
+            (in->op == 0x3A || in->op == 0x32 || in->op == 0x2A || in->op == 0x22) &&
+            (konst[(n - 1) >> 5] & ((uint32)1 << ((n - 1) & 31))) == 0) {
             in->dyn = 1;
             *flags |= JIT_DEC_DYN;
+        }
+        if (in->dyn && (in->kind == K_JP || in->kind == K_JPCC) &&
+            ((in->target - pc) & 0xFFFFu) < ((in->pc - pc) & 0xFFFFu))
+            *flags |= JIT_DEC_LOOP;             /* a JP back as decoded */
+        if (key == KEY_RAM) {
+            uint32 st = ref_store(in);
+
+            if (in->dyn)
+                m[(n - 1) >> 5] |= (uint32)1 << ((n - 1) & 31);
+            if (st == 2)
+                m[2 + ((n - 1) >> 5)] |= (uint32)1 << ((n - 1) & 31);
+            if (st == 1 && m[4] == MAX_INSNS)
+                m[4] = (uint32)(n - 1);
         }
         if (n >= 2 && in[-1].ei) {
             if (in->kind != K_NORMAL)
@@ -768,6 +819,7 @@ void dec_test(void)
             uint32 na, nb_;
             uint32 nexta, fa;
             uint32 backa[2];
+            uint32 ma[5];
             jit_block_ctx d;
             uint32 k;
             uint32 w;
@@ -781,7 +833,14 @@ void dec_test(void)
             key = jit_block_key(c, pc);
             fill(ra, MAX_INSNS, 0xDEADBEEFu);
             fill(rb, MAX_INSNS, 0x5A5A5A5Au);
-            na = (uint32)ref_decode_block(c, ra, pc, key, &nexta, &fa, backa);
+            /* RAM blocks: some of the operands read when they run taken
+             * as immediates (jit_ram_operands), at random. */
+            d.konst[0] = d.konst[1] = 0;
+            if (key == KEY_RAM && (v & 3) != 0) {
+                d.konst[0] = ((v & 3) == 3) ? 0xFFFFFFFFu : rnd() ^ (rnd() << 16);
+                d.konst[1] = ((v & 3) == 3) ? 0xFFFFFFFFu : rnd() ^ (rnd() << 16);
+            }
+            na = (uint32)ref_decode_block(c, ra, pc, key, &nexta, &fa, backa, d.konst, ma);
             d.ins = rb;
             d.pc = pc;
             d.ctx = c;
@@ -789,6 +848,7 @@ void dec_test(void)
             d.next_pc = 0;
             d.dec_flags = 0;
             d.back[0] = d.back[1] = 0x12345678u;
+            d.dynm[0] = d.dynm[1] = d.wmask[0] = d.wmask[1] = d.wany = 0x9ABCDEF0u;
             nb_ = (uint32)jit_decode_block(&d);
             blocks++;
             insns += na;
@@ -797,7 +857,7 @@ void dec_test(void)
             if (fa & JIT_DEC_DYN)
                 dyns++;
             if (nb_ != na || (na != 0 && d.next_pc != nexta) ||
-                (d.dec_flags & (JIT_DEC_SEAM | JIT_DEC_DYN | JIT_DEC_RECUT)) != fa) {
+                (d.dec_flags & (JIT_DEC_SEAM | JIT_DEC_DYN | JIT_DEC_RECUT | JIT_DEC_LOOP)) != fa) {
                 if (bad++ < 10)
                     printf("Decoder test: block at $%04lx (key %08lx): C %lu instructions to $%04lx, "
                            "flags %lx; assembly %lu to $%04lx, flags %lx\n",
@@ -814,6 +874,18 @@ void dec_test(void)
                            "assembly %08lx %08lx\n", (unsigned long)pc, (unsigned long)key,
                            (unsigned long)backa[0], (unsigned long)backa[1],
                            (unsigned long)d.back[0], (unsigned long)d.back[1]);
+                continue;
+            }
+            if (key == KEY_RAM &&
+                (d.dynm[0] != ma[0] || d.dynm[1] != ma[1] || d.wmask[0] != ma[2] ||
+                 d.wmask[1] != ma[3] || d.wany != ma[4])) {
+                if (bad++ < 10)
+                    printf("Decoder test: block at $%04lx: RAM masks C %08lx %08lx %08lx %08lx %lu, "
+                           "assembly %08lx %08lx %08lx %08lx %lu\n", (unsigned long)pc,
+                           (unsigned long)ma[0], (unsigned long)ma[1], (unsigned long)ma[2],
+                           (unsigned long)ma[3], (unsigned long)ma[4], (unsigned long)d.dynm[0],
+                           (unsigned long)d.dynm[1], (unsigned long)d.wmask[0],
+                           (unsigned long)d.wmask[1], (unsigned long)d.wany);
                 continue;
             }
             if (na < MAX_INSNS && !IS_END(ra[na - 1].kind) && (fa & JIT_DEC_SEAM) == 0 &&

@@ -681,6 +681,11 @@ void ana_test(void)
             bca.pc = pc;
             bca.ctx = c;
             bca.key = key;
+            if (key == KEY_RAM && (v & 1) != 0) {
+                /* Operands taken as immediates (jit_ram_operands). */
+                bca.konst[0] = rnd() ^ (rnd() << 16);
+                bca.konst[1] = rnd() ^ (rnd() << 16);
+            }
             na = (uint32)jit_decode_block(&bca);
             if (na == 0)
                 continue;

@@ -20,6 +20,7 @@
         EXPORT  jit_translate_block
         IMPORT  jit_next_zone
         IMPORT  jit_decode_block
+        IMPORT  jit_ram_operands
         IMPORT  jit_analyse_block
         IMPORT  jit_emit_block
         IMPORT  jit_bctx
@@ -240,6 +241,15 @@ tb_zone_ok
         bl      jit_decode_block
         movs    r8,r0
         beq     tb_undecodable
+        ; A RAM block whose JP, CALL or LD (nn) read their operands when
+        ; they run: those that may be immediates taken as such
+        ; (jit_ram_operands, C; it returns the count, r0 holds it already
+        ; otherwise).
+        ldr     r1,[r7,#B_HAS_DYN]
+        cmp     r1,#0
+        movne   r0,r7
+        blne    jit_ram_operands
+        mov     r8,r0
         ldr     r1,[r7,#B_DEC_FLAGS]
         tst     r1,#DEC_SEAM
         beq     tb_noseam

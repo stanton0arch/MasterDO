@@ -67,6 +67,7 @@
 #define Z80J_MRAM_OFF  0x1000
 #define Z80J_MARK_CHUNKS 256   /* run marks of the code buffer (z80j_state) */
 #define Z80J_OBUF_WORDS 16     /* Z80J_RUN_MAX */
+#define Z80J_LIVE_WORDS 128    /* bits of ctx->live_ops: one per two bytes of mram */
 #define Z80J_TAB_OFF   0x4000
 #define Z80J_PORTS     256      /* port handler tables (see below) */
 
@@ -145,7 +146,11 @@ typedef struct {
     uint32 chunk_mark[Z80J_MARK_CHUNKS];  /* +0x900: set by the code of each chunk */
                             /* of the code buffer when it runs (see z80j_state) */
     uint32 obuf[Z80J_OBUF_WORDS];   /* +0xD00: bytes of a buffered run (see below) */
-    uint8  pad1[Z80J_MRAM_OFF - 0x900 - 4 * Z80J_MARK_CHUNKS - 4 * Z80J_OBUF_WORDS];
+    uint32 live_ops[Z80J_LIVE_WORDS];   /* +0xD40: code in mram whose operand was seen */
+                            /* rewritten: a bit per two bytes, set at the address of */
+                            /* the instruction (see z80j_retranslate) */
+    uint8  pad1[Z80J_MRAM_OFF - 0x900 - 4 * Z80J_MARK_CHUNKS - 4 * Z80J_OBUF_WORDS -
+                4 * Z80J_LIVE_WORDS];
     uint8  mram[0x2000];    /* +0x1000: machine RAM near the global pointer */
     uint32 in_tab[Z80J_PORTS];      /* +0x3000: the tables port_in, port_out */
     uint32 out_tab[Z80J_PORTS];     /* +0x3400  and port_outn point at, */
@@ -472,6 +477,8 @@ typedef struct {
     uint32      nwaiting;       /* addresses kept waiting by the limit this frame */
     uint16      waiting[Z80J_WAITING];
     uint32      pair_ports[8];  /* bitmap of the ports set by z80j_set_pair_port */
+    uint32      ram_learned;    /* RAM blocks translated again because an operand */
+                                /* they held as an immediate was rewritten */
 } z80j_state;
 
 /* Memory for max_blocks block descriptors, and for a link log of

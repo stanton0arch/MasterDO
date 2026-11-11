@@ -2662,6 +2662,11 @@ void emit_test(void)
             bca.pc = pc;
             bca.ctx = c;
             bca.key = key;
+            if (key == KEY_RAM && (v & 1) != 0) {
+                /* Operands taken as immediates (jit_ram_operands). */
+                bca.konst[0] = ernd() ^ (ernd() << 16);
+                bca.konst[1] = ernd() ^ (ernd() << 16);
+            }
             n = (uint32)jit_decode_block(&bca);
             if (n == 0)
                 continue;

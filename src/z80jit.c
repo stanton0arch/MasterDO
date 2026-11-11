@@ -38,6 +38,7 @@ CHECK_OFF(port_outn, GOFF(port_outn) == 0x4A4);
 CHECK_OFF(port_inn, GOFF(port_inn) == 0x4E8);
 CHECK_OFF(inn_tab, GOFF(inn_tab) == 0x3C00);
 CHECK_OFF(obuf, GOFF(obuf) == 0xD00);
+CHECK_OFF(live_ops, GOFF(live_ops) == 0xD40 && Z80J_LIVE_WORDS * 64 == sizeof(((z80j_ctx *)0)->mram));
 CHECK_OFF(obuf_words, Z80J_OBUF_WORDS == Z80J_RUN_MAX);
 CHECK_OFF(mdata, GOFF(mdata) == 0x4A8);
 CHECK_OFF(write_a, GOFF(write_a) == 0x4AC);
@@ -105,7 +106,11 @@ CHECK_OFF(b_fused, offsetof(jit_block_ctx, fused) == 76);
 CHECK_OFF(b_targets, offsetof(jit_block_ctx, targets) == 80);
 CHECK_OFF(b_max_targets, offsetof(jit_block_ctx, max_targets) == 84);
 CHECK_OFF(b_ntargets, offsetof(jit_block_ctx, ntargets) == 88);
-CHECK_OFF(b_ctx_size, sizeof(jit_block_ctx) == 0x64);
+CHECK_OFF(b_konst, offsetof(jit_block_ctx, konst) == 100);
+CHECK_OFF(b_dynm, offsetof(jit_block_ctx, dynm) == 108);
+CHECK_OFF(b_wmask, offsetof(jit_block_ctx, wmask) == 116);
+CHECK_OFF(b_wany, offsetof(jit_block_ctx, wany) == 124);
+CHECK_OFF(b_ctx_size, sizeof(jit_block_ctx) == 0x80);
 CHECK_OFF(st_words, STUB_WORDS == 4);
 CHECK_OFF(s_cur, offsetof(z80j_state, cur) == 12);
 CHECK_OFF(s_zone_end, offsetof(z80j_state, zone_end) == 16);
@@ -180,7 +185,7 @@ CHECK_OFF(scan_cache, JIT_SCAN_CACHE == 512);
 CHECK_OFF(c_lookup, offsetof(z80j_ctx, lookup) == 0x4100);
 CHECK_OFF(key_ram, KEY_RAM == 0x80000u);
 CHECK_OFF(dec_flags, JIT_DEC_DYN == 4u && JIT_DEC_SEAM == 8u && JIT_DEC_EDIO == 0x10u &&
-          JIT_DEC_RECUT == 0x20u && JIT_DEC_NOUT_SHIFT == 16);
+          JIT_DEC_RECUT == 0x20u && JIT_DEC_LOOP == 0x40u && JIT_DEC_NOUT_SHIFT == 16);
 CHECK_OFF(c_page_kind, offsetof(z80j_ctx, page_kind) == 0x600);
 CHECK_OFF(scan_walk, JIT_SCAN_INSNS == 8 && JIT_SCAN_DEPTH == 1);   /* z80jit_dec.s */
 
@@ -197,8 +202,8 @@ static uint32   jit_stub_words[MAX_STUBS * STUB_WORDS];
 jit_block_ctx   jit_bctx;
 
 /* Table of z80jit_dec.s: the records of the unprefixed opcodes (two words
- * each, see dec_entry). */
-uint32 jit_dec_tab[2 * 256];
+ * each, see dec_entry), then the memory class bytes (JIT_WR_TAB). */
+uint32 jit_dec_tab[2 * 256 + 64];
 
 /*--------------------------------------------------------------------------
  * Z80 memory and pages
@@ -1451,6 +1456,7 @@ void z80j_flush(z80j_state *j)
     memset(j->hash, 0, sizeof(j->hash));
     memset(j->seen, 0, sizeof(j->seen));
     memset(j->flaky, 0, sizeof(j->flaky));
+    memset(j->ctx->live_ops, 0, sizeof(j->ctx->live_ops));
     memset(j->zone_blocks, 0, sizeof(j->zone_blocks));
     memset(j->zone_head, 0, sizeof(j->zone_head));
     memset(j->scan_kind, 0xFF, sizeof(j->scan_kind));
@@ -1997,6 +2003,253 @@ uint32 z80j_hot(z80j_state *j)
     return j->glue.interp;
 }
 
+/* RAM code. The operands of JP and CALL (conditional or not), LD A,(nn),
+ * LD (nn),A, LD HL,(nn) and LD (nn),HL are those RAM code usually rewrites
+ * (jump vectors, pointers stepped through a table). Each one is taken as
+ * an immediate, covered by the entry check of its block like the other
+ * bytes, until a check fails on the bytes of such operands alone: their
+ * instructions are then marked in ctx->live_ops and translated from then
+ * on with the operand read when it runs, so that a rewrite costs one
+ * translation and no more. An operand is always read when it runs where
+ * its code lies outside mram (no mark for it), and where a store of its
+ * own block may write it before it is read in the same pass, which the
+ * entry check could not see. */
+
+/* Offset in mram of the byte at Z80 address a: 0x2000 or above when its
+ * page shows other memory (two addresses with the same offset name the
+ * same host byte in any case). */
+static uint32 mram_off(const z80j_ctx *ctx, uint32 a)
+{
+    a &= 0xFFFFu;
+    return ctx->rtab[63 - (a >> 10)] + a - JIT_ADDR(ctx->mram);
+}
+
+#define LIVE_WORD(off)  ((off) >> 6)
+#define LIVE_BIT(off)   ((uint32)1 << (((off) >> 1) & 31u))
+
+/* The memory classes of the opcodes alone or after DD / FD, for the
+ * decoder (JIT_WR_TAB). wr_any_main: those writing through BC, DE, HL,
+ * IX + d, IY + d or SP (LD (BC),A, LD (DE),A, INC / DEC / LD (HL), LD
+ * (HL),r, PUSH, EX (SP),HL). CALL, RST and a CALL cc taken push once they
+ * leave the block: none. */
+static const uint32 wr_any_main[8] = {
+    0x00040004u, 0x00700000u, 0, 0x00BF0000u, 0, 0, 0x00200020u, 0x00200028u
+};
+
+static void wr_classes(uint8 *c)
+{
+    uint32 op;
+
+    for (op = 0; op < 256; op++)
+        c[op] = (wr_any_main[op >> 5] & ((uint32)1 << (op & 31u))) ? JIT_WRC_ANY : 0;
+    c[0x2A] = c[0x3A] = JIT_WRC_LOAD;
+    c[0x22] = c[0x32] = JIT_WRC_STORE;
+}
+
+/* Whether one of the nst stores (bytes at offsets a[k] and b[k] of mram)
+ * writes the operand of in (its last two bytes). */
+static uint32 store_hits(const z80j_ctx *ctx, const jit_insn *in, const uint32 *a,
+                         const uint32 *b, int32 nst)
+{
+    uint32 o1 = mram_off(ctx, in->pc + in->len - 2u);
+    uint32 o2 = mram_off(ctx, in->pc + in->len - 1u);
+    int32 k;
+
+    for (k = 0; k < nst; k++) {
+        if (a[k] == o1 || a[k] == o2 || b[k] == o1 || b[k] == o2)
+            return 1;
+    }
+    return 0;
+}
+
+int32 jit_ram_operands(jit_block_ctx *b)
+{
+    const z80j_ctx *ctx = b->ctx;
+    jit_insn *ins = b->ins;
+    int32 n = b->n;
+    uint32 pc0 = b->pc & 0xFFFFu;
+    uint32 span = (b->next_pc - pc0) & 0xFFFFu;
+    uint32 mbase = JIT_ADDR(ctx->mram);
+    uint32 loop = b->dec_flags & JIT_DEC_LOOP;
+    int32 any = (int32)b->wany;     /* first store to an address not known */
+    uint32 konst[2];
+    uint32 ndyn = 0;
+    uint32 nk = 0;
+    uint32 inside = 0;              /* an immediate JP may target the block */
+    int32 nst = 0;                  /* stores to a constant address: */
+    uint32 st_a[MAX_INSNS];         /* the offsets of their bytes */
+    uint32 st_b[MAX_INSNS];
+    const jit_insn *in;
+    uint32 off;
+    int32 i;
+    int32 w;
+
+#define MRAM_OFF(a) (ctx->rtab[63 - (((a) & 0xFFFFu) >> 10)] + ((a) & 0xFFFFu) - mbase)
+#define LIVE(off)   ((off) >= 0x2000u || (ctx->live_ops[LIVE_WORD(off)] & LIVE_BIT(off)) != 0)
+
+    /* A jump back lets any store of the block come before any operand:
+     * every store is listed first, and a store whose address stays read
+     * when it runs (marked live, or written by a store) keeps every
+     * operand read. Without one, an operand depends on the stores before
+     * it alone: one walk in order. */
+    if (loop) {
+        if (any < n)
+            return n;
+        for (w = 0; w < 2; w++) {
+            uint32 m = b->wmask[w];
+
+            for (i = w * 32; m != 0; m >>= 1, i++) {
+                if ((m & 1u) == 0)
+                    continue;
+                in = &ins[i];
+                if (in->dyn) {
+                    off = MRAM_OFF(in->pc);
+                    if (LIVE(off))
+                        return n;
+                }
+                st_a[nst] = MRAM_OFF(in->n);
+                st_b[nst] = (in->op != 0x32u) ? MRAM_OFF(in->n + 1u) : st_a[nst];
+                nst++;
+            }
+        }
+        for (w = 0; w < 2; w++) {
+            uint32 m = b->wmask[w] & b->dynm[w];
+
+            for (i = w * 32; m != 0; m >>= 1, i++) {
+                if ((m & 1u) != 0 && store_hits(ctx, &ins[i], st_a, st_b, nst))
+                    return n;
+            }
+        }
+    }
+    konst[0] = konst[1] = 0;
+    for (w = 0; w < 2; w++) {
+        uint32 dm = b->dynm[w];
+        uint32 m = loop ? dm : (dm | b->wmask[w]);
+
+        for (i = w * 32; m != 0; m >>= 1, dm >>= 1, i++) {
+            uint32 hazard;
+
+            if ((m & 1u) == 0)
+                continue;
+            in = &ins[i];
+            if ((dm & 1u) == 0) {           /* a store to the address of its operand */
+                st_a[nst] = MRAM_OFF(in->n);
+                st_b[nst] = (in->op != 0x32u) ? MRAM_OFF(in->n + 1u) : st_a[nst];
+                nst++;
+                continue;
+            }
+            /* The operands read when they run, in mram, not marked live,
+             * that no store may write before they are read. */
+            ndyn++;
+            off = MRAM_OFF(in->pc);
+            hazard = LIVE(off) || any < i;
+            if (!hazard && nst != 0)
+                hazard = store_hits(ctx, in, st_a, st_b, nst);
+            if (hazard) {
+                if ((in->op == 0x22u || in->op == 0x32u) && i < any)
+                    any = i;                /* a store that writes anywhere */
+                continue;
+            }
+            /* An immediate: the record as the decoder makes it with konst
+             * (but for a JP to an address of the block, which the decoder
+             * resolves: the block is decoded again). */
+            ins[i].dyn = 0;
+            konst[w] |= (uint32)1 << (i & 31);
+            nk++;
+            if (!loop && (in->op == 0x22u || in->op == 0x32u)) {
+                st_a[nst] = MRAM_OFF(in->n);
+                st_b[nst] = (in->op != 0x32u) ? MRAM_OFF(in->n + 1u) : st_a[nst];
+                nst++;
+            }
+            if ((in->kind == K_JP || in->kind == K_JPCC) && ((in->target - pc0) & 0xFFFFu) < span)
+                inside = 1;
+        }
+    }
+#undef MRAM_OFF
+#undef LIVE
+    if (nk == 0)
+        return n;
+    if (inside) {
+        b->konst[0] = konst[0];
+        b->konst[1] = konst[1];
+        n = jit_decode_block(b);
+        b->konst[0] = b->konst[1] = 0;
+        return n;
+    }
+    if (nk == ndyn) {
+        b->has_dyn = 0;
+        b->dec_flags &= ~JIT_DEC_DYN;
+    }
+    return n;
+}
+
+/* The entry check of the RAM block blk failed. When every byte that
+ * differs belongs to the operand of a JP, CALL or LD (nn) the block took
+ * as an immediate, those instructions are marked live and their number is
+ * returned; 0 when other code changed. The instructions are walked from
+ * the block's address in memory as it is now: up to the first byte that
+ * differs it holds the block's own bytes, so the walk meets the block's
+ * instructions, and stops at the first one whose opcode bytes differ. */
+static uint32 learn_operands(z80j_ctx *ctx, const z80j_block *blk)
+{
+    const uint32 *h = blk->entry;
+    uint32 pc = h[1] & 0xFFFFu;
+    uint32 nbytes = h[2] * 4u;
+    const uint8 *was = (const uint8 *)(h + 3);
+    const uint8 *mask = was + nbytes;
+    const uint8 *mem = (const uint8 *)JIT_PTR((ctx->rtab[63 - (pc >> 10)] + pc) & ~3u);
+    uint32 lead = pc & 3u;
+    uint32 lastdiff = nbytes;           /* index of the last byte that differs */
+    uint32 at[MAX_INSNS];               /* the instructions to mark */
+    uint32 nat = 0;
+    uint32 a = pc;
+    uint32 i;
+
+    if ((h[0] & 0x0F000000u) != 0x0B000000u || h[2] > 72u)
+        return 0;                       /* not a checked RAM block */
+    for (i = 0; i < nbytes; i++) {
+        if (((mem[i] ^ was[i]) & mask[i]) != 0)
+            lastdiff = i;
+    }
+    if (lastdiff == nbytes)
+        return 0;
+    for (;;) {
+        jit_insn in;
+        uint32 s = lead + ((a - pc) & 0xFFFFu);     /* index of its first byte */
+        uint32 e;
+        uint32 imm;                     /* index of its operand, if one of those */
+
+        if (s > lastdiff)
+            break;
+        jit_decode(&in, a, ctx);
+        e = s + in.len;
+        imm = e;
+        if (in.kind == K_JP || in.kind == K_JPCC || in.kind == K_CALL || in.kind == K_CALLCC ||
+            (in.pre == PRE_NONE &&
+             (in.op == 0x3Au || in.op == 0x32u || in.op == 0x2Au || in.op == 0x22u)))
+            imm = e - 2u;
+        for (i = s; i < e && i < nbytes; i++) {
+            if (((mem[i] ^ was[i]) & mask[i]) == 0)
+                continue;
+            if (i < imm || nat >= MAX_INSNS)
+                return 0;               /* other code changed */
+            if (nat == 0 || at[nat - 1] != a)
+                at[nat++] = a;
+        }
+        a = (a + in.len) & 0xFFFFu;
+    }
+    for (i = 0; i < nat; i++) {
+        if (mram_off(ctx, at[i]) >= 0x2000u)
+            return 0;
+    }
+    for (i = 0; i < nat; i++) {
+        uint32 off = mram_off(ctx, at[i]);
+
+        ctx->live_ops[LIVE_WORD(off)] |= LIVE_BIT(off);
+    }
+    return nat;
+}
+
 /* Does the RAM block still describe the code at its address? Its entry
  * check holds the address, the length and the bytes it was made from:
  * the host words from the one holding the first byte of the block,
@@ -2027,6 +2280,7 @@ uint32 z80j_retranslate(z80j_state *j, uint32 pc)
     z80j_block *old;
     uint32 generation = j->generation;
     uint32 host;
+    uint32 learned;
 
     pc &= 0xFFFFu;
     old = find_block(j, pc, KEY_RAM);
@@ -2036,26 +2290,34 @@ uint32 z80j_retranslate(z80j_state *j, uint32 pc)
         j->ctx->lookup[pc] = JIT_ADDR(old->entry);
         return JIT_ADDR(old->entry);
     }
+    learned = old != 0 && learn_operands(j->ctx, old) != 0;
     if (old != 0) {
         unhash_block(j, old);
         j->ctx->lookup[pc] = j->glue.miss;  /* host_for must not return the stale entry */
     }
-    j->stats.retranslations++;
-    /* Code rewritten since its translation starts again as cold; code
-     * found rewritten a second time (a handler patched on every line,
-     * for instance) is interpreted from then on: its counter is parked
-     * where the interpreter's thresholds never match. */
-    if (j->hot != 0) {
-        uint32 bit = (uint32)1 << (pc & 31);
+    if (learned) {
+        /* Operands rewritten: the block, entered often as it is, is
+         * translated again at once with them read when they run. */
+        j->ram_learned++;
+        host = sync_translate(j, pc);
+    } else {
+        j->stats.retranslations++;
+        /* Code rewritten since its translation starts again as cold; code
+         * found rewritten a second time (a handler patched on every line,
+         * for instance) is interpreted from then on: its counter is parked
+         * where the interpreter's thresholds never match. */
+        if (j->hot != 0) {
+            uint32 bit = (uint32)1 << (pc & 31);
 
-        if (j->flaky[pc >> 5] & bit) {
-            j->hot[pc] = 255;
-        } else {
-            j->flaky[pc >> 5] |= bit;
-            j->hot[pc] = 0;
+            if (j->flaky[pc >> 5] & bit) {
+                j->hot[pc] = 255;
+            } else {
+                j->flaky[pc >> 5] |= bit;
+                j->hot[pc] = 0;
+            }
         }
+        host = host_for(j, pc);
     }
-    host = host_for(j, pc);
     if (host == j->glue.interp) {
         j->ctx->regs[6] = pc;
         return 0;
@@ -2397,6 +2659,7 @@ void z80j_init(z80j_state *j, z80j_ctx *ctx, uint32 *code, uint32 code_words,
     if (jit_dec_tab[0] == 0) {
         for (v = 0; v < 256; v++)
             dec_entry(v, &jit_dec_tab[2 * v]);
+        wr_classes((uint8 *)jit_dec_tab + JIT_WR_TAB);
     }
     for (v = 0; v < Z80J_PORTS; v++) {
         ctx->in_tab[v] = JIT_ADDR(z80j_port_in_c);
