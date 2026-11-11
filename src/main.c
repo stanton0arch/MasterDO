@@ -621,7 +621,8 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: VDP control port pairs sent in one call; "
+    printf("masterdo: diagnostic counts carried by the loads and stores of their handlers; "
+           "VDP control port pairs sent in one call; "
            "line interrupt delivered with the line counter event, no handler call; "
            "display-off catch-up looks at the clock across short tile lists; "
            "one kernel call per look at the clock, adjacent looks shared; "

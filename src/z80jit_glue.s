@@ -64,7 +64,7 @@ REGS            EQU     0x400           ; F A BC DE HL cycles PC SP
 R_PC            EQU     0x418
 IX              EQU     0x420
 HALTED          EQU     0x450
-HOST_SL         EQU     0x468
+HOST_SL         EQU     0x4E0
 EXIT_ARG        EQU     0x470
 EXIT_REASON     EQU     0x46C
 STATE           EQU     0x474
@@ -74,7 +74,7 @@ RESUME_HOST     EQU     0x48C
 RESUME_PC       EQU     0x490
 RESUME_TAB      EQU     0x4D8
 EVENT_A         EQU     0x4DC
-IRQ_COUNT       EQU     0x4E0
+IRQ_COUNT       EQU     0x468           ; follows EVENT_LINE (seg_take)
 RESUMED_COUNT   EQU     0x4E4
 IFF1            EQU     0x444
 IFF2            EQU     0x448
@@ -275,11 +275,26 @@ seg_push
         mov     r1,#0
         add     r12,r10,#IFF1-4
         stmib   r12,{r0,r1}             ; IFF1, IFF2
-        ldr     r0,[r10,#IRQ_COUNT]
-        add     r0,r0,#1
-        str     r0,[r10,#IRQ_COUNT]
         sub     r8,r8,#13*256           ; the interrupt's T-states
-        STRETCH
+        ; The next stretch as STRETCH makes it, the interrupt counted with
+        ; the same load and store (irq_count follows the line words)
+        ASSERT  LINE = RUN_END + 4 :LAND: EVENT_LINE = RUN_END + 8 :LAND: IRQ_COUNT = RUN_END + 12
+        add     r2,r10,#RUN_END :AND: 0xF00
+        add     r2,r2,#RUN_END :AND: 0xFF
+        ldmia   r2,{r0,r1,r12,lr}       ; run end, line, event line, interrupts taken
+        add     lr,lr,#1
+        sub     r0,r0,r1                ; lines to the end of the run
+        subs    r12,r12,r1              ; lines to the event
+        cmpne   r12,r0
+        movlo   r0,r12
+        add     r12,r12,r1              ; the event line again
+        cmp     r0,#MAX_STRETCH
+        movhi   r0,#MAX_STRETCH
+        add     r1,r1,r0
+        stmib   r2,{r1,r12,lr}          ; line, event line, interrupts taken
+        add     r8,r8,r0,lsl#16         ; 228 = 256 - 32 + 4
+        sub     r8,r8,r0,lsl#13
+        add     r8,r8,r0,lsl#10
         add     r1,r10,#LOOKUP
         mov     r0,#0x38                ; for the miss glue, should the entry be gone
         ldr     pc,[r1,#0x38*4]         ; the vector (the entry checks its bank or bytes)

@@ -111,28 +111,35 @@
 /*
  * The port state comes first: the data and control ports also have
  * handlers in assembly (sms_io.s), which address it. CONTRACT with the
- * equates of sms_io.s - vdp.c checks the offsets at compile time.
+ * equates of sms_io.s and vdp_a.s - vdp.c checks the offsets at compile
+ * time.
+ *
+ * The counts kept by the assembly handlers for the logs each sit next to
+ * a word the handler's path loads or stores anyway, so that one LDM or
+ * STM carries both and a count costs an addition: the control writes
+ * after the access word, the data reads after the read buffer, the
+ * status reads after the status, the counter reads before the line count.
  */
 typedef struct {
     uint32  acc;            /* +0x00: the access word (see VDP_ACC_*) */
-    uint8   gg_latch;       /* +0x04: Game Gear: the even byte of a colour */
-    uint8   pad1[3];
+    uint32  n_ctrl_w;       /* +0x04: control port writes */
     uint32  buffer;         /* +0x08: read buffer */
-    uint32  cram_dirty;     /* +0x0C: colour RAM written since last cleared */
-    uint32  n_data_r;       /* +0x10: data port reads */
-    uint32  n_ctrl_w;       /* +0x14: control port writes */
-    uint32  n_stat_r;       /* +0x18: status reads handled in assembly */
+    uint32  n_data_r;       /* +0x0C: data port reads */
+    uint32  cram_dirty;     /* +0x10: colour RAM written since last cleared */
+    uint32  line_flag;      /* +0x14: line interrupt pending */
+    uint32  active;         /* +0x18: active lines: 192, 224 or 240 */
     uint32  gg;             /* +0x1C: Game Gear mode (set by the machine) */
     uint8   cram[32];       /* +0x20 */
     uint8   reg[16];        /* +0x40 */
     uint32  status;         /* +0x50: VDP_ST_* */
-    uint32  line_flag;      /* +0x54: line interrupt pending */
-    /* Timing (the fields the event handler of sms_io.s loads together). */
-    uint32  active;         /* +0x58: active lines: 192, 224 or 240 */
-    uint32  lines;          /* lines per frame */
+    uint32  n_stat_r;       /* +0x54: status reads handled in assembly */
+    uint32  n_count_r;      /* +0x58: V and H counter reads (handled in assembly) */
+    /* Timing. */
+    uint32  lines;          /* +0x5C: lines per frame */
     uint32  vc_jump;        /* last V counter value before the jump back */
     uint32  vc_back;        /* amount the V counter jumps back by */
-    uint32  frame_base;     /* ctx->line at the start of the current frame */
+    /* The event handler of sms_io.s loads the next four together. */
+    uint32  frame_base;     /* +0x68: ctx->line at the start of the current frame */
     uint32  vbl_done;       /* the VBlank event of this frame has run */
     uint32  lc_k;           /* line counter valid at the end of line lc_k - 1 */
     uint32  lc_val;
@@ -140,7 +147,8 @@ typedef struct {
     uint8   hc[VDP_LINE_T]; /* +0x7C: H counter for each T-state of a line */
     z80j_ctx *ctx;          /* +0x160 */
     uint32  nt_rows;        /* +0x164: name table rows: 28, or 32 in the extended modes */
-    uint32  n_count_r;      /* +0x168: V and H counter reads (handled in assembly) */
+    uint8   gg_latch;       /* +0x168: Game Gear: the even byte of a colour */
+    uint8   pad1[3];
     uint8   gg_cram[VDP_GG_CRAM];   /* +0x16C: Game Gear colour RAM */
     uint8   pad[0x200 - 0x7C - VDP_LINE_T - 12 - VDP_GG_CRAM];
     uint8   dirty[VDP_TILES];       /* +0x200: nonzero: tile written */

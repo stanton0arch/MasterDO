@@ -40,19 +40,21 @@ OBUF_OFF        EQU     0xD00           ; ctx->obuf (buffered runs, z80jit.h)
 VDP_OFFSET      EQU     0x44000         ; the vdp_state: SMS_VDP_OFFSET of sms.h from the
                                         ; context, less the read table below the global pointer
 
-; vdp_state fields.
+; vdp_state fields. The counts kept for the logs sit next to a word their
+; handler loads or stores anyway (vdp.h): one LDM or STM carries both.
 V_ACC           EQU     0x00
-V_GGLATCH       EQU     0x04
+V_NCTRLW        EQU     0x04            ; control writes, after the access word
 V_BUFFER        EQU     0x08
-V_CRAMDIRTY     EQU     0x0C
-V_NDATAR        EQU     0x10
-V_NCTRLW        EQU     0x14
-V_NSTATR        EQU     0x18
+V_NDATAR        EQU     0x0C            ; data reads, after the read buffer
+V_CRAMDIRTY     EQU     0x10
+V_LINEFLAG      EQU     0x14
+V_ACTIVE        EQU     0x18
 V_GG            EQU     0x1C
 V_CRAM          EQU     0x20
 V_REG           EQU     0x40
 V_STATUS        EQU     0x50
-V_LINEFLAG      EQU     0x54
+V_NSTATR        EQU     0x54            ; status reads, after the status
+V_NCOUNTR       EQU     0x58            ; counter reads, before the line count
 V_LINES         EQU     0x5C
 V_VCJUMP        EQU     0x60
 V_VCBACK        EQU     0x64
@@ -61,9 +63,10 @@ V_VBLDONE       EQU     0x6C
 V_LCK           EQU     0x70
 V_LCVAL         EQU     0x74
 V_HC            EQU     0x7C
-V_ACTIVE        EQU     0x58
-V_NCOUNTR       EQU     0x168
+V_GGLATCH       EQU     0x168
 V_GGCRAM        EQU     0x16C
+        ASSERT  V_NCTRLW = V_ACC + 4 :LAND: V_NDATAR = V_BUFFER + 4
+        ASSERT  V_NSTATR = V_STATUS + 4 :LAND: V_LINES = V_NCOUNTR + 4 :LAND: V_VCJUMP = V_LINES + 4
 V_DIRTY         EQU     0x200
 V_VRAM          EQU     0x400
 V_HSN           EQU     0x4400          ; the logs lie past the video RAM
@@ -226,21 +229,21 @@ data_w_gg                               ; Game Gear: colours of 12 bits, two byt
 
 ;----------------------------------------------------------------------------
 ; IN from the data port: returns the read buffer, which is then loaded from
-; the next address.
+; the next address (the buffer and the count of data reads, next to it, in
+; one load and one store).
 ;----------------------------------------------------------------------------
 sms_vdp_data_r
         VDP
         ldr     r1,[r12,#V_ACC]
-        ldr     r0,[r12,#V_BUFFER]
         add     r2,r12,#V_VRAM
-        ldrb    r2,[r2,r1,lsr#18]
-        str     r2,[r12,#V_BUFFER]
+        ldrb    r2,[r2,r1,lsr#18]       ; the next buffer: the byte at the address
         UNPEND  r1
         add     r1,r1,#ACC_ADDR1
         str     r1,[r12,#V_ACC]
-        ldr     r2,[r12,#V_NDATAR]
-        add     r2,r2,#1
-        str     r2,[r12,#V_NDATAR]
+        add     r1,r12,#V_BUFFER
+        ldmia   r1,{r0,r12}             ; the read buffer (returned), the data reads
+        add     r12,r12,#1
+        stmia   r1,{r2,r12}             ; the next buffer, one more read
         mov     pc,lr
 
 ;----------------------------------------------------------------------------
@@ -282,7 +285,8 @@ rn_loop
 ; needs no counter update. With them disabled an underflow since the last
 ; update may have set the flag, which the read clears: the lazy counter is
 ; first brought to the lines done (lc_sync of vdp.c) in its simple case,
-; and through the C path when it crossed an underflow.
+; and through the C path when it crossed an underflow. The status and the
+; count of status reads, next to it, take one load and one store.
 ;----------------------------------------------------------------------------
 sms_vdp_stat_r
         VDP
@@ -290,19 +294,18 @@ sms_vdp_stat_r
         tst     r0,#0x10
         beq     stat_lc
 stat_clear
-        ldr     r0,[r12,#V_STATUS]
+        add     r1,r12,#V_STATUS
+        ldmia   r1,{r0,r12}             ; the status (returned), the status reads
         mov     r2,#0
-        str     r2,[r12,#V_STATUS]
-        str     r2,[r12,#V_LINEFLAG]
+        add     r12,r12,#1
+        stmia   r1,{r2,r12}             ; the status cleared, one more read
+        str     r2,[r1,#V_LINEFLAG-V_STATUS]
         str     r2,[r10,#IRQ_LINE]
-        ldr     r1,[r12,#V_NSTATR]
-        add     r1,r1,#1
-        str     r1,[r12,#V_NSTATR]
-        ldr     r2,[r12,#V_ACC]
+        ldr     r2,[r1,#V_ACC-V_STATUS]
         tst     r2,#ACC_PENDING
         moveq   pc,lr
         UNPEND  r2                      ; a pending control word ends
-        str     r2,[r12,#V_ACC]
+        str     r2,[r1,#V_ACC-V_STATUS]
         mov     pc,lr
 stat_lc
         ldr     r0,[r10,#LINE]
@@ -356,7 +359,7 @@ stat_lc_slow
 ; from the table of a line.
 ;----------------------------------------------------------------------------
         MACRO
-        BEAM                            ; out: r2 = line, r1 = T-state in it
+        BEAM                            ; out: r1 = T-state in the line
         ldr     r0,[r10,#LINE]
         ldr     r1,[r12,#V_FRAMEBASE]
         sub     r0,r0,r1
@@ -374,15 +377,14 @@ stat_lc_slow
         mov     r1,#228
         mul     r1,r2,r1
         sub     r1,r0,r1                ; T-state in the line
-        ldr     r0,[r12,#V_LINES]
-        cmp     r2,r0
-        subhs   r2,r2,r0
         MEND
 
 ; The V counter only needs the line: the lines at the stretch end less
 ; ceil(left / 228), computed as (ceil(left / 4) + 56) / 57 by one
 ; multiplication (exact within a frame), as the control port does; the
-; line count and the jump of the display mode come with one LDM.
+; count of counter reads, the line count and the last value before the
+; jump of the display mode come with one LDM, the amount of the jump only
+; when the counter jumps.
 sms_vdp_vc_r
         add     r0,r2,#0x300
         mov     r0,r0,lsr#10
@@ -395,16 +397,16 @@ sms_vdp_vc_r
         VDP
         ldr     r1,[r12,#V_FRAMEBASE]
         subs    r0,r0,r1                ; from the start of the frame
-        add     r12,r12,#V_LINES
-        ldmia   r12,{r1,r2,r12}         ; lines, vc_jump, vc_back
-        addmi   r0,r0,r1                ; an access that ends the previous frame
-        cmp     r0,r1
-        subhs   r0,r0,r1
+        add     r12,r12,#V_NCOUNTR
+        ldmia   r12,{r1,r2,r12}         ; counter reads, lines, vc_jump
+        addmi   r0,r0,r2                ; an access that ends the previous frame
         cmp     r0,r2
-        subhi   r0,r0,r12
+        subhs   r0,r0,r2
+        cmp     r0,r12
+        VDP                             ; (the flags kept)
+        ldrhi   r2,[r12,#V_VCBACK]
+        subhi   r0,r0,r2
         and     r0,r0,#0xFF
-        VDP
-        ldr     r1,[r12,#V_NCOUNTR]
         add     r1,r1,#1
         str     r1,[r12,#V_NCOUNTR]
         mov     pc,lr
@@ -465,7 +467,8 @@ psg_4bits
 ; read code loads the read buffer. Register writes go to the machine's C
 ; handler (vdp_control_write), which may raise the interrupt line or move
 ; the next event, but for the registers raster effects write on every
-; line (ctrl_reg8 and the next ones).
+; line (ctrl_reg8 and the next ones). The paths that store the access word
+; store the count of control writes, next to it, with the same STM.
 ;----------------------------------------------------------------------------
 sms_vdp_ctrl_w
         VDP
@@ -476,7 +479,11 @@ sms_vdp_ctrl_w
         bic     r1,r1,#0x03FC0000       ; bits 0-7 of the address: the byte
         orr     r1,r1,r0,lsl#18
         orr     r1,r1,#ACC_PENDING+ACC_SLOW
-        str     r1,[r12,#V_ACC]
+        ldr     r2,[r12,#V_NCTRLW]
+        add     r2,r2,#1
+        stmia   r12,{r1,r2}             ; the access word, one more control write
+        mov     r0,#0
+        mov     pc,lr
 ctrl_count
         ldr     r1,[r12,#V_NCTRLW]
         add     r1,r1,#1
@@ -512,8 +519,11 @@ ctrl_data                               ; codes 0, 1 and 3
         str     r0,[r12,#V_BUFFER]
         add     r1,r1,#ACC_ADDR1        ; (0x4000 wraps to 0 in the word)
 ctrl_addr
-        str     r1,[r12,#V_ACC]
-        b       ctrl_count
+        ldr     r2,[r12,#V_NCTRLW]
+        add     r2,r2,#1
+        stmia   r12,{r1,r2}             ; the access word, one more control write
+        mov     r0,#0
+        mov     pc,lr
 
 ; Registers written by raster effects on every line, handled here as
 ; vdp_reg_write does: the horizontal scroll (8) and the name table base
@@ -650,7 +660,8 @@ ctrl_slow10
 ; first only sets the latch, which nothing reads between the two) and
 ; counted as two control writes: data codes and register 8 here, the
 ; other registers through the single output's paths once the first byte
-; is latched.
+; is latched. The access word and the count of control writes, next to
+; it, take one load and one store.
 ;----------------------------------------------------------------------------
 sms_vdp_ctrl_pw
         VDP
@@ -662,22 +673,19 @@ sms_vdp_ctrl_pw
         ldr     r0,[r10,#PAIR]
         tst     r0,#PAIR_SENT
         bne     pw_single
-        ldr     r2,[r12,#V_ACC]         ; (left is not needed by the data codes)
-        mov     r2,r2,lsl#18
-        mov     r2,r2,lsr#18            ; the data writes of the frame
-        orr     r0,r2,r0,lsr#6          ; address bits 0-7: the first byte (d falls out)
+        mov     r0,r0,lsr#6             ; address bits 0-7: the first byte (d falls out)
         orr     r0,r0,r4,lsl#2          ; address bits 8-13: bits 0-5 of the second
         orr     r0,r0,r1,lsr#16         ; the code
         cmp     r1,#0xC0000000
         orreq   r0,r0,#ACC_SLOW         ; colour RAM writes take the slow path
-        teq     r1,#0
+        ldmia   r12,{r1,r2}             ; the access word, the control writes (left
+                                        ; is not needed by the data codes)
+        add     r2,r2,#2
+        mov     r1,r1,lsl#18
+        orr     r0,r0,r1,lsr#18         ; the data writes of the frame
+        tst     r0,#ACC_CODE3
         beq     pw_read
-pw_addr
-        str     r0,[r12,#V_ACC]
-pw_count2
-        ldr     r1,[r12,#V_NCTRLW]
-        add     r1,r1,#2
-        str     r1,[r12,#V_NCTRLW]
+        stmia   r12,{r0,r2}             ; the access word, two more control writes
         mov     r0,#0
         mov     pc,lr
 pw_single                               ; the first byte went out alone
@@ -689,26 +697,44 @@ pw_read                                 ; read code: read ahead
         ldrb    r1,[r1,#V_VRAM]
         str     r1,[r12,#V_BUFFER]
         add     r0,r0,#ACC_ADDR1        ; (0x4000 wraps to 0 in the word)
-        b       pw_addr
+        stmia   r12,{r0,r2}
+        mov     r0,#0
+        mov     pc,lr
 
-; Register 8, as ctrl_reg8 does.
+; Register 8, as ctrl_reg8 does: the register and its raster log entry
+; first, then the access word with the count of control writes.
 pw_reg8
         ACCLINE
         bmi     pw_latch                ; it ends the previous frame
         ldr     r0,[r10,#PAIR]
         tst     r0,#PAIR_SENT
         bne     pw_single
-        ldr     r2,[r12,#V_ACC]
-        mov     r2,r2,lsl#18
-        mov     r2,r2,lsr#18            ; the data writes of the frame
-        orr     r2,r2,#0x8000           ; code 2
-        orr     r2,r2,#8:SHL:26         ; address bits 8-11: the register
-        orr     r2,r2,r0,lsr#6          ; address bits 0-7: the first byte
-        str     r2,[r12,#V_ACC]
-        mov     r2,r0,lsr#24
+        mov     r2,r0,lsr#24            ; the value: the first byte
         strb    r2,[r12,#V_REG+8]
         add     r1,r1,#1                ; shows from the next line on
-        RASTERLOG V_HSN,VDP_HS_LOG,pw_count2
+        ldr     r0,[r12,#V_ACTIVE]
+        cmp     r1,r0
+        orr     r1,r2,r1,lsl#8          ; the log entry: (line << 8) | value
+        bhs     pw_reg8_acc             ; past the active display: not recorded
+        add     r2,r12,#V_HSN
+        ldr     r0,[r2]
+        cmp     r0,#VDP_HS_LOG
+        bhs     pw_reg8_acc             ; the log is full
+        add     r0,r0,#1
+        str     r0,[r2],r0,lsl#2        ; to the new entry (the count is just below the log)
+        str     r1,[r2]
+pw_reg8_acc                             ; r1 = the value in bits 0-7
+        ldmia   r12,{r0,r2}             ; the access word, the control writes
+        mov     r1,r1,lsl#24
+        mov     r0,r0,lsl#18
+        mov     r0,r0,lsr#18            ; the data writes of the frame
+        orr     r0,r0,#0x8000           ; code 2
+        orr     r0,r0,#8:SHL:26         ; address bits 8-11: the register
+        orr     r0,r0,r1,lsr#6          ; address bits 0-7: the value
+        add     r2,r2,#2
+        stmia   r12,{r0,r2}             ; the access word, two more control writes
+        mov     r0,#0
+        mov     pc,lr
 
 ; The first byte latched as a single output does it, counted, then the
 ; second through the single output's paths. In: r2 = T-states left.
@@ -718,12 +744,12 @@ pw_latch
         tst     r1,#PAIR_SENT
         bne     pw_single
         bic     r0,r0,#0x03FC0000
-        orr     r1,r0,r1,lsr#6
-        orr     r1,r1,#ACC_PENDING+ACC_SLOW
-        str     r1,[r12,#V_ACC]
-        ldr     r0,[r12,#V_NCTRLW]
-        add     r0,r0,#1
-        str     r0,[r12,#V_NCTRLW]
+        orr     r0,r0,r1,lsr#6
+        orr     r0,r0,#ACC_PENDING+ACC_SLOW
+        ldr     r1,[r12,#V_NCTRLW]
+        add     r1,r1,#1
+        stmia   r12,{r0,r1}             ; the access word, one more control write
+        mov     r1,r0
         mov     r0,r4,lsr#24
         b       ctrl_second             ; r0 = byte, r1 = access word, r2 = left
 
@@ -1207,8 +1233,8 @@ ev_irq
         ; bit 4); registers 0-3 in one big-endian word: R0 in bits 24-31,
         ; R1 in bits 16-23
         ldr     r0,[r12,#V_REG]
-        add     r6,r12,#V_STATUS
-        ldmia   r6,{r6,r7}              ; status, line flag
+        ldr     r6,[r12,#V_STATUS]
+        ldr     r7,[r12,#V_LINEFLAG]
         ands    r6,r0,r6,lsl#14         ; status bit 7 against R1 bit 5
         andeqs  r6,r0,r7,lsl#28         ; line flag against R0 bit 4
         movne   r6,#1

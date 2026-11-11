@@ -67,7 +67,7 @@ IFF1            EQU     0x444
 IFF2            EQU     0x448
 IM              EQU     0x44C
 LINE            EQU     0x460
-HOST_SL         EQU     0x468
+HOST_SL         EQU     0x4E0
 STATE           EQU     0x474
 SCRATCH         EQU     0x494
 PORT_IN         EQU     0x49C

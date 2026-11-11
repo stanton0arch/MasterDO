@@ -102,7 +102,8 @@ typedef struct {
     uint32 line;            /* +0x460: scanline at which the current stretch */
                             /* of execution ends (see z80j_machine) */
     uint32 event_line;      /* +0x464: next line calling machine->event */
-    uint32 host_sl;         /* +0x468: caller's r10, restored around C calls */
+    uint32 irq_count;       /* +0x468: maskable interrupts taken by the glue (next to */
+                            /* the line words: one LDM and one STM of the glue carry it) */
     uint32 exit_reason;     /* +0x46C */
     uint32 exit_arg;        /* +0x470 */
     uint32 state;           /* +0x474: translator state */
@@ -131,7 +132,7 @@ typedef struct {
     uint32 hot_force_at;    /* +0x4D4: count at which it is handed over regardless */
     uint32 resume_tab;      /* +0x4D8: interrupted segments (z80j_resume[Z80J_RESUMES]) */
     uint32 event_a;         /* +0x4DC: machine event handler in assembly (see below) */
-    uint32 irq_count;       /* +0x4E0: maskable interrupts taken by the glue */
+    uint32 host_sl;         /* +0x4E0: caller's r10, restored around C calls */
     uint32 resumed_count;   /* +0x4E4: returns resumed by the glue */
     uint32 port_inn;        /* +0x4E8: 256 handlers of INI / IND runs */
     uint32 pair_a;          /* +0x4EC: handler of the output pairs, or 0 (see below) */
