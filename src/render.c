@@ -267,6 +267,7 @@ static void set_mode(renderer *r, uint32 height, uint32 force)
             l->rb_next = RENDER_NO_TILE;
             l->nt_pend[0] = l->nt_pend[1] = 0;
             memset(l->tile_pend, 0, sizeof(l->tile_pend));
+            l->tile_pend_set = 0;
             l->stale_rows = 0;
             l->shown_rows = 0;
             l->shown_cols = 0;
@@ -453,6 +454,7 @@ static void rebuild_start(render_layer *l, const uint8 *vram)
     l->pend_tile = RENDER_NO_TILE;
     l->nt_pend[0] = l->nt_pend[1] = 0;
     memset(l->tile_pend, 0, sizeof(l->tile_pend));
+    l->tile_pend_set = 0;
     for (i = 0; i < VDP_TILES; i++)
         l->head[i] = NONE;
 }
@@ -881,14 +883,62 @@ static void shown_columns(renderer *r, const vdp_state *v)
     }
 }
 
-/* Palette band holding line y. */
-static uint32 pband_of(const renderer *r, uint32 y)
+/* The rows a run of lines ya to yb - 1 of layer l shows, within the lines
+ * of the window, added to its shown rows. */
+static void shown_rows_add(renderer *r, render_layer *l, uint32 ya, uint32 yb, uint32 vs,
+                           uint32 vsi)
 {
-    uint32 q = 0;
+    if (ya < r->win_y)
+        ya = r->win_y;
+    if (yb > r->win_y + r->win_h)
+        yb = r->win_y + r->win_h;
+    if (ya >= yb)
+        return;
+    l->shown_rows |= rows_of(ya, yb, vs, l->nrows);
+    if (vsi)
+        l->shown_rows |= rows_of(ya, yb, 0, l->nrows);
+}
 
-    while (q + 1 < r->npb && r->ptops[q + 1] <= y)
-        q++;
-    return q;
+/* The attribute bands of the update in r->abands: the lines cut at every
+ * top of a display, name table or palette band, each run of lines given
+ * as its end | RENDER_AB_OFF when the display is off there | the layer
+ * of its name table << 24 | its palette band << 25, from line 0 to the
+ * picture height. Returns their number. */
+static uint32 attr_bands(renderer *r, uint32 nnb, uint32 ndb)
+{
+    uint32 h = r->height;
+    uint32 *ab = r->abands;
+    uint32 n = 0;
+    uint32 y = 0;
+    uint32 j = 0;           /* display band */
+    uint32 m = 0;           /* name table band */
+    uint32 q = 0;           /* palette band */
+
+    while (y < h) {
+        uint32 e = h;
+        uint32 a;
+
+        if (j + 1 < ndb && r->dtops[j + 1] < e)
+            e = r->dtops[j + 1];
+        if (m + 1 < nnb && r->ntops[m + 1] < e)
+            e = r->ntops[m + 1];
+        if (q + 1 < r->npb && r->ptops[q + 1] < e)
+            e = r->ptops[q + 1];
+        a = e | (q << 25);
+        if (r->nlayer[m] != &r->layer[0])
+            a |= (uint32)1 << 24;
+        if (!r->dons[j])
+            a |= RENDER_AB_OFF;
+        ab[n++] = a;
+        if (j + 1 < ndb && r->dtops[j + 1] == e)
+            j++;
+        if (m + 1 < nnb && r->ntops[m + 1] == e)
+            m++;
+        if (q + 1 < r->npb && r->ptops[q + 1] == e)
+            q++;
+        y = e;
+    }
+    return n;
 }
 
 /*
@@ -902,7 +952,10 @@ static uint32 pband_of(const renderer *r, uint32 y)
  * in *any_on, whether any line is displayed. The name table, display and
  * palette band tables were filled by the caller (r->ntops and r->dtops
  * with nnb and ndb bands, r->ptops with r->npb); the scroll bands come
- * from the log here.
+ * from the log here. Every band runs from its top to the next one's (the
+ * last to the picture height), so the line bands are the scroll bands cut
+ * at the tops of the other bands, and the rows a layer shows are those of
+ * the runs of lines of its name table bands with the display on.
  */
 static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nnb, uint32 ndb,
                          uint32 *any_on)
@@ -915,11 +968,13 @@ static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nnb, uint32 ndb
     uint32 nbl = 0;
     uint32 nl = 0;
     uint32 on = 0;
-    uint32 nb;
+    uint32 na;
+    uint32 ya;
+    uint32 ra;
+    render_layer *rl;
     uint32 j;
     uint32 k;
     uint32 m;
-    uint32 q;
 
     if (ndb > 1)
         r->st.dbands++;
@@ -946,9 +1001,7 @@ static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nnb, uint32 ndb
         *any_on = 1;
         return 0;
     }
-    nb = vdp_bands(v->hs_log, v->hs_n, v->reg[8], r->tops, r->hss);
-    if (nb > 1)
-        r->st.bands++;
+    /* The lines with the display off: a backdrop rectangle per band. */
     for (j = 0; j < ndb; j++) {
         uint32 da = r->dtops[j];
         uint32 db = (j + 1 < ndb) ? r->dtops[j + 1] : h;
@@ -962,58 +1015,37 @@ static uint32 line_bands(renderer *r, const vdp_state *v, uint32 nnb, uint32 ndb
 
             c->ccb_YPos = (Coord)(da << 16);
             c->ccb_VDY = (int32)((db - da) << 16);
-            continue;
-        }
-        on = 1;
-        for (m = 0; m < nnb; m++) {
-            uint32 na = r->ntops[m];
-            uint32 nb2 = (m + 1 < nnb) ? r->ntops[m + 1] : h;
-            render_layer *l = r->nlayer[m];
-            uint32 li = (l == &r->layer[0]) ? 0 : 1;    /* no pointer division */
-
-            if (na < da)
-                na = da;
-            if (nb2 > db)
-                nb2 = db;
-            if (na >= nb2)
-                continue;
-            for (k = 0; k < nb; k++) {
-                uint32 ya = r->tops[k];
-                uint32 yb = (k + 1 < nb) ? r->tops[k + 1] : h;
-
-                if (ya < na)
-                    ya = na;
-                if (yb > nb2)
-                    yb = nb2;
-                if (ya >= yb)
-                    continue;
-                if (r->npb == 1) {
-                    r->lbands[nl++] = ya | (yb << 8) | ((r->hss[k] & 0xFF) << 16) | (li << 24);
-                } else {
-                    for (q = pband_of(r, ya); q < r->npb && r->ptops[q] < yb; q++) {
-                        uint32 pa = r->ptops[q];
-                        uint32 pz = (q + 1 < r->npb) ? r->ptops[q + 1] : h;
-
-                        if (pa < ya)
-                            pa = ya;
-                        if (pz > yb)
-                            pz = yb;
-                        r->lbands[nl++] = pa | (pz << 8) | ((r->hss[k] & 0xFF) << 16) |
-                                          (li << 24) | (q << 25);
-                    }
-                }
-                if (ya < wa)
-                    ya = wa;
-                if (yb > wb)
-                    yb = wb;
-                if (ya < yb) {
-                    l->shown_rows |= rows_of(ya, yb, vs, l->nrows);
-                    if (vsi)
-                        l->shown_rows |= rows_of(ya, yb, 0, l->nrows);
-                }
-            }
+        } else {
+            on = 1;
         }
     }
+    /* The scroll bands from the log, then cut at the other bands' tops. */
+    na = attr_bands(r, nnb, ndb);
+    k = render_scroll_lbands(v->hs_log, v->hs_n, v->reg[8], h, r->sbands);
+    if ((k >> 16) > 1)
+        r->st.bands++;
+    nl = render_cut_lbands(r->sbands, k & 0xFFFF, r->abands, r->lbands);
+    /* The rows shown: one run of lines per layer while the display stays
+     * on (ra, the first line of the run, is h when there is none). */
+    ra = h;
+    rl = NULL;
+    ya = 0;
+    for (k = 0; k < na; k++) {
+        uint32 a = r->abands[k];
+        render_layer *l = (a & ((uint32)1 << 24)) ? &r->layer[1] : &r->layer[0];
+
+        if (ra != h && ((a & RENDER_AB_OFF) || l != rl)) {
+            shown_rows_add(r, rl, ra, ya, vs, vsi);
+            ra = h;
+        }
+        if (ra == h && !(a & RENDER_AB_OFF)) {
+            ra = ya;
+            rl = l;
+        }
+        ya = a & 0xFF;
+    }
+    if (ra != h)
+        shown_rows_add(r, rl, ra, ya, vs, vsi);
     r->nlb = nl;
     for (k = 1; k < nbl; k++)
         r->cels[CEL_DBLANK0 + k - 1].ccb_NextPtr = &r->cels[CEL_DBLANK0 + k];
@@ -1563,14 +1595,69 @@ static void window_offset(renderer *r, uint32 nbl)
     }
 }
 
+/* The nd written tiles of r->dlist: their conversions forgotten, and the
+ * name table chunks among them noted in nt_mask for each layer. */
+static void dirty_marks(renderer *r, vdp_state *v, uint32 nd, uint32 nt_mask[][2])
+{
+    const uint32 *dl = r->dlist;
+    const uint32 *end = dl + nd;
+    uint8 *tok = r->t_ok;
+    uint8 *sok = v->spr_tile_ok;
+    uint32 c0 = r->layer[0].nt_base >> 5;   /* first chunk and chunks of each table */
+    uint32 n0 = r->layer[0].nrows * 2;
+    uint32 c1 = r->layer[1].nt_base >> 5;
+    uint32 n1 = r->layer[1].nrows * 2;
+
+    while (dl < end) {
+        uint32 j = *dl++;
+        uint32 d;
+
+        tok[j] = 0;
+        sok[j] = 0;
+        d = j - c0;
+        if (d < n0)
+            nt_mask[0][d >> 5] |= (uint32)1 << (d & 31);
+        d = j - c1;
+        if (d < n1)
+            nt_mask[1][d >> 5] |= (uint32)1 << (d & 31);
+    }
+}
+
+/* The cells of the written tiles (the nd tiles of r->dlist, then the
+ * tiles the catch-up left pending) of the layers whose bit is set in
+ * walk, in one walk of the list for both layers. */
+static void written_cells(renderer *r, const uint8 *vram, uint32 nd, uint32 walk)
+{
+    uint32 k;
+    uint32 m;
+
+    if (walk != 0)
+        render_written_cells((walk & 1) ? &r->layer[0] : NULL, (walk & 2) ? &r->layer[1] : NULL,
+                             vram, r->dlist, nd);
+    for (m = 0; m < RENDER_LAYERS; m++) {
+        render_layer *l = &r->layer[m];
+
+        if (!((walk >> m) & 1) || !l->tile_pend_set)
+            continue;
+        l->tile_pend_set = 0;
+        for (k = 0; k < VDP_TILES / 32; k++) {
+            uint32 w = l->tile_pend[k];
+
+            l->tile_pend[k] = 0;
+            for (; w != 0; w &= w - 1) {
+                uint32 j = k * 32 + lowest_bit(w);
+
+                if (l->head[j] != NONE)
+                    render_tile_cells(l, vram, j);
+            }
+        }
+    }
+}
+
 static void update_picture(renderer *r, vdp_state *v)
 {
     const uint8 *vram = v->vram;
     uint32 nt_mask[RENDER_LAYERS][2];
-    uint32 c0;
-    uint32 n0;
-    uint32 c1;
-    uint32 n1;
     uint32 nnb;
     uint32 ndb;
     uint32 nd;
@@ -1580,6 +1667,7 @@ static void update_picture(renderer *r, vdp_state *v)
     uint32 nbl;
     uint32 any_on;
     uint32 ns;
+    uint32 walk;
     uint32 k;
     uint32 m;
     CCB *last;
@@ -1634,34 +1722,22 @@ static void update_picture(renderer *r, vdp_state *v)
 
         if (l->pend_tile != RENDER_NO_TILE) {
             l->tile_pend[l->pend_tile >> 5] |= (uint32)1 << (l->pend_tile & 31);
+            l->tile_pend_set = 1;
             l->pend_tile = RENDER_NO_TILE;
         }
         nt_mask[m][0] = nt_mask[m][1] = 0;
     }
-    c0 = r->layer[0].nt_base >> 5;      /* first chunk and chunks of each table */
-    n0 = r->layer[0].nrows * 2;
-    c1 = r->layer[1].nt_base >> 5;
-    n1 = r->layer[1].nrows * 2;
-    for (k = 0; k < nd; k++) {
-        uint32 j = r->dlist[k];
-        uint32 d;
-
-        r->t_ok[j] = 0;
-        v->spr_tile_ok[j] = 0;
-        d = j - c0;
-        if (d < n0)
-            nt_mask[0][d >> 5] |= (uint32)1 << (d & 31);
-        d = j - c1;
-        if (d < n1)
-            nt_mask[1][d >> 5] |= (uint32)1 << (d & 31);
-    }
+    dirty_marks(r, v, nd, nt_mask);
 
     /* Every layer in use follows the VDP: a layer that took a new table
      * is drawn whole, the others draw their changed entries first (with
      * the written tiles converted again), then the stale cells of the
-     * rows shown, then the other cells of the written tiles in the rows
-     * shown (the rest is left stale). A layer with no table is left
-     * alone. */
+     * rows shown, then (written_cells, for both layers at once) the other
+     * cells of the written tiles in the rows shown (the rest is left
+     * stale). A layer with no table is left alone. The layers share only
+     * the tile conversions, which do not depend on the layer that makes
+     * them. */
+    walk = 0;
     for (m = 0; m < RENDER_LAYERS; m++) {
         render_layer *l = &r->layer[m];
         uint32 used = 0;
@@ -1694,24 +1770,9 @@ static void update_picture(renderer *r, vdp_state *v)
             update_entries(l, nt_mask[m], vram);
         if ((l->stale_rows & l->shown_rows) != 0)
             render_stale_cells(l, vram);
-        for (k = 0; k < nd; k++) {
-            uint32 j = r->dlist[k];
-
-            if (l->head[j] != NONE)
-                render_tile_cells(l, vram, j);
-        }
-        for (k = 0; k < VDP_TILES / 32; k++) {
-            uint32 w = l->tile_pend[k];
-
-            l->tile_pend[k] = 0;
-            for (; w != 0; w &= w - 1) {
-                uint32 j = k * 32 + lowest_bit(w);
-
-                if (l->head[j] != NONE)
-                    render_tile_cells(l, vram, j);
-            }
-        }
+        walk |= (uint32)1 << m;
     }
+    written_cells(r, vram, nd, walk);
     for (m = 0; m < RENDER_LAYERS; m++) {
         render_layer *l = &r->layer[m];
 
@@ -1912,6 +1973,7 @@ uint32 render_catch_up(renderer *r, vdp_state *v, uint32 (*now)(void), uint32 de
             if (!layer_holds(l, l->nt_base))
                 continue;
             l->tile_pend[j >> 5] |= (uint32)1 << (j & 31);
+            l->tile_pend_set = 1;
             if (j == l->pend_tile)
                 l->pend_tile = RENDER_NO_TILE;
             d = j - (l->nt_base >> 5);
@@ -2005,6 +2067,7 @@ uint32 render_catch_up(renderer *r, vdp_state *v, uint32 (*now)(void), uint32 de
         if ((((uint32)l->shadow[2 * l->pend_cell + 1] & 1) << 8 |
              l->shadow[2 * l->pend_cell]) != t) {
             l->tile_pend[t >> 5] |= (uint32)1 << (t & 31);
+            l->tile_pend_set = 1;
             l->pend_tile = RENDER_NO_TILE;
             continue;
         }

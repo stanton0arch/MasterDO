@@ -252,6 +252,9 @@ typedef struct render_layer_s {
      * others wait stale; stale_cols says where render_stale_cells looks. */
     uint32  shown_cols;
     uint32  stale_cols[RENDER_NT_ROWS_MAX];
+    /* Nonzero when tile_pend may hold a bit: set with every bit, cleared
+     * when the update walks and clears the words. */
+    uint32  tile_pend_set;
 } render_layer;
 
 #define RENDER_NO_TILE  0xFFFFFFFFu
@@ -296,9 +299,12 @@ typedef struct {
     CCB    *chain;          /* first cel to draw */
     CCB    *last_cel;       /* the cel carrying CCB_LAST */
     uint32  wblank;         /* index of the cel of render_blank_window() */
-    /* Band tables of the update, kept off the task stack. */
-    uint32  tops[VDP_HS_LOG + 1];
-    uint32  hss[VDP_HS_LOG + 1];
+    /* Band tables of the update, kept off the task stack. The scroll
+     * bands (render_scroll_lbands, layer 0) and the attribute bands
+     * (render_cut_lbands) are those of a frame with more than one display,
+     * name table or palette band. */
+    uint32  sbands[VDP_HS_LOG + 1];
+    uint32  abands[VDP_NT_LOG + VDP_DE_LOG + VDP_PAL_BANDS];
     uint32  ntops[VDP_NT_LOG + 1];
     uint32  nvals[VDP_NT_LOG + 1];
     render_layer *nlayer[VDP_NT_LOG + 1];   /* layer of each name table band */
@@ -434,6 +440,11 @@ void   render_entries(render_layer *l, const uint8 *vram, uint32 n);
  * of 8): the wrap of the update stamps (render_a.s). */
 void   render_stamp_wrap(uint8 *stamp, uint32 nwords);
 void   render_tile_cells(render_layer *l, const uint8 *vram, uint32 t);
+/* render_tile_cells for each of the n tiles of list whose cell list is not
+ * empty, on layer l0 then on layer l1, in one walk of the list; either
+ * layer may be NULL (not walked), not both. */
+void   render_written_cells(render_layer *l0, render_layer *l1, const uint8 *vram,
+                            const uint32 *list, uint32 n);
 void   render_stale_cells(render_layer *l, const uint8 *vram);
 void   render_rebuild_cells(render_layer *l, const uint8 *vram);
 /* Resumable forms for the catch-up: render_tile_cells for the list of
@@ -476,6 +487,16 @@ uint32 render_band_pieces(render_band_args *a, const uint32 *lb);
  * vdp_bands and line_bands make them; hl = picture height | layer << 24
  * (render_a.s). Returns the words written to out | the bands << 16. */
 uint32 render_scroll_lbands(const uint32 *log, uint32 n, uint32 top, uint32 hl, uint32 *out);
+/* The line bands of any other frame: the n scroll bands at sb (ya | yb <<
+ * 8 | hs << 16, from line 0 to the picture height, as render_scroll_lbands
+ * makes them with layer 0) cut at the ends of the attribute bands at ab
+ * (yb | RENDER_AB_OFF when the display is off there | layer << 24 |
+ * palette band << 25, from line 0 to the same height), each part with the
+ * scroll of its scroll band and the layer and palette band of its
+ * attribute band, the parts with the display off left out (render_a.s).
+ * Returns the words written to out. */
+uint32 render_cut_lbands(const uint32 *sb, uint32 n, const uint32 *ab, uint32 *out);
+#define RENDER_AB_OFF   0x100       /* attribute band with the display off */
 /* Converts tile t (flip: mirrored horizontally) from the VDP's four bit
  * planes to 8 bpp rows into the layer's stores (render_a.s). */
 void   render_tile_conv(render_layer *l, uint32 t, uint32 flip, const uint8 *vram);

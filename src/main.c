@@ -621,7 +621,8 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: diagnostic counts carried by the loads and stores of their handlers; "
+    printf("masterdo: band pictures cut in one pass, written tiles walked once for both layers; "
+           "diagnostic counts carried by the loads and stores of their handlers; "
            "VDP control port pairs sent in one call; "
            "line interrupt delivered with the line counter event, no handler call; "
            "display-off catch-up looks at the clock across short tile lists; "

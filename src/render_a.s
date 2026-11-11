@@ -15,6 +15,8 @@
         EXPORT  render_rect_pieces
         EXPORT  render_band_pieces
         EXPORT  render_scroll_lbands
+        EXPORT  render_cut_lbands
+        EXPORT  render_written_cells
         EXPORT  render_sprite_runs
         EXPORT  render_prio_patches
         EXPORT  render_prio_groups
@@ -1339,13 +1341,15 @@ sl_loop
         cmp     r0,r1
         beq     sl_end
         ldr     r12,[r0],#4
+        eor     lr,r12,r2
+        tst     lr,#0xFF
+        beq     sl_loop                 ; the value of the last band: no change on any
+                                        ; line (it differs from the band before it)
         mov     lr,r12,lsr #8           ; line
         and     r12,r12,#0xFF           ; value
         cmp     lr,r4
         beq     sl_same
         bcc     sl_loop                 ; before the last band (the lines only grow)
-        cmp     r12,r2
-        beq     sl_loop                 ; the same value: no new band
         cmp     r5,#0
         blt     sl_shift
         SLEMIT  r5,r4,r6                ; the band before the last is final
@@ -1375,6 +1379,114 @@ sl_last
         sub     r0,r8,r11
         mov     r0,r0,lsr #2
         orr     r0,r0,r9,lsl #16
+        ldmfd   sp!,{r4-r11,pc}
+
+;----------------------------------------------------------------------------
+; uint32 render_cut_lbands(const uint32 *sb, uint32 n, const uint32 *ab,
+;                          uint32 *out)
+;
+; The line bands of a frame with more than one display, name table or
+; palette band: the n scroll bands at sb (ya | yb << 8 | hs << 16, as
+; render_scroll_lbands makes them for layer 0) cut at the ends of the
+; attribute bands at ab (yb | AB_OFF when the display is off there | layer
+; << 24 | palette band << 25), both lists running from line 0 to the
+; picture height. Each part between two consecutive ends of either list is
+; written as ya | yb << 8 | hs << 16 | the attribute byte << 24, unless its
+; attribute band has the display off. Returns the words written.
+;----------------------------------------------------------------------------
+AB_OFF          EQU     0x100           ; RENDER_AB_OFF
+
+render_cut_lbands
+        stmfd   sp!,{r4-r11,lr}
+        mov     r7,r3                   ; the start of the output
+        ldr     r4,[r0],#4              ; the scroll band
+        ldr     r5,[r2],#4              ; the attribute band
+        mov     r6,#0                   ; ya: the first line of the part
+        mov     r12,r4,lsr #8
+        and     r12,r12,#0xFF           ; the end of the scroll band
+        and     r11,r4,#0xFF0000        ; its scroll
+        and     r9,r5,#0xFF             ; the end of the attribute band
+        and     r10,r5,#0xFF000000      ; its layer and palette band
+cl_part
+        cmp     r9,r12
+        movls   lr,r9
+        movhi   lr,r12                  ; yb: the nearer end
+        tst     r5,#AB_OFF
+        orreq   r8,r11,r6               ; hs | ya
+        orreq   r8,r8,lr,lsl #8         ; | yb << 8
+        orreq   r8,r8,r10               ; | layer and palette band
+        streq   r8,[r3],#4              ; unless the display is off
+        mov     r6,lr                   ; the next part starts at yb
+        cmp     r12,lr
+        bne     cl_attr                 ; the scroll band goes on
+        subs    r1,r1,#1
+        beq     cl_end                  ; the last one ends at the picture height
+        ldr     r4,[r0],#4
+        mov     r12,r4,lsr #8
+        and     r12,r12,#0xFF
+        and     r11,r4,#0xFF0000
+cl_attr
+        cmp     r9,lr
+        bne     cl_part                 ; the attribute band goes on
+        ldr     r5,[r2],#4
+        and     r9,r5,#0xFF
+        and     r10,r5,#0xFF000000
+        b       cl_part
+cl_end
+        sub     r0,r3,r7
+        mov     r0,r0,lsr #2
+        ldmfd   sp!,{r4-r11,pc}
+;----------------------------------------------------------------------------
+; void render_written_cells(render_layer *l0, render_layer *l1,
+;                           const uint8 *vram, const uint32 *list, uint32 n)
+;
+; The cells of the n written tiles listed: render_tile_cells for each tile
+; whose cell list is not empty, on layer l0 and then on layer l1, in one
+; walk of the list. Either layer may be 0 (not walked), not both.
+;----------------------------------------------------------------------------
+render_written_cells
+        stmfd   sp!,{r4-r11,lr}
+        ldr     r8,[sp,#36]             ; n
+        cmp     r8,#0
+        beq     wc_done
+        mov     r6,r2                   ; vram
+        mov     r7,r3                   ; the list
+        add     r8,r3,r8,lsl #2         ; its end
+        movs    r4,r0
+        moveq   r4,r1                   ; l1 alone
+        moveq   r1,#0
+        ldr     r9,[r4,#R_HEAD]         ; the heads of the cell lists
+        movs    r5,r1
+        beq     wc_one
+        ldr     r10,[r5,#R_HEAD]
+wc_two
+        ldr     r11,[r7],#4             ; the tile
+        ldr     r0,[r9,r11,lsl #2]
+        cmp     r0,#NONE
+        movne   r0,r4
+        movne   r1,r6
+        movne   r2,r11
+        blne    render_tile_cells
+        ldr     r0,[r10,r11,lsl #2]
+        cmp     r0,#NONE
+        movne   r0,r5
+        movne   r1,r6
+        movne   r2,r11
+        blne    render_tile_cells
+        cmp     r7,r8
+        bne     wc_two
+        ldmfd   sp!,{r4-r11,pc}
+wc_one
+        ldr     r11,[r7],#4             ; the tile
+        ldr     r0,[r9,r11,lsl #2]
+        cmp     r0,#NONE
+        movne   r0,r4
+        movne   r1,r6
+        movne   r2,r11
+        blne    render_tile_cells
+        cmp     r7,r8
+        bne     wc_one
+wc_done
         ldmfd   sp!,{r4-r11,pc}
 
 ;----------------------------------------------------------------------------
