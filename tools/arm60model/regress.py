@@ -12,9 +12,10 @@ Usage (after make and mk.sh):
   regress.py run OUT [-img DIR] [-scales a,b,...] [-only c1,c2] [-args "sim args"] [-jobs N]
       Runs every play of panel.txt and panel_gg.txt with -framelog at each
       scale and keeps the Frame: lines in OUT/<cartridge>@<scale>.txt (a
-      run already there is kept). DIR holds the sim, sim.bin and sim.sym
-      of the build to run (default: this directory); copy them aside to
-      keep a build to compare with.
+      run already there is kept). DIR holds the sim, sim.bin, sim.sym and
+      sim.aif of the build to run (default: this directory); copy them
+      aside to keep a build to compare with (sim.aif gives the DRAM the
+      console leaves to that build, hence its code buffer zones).
   regress.py compare BASE NEW [-v] [-only c]
       Compares two run directories over the scales both hold. Per
       cartridge and per window, the means over the scales of: vis (VBLs

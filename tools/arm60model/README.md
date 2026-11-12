@@ -10,7 +10,16 @@ built. It is not part of the ISO and `make` does not use it.
   with `harness.c` (the driver), `dectest.c`, `anatest.c` and `emittest.c`
   (the checks of the assembly decoder, analysis passes and code emitter
   against their C references), all compiled by `armcc`, and `hstub.s` (host services) into a plain binary (`armlink -bin` at 0x8000, symbols in
-  `sim.sym`), and builds `sim` with `gcc`.
+  `sim.sym`), builds `sim` with `gcc` and copies the AIF header of the
+  console's executable of the same make (`takeme/LaunchMe`) to `sim.aif`.
+- The DRAM left to the run is the figure Phoenix gives before the
+  cartridge for that executable: 1 494 784 bytes less its read-only and
+  read-write parts rounded up to 16 bytes and its zero-initialised part
+  rounded up to 16 bytes (fitted to the byte on five builds), so that a
+  build that grows shows the code buffer zones it costs on the console.
+  `sim` reads `sim.aif` beside the image (`-aif file` for another);
+  without it, it takes the last figure measured (1 283 456 bytes) and
+  says so; `-dramfree n` overrides both.
 - `sim` interprets the binary as an ARMv3 big-endian CPU and counts the S,
   N and I cycles of every instruction with the timings of the ARM60
   datasheet (data processing 1S, `LDR` 1S+1N+1I, `STR` 2N, `LDM` nS+1N+1I,
@@ -65,7 +74,9 @@ the entry counts at which an address is queued (q) and translated at once
 whatever the budget, `-forcelimit us` the elapsed time of a frame past
 which that rule waits for the next frame (0: no limit), `-zones n` the
 zones of the code buffer (default: as many as the DRAM left allows),
-`-dramfree n` the DRAM left to the run, `-seed` translate the reachable
+`-dramfree n` the DRAM left to the run (default: derived from `sim.aif`),
+`-aif file` the console executable's header to derive it from, `-seed`
+translate the reachable
 code into the hot area, `-hotzones n`
 (kept for older scripts: the zones are no longer split between the areas,
 any nonzero value gives the hot area its own zone), `-check` verify the
@@ -340,7 +351,7 @@ run with them), so each play is run at eleven timing scales (`SIMSCALE`
 window and per 100-frame window:
 
 ```
-cp tools/arm60model/sim tools/arm60model/sim.bin tools/arm60model/sim.sym OLD/   # build replaced
+cp tools/arm60model/sim tools/arm60model/sim.bin tools/arm60model/sim.sym tools/arm60model/sim.aif OLD/   # build replaced
 tools/arm60model/regress.py run RUNS/old -img OLD
 tools/arm60model/regress.py run RUNS/new                 # the build of this directory
 tools/arm60model/regress.py compare RUNS/old RUNS/new    # -v: 100-frame windows too

@@ -1,7 +1,10 @@
 #!/bin/sh
 # Builds the ARM60 cycle model: the host interpreter (sim) and the image it
 # runs (sim.bin, sim.sym), linked from the objects of the last
-# "make clean && make" (build/*.o) with the harness and the host stubs.
+# "make clean && make" (build/*.o) with the harness and the host stubs,
+# and copies the AIF header of that make's console executable
+# (takeme/LaunchMe) to sim.aif: sim derives from its sizes the DRAM the
+# console leaves to the cartridge with this build.
 #
 # mk.sh -labels: the translator's assembly files (z80jit_dec.s, _ana.s,
 # _blk.s, _emt.s, _glue.s) are assembled again from copies in which every
@@ -56,4 +59,5 @@ armlink -bin -ro-base 0x8000 -o sim.bin -symbols sim.sym hstub.o harness.o decte
         $B/z80jit.c.o $B/z80jit_emit.c.o $JE $JB $JG $JD $JA $B/z80int_a.s.o $B/dbgview.c.o $B/render.c.o $B/render_a.s.o \
         $B/bench_cpu.c.o $B/bench_z80.s.o $B/z80prog.c.o $B/clock.c.o \
         $M/lib/community/libc.lib > link.txt 2>&1 || { cat link.txt; exit 1; }
-echo "sim, sim.bin and sim.sym built"
+head -c 128 $M/takeme/LaunchMe > sim.aif
+echo "sim, sim.bin, sim.sym and sim.aif built"

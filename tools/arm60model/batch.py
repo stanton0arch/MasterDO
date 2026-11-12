@@ -665,7 +665,7 @@ def main():
         if getattr(args, k):
             setattr(args, k, os.path.abspath(getattr(args, k)))     # the runs work elsewhere
 
-    for f in ("sim", "sim.bin", "sim.sym"):
+    for f in ("sim", "sim.bin", "sim.sym", "sim.aif"):
         if not os.path.exists(os.path.join(HERE, f)):
             sys.exit("%s missing: run mk.sh after make" % f)
     img_time = os.path.getmtime(os.path.join(HERE, "sim.bin"))

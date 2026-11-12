@@ -365,16 +365,20 @@ void game_free(game *g)
 
 /* The code buffer: JIT_ZONES zones, and up to GAME_MAX_ZONES when the
  * DRAM measured now still leaves DRAM_RESERVE free once the buffer and
- * the arenas of the logs are allocated. Code that outgrows the buffer
- * is evicted and translated again where it runs again, so every zone the
- * memory allows saves translations. A buffer found nowhere in one piece
- * falls back to fewer zones. */
+ * the arenas of the logs still to come in DRAM are allocated (the pad
+ * log is already in VRAM when that memory had room for it). Code that
+ * outgrows the buffer is evicted and translated again where it runs
+ * again, so every zone the memory allows saves translations. A buffer
+ * found nowhere in one piece falls back to fewer zones. */
 static uint32 *alloc_code(game *g)
 {
     uint32 dram = 0;
     uint32 vram = 0;
-    uint32 need = JIT_ZONE_BYTES * JIT_ZONES + GAME_LOG_WORDS * 4 + GAME_PAD_LOGS * 4 + DRAM_RESERVE;
+    uint32 need = JIT_ZONE_BYTES * JIT_ZONES + GAME_LOG_WORDS * 4 + DRAM_RESERVE;
     uint32 *code;
+
+    if (g->pad_log == NULL)
+        need += GAME_PAD_LOGS * 4;
 
     g->zones = JIT_ZONES;
     if (game_zones != 0) {
@@ -449,6 +453,14 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
     }
     if (g->cart_ram == NULL)
         g->cart_ram_size = 0;
+    /* The pad recorder's log goes to VRAM when the renderer and the
+     * cartridge RAM have left room there: its 4 KiB stay free in DRAM for
+     * the code buffer, whose zone count is taken next. Without that room
+     * it comes after the code buffer in DRAM, as the run's log does. */
+    g->pad_log_vram = 1;
+    g->pad_log = (uint32 *)AllocMem(GAME_PAD_LOGS * 4, MEMTYPE_VRAM);
+    if (g->pad_log == NULL)
+        g->pad_log_vram = 0;
     g->code = alloc_code(g);
     if (g->code == NULL) {
         printf("ERROR: out of memory for the code buffer (%lu bytes)\n",
@@ -467,7 +479,8 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
      * optional: without memory the records are dropped and counted, and
      * nothing is recorded. */
     g->log = (uint32 *)AllocMem(GAME_LOG_WORDS * 4, MEMTYPE_DRAM);
-    g->pad_log = (uint32 *)AllocMem(GAME_PAD_LOGS * 4, MEMTYPE_DRAM);
+    if (g->pad_log == NULL)
+        g->pad_log = (uint32 *)AllocMem(GAME_PAD_LOGS * 4, MEMTYPE_DRAM);
     sms_init(g->sms, g->ctx, rom, rom_size, VDP_LINES_NTSC, g->cart_ram, g->cart_ram_size, gg);
     for (k = 0; k < Z80J_PORTS; k++) {
         if (SMS_PORT_VCOUNTER(k))
@@ -483,7 +496,7 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
            g->cart_ram == NULL ? "no memory" : g->cart_ram_vram ? "VRAM" : "DRAM",
            g->hot_vram ? "VRAM" : "DRAM",
            g->log != NULL ? "allocated" : "out of memory",
-           g->pad_log != NULL ? "allocated" : "out of memory");
+           g->pad_log == NULL ? "out of memory" : g->pad_log_vram ? "in VRAM" : "in DRAM");
     printf("Mapper: %s\n", g->sms->mem.mapper == SMS_MAPPER_CODEMASTERS ?
            "Codemasters (header at $7FE0; slots paged by writes to $0000, $4000, $8000)" :
            "Sega (paging registers at $FFFC-$FFFF)");

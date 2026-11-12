@@ -621,7 +621,8 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("masterdo: RAM code operands taken as immediates until seen rewritten; "
+    printf("masterdo: pad log in VRAM, one more code zone for 512 KiB images; "
+           "RAM code operands taken as immediates until seen rewritten; "
            "band pictures cut in one pass, written tiles walked once for both layers; "
            "diagnostic counts carried by the loads and stores of their handlers; "
            "VDP control port pairs sent in one call; "

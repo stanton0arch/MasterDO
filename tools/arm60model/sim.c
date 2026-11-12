@@ -10,7 +10,8 @@
  *
  * Host services (SWI 0xF000nn, see hstub.s): 0 exit, 1 printf, 2 allocate
  * (counted against the memory left to the run: -dramfree n, default the
- * DRAM of Phoenix; the VRAM less the image), 3 free (counted back),
+ * DRAM Phoenix leaves to the console's executable of the same build, see
+ * dram_from_aif; the VRAM less the image), 3 free (counted back),
  * 4 microsecond clock, 5 ROM address, 6 ROM size,
  * 7 picture dump (view_NNNNNN.ppm), 8 command-line argument, 9 pad
  * buttons of a frame, 10 time marks (15: reset the profile), 11 code
@@ -19,7 +20,9 @@
  * charged as SIMCLOCK microseconds of I cycles, half before the sample
  * and half after), 16 the microsecond clock without charge (sim_time).
  *
- * Options: -rom file, -frames n, -bench, -dump n, -from n, -img, -sym.
+ * Options: -rom file, -frames n, -bench, -dump n, -from n, -img, -sym,
+ * -aif file (the AIF header of the console's executable, default sim.aif
+ * beside the image), -dramfree n (overrides the figure derived from it).
  * Environment: SIMPAD="frame:bits,..." (buttons held from that frame on,
  * SMS_PAD_* bits, 0x100 PAUSE), SIMPROF=1 (cycles per function, the 40
  * largest; SIMPROFALL=1 every function),
@@ -60,9 +63,19 @@ static uint32_t rom_size;
 /* Memory of the console left to the cartridge's run (Phoenix, NTSC, the
  * ISO's own code and the system loaded): the allocations are counted
  * against it, an allocation past it fails as AllocMem does, and the
- * image takes its size of VRAM. */
-static uint32_t dram_free = 1290080;
+ * image takes its size of VRAM. The DRAM is derived from the size of the
+ * console's executable (dram_from_aif); without its header, the figure
+ * Phoenix gave last. */
+static uint32_t dram_free = 1283456;
 static uint32_t vram_free = 571392;
+static int dram_given;
+/* DRAM Phoenix leaves free before the cartridge, plus what the console's
+ * executable takes there: its read-only and read-write parts rounded up to
+ * 16 bytes, and its zero-initialised part rounded up to 16 bytes. Fitted
+ * to the byte on five builds of the emulator whose Phoenix logs give the
+ * free DRAM (1 283 456 to 1 289 632 bytes for executables of 205 152 to
+ * 211 328 bytes). */
+#define DRAM_PHOENIX 1494784u
 static struct { uint32_t a, size, vram; } allocs[256];
 static uint32_t nallocs;
 static uint32_t args[32] = { 0, 0, 0, 0xFFFFFFFFu };
@@ -514,6 +527,35 @@ static void block_log(int32_t frame)
         }
     }
     if (any) fprintf(blog, "\n");
+}
+
+/* The DRAM free before the cartridge for the console's executable whose
+ * AIF header (its first 128 bytes, copied by mk.sh from takeme/LaunchMe)
+ * is in the file: a build that grows shows the code buffer zones it costs
+ * on the console. */
+static void dram_from_aif(const char *path)
+{
+    uint8_t h[36];
+    uint32_t w[9], foot;
+    FILE *f = fopen(path, "rb");
+    int k;
+
+    if (!f || fread(h, 1, sizeof(h), f) != sizeof(h)) {
+        if (f) fclose(f);
+        fprintf(stderr, "sim: no executable header in %s: DRAM free before the cartridge "
+                "taken as %u bytes (-dramfree n to set it)\n", path, (unsigned)dram_free);
+        return;
+    }
+    fclose(f);
+    for (k = 0; k < 9; k++)
+        w[k] = (uint32_t)h[4 * k] << 24 | (uint32_t)h[4 * k + 1] << 16 |
+               (uint32_t)h[4 * k + 2] << 8 | h[4 * k + 3];
+    if (w[4] != 0xEF000011u)            /* SWI exit: the fourth entry of an AIF header */
+        fatal("%s: not an AIF header", path);
+    foot = ((w[5] + w[6] + 15) & ~15u) + ((w[8] + 15) & ~15u);
+    dram_free = DRAM_PHOENIX - foot;
+    fprintf(stderr, "sim: %u bytes of DRAM free before the cartridge (executable of %u bytes "
+            "in DRAM, %s)\n", (unsigned)dram_free, (unsigned)foot, path);
 }
 
 static void do_swi(uint32_t n)
@@ -1047,7 +1089,7 @@ int main(int argc, char **argv)
 {
     FILE *f;
     long n;
-    const char *img = "sim.bin", *romp = NULL, *sym = "sim.sym";
+    const char *img = "sim.bin", *romp = NULL, *sym = "sim.sym", *aif = NULL;
     int i;
     char *padenv;
 
@@ -1077,7 +1119,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-force") && i + 1 < argc) args[20] = atoi(argv[++i]) + 1;
         else if (!strcmp(argv[i], "-forcelimit") && i + 1 < argc) args[25] = atoi(argv[++i]) + 1;
         else if (!strcmp(argv[i], "-zones") && i + 1 < argc) args[27] = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-dramfree") && i + 1 < argc) dram_free = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-dramfree") && i + 1 < argc) { dram_free = atoi(argv[++i]); dram_given = 1; }
+        else if (!strcmp(argv[i], "-aif") && i + 1 < argc) aif = argv[++i];
         else if (!strcmp(argv[i], "-hotzones") && i + 1 < argc) args[12] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-budget") && i + 1 < argc) {
             unsigned f = 0, c = 0;
@@ -1089,6 +1132,19 @@ int main(int argc, char **argv)
             sscanf(argv[++i], "%u:%u", &q, &t);
             args[8] = q; args[9] = t; args[10] = 1;
         }
+    }
+    if (!dram_given) {
+        /* sim.aif beside the image by default. */
+        static char path[4096];
+        const char *slash = strrchr(img, '/');
+        size_t dir = slash ? (size_t)(slash - img) + 1 : 0;
+
+        if (!aif && dir + 8 < sizeof(path)) {
+            memcpy(path, img, dir);
+            strcpy(path + dir, "sim.aif");
+            aif = path;
+        }
+        if (aif) dram_from_aif(aif);
     }
     mem = calloc(1, MEM_SIZE);
     execmap = calloc(1, MEM_SIZE / 4);

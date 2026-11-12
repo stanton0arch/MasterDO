@@ -240,6 +240,7 @@ typedef struct {
     uint32  cart_ram_size;  /* 32 KiB in VRAM, else 16 KiB in DRAM */
     uint32  cart_ram_vram;  /* allocated in VRAM */
     uint32  hot_vram;       /* entry counters allocated in VRAM */
+    uint32  pad_log_vram;   /* pad log allocated in VRAM */
 } game;
 
 /* Allocates the translator and the machine for a cartridge image; gg
