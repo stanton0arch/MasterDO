@@ -630,7 +630,9 @@ int main(int argc, char **argv)
            "%d blocks per frame at most, each code zone emptied once its blocks have moved\n",
            (int)Z80J_CHURN);
 #endif
-    printf("masterdo: pad log in VRAM, one more code zone for 512 KiB images; "
+    printf("masterdo: interrupted segments resumed only under the memory they were "
+           "interrupted in, never through the linker; "
+           "pad log in VRAM, one more code zone for 512 KiB images; "
            "RAM code operands taken as immediates until seen rewritten; "
            "band pictures cut in one pass, written tiles walked once for both layers; "
            "diagnostic counts carried by the loads and stores of their handlers; "

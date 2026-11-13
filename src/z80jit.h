@@ -334,7 +334,7 @@ typedef struct {
 typedef struct {
     uint32 pc;              /* Z80 address of the segment */
     uint32 host;            /* its code (0: empty) */
-    uint32 key;             /* key of the block */
+    uint32 key;             /* read table entry of its 1 KiB page then */
     uint32 pad;             /* 16-byte entries for the glue */
 } z80j_resume;
 

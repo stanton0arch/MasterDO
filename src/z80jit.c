@@ -1759,8 +1759,12 @@ static uint32 host_force(z80j_state *j, uint32 pc)
 
 /* Code to run for pc: its translation when it exists, else, with the
  * interpreter, the interpreter entry until the address has proven hot
- * (queued in the meantime), else a fresh translation. */
-static uint32 host_for(z80j_state *j, uint32 pc)
+ * (queued in the meantime), else a fresh translation. With resume, a
+ * segment remembered at an interrupt taken there (the return) comes
+ * first; the linker asks without: a static exit to that address is linked
+ * to a block of its own, not run through the C side at every pass into a
+ * segment it cannot link to. */
+static uint32 host_from(z80j_state *j, uint32 pc, int resume)
 {
     z80j_block *blk;
     uint32 host;
@@ -1776,11 +1780,14 @@ static uint32 host_for(z80j_state *j, uint32 pc)
     if (host != j->glue.miss && !KEY_IS_SLOT(key))
         return host;
     /* The return from an interrupt taken at a segment check: the block
-     * goes on from there, under the mapping it was interrupted with. */
-    {
+     * goes on from there when its page shows what it showed then (the
+     * same read table entry: a bank, a fixed page), never for code in
+     * RAM (only the entry check of a block notices a rewrite). */
+    if (resume) {
         const z80j_resume *e = &j->resume[Z80J_RESUME_SLOT(pc)];
 
-        if (e->host != 0 && e->pc == pc && e->key == key) {
+        if (e->host != 0 && e->pc == pc && e->key == j->ctx->rtab[63 - (pc >> 10)] &&
+            key != KEY_RAM) {
             j->stats.resumed++;
             return e->host;
         }
@@ -1821,6 +1828,11 @@ static uint32 host_for(z80j_state *j, uint32 pc)
         return sync_translate(j, pc);
     }
     return host_force(j, pc);
+}
+
+static uint32 host_for(z80j_state *j, uint32 pc)
+{
+    return host_from(j, pc, 1);
 }
 
 /* Translates the hottest address of the queue, after dropping the
@@ -2487,14 +2499,14 @@ uint32 z80j_link(z80j_state *j, uint32 data)
     uint32 host = jit_link_host(j, target, from_key, data);
 
     if (host == 0) {
-        host = host_for(j, target);
+        host = host_from(j, target, 0);
         if (host == j->glue.interp) {
             j->ctx->regs[6] = target;
             return 0;
         }
         if (host == j->glue.abort || j->generation != generation)
             return host;
-        /* A return resumed inside a block is run, not linked. */
+        /* Code the linker cannot record is run, not linked. */
         if (jit_link_host(j, target, from_key, data) == 0)
             return host;
         host = jit_link_host(j, target, from_key, data);
@@ -2610,7 +2622,7 @@ static uint32 take_interrupt(z80j_state *j)
 
             e->pc = ctx->resume_pc;
             e->host = ctx->resume_host;
-            e->key = key;
+            e->key = ctx->rtab[63 - (ctx->resume_pc >> 10)];
         }
     }
     ctx->resume_host = 0;

@@ -84,7 +84,7 @@ NMI             EQU     0x458
 RUN_END         EQU     0x45C
 LINE            EQU     0x460
 EVENT_LINE      EQU     0x464
-PAGE_KIND       EQU     0x100           ; page kinds (context + 0x500)
+PAGE_KIND       EQU     0x500           ; page kinds (context + 0x600)
 LOOKUP          EQU     0x4000
 MAX_STRETCH     EQU     8192
 PAGE_KIND_MASK  EQU     0x0F
@@ -241,15 +241,14 @@ seg_raised                              ; lr: handled, the interrupt line high
         cmp     r0,#2
         beq     seg_slow
 seg_take
-        ; Remember the interrupted segment for the return, under the key
-        ; of its code (jit_block_key): 0 for a fixed page, (kind << 16) |
-        ; bank for a paged slot; not for RAM code, whose entry check alone
-        ; notices a rewrite.
-        add     r12,r10,#PAGE_KIND
-        ldrb    r12,[r12,r1,lsr#8]
-        ands    r12,r12,#PAGE_KIND_MASK
-        bne     seg_take_slot
-seg_take_key
+        ; Remember the interrupted segment for the return, under the read
+        ; table entry of its 1 KiB page (rtab[63 - page], below the global
+        ; pointer: the memory the page shows, a bank or a fixed page); the
+        ; miss path resumes it under the same entry only, and never for
+        ; code in RAM, whose entry check alone notices a rewrite.
+        mov     r12,r1,lsr#10
+        sub     r12,r10,r12,lsl#2
+        ldr     r12,[r12,#-4]
         ldr     r0,[r10,#RESUME_TAB]
         eor     lr,r1,r1,lsr#6
         and     lr,lr,#63
@@ -298,14 +297,6 @@ seg_push
         add     r1,r10,#LOOKUP
         mov     r0,#0x38                ; for the miss glue, should the entry be gone
         ldr     pc,[r1,#0x38*4]         ; the vector (the entry checks its bank or bytes)
-seg_take_slot
-        cmp     r12,#4
-        bhi     seg_push                ; RAM (or unknown): no entry
-        add     r0,r10,#0x400
-        add     r0,r0,#SLOT_BANK-4-0x400
-        ldr     r0,[r0,r12,lsl#2]       ; slot_bank[kind - 1]
-        orr     r12,r0,r12,lsl#16
-        b       seg_take_key
 seg_no_event
         ldr     r0,[r10,#NMI]
         teq     r0,#0
@@ -380,21 +371,17 @@ z80j_glue_miss
         bne     miss_c
         teq     r2,#0
         beq     miss_c
-        ; The key of the code at that address now (as seg_take computes
-        ; it; RAM code is never remembered)
-        add     r12,r10,#PAGE_KIND
-        ldrb    r12,[r12,r0,lsr#8]
-        ands    r12,r12,#PAGE_KIND_MASK
-        beq     miss_key                ; fixed page: 0
-        cmp     r12,#4
-        bhi     miss_c                  ; RAM (or unknown)
-        add     r1,r10,#0x400
-        add     r1,r1,#SLOT_BANK-4-0x400
-        ldr     r1,[r1,r12,lsl#2]       ; slot_bank[kind - 1]
-        orr     r12,r1,r12,lsl#16
-miss_key
+        ; The read table entry it was interrupted under, and code not in
+        ; RAM
+        mov     r12,r0,lsr#10
+        sub     r12,r10,r12,lsl#2
+        ldr     r12,[r12,#-4]           ; rtab[63 - page]
         cmp     r12,lr
         bne     miss_c
+        add     r12,r10,#PAGE_KIND
+        ldrb    r12,[r12,r0,lsr#8]
+        tst     r12,#PAGE_RAM
+        bne     miss_c                  ; RAM (or unknown)
         ldr     r1,[r10,#RESUMED_COUNT]
         add     r1,r1,#1
         str     r1,[r10,#RESUMED_COUNT]
