@@ -661,7 +661,9 @@ int main(int argc, char **argv)
            "%d blocks per frame at most, each code zone emptied once its blocks have moved\n",
            (int)Z80J_CHURN);
 #endif
-    printf("masterdo: interrupted segments resumed only under the memory they were "
+    printf("masterdo: code entered fewer than 16 times left to the interpreter while "
+           "the code buffer turns over; "
+           "interrupted segments resumed only under the memory they were "
            "interrupted in, never through the linker; "
            "pad log in VRAM, one more code zone for 512 KiB images; "
            "RAM code operands taken as immediates until seen rewritten; "

@@ -395,7 +395,25 @@ typedef struct {
  * than paying the interpretation again in the next frame. Code that runs
  * once never enters the buffer, and translation mostly leaves the frames
  * of the game for their spare time.
+ *
+ * When the buffer cannot hold the code being run (Z80J_PRESSURE_EVICTIONS
+ * zones emptied within Z80J_PRESSURE_FRAMES frames), both counts rise to
+ * Z80J_PRESSURE_AT until no zone has been emptied for Z80J_PRESSURE_CALM
+ * frames:
+ * code entered only a few times stays interpreted instead of taking the
+ * room of code that runs more, and the code the buffer turns over (code
+ * translated, emptied, translated again) falls with it. Writing ARM code
+ * during play is a cost some hosts pay far more than the console does (an
+ * emulator of the console that itself translates the ARM code it runs:
+ * none of that cost shows in the frame times).
  */
+#define Z80J_PRESSURE_EVICTIONS 5
+#define Z80J_PRESSURE_FRAMES    128
+#define Z80J_PRESSURE_CALM      512
+#ifndef Z80J_PRESSURE_AT
+#define Z80J_PRESSURE_AT        16
+#endif
+
 typedef struct {
     z80j_ctx   *ctx;
     uint32     *code;       /* code buffer */
@@ -479,6 +497,15 @@ typedef struct {
     uint32      pair_ports[8];  /* bitmap of the ports set by z80j_set_pair_port */
     uint32      ram_learned;    /* RAM blocks translated again because an operand */
                                 /* they held as an immediate was rewritten */
+    /* Code buffer pressure (see above): the counts given to
+     * z80j_set_interp, the frames of the last evictions (a ring), whether
+     * the counts are raised, and the frames spent so. */
+    uint32      base_queue_at;
+    uint32      base_sync_at;
+    uint32      evict_frames[Z80J_PRESSURE_EVICTIONS - 1];
+    uint32      evict_ring;
+    uint32      pressure;
+    uint32      pressure_frames;
 } z80j_state;
 
 /* Memory for max_blocks block descriptors, and for a link log of

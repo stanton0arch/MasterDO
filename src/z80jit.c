@@ -1225,6 +1225,36 @@ static uint32 clock_start(z80j_state *j)
     return (j->clock != 0) ? j->clock() : 0;
 }
 
+/* The entry counts from which code is queued and translated at once, for
+ * the interpreter and the C side. */
+static void set_counts(z80j_state *j, uint32 queue_at, uint32 sync_at)
+{
+    j->queue_at = queue_at;
+    j->sync_at = sync_at;
+    j->ctx->hot_queue_at = queue_at;
+    j->ctx->hot_sync_at = sync_at;
+}
+
+/* An eviction in this frame: the counts rise to Z80J_PRESSURE_AT when the
+ * last Z80J_PRESSURE_EVICTIONS evictions fell within Z80J_PRESSURE_FRAMES
+ * frames (see z80j_state). An address reaching it past force_at is
+ * translated whatever the budget, as usual. */
+static void note_eviction(z80j_state *j)
+{
+    uint32 k = j->evict_ring % (Z80J_PRESSURE_EVICTIONS - 1);
+    uint32 at = Z80J_PRESSURE_AT;
+
+    if (j->evict_ring >= Z80J_PRESSURE_EVICTIONS - 1 &&
+        j->frame_no - j->evict_frames[k] < Z80J_PRESSURE_FRAMES &&
+        !j->pressure && j->hot != 0 && j->base_queue_at != 0) {
+        set_counts(j, at > j->base_queue_at ? at : j->base_queue_at,
+                   at > j->base_sync_at ? at : j->base_sync_at);
+        j->pressure = 1;
+    }
+    j->evict_frames[k] = j->frame_no;
+    j->evict_ring++;
+}
+
 /*
  * Empties zone z: its blocks (chained from zone_head) lose their
  * descriptors and their lookup entries, and every direct branch into the
@@ -1272,6 +1302,7 @@ static void evict_zone(z80j_state *j, uint32 z)
     ctx->resume_host = 0;
     j->generation++;
     j->stats.evictions++;
+    note_eviction(j);
     if (j->clock != 0) {
         uint32 dt;
 
@@ -2039,13 +2070,14 @@ uint32 z80j_churn(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 margin_
 void z80j_set_interp(z80j_state *j, uint8 *hot, uint32 queue_at, uint32 sync_at)
 {
     j->hot = hot;
-    j->queue_at = queue_at;
-    j->sync_at = sync_at;
     if (hot != 0)
         memset(hot, 0, 0x10000);
     j->ctx->hot_tab = JIT_ADDR(hot);
-    j->ctx->hot_queue_at = queue_at;
-    j->ctx->hot_sync_at = sync_at;
+    set_counts(j, queue_at, sync_at);
+    j->base_queue_at = queue_at;
+    j->base_sync_at = sync_at;
+    j->pressure = 0;
+    j->evict_ring = 0;
     j->ctx->ei_saved = 0;
     j->ctx->int_leave = 0;
     j->ctx->hot_sync_gate = 0;
@@ -2125,6 +2157,17 @@ void z80j_set_budget(z80j_state *j, uint32 (*clock)(void), uint32 floor_us,
 void z80j_frame_start(z80j_state *j, uint32 start_us, uint32 reserve_us)
 {
     j->frame_no++;
+    if (j->pressure) {
+        /* Back to the usual counts once no zone has been emptied for
+         * Z80J_PRESSURE_CALM frames. */
+        uint32 last = j->evict_frames[(j->evict_ring - 1) % (Z80J_PRESSURE_EVICTIONS - 1)];
+
+        j->pressure_frames++;
+        if (j->frame_no - last >= Z80J_PRESSURE_CALM) {
+            set_counts(j, j->base_queue_at, j->base_sync_at);
+            j->pressure = 0;
+        }
+    }
     age_zone(j, j->frame_no % j->nzones);
     j->sync_spent_us = 0;
     j->int_insns0 = j->ctx->int_insns;

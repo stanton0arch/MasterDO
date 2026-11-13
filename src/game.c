@@ -1124,7 +1124,8 @@ void game_log_state(game *g)
            "%lu evictions (%lu blocks, %lu unlinked, %lu ahead in spare time, %lu us), "
            "%lu RAM retranslations, %lu for rewritten operands, %lu dynamic RAM "
            "blocks, %lu seams, %lu returns resumed, %lu hot addresses dropped, "
-           "%lu interpreted instructions, generation %lu\n",
+           "%lu interpreted instructions, generation %lu, %lu frames with new code "
+           "translated from %lu entries\n",
            (unsigned long)j->nblocks, (unsigned long)g->blocks_peak, (unsigned long)j->nlinks,
            (unsigned long)j->max_links, (unsigned long)j->stats.link_full,
            (unsigned long)j->stats.evictions, (unsigned long)j->stats.evicted,
@@ -1134,5 +1135,6 @@ void game_log_state(game *g)
            (unsigned long)j->stats.dyn_blocks, (unsigned long)j->stats.seams,
            (unsigned long)(j->stats.resumed + c->resumed_count),
            (unsigned long)j->stats.queue_full, (unsigned long)c->int_insns,
-           (unsigned long)j->generation);
+           (unsigned long)j->generation, (unsigned long)j->pressure_frames,
+           (unsigned long)Z80J_PRESSURE_AT);
 }
