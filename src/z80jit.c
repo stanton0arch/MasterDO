@@ -1281,9 +1281,14 @@ static void evict_zone(z80j_state *j, uint32 z)
         next = blk->znext;
         unhash_block(j, blk);
         ctx->lookup[BLK_PC_OF(blk)] = j->glue.miss;
-        /* Interpreted again until it proves hot, in spare time. */
+        /* Interpreted again until it proves hot, in spare time: one
+         * entry short of the usual count, raised counts or not, so that
+         * under pressure a block thrown out must earn its place again
+         * like new code instead of coming back at its next entry, and the
+         * blocks of a zone emptied come back one by one as their entries
+         * come, not all in the frame that enters them again. */
         if (j->hot != 0 && j->queue_at != 0)
-            j->hot[BLK_PC_OF(blk)] = (uint8)(j->queue_at - 1);
+            j->hot[BLK_PC_OF(blk)] = (uint8)(j->base_queue_at - 1);
         free_block(j, blk);
         freed++;
     }

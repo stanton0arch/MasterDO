@@ -402,7 +402,9 @@ typedef struct {
  * frames:
  * code entered only a few times stays interpreted instead of taking the
  * room of code that runs more, and the code the buffer turns over (code
- * translated, emptied, translated again) falls with it. Writing ARM code
+ * translated, emptied, translated again) falls with it; a block emptied
+ * starts again from the usual count, so it must reach the raised one to
+ * come back. Writing ARM code
  * during play is a cost some hosts pay far more than the console does (an
  * emulator of the console that itself translates the ARM code it runs:
  * none of that cost shows in the frame times).
