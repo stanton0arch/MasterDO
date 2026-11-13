@@ -647,9 +647,15 @@ int main(int argc, char **argv)
 #elif Z80J_DIAG == 6
     printf("masterdo: DIAGNOSTIC BUILD 6: no code written, about 2 ms of plain work per frame "
            "in spare time\n");
-#elif Z80J_DIAG
+#elif Z80J_DIAG == 7
     printf("masterdo: DIAGNOSTIC BUILD 7: 4 link branches of code run lately undone per frame, "
            "30 at once every 22 frames, each linked again at its next run\n");
+#elif Z80J_DIAG == 8
+    printf("masterdo: DIAGNOSTIC BUILD 8: the translations of build 5, %d blocks per frame at "
+           "most, their new code never run, no zone emptied by the move\n", (int)Z80J_CHURN);
+#elif Z80J_DIAG
+    printf("masterdo: DIAGNOSTIC BUILD 9: the move of build 5 at %d block per frame at most\n",
+           (int)Z80J_CHURN);
 #elif Z80J_CHURN
     printf("masterdo: DIAGNOSTIC BUILD: code run lately translated again in spare time, "
            "%d blocks per frame at most, each code zone emptied once its blocks have moved\n",

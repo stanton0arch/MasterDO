@@ -1909,6 +1909,9 @@ uint32 z80j_churn(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 margin_
     uint32 shown = 0;
     uint32 key = 0;
     uint32 pc = 0;
+#if Z80J_CHURN_DEAD
+    uint32 rounds = 0;
+#endif
 
     if (j->nzones < 3 || j->area[1].count == 0)
         return 0;
@@ -1973,6 +1976,15 @@ uint32 z80j_churn(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 margin_
         }
         if (blk != 0)
             break;
+#if Z80J_CHURN_DEAD
+        /* Every block translated again: the zone run the most is looked
+         * for again (the same one, most likely). */
+        churn_next = 0;
+        churn_zone = CHURN_NONE;
+        if (++rounds > 1)
+            return 0;                   /* nothing it holds is readable now */
+        continue;
+#endif
         /* Every block moved that could be: the zone waits for its
          * eviction, after the one waiting already. */
         churn_next = 0;
@@ -1989,6 +2001,22 @@ uint32 z80j_churn(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 margin_
         j->stats.prefetched++;
     else if (j->error == 5 && j->hot != 0 && !shown)
         j->hot[pc] = 255;               /* not translatable: interpreted for good */
+#if Z80J_CHURN_DEAD
+    {
+        /* The new code dropped (out of the hash, its descriptor left in its
+         * zone's chain until the zone is emptied), the code before found
+         * again. */
+        z80j_block *nb = find_block(j, pc, key);
+
+        if (nb != 0 && nb != blk)
+            unhash_block(j, nb);
+        if (find_block(j, pc, key) == 0) {
+            blk->next = j->hash[HASH(pc)];
+            j->hash[HASH(pc)] = blk;
+        }
+        ctx->lookup[pc] = j->glue.miss;
+    }
+#endif
     if (shown)
         show(arg, key, 0);
     /* The lookup entry the translation set stays only for code of one
@@ -2669,7 +2697,7 @@ uint32 z80j_diag(z80j_state *j)
         }
         break;
     default:
-        return 0;                       /* modes 5 and 6: not here */
+        return 0;                       /* modes 5, 6, 8 and 9: not here */
     }
     diag_frame = j->frame_no;
     return 1;

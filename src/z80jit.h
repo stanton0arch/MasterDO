@@ -598,11 +598,19 @@ uint32 z80j_evict_ahead(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 m
  * reaching new code a part at a time, to measure what writing code costs
  * the host. */
 #ifndef Z80J_CHURN
-#if Z80J_DIAG == 5
-#define Z80J_CHURN 3                    /* diagnostic build 5 */
+#if Z80J_DIAG == 5 || Z80J_DIAG == 8
+#define Z80J_CHURN 3                    /* diagnostic builds 5 and 8 */
+#elif Z80J_DIAG == 9
+#define Z80J_CHURN 1                    /* diagnostic build 9 */
 #else
 #define Z80J_CHURN 0
 #endif
+#endif
+/* Nonzero: the new code of each block is dropped at once (the block's
+ * code before keeps its place and its links) and no zone is emptied by the
+ * move (diagnostic build 8). */
+#ifndef Z80J_CHURN_DEAD
+#define Z80J_CHURN_DEAD (Z80J_DIAG == 8)
 #endif
 #if Z80J_CHURN
 /* One step: a block of the zone being moved translated again, or that
@@ -617,9 +625,9 @@ uint32 z80j_churn(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 margin_
 #endif
 
 /* Diagnostic builds, each doing one of the operations of writing code
- * alone (1-4, 7), the whole of it (5) or none of it (6), at about the rate
- * of a game reaching new code a part at a time, with the display on (0:
- * the usual build, nothing compiled):
+ * alone (1-4, 7), the move of Z80J_CHURN or a part of it (5, 8, 9), or no
+ * code written (6), at about the rate of a game reaching new code a part
+ * at a time, with the display on (0: the usual build, nothing compiled):
  *   1  stores: the words of about two blocks written into the free room of
  *      the zone being filled, where the next translation goes, never run;
  *   2  first runs: a fresh routine of as many words written into a zone
@@ -639,7 +647,13 @@ uint32 z80j_churn(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 margin_
  *   7  patches that change code that runs: a few link branches of code run
  *      lately undone at every frame (the call to the linker restored, as
  *      an eviction does), and as many as an eviction undoes at once every
- *      few frames; the code links them again at its next run.
+ *      few frames; the code links them again at its next run;
+ *   8  the translations of build 5 without the move: the same blocks
+ *      translated again at the same rate, their new code left unused (the
+ *      code before stays in use), so the code written never runs and the
+ *      move empties no zone (the area that takes the new code empties the
+ *      zones of unused code as it fills);
+ *   9  the move of build 5 at 1 block per frame at most.
  * The machine runs the same Z80 code and generated code keeps its meaning;
  * only the host's handling of code written while it runs is exercised. */
 #if Z80J_DIAG
