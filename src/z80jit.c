@@ -2525,7 +2525,8 @@ uint32 z80j_link(z80j_state *j, uint32 data)
 #define DIAG_EVICT_FRAMES 22    /* frames between two evictions */
 
 static uint32 diag_frame;       /* frame of the last operation */
-static uint32 diag_next;        /* mode 2: routine slot; modes 3, 4: link log entry */
+static uint32 diag_next;        /* mode 2: routine slot; modes 3, 4, 7: link log entry */
+static uint32 diag_burst;       /* mode 7: frame of the last burst */
 
 /* Whether the code at p ran lately (its chunk marked, or aged once). */
 static uint32 diag_live(const z80j_state *j, const uint32 *p)
@@ -2561,6 +2562,37 @@ static uint32 diag_relink(z80j_state *j, uint32 count)
             w = (volatile uint32 *)JIT_PTR(d[1]);
             *w = *w;
         }
+        n++;
+    }
+    return n;
+}
+
+/* Undoes the next count link stubs of the log whose branch lies in code
+ * run lately, as an eviction undoes the links into its zone (the call to
+ * the linker restored in the branch, the conditional jump leading to it
+ * pointed at it again, the log entry dropped): the code links them again
+ * at its next pass. Returns how many were undone. */
+static uint32 diag_unlink(z80j_state *j, uint32 count)
+{
+    uint32 n = 0;
+    uint32 tries;
+
+    for (tries = 0; n < count && tries < j->nlinks; tries++) {
+        uint32 e;
+        uint32 *d;
+
+        if (diag_next >= j->nlinks)
+            diag_next = 0;
+        e = j->links[diag_next];
+        d = (uint32 *)JIT_PTR(e);
+        if ((e & 1u) != 0 || !diag_live(j, d - 1)) {
+            diag_next++;                /* a trampoline, or code not run lately */
+            continue;
+        }
+        d[-1] = arm_branch(0xEu, 1, JIT_ADDR(d - 1), j->glue.link);
+        if (d[1] != 0)
+            patch_b((uint32 *)JIT_PTR(d[1]), JIT_ADDR(d - 1));
+        j->links[diag_next] = j->links[--j->nlinks];
         n++;
     }
     return n;
@@ -2619,12 +2651,25 @@ uint32 z80j_diag(z80j_state *j)
         if (diag_relink(j, DIAG_LINKS) == 0)
             return 0;
         break;
-    default:
+    case 4:
         /* As many stubs as an eviction undoes, at once, every
          * DIAG_EVICT_FRAMES frames. */
         if (j->frame_no - diag_frame < DIAG_EVICT_FRAMES || diag_relink(j, DIAG_BURST) == 0)
             return 0;
         break;
+    case 7:
+        /* A few links undone at every frame, as many as an eviction undoes
+         * at once every DIAG_EVICT_FRAMES frames. */
+        if (j->frame_no - diag_burst >= DIAG_EVICT_FRAMES) {
+            if (diag_unlink(j, DIAG_BURST) == 0)
+                return 0;
+            diag_burst = j->frame_no;
+        } else if (diag_unlink(j, DIAG_LINKS) == 0) {
+            return 0;
+        }
+        break;
+    default:
+        return 0;                       /* modes 5 and 6: not here */
     }
     diag_frame = j->frame_no;
     return 1;

@@ -868,6 +868,33 @@ void game_set_frame_us(game *g, uint32 us)
     z80j_set_force_limit(&g->jit, FORCE_PERIODS * us);
 }
 
+#if Z80J_DIAG == 6
+/* Diagnostic build 6 (see Z80J_DIAG): plain work, no code written. */
+#define DIAG_WORK_US 2000               /* spare time per frame */
+
+static uint32 diag_sums[64];            /* stores to a data buffer */
+
+/* About 0.2 ms of loads from the cartridge image, arithmetic and stores. */
+static void diag_work(const uint8 *mem, uint32 size)
+{
+    static uint32 at;
+    uint32 s = diag_sums[at & 63];
+    uint32 k;
+
+    for (k = 0; k < 128; k++) {
+        const uint32 *p;
+
+        if (at + 8 > size)
+            at = 0;
+        p = (const uint32 *)(const void *)(mem + at);
+        s = (s << 3) + (s >> 29) + p[0];
+        s ^= p[1] + (s >> 7);
+        diag_sums[k & 63] = s;
+        at += 8;
+    }
+}
+#endif
+
 uint32 game_spare_time(game *g, uint32 deadline_us)
 {
     uint32 t0 = plat_usec_now();
@@ -908,7 +935,19 @@ uint32 game_spare_time(game *g, uint32 deadline_us)
         }
     }
 #endif
-#if Z80J_DIAG
+#if Z80J_DIAG == 6
+    /* Diagnostic build 6: plain work for about the spare time the move of
+     * build 5 takes, within the same limit, with the display on. */
+    if (render_display_on(g->rd)) {
+        uint32 t1 = now;
+
+        while (now - t1 < DIAG_WORK_US &&
+               z80j_spare_fits(&g->jit, now - origin, FRAME_MARGIN_US)) {
+            diag_work(g->sms->mem.rom, g->sms->mem.rom_size);
+            now = plat_usec_now();
+        }
+    }
+#elif Z80J_DIAG
     /* Diagnostic builds: one operation of writing code (z80j_diag), with
      * the display on. */
     if (render_display_on(g->rd) && z80j_diag(&g->jit))

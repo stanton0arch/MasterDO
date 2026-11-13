@@ -474,11 +474,11 @@ static void draw_menu(platform *p, const app_state *st, int32 cur)
     char buf[64];
 
     plat_clear(p, s);
-#if Z80J_CHURN
-    sprintf(buf, "MASTERDO DIAGNOSTIC - %ld FILES   A: RUN  X: QUIT", (long)st->roms.count);
-#elif Z80J_DIAG
+#if Z80J_DIAG
     sprintf(buf, "MASTERDO DIAGNOSTIC %d - %ld FILES   A: RUN  X: QUIT", (int)Z80J_DIAG,
             (long)st->roms.count);
+#elif Z80J_CHURN
+    sprintf(buf, "MASTERDO DIAGNOSTIC - %ld FILES   A: RUN  X: QUIT", (long)st->roms.count);
 #else
     sprintf(buf, "MASTERDO - CHOOSE A CARTRIDGE (%ld FILES)   A: RUN  X: QUIT",
             (long)st->roms.count);
@@ -628,11 +628,6 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-#if Z80J_CHURN
-    printf("masterdo: DIAGNOSTIC BUILD: code run lately translated again in spare time, "
-           "%d blocks per frame at most, each code zone emptied once its blocks have moved\n",
-           (int)Z80J_CHURN);
-#endif
 #if Z80J_DIAG == 1
     printf("masterdo: DIAGNOSTIC BUILD 1: 1 KiB of code words stored per frame where the "
            "next block goes, never run\n");
@@ -642,9 +637,23 @@ int main(int argc, char **argv)
 #elif Z80J_DIAG == 3
     printf("masterdo: DIAGNOSTIC BUILD 3: 4 link branches of code run lately written again "
            "per frame\n");
-#elif Z80J_DIAG
+#elif Z80J_DIAG == 4
     printf("masterdo: DIAGNOSTIC BUILD 4: 30 link branches of code run lately written again "
            "at once every 22 frames\n");
+#elif Z80J_DIAG == 5
+    printf("masterdo: DIAGNOSTIC BUILD 5: code run lately translated again in spare time, "
+           "%d blocks per frame at most, each code zone emptied once its blocks have moved\n",
+           (int)Z80J_CHURN);
+#elif Z80J_DIAG == 6
+    printf("masterdo: DIAGNOSTIC BUILD 6: no code written, about 2 ms of plain work per frame "
+           "in spare time\n");
+#elif Z80J_DIAG
+    printf("masterdo: DIAGNOSTIC BUILD 7: 4 link branches of code run lately undone per frame, "
+           "30 at once every 22 frames, each linked again at its next run\n");
+#elif Z80J_CHURN
+    printf("masterdo: DIAGNOSTIC BUILD: code run lately translated again in spare time, "
+           "%d blocks per frame at most, each code zone emptied once its blocks have moved\n",
+           (int)Z80J_CHURN);
 #endif
     printf("masterdo: interrupted segments resumed only under the memory they were "
            "interrupted in, never through the linker; "

@@ -587,6 +587,10 @@ uint32 z80j_prefetch(z80j_state *j, uint32 now_us);
  * end left in j->now_us. */
 uint32 z80j_evict_ahead(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 margin_us);
 
+#ifndef Z80J_DIAG
+#define Z80J_DIAG 0                     /* diagnostic builds, further below */
+#endif
+
 /* Diagnostic build: blocks of code run lately translated again in spare
  * time, this many per frame (0: the usual build, nothing compiled). The
  * machine runs the same Z80 code; only generated code is written, linked
@@ -594,7 +598,11 @@ uint32 z80j_evict_ahead(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 m
  * reaching new code a part at a time, to measure what writing code costs
  * the host. */
 #ifndef Z80J_CHURN
+#if Z80J_DIAG == 5
+#define Z80J_CHURN 3                    /* diagnostic build 5 */
+#else
 #define Z80J_CHURN 0
+#endif
 #endif
 #if Z80J_CHURN
 /* One step: a block of the zone being moved translated again, or that
@@ -608,9 +616,10 @@ uint32 z80j_churn(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 margin_
                   uint32 (*show)(void *arg, uint32 key, uint32 on), void *arg);
 #endif
 
-/* Diagnostic builds, each doing one of the operations of writing code,
- * alone, at about the rate of a game reaching new code a part at a time,
- * with the display on (0: the usual build, nothing compiled):
+/* Diagnostic builds, each doing one of the operations of writing code
+ * alone (1-4, 7), the whole of it (5) or none of it (6), at about the rate
+ * of a game reaching new code a part at a time, with the display on (0:
+ * the usual build, nothing compiled):
  *   1  stores: the words of about two blocks written into the free room of
  *      the zone being filled, where the next translation goes, never run;
  *   2  first runs: a fresh routine of as many words written into a zone
@@ -621,15 +630,21 @@ uint32 z80j_churn(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 margin_
  *      their own value at every frame;
  *   4  an eviction's patches: as many link branches of code run lately as
  *      an eviction undoes, written again with their own value at once,
- *      every few frames.
+ *      every few frames;
+ *   5  the move of Z80J_CHURN (3 blocks per frame at most), as a reference
+ *      for the others;
+ *   6  no code written: plain work (loads, arithmetic, stores to a data
+ *      buffer) for at least the spare time the move takes, to tell the cost
+ *      of a busier processor from that of writing code;
+ *   7  patches that change code that runs: a few link branches of code run
+ *      lately undone at every frame (the call to the linker restored, as
+ *      an eviction does), and as many as an eviction undoes at once every
+ *      few frames; the code links them again at its next run.
  * The machine runs the same Z80 code and generated code keeps its meaning;
  * only the host's handling of code written while it runs is exercised. */
-#ifndef Z80J_DIAG
-#define Z80J_DIAG 0
-#endif
 #if Z80J_DIAG
 /* The operation of the frame (once per frame at most); returns 0 when
- * nothing was done. */
+ * nothing was done. Mode 6 is the caller's (no translator state). */
 uint32 z80j_diag(z80j_state *j);
 #endif
 
