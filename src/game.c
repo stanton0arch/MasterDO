@@ -892,6 +892,22 @@ uint32 game_spare_time(game *g, uint32 deadline_us)
             break;
         now = g->jit.now_us;
     }
+#if Z80J_CHURN
+    /* Diagnostic build: code run lately moved and translated again
+     * (z80j_churn), with the display on (the spare time of the frames
+     * without a picture goes to the picture's catch-up). */
+    if (render_display_on(g->rd)) {
+        uint32 k;
+
+        for (k = 0; k < Z80J_CHURN && z80j_spare_fits(&g->jit, now - origin, FRAME_MARGIN_US);
+             k++) {
+            if (!z80j_churn(&g->jit, now, origin, FRAME_MARGIN_US, sms_mem_show,
+                            &g->sms->mem))
+                break;
+            now = g->jit.now_us;
+        }
+    }
+#endif
     g->win.spare_us += now - t0;
     g->last_spare_us = now - t0;
     return now;

@@ -474,8 +474,12 @@ static void draw_menu(platform *p, const app_state *st, int32 cur)
     char buf[64];
 
     plat_clear(p, s);
+#if Z80J_CHURN
+    sprintf(buf, "MASTERDO DIAGNOSTIC - %ld FILES   A: RUN  X: QUIT", (long)st->roms.count);
+#else
     sprintf(buf, "MASTERDO - CHOOSE A CARTRIDGE (%ld FILES)   A: RUN  X: QUIT",
             (long)st->roms.count);
+#endif
     text_line(p, s, 0, COLOR_TITLE, buf);
     memory_line(p, s, 1, st->dram_free, st->vram_free);
     for (k = first; k < st->roms.count && k < first + MENU_LINES; k++) {
@@ -621,6 +625,11 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
+#if Z80J_CHURN
+    printf("masterdo: DIAGNOSTIC BUILD: code run lately translated again in spare time, "
+           "%d blocks per frame at most, each code zone emptied once its blocks have moved\n",
+           (int)Z80J_CHURN);
+#endif
     printf("masterdo: pad log in VRAM, one more code zone for 512 KiB images; "
            "RAM code operands taken as immediates until seen rewritten; "
            "band pictures cut in one pass, written tiles walked once for both layers; "

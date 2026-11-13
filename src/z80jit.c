@@ -1446,6 +1446,16 @@ static void zone_forget(z80j_state *j, uint32 z)
     }
 }
 
+#if Z80J_CHURN
+/* The move of the diagnostic build (z80j_churn): reset by a flush. */
+#define CHURN_NONE 0xFFFFFFFFu
+
+static uint32 churn_zone = CHURN_NONE;  /* zone being moved */
+static uint32 churn_gen;                /* generation when the zones were looked at */
+static z80j_block *churn_next;          /* next descriptor of its chain to look at */
+static uint32 churn_evict = CHURN_NONE; /* zone moved, waiting for its eviction */
+#endif
+
 void z80j_flush(z80j_state *j)
 {
     uint32 k;
@@ -1490,6 +1500,10 @@ void z80j_flush(z80j_state *j)
     j->generation++;
     j->ctx->resume_host = 0;
     j->stats.flushes++;
+#if Z80J_CHURN
+    churn_zone = CHURN_NONE;
+    churn_evict = CHURN_NONE;
+#endif
 }
 
 uint32 jit_link_host(z80j_state *j, uint32 target, uint32 from_key, uint32 from_site)
@@ -1853,6 +1867,134 @@ uint32 z80j_prefetch(z80j_state *j, uint32 now_us)
     }
     return 0;
 }
+
+#if Z80J_CHURN
+/*
+ * Diagnostic build: the code of the zone holding the most chunks run
+ * lately is moved, one block per call, to the area that takes code
+ * translated again (each current block of the zone translated anew: the
+ * new code takes its hash chain and lookup entry, the old one stays valid
+ * and linked meanwhile). Once every block has moved, the zone waits to be
+ * emptied, as an eviction empties it, in a frame with room for one (the
+ * direct branches into it become calls to the linker again, each linked
+ * to the new code at its next run), while the next zone moves. The code of
+ * a paged slot showing another bank is translated with its bank shown for
+ * the time of the translation (show); code that cannot be read under its
+ * key now is left to the eviction. A zone an area takes in the meantime
+ * leaves the move.
+ */
+static uint32 churn_out(const z80j_state *j, uint32 z)
+{
+    return z >= j->nzones || z == j->area[0].zone ||
+           (j->area[1].count != 0 && z == j->area[1].zone) || j->zone_blocks[z] == 0;
+}
+
+uint32 z80j_churn(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 margin_us,
+                  uint32 (*show)(void *arg, uint32 key, uint32 on), void *arg)
+{
+    z80j_ctx *ctx = j->ctx;
+    z80j_block *blk;
+    uint32 shown = 0;
+    uint32 key = 0;
+    uint32 pc = 0;
+
+    if (j->nzones < 3 || j->area[1].count == 0)
+        return 0;
+    /* An eviction since the last call (the move's own translations may
+     * have caused it): the zones are looked at again, the one moving from
+     * its first block, the blocks moved already being out of the hash. */
+    if (j->generation != churn_gen) {
+        if (churn_evict != CHURN_NONE && churn_out(j, churn_evict))
+            churn_evict = CHURN_NONE;
+        if (churn_zone != CHURN_NONE && churn_out(j, churn_zone))
+            churn_zone = CHURN_NONE;
+        if (churn_zone != CHURN_NONE)
+            churn_next = j->zone_head[churn_zone];
+        churn_gen = j->generation;
+    }
+    if (churn_evict != CHURN_NONE &&
+        now_us - origin_us + j->evict_est_us + margin_us <= j->frame_us) {
+        j->now_us = now_us;
+        j->now_fresh = 1;
+        evict_zone(j, churn_evict);
+        j->now_fresh = 0;
+        churn_evict = CHURN_NONE;
+        if (j->clock == 0)
+            j->now_us = now_us;
+        return 1;
+    }
+    for (;;) {
+        if (churn_zone == CHURN_NONE) {
+            uint32 best_live = 0;
+            uint32 k;
+
+            for (k = 0; k < j->nzones; k++) {
+                uint32 fresh;
+                uint32 live;
+
+                if (k == churn_evict || churn_out(j, k))
+                    continue;
+                live = zone_live(j, k, &fresh, LIVE_AGE);
+                if (live > best_live) {
+                    best_live = live;
+                    churn_zone = k;
+                }
+            }
+            if (churn_zone == CHURN_NONE)
+                return 0;
+            churn_next = j->zone_head[churn_zone];
+        }
+        for (blk = churn_next; blk != 0; blk = blk->znext) {
+            pc = BLK_PC_OF(blk);
+            key = blk->key;
+            if (find_block(j, pc, key) != blk)
+                continue;               /* moved already, or replaced */
+            if (jit_block_key(ctx, pc) == key)
+                break;
+            if (show != 0 && KEY_IS_SLOT(key) && show(arg, key, 1)) {
+                if (jit_block_key(ctx, pc) == key) {
+                    shown = 1;
+                    break;
+                }
+                show(arg, key, 0);
+            }
+        }
+        if (blk != 0)
+            break;
+        /* Every block moved that could be: the zone waits for its
+         * eviction, after the one waiting already. */
+        churn_next = 0;
+        if (churn_evict != CHURN_NONE)
+            return 0;
+        churn_evict = churn_zone;
+        churn_zone = CHURN_NONE;
+    }
+    churn_next = blk->znext;
+    unhash_block(j, blk);
+    ctx->lookup[pc] = j->glue.miss;
+    j->error = 0;
+    if (translate_block(j, pc, 0, 0) != 0)
+        j->stats.prefetched++;
+    else if (j->error == 5 && j->hot != 0 && !shown)
+        j->hot[pc] = 255;               /* not translatable: interpreted for good */
+    if (shown)
+        show(arg, key, 0);
+    /* The lookup entry the translation set stays only for code of one
+     * key (fixed, RAM): the entry of a paged slot's block is found again
+     * through the hash under the mapping in force when next needed (the
+     * slot may show cartridge RAM by then, which its bank check does not
+     * see). */
+    if (KEY_IS_SLOT(key))
+        ctx->lookup[pc] = j->glue.miss;
+    if (j->clock != 0) {
+        j->now_us = j->clock();
+        j->est_us = (j->est_us * 3 + (j->now_us - now_us)) >> 2;
+    } else {
+        j->now_us = now_us;
+    }
+    return 1;
+}
+#endif
 
 void z80j_set_interp(z80j_state *j, uint8 *hot, uint32 queue_at, uint32 sync_at)
 {

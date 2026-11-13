@@ -587,6 +587,27 @@ uint32 z80j_prefetch(z80j_state *j, uint32 now_us);
  * end left in j->now_us. */
 uint32 z80j_evict_ahead(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 margin_us);
 
+/* Diagnostic build: blocks of code run lately translated again in spare
+ * time, this many per frame (0: the usual build, nothing compiled). The
+ * machine runs the same Z80 code; only generated code is written, linked
+ * and run again, and code zones emptied, at about the rate of a game
+ * reaching new code a part at a time, to measure what writing code costs
+ * the host. */
+#ifndef Z80J_CHURN
+#define Z80J_CHURN 0
+#endif
+#if Z80J_CHURN
+/* One step: a block of the zone being moved translated again, or that
+ * zone emptied when the frame (begun at origin_us) has room for an
+ * eviction plus margin_us; returns 0 when nothing was done. now_us as for
+ * z80j_prefetch, the sample ending the step in j->now_us. show(arg, key,
+ * 1) makes the code of a paged slot readable under a block key for the
+ * time of its translation (0 when it cannot), show(arg, key, 0) puts the
+ * mapping back; show may be null. */
+uint32 z80j_churn(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 margin_us,
+                  uint32 (*show)(void *arg, uint32 key, uint32 on), void *arg);
+#endif
+
 /* Translates the block at pc if needed, and reports its static exits
  * (jump and call targets, fall-through) in targets. Returns the number of
  * Z80 instructions of the block, 0 when translation failed. */

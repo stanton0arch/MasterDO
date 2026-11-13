@@ -94,6 +94,43 @@ void sms_mem_map(sms_mem *s)
     map_slot(s, 2);
 }
 
+#if Z80J_CHURN
+static uint32 show_bank;                /* the slot's bank before sms_mem_show */
+static uint32 show_rtab[SLOT_PAGES / RPAGE];
+
+uint32 sms_mem_show(void *arg, uint32 key, uint32 on)
+{
+    sms_mem *s = (sms_mem *)arg;
+    z80j_ctx *ctx = s->ctx;
+    uint32 kind = key >> 16;
+    uint32 slot = kind - Z80J_PAGE_SLOT(0);
+    uint32 q0 = slot * (SLOT_PAGES / RPAGE);
+    uint32 bank = key & 0xFFFFu;
+    uint32 rom_e;
+    uint32 q;
+
+    if (kind < Z80J_PAGE_SLOT(0) || kind > Z80J_PAGE_SLOT(2))
+        return 0;
+    if (!on) {
+        ctx->slot_bank[slot] = show_bank;
+        for (q = 0; q < SLOT_PAGES / RPAGE; q++)
+            ctx->rtab[63 - (q0 + q)] = show_rtab[q];
+        return 1;
+    }
+    if (bank >= s->banks)
+        return 0;
+    show_bank = ctx->slot_bank[slot];
+    rom_e = JIT_ADDR(s->rom) + bank * 0x4000u - slot * 0x4000u;
+    for (q = 0; q < SLOT_PAGES / RPAGE; q++) {
+        show_rtab[q] = ctx->rtab[63 - (q0 + q)];
+        if ((ctx->page_kind[(q0 + q) * RPAGE] & Z80J_PAGE_KIND) == kind)
+            ctx->rtab[63 - (q0 + q)] = rom_e;
+    }
+    ctx->slot_bank[slot] = bank;
+    return 1;
+}
+#endif
+
 void sms_mem_reset(sms_mem *s)
 {
     s->reg[0] = 0;

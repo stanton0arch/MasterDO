@@ -53,6 +53,13 @@ void   sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size
 
 /* Applies the paging registers to the page tables. */
 void   sms_mem_map(sms_mem *s);
+#if Z80J_CHURN
+/* Diagnostic build (z80j_churn): with on, the ROM pages of the slot of a
+ * block key read as the key's bank shows them, the previous mapping kept;
+ * without, that mapping put back. Returns 0 when the key is not a slot's
+ * or (with on) the bank is not in the image. arg: the sms_mem. */
+uint32 sms_mem_show(void *arg, uint32 key, uint32 on);
+#endif
 
 /* Paging registers to their power-on values (banks 0, 1, 2; the
  * Codemasters mapper starts with banks 0, 1, 0). */
