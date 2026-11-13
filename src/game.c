@@ -908,6 +908,12 @@ uint32 game_spare_time(game *g, uint32 deadline_us)
         }
     }
 #endif
+#if Z80J_DIAG
+    /* Diagnostic builds: one operation of writing code (z80j_diag), with
+     * the display on. */
+    if (render_display_on(g->rd) && z80j_diag(&g->jit))
+        now = plat_usec_now();
+#endif
     g->win.spare_us += now - t0;
     g->last_spare_us = now - t0;
     return now;

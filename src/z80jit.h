@@ -608,6 +608,31 @@ uint32 z80j_churn(z80j_state *j, uint32 now_us, uint32 origin_us, uint32 margin_
                   uint32 (*show)(void *arg, uint32 key, uint32 on), void *arg);
 #endif
 
+/* Diagnostic builds, each doing one of the operations of writing code,
+ * alone, at about the rate of a game reaching new code a part at a time,
+ * with the display on (0: the usual build, nothing compiled):
+ *   1  stores: the words of about two blocks written into the free room of
+ *      the zone being filled, where the next translation goes, never run;
+ *   2  first runs: a fresh routine of as many words written into a zone
+ *      holding no code (else into that free room, a few pages past the code
+ *      before it) and run once;
+ *   3  patches of code that runs: a few link branches of code run lately
+ *      (and the conditional jumps leading to them) written again with
+ *      their own value at every frame;
+ *   4  an eviction's patches: as many link branches of code run lately as
+ *      an eviction undoes, written again with their own value at once,
+ *      every few frames.
+ * The machine runs the same Z80 code and generated code keeps its meaning;
+ * only the host's handling of code written while it runs is exercised. */
+#ifndef Z80J_DIAG
+#define Z80J_DIAG 0
+#endif
+#if Z80J_DIAG
+/* The operation of the frame (once per frame at most); returns 0 when
+ * nothing was done. */
+uint32 z80j_diag(z80j_state *j);
+#endif
+
 /* Translates the block at pc if needed, and reports its static exits
  * (jump and call targets, fall-through) in targets. Returns the number of
  * Z80 instructions of the block, 0 when translation failed. */

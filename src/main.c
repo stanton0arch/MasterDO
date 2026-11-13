@@ -476,6 +476,9 @@ static void draw_menu(platform *p, const app_state *st, int32 cur)
     plat_clear(p, s);
 #if Z80J_CHURN
     sprintf(buf, "MASTERDO DIAGNOSTIC - %ld FILES   A: RUN  X: QUIT", (long)st->roms.count);
+#elif Z80J_DIAG
+    sprintf(buf, "MASTERDO DIAGNOSTIC %d - %ld FILES   A: RUN  X: QUIT", (int)Z80J_DIAG,
+            (long)st->roms.count);
 #else
     sprintf(buf, "MASTERDO - CHOOSE A CARTRIDGE (%ld FILES)   A: RUN  X: QUIT",
             (long)st->roms.count);
@@ -629,6 +632,19 @@ int main(int argc, char **argv)
     printf("masterdo: DIAGNOSTIC BUILD: code run lately translated again in spare time, "
            "%d blocks per frame at most, each code zone emptied once its blocks have moved\n",
            (int)Z80J_CHURN);
+#endif
+#if Z80J_DIAG == 1
+    printf("masterdo: DIAGNOSTIC BUILD 1: 1 KiB of code words stored per frame where the "
+           "next block goes, never run\n");
+#elif Z80J_DIAG == 2
+    printf("masterdo: DIAGNOSTIC BUILD 2: a fresh 1 KiB routine written per frame in an "
+           "empty code zone and run once\n");
+#elif Z80J_DIAG == 3
+    printf("masterdo: DIAGNOSTIC BUILD 3: 4 link branches of code run lately written again "
+           "per frame\n");
+#elif Z80J_DIAG
+    printf("masterdo: DIAGNOSTIC BUILD 4: 30 link branches of code run lately written again "
+           "at once every 22 frames\n");
 #endif
     printf("masterdo: interrupted segments resumed only under the memory they were "
            "interrupted in, never through the linker; "

@@ -2518,6 +2518,119 @@ uint32 z80j_link(z80j_state *j, uint32 data)
     return host;
 }
 
+#if Z80J_DIAG
+#define DIAG_WORDS 256          /* code written per frame: about two blocks */
+#define DIAG_LINKS 4            /* link stubs written again per frame */
+#define DIAG_BURST 30           /* link stubs an eviction undoes, at once */
+#define DIAG_EVICT_FRAMES 22    /* frames between two evictions */
+
+static uint32 diag_frame;       /* frame of the last operation */
+static uint32 diag_next;        /* mode 2: routine slot; modes 3, 4: link log entry */
+
+/* Whether the code at p ran lately (its chunk marked, or aged once). */
+static uint32 diag_live(const z80j_state *j, const uint32 *p)
+{
+    uint32 c = (uint32)(p - j->code) >> j->chunk_shift;
+
+    return c < Z80J_MARK_CHUNKS && (j->ctx->chunk_mark[c] != 0 || j->chunk_age[c] == 0);
+}
+
+/* Writes again, with their own words, the next count link stubs of the log
+ * whose branch lies in code run lately (the branch, in the word before
+ * the stub's data words, and the conditional jump leading to it); returns
+ * how many were written. */
+static uint32 diag_relink(z80j_state *j, uint32 count)
+{
+    uint32 n = 0;
+    uint32 tries;
+
+    for (tries = 0; n < count && tries < j->nlinks; tries++) {
+        uint32 e;
+        uint32 *d;
+        volatile uint32 *w;
+
+        if (diag_next >= j->nlinks)
+            diag_next = 0;
+        e = j->links[diag_next++];
+        d = (uint32 *)JIT_PTR(e);
+        if ((e & 1u) != 0 || !diag_live(j, d - 1))
+            continue;                   /* a trampoline, or code not run lately */
+        w = d - 1;
+        *w = *w;
+        if (d[1] != 0) {
+            w = (volatile uint32 *)JIT_PTR(d[1]);
+            *w = *w;
+        }
+        n++;
+    }
+    return n;
+}
+
+uint32 z80j_diag(z80j_state *j)
+{
+    uint32 at = (uint32)(j->cur - j->code);
+    uint32 k;
+
+    if (j->frame_no == diag_frame)
+        return 0;
+    switch (Z80J_DIAG) {
+    case 1:
+        /* Real code words (those before, from one of two places in turn,
+         * so that every frame changes them) where the next block goes. */
+        if ((uint32)(j->zone_end - j->cur) < DIAG_WORDS || at < 2 * DIAG_WORDS)
+            return 0;
+        memcpy(j->cur, j->cur - DIAG_WORDS * (1 + (j->frame_no & 1)), DIAG_WORDS * 4);
+        break;
+    case 2: {
+        /* A routine of plain operations on the scratch registers, its
+         * immediates changing with the frame, a new slot at every frame:
+         * in a zone holding no code (not one an area is filling), else in
+         * the free room from 4 KiB past the code being filled. */
+        uint32 start = (at + 2048) & ~1023u;
+        uint32 end = (uint32)(j->zone_end - j->code);
+        uint32 slots;
+        uint32 *p;
+
+        for (k = 0; k < j->nzones; k++) {
+            if (j->zone_blocks[k] == 0 && k != j->area[0].zone &&
+                (j->area[1].count == 0 || k != j->area[1].zone)) {
+                start = k * j->zone_words;
+                end = start + j->zone_words;
+                break;
+            }
+        }
+        slots = end > start ? (end - start) / DIAG_WORDS : 0;
+        if (slots < 2)
+            return 0;
+        p = j->code + start + (diag_next++ % slots) * DIAG_WORDS;
+        for (k = 0; k + 1 < DIAG_WORDS; k++) {
+            switch (k & 3) {
+            case 0: p[k] = 0xE2800000u | ((j->frame_no + k) & 0xFFu); break; /* ADD r0,r0,#n */
+            case 1: p[k] = 0xE0211000u; break;                  /* EOR r1,r1,r0 */
+            case 2: p[k] = 0xE0402001u; break;                  /* SUB r2,r0,r1 */
+            default: p[k] = 0xE1A03182u; break;                 /* MOV r3,r2,LSL #3 */
+            }
+        }
+        p[DIAG_WORDS - 1] = 0xE1A0F00Eu;                        /* MOV pc,lr */
+        ((void (*)(void))(void *)p)();
+        break;
+    }
+    case 3:
+        if (diag_relink(j, DIAG_LINKS) == 0)
+            return 0;
+        break;
+    default:
+        /* As many stubs as an eviction undoes, at once, every
+         * DIAG_EVICT_FRAMES frames. */
+        if (j->frame_no - diag_frame < DIAG_EVICT_FRAMES || diag_relink(j, DIAG_BURST) == 0)
+            return 0;
+        break;
+    }
+    diag_frame = j->frame_no;
+    return 1;
+}
+#endif
+
 uint32 z80j_prepare(z80j_state *j, uint32 pc, uint32 *targets, uint32 max_targets,
                     uint32 *ntargets)
 {
