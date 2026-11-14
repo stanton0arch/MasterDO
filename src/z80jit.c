@@ -1555,14 +1555,16 @@ void z80j_lend_zones(z80j_state *j, uint32 n)
     j->stats.flushes = 0;
 }
 
-uint32 *z80j_retire_zones(z80j_state *j)
+uint32 *z80j_retire_zones(z80j_state *j, uint32 more)
 {
-    uint32 keep = j->nzones - j->nlent;
+    uint32 keep = j->nzones - j->nlent - more;
     uint32 had_hot = j->area[1].count != 0;
     uint32 z;
 
-    if (j->nlent == 0)
+    if (j->nlent + more == 0)
         return j->code_end;
+    if (j->nlent + more >= j->nzones || keep < 3)
+        return 0;
     for (z = keep; z < j->nzones; z++) {
         uint32 owner = j->zone_area[z];
 

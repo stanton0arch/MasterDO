@@ -19,6 +19,32 @@ CHECK_OFF(remaps, offsetof(sms_mem, remaps) == 68);
 CHECK_OFF(bank_mask, offsetof(sms_mem, bank_mask) == 72);
 CHECK_OFF(mapper, offsetof(sms_mem, mapper) == 80);
 
+/* The cartridge RAM, asked for when the paging registers first show it
+ * (none when it is not given). Kept out of map_slot, which every bank
+ * switch of the Codemasters mapper runs: a call there costs it registers. */
+static void take_ram(sms_mem *s)
+{
+    if (s->ram_get != 0)
+        s->cart_ram = s->ram_get(s->ram_arg);
+    if (s->cart_ram == 0)
+        s->cart_ram_size = 0;
+}
+
+static void map_slot(sms_mem *s, uint32 slot);
+
+/* A write to the Codemasters mapper's slot 1 register while its cartridge
+ * RAM has not been given (sms_mem_ram_source): slot 2 has shown ROM until
+ * this write shows the RAM. Out of sms_mem_write, which every bank switch
+ * of that mapper runs. */
+static uint32 first_ram(sms_mem *s)
+{
+    if ((s->reg[2] & 0x80) == 0)
+        return Z80J_WRITE_PAGING;
+    take_ram(s);
+    map_slot(s, 2);
+    return Z80J_WRITE_LEAVE;
+}
+
 static uint32 bank_of(const sms_mem *s, uint32 reg)
 {
     if ((s->banks & (s->banks - 1)) == 0)
@@ -167,9 +193,40 @@ uint32 sms_mem_write(z80j_machine *m, uint32 addr, uint32 value)
             map_slot(s, 2);
             return Z80J_WRITE_LEAVE;
         }
+        if (slot == 1 && s->cart_ram_size != 0)
+            return first_ram(s);
         return Z80J_WRITE_PAGING;
     }
     return Z80J_WRITE_STAY;     /* ROM area: ignored */
+}
+
+/* The write callback of the Sega mapper while its cartridge RAM has not
+ * been given: the write to $FFFC that first shows it asks for it, then
+ * sms_mem_write takes over for good. The test stays off sms_mem_write,
+ * which every write to $FFFC goes through. */
+static uint32 write_first(z80j_machine *m, uint32 addr, uint32 value)
+{
+    sms_mem *s = (sms_mem *)m->user;
+
+    if (addr == 0xFFFCu && (value & 0x08)) {
+        take_ram(s);
+        m->write = sms_mem_write;
+    }
+    return sms_mem_write(m, addr, value);
+}
+
+void sms_mem_ram_source(sms_mem *s, uint8 *(*get)(void *arg), void *arg)
+{
+    s->ram_get = get;
+    s->ram_arg = arg;
+    if (s->cart_ram == 0 && s->cart_ram_size != 0 && s->mapper != SMS_MAPPER_CODEMASTERS)
+        s->m.write = write_first;
+}
+
+void sms_mem_move_ram(sms_mem *s, uint8 *ram)
+{
+    s->cart_ram = ram;
+    map_slot(s, 2);
 }
 
 /* The Codemasters header at $7FE0: the number of 16 KiB banks, a date,

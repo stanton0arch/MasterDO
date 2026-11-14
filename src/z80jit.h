@@ -584,13 +584,15 @@ void   z80j_flush(z80j_state *j);
  * than three zones would remain. */
 void   z80j_lend_zones(z80j_state *j, uint32 n);
 
-/* Gives the lent zones back: their blocks are emptied as by an eviction
- * (not counted as one, nor towards the code buffer pressure), an area
- * filling one of them moves on to another zone (emptied first if it holds
- * code, as when it fills up), and the code buffer ends before them from
- * then on. Called between frames, never from translated code. Returns the
- * first word given back (the new end of the code buffer). */
-uint32 *z80j_retire_zones(z80j_state *j);
+/* Gives the lent zones back, and the last `more` zones of the code buffer
+ * before them: their blocks are emptied as by an eviction (not counted as
+ * one, nor towards the code buffer pressure), an area filling one of them
+ * moves on to another zone (emptied first if it holds code, as when it
+ * fills up), and the code buffer ends before them from then on. Called
+ * between frames, never from translated code. Returns the first word
+ * given back (the new end of the code buffer), or 0 with nothing given
+ * back when fewer than three zones would remain. */
+uint32 *z80j_retire_zones(z80j_state *j, uint32 more);
 
 /* Enables the interpreter: hot is a table of 65536 entry counts, cleared
  * here; an address is queued for translation when its count reaches

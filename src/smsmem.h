@@ -29,6 +29,7 @@ typedef struct {
     uint32       rom_size;
     uint32       banks;     /* 16 KiB banks in the ROM */
     uint8       *cart_ram;  /* battery RAM shown in slot 2 by $FFFC bit 3, or 0 */
+                            /* (with cart_ram_size set: given at its first showing) */
     uint32       reg[4];    /* $FFFC-$FFFF */
     uint32       slot_ram[3]; /* first page of each slot showing cartridge RAM (its end: none) */
     uint32       remaps;    /* paging changes (statistics) */
@@ -36,6 +37,8 @@ typedef struct {
     uint32       cart_ram_size; /* 16 KiB (one page) or 32 KiB (bit 2 selects the page) */
     uint32       mapper;    /* SMS_MAPPER_* */
     uint32       slot_ram_e[3]; /* read table entry of that RAM, as mapped */
+    uint8     *(*ram_get)(void *arg); /* gives the cartridge RAM (sms_mem_ram_source) */
+    void        *ram_arg;
 } sms_mem;
 
 /* The mapper an image calls for, from its header (SMS_MAPPER_*). */
@@ -46,12 +49,26 @@ uint32 sms_mem_detect(const uint8 *rom, uint32 rom_size);
 void   sms_mem_write_a(void);
 
 /* Sets up the pages of ctx (system RAM in ctx->mram) for a ROM image and
- * the machine callbacks; cart_ram (16 or 32 KiB, or 0 for none) is the
- * cartridge RAM that register $FFFC can map into slot 2. */
+ * the machine callbacks; cart_ram (cart_ram_size bytes, 16 or 32 KiB; a
+ * size of 0 for none) is the cartridge RAM that register $FFFC can map
+ * into slot 2. With cart_ram 0 and a size, the memory is asked for the
+ * first time the mapper shows it (sms_mem_ram_source). */
 void   sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
                     uint8 *cart_ram, uint32 cart_ram_size);
 
-/* Applies the paging registers to the page tables. */
+/* The cartridge RAM given at its first showing: get(arg), called from the
+ * mapper's write handler (inside the run), returns cart_ram_size bytes
+ * filled with zeros, or 0 (the cartridge then has no RAM). */
+void   sms_mem_ram_source(sms_mem *s, uint8 *(*get)(void *arg), void *arg);
+
+/* The cartridge RAM moved to ram, its bytes already copied there by the
+ * caller: the pages showing it read and write the new place from now on.
+ * Called between frames, never from translated code. */
+void   sms_mem_move_ram(sms_mem *s, uint8 *ram);
+
+/* Applies the paging registers to the page tables (cartridge RAM not
+ * given yet is asked for by the writes that show it, never here: the
+ * power-on values do not). */
 void   sms_mem_map(sms_mem *s);
 #if Z80J_CHURN
 /* Diagnostic build (z80j_churn): with on, the ROM pages of the slot of a

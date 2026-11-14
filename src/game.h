@@ -146,6 +146,16 @@ typedef struct {
     uint32 snd_us;
 } game_long_rec;
 
+/* Where the cartridge RAM is (game.cart_where); from GAME_CART_VRAM on,
+ * a block of its own. */
+#define GAME_CART_NONE   0  /* none: no memory for it */
+#define GAME_CART_LATER  1  /* to be given in DRAM the first time it is shown */
+#define GAME_CART_ROOM   2  /* the end of the renderer's room, lent with it */
+#define GAME_CART_ZONE   3  /* a zone of the code buffer, given up for it */
+#define GAME_CART_VRAM   4  /* in VRAM from the set-up */
+#define GAME_CART_DRAM   5  /* from the DRAM left above the reserve */
+#define GAME_CART_BORROW 6  /* from the DRAM reserve, until the frame ends */
+
 /* Zones of the code buffer given to the hot area, and the number of
  * zones of the code buffer (0: chosen by game_init from the DRAM left);
  * set before game_init (tuning knobs of the analysis harness). */
@@ -244,9 +254,14 @@ typedef struct {
     uint32        f_interp;
     uint32        f_interp_insns;
     uint32        f_sync_us;
-    uint8  *cart_ram;       /* cartridge RAM (battery RAM of the mapper), or NULL */
-    uint32  cart_ram_size;  /* 32 KiB in VRAM, else 16 KiB in DRAM */
-    uint32  cart_ram_vram;  /* allocated in VRAM */
+    /* Cartridge RAM (the battery RAM of the mapper): 32 KiB in VRAM from
+     * the set-up, or 16 KiB of DRAM given the first time the mapper shows
+     * it (GAME_CART_*), at frame cart_frame (0xFFFFFFFF: not yet). */
+    uint8  *cart_ram;       /* or NULL */
+    uint32  cart_ram_size;
+    uint32  cart_where;
+    uint32  cart_frame;
+    uint8  *pool;           /* the renderer's bitmaps when they follow the code buffer */
     uint32  hot_vram;       /* entry counters allocated in VRAM */
     uint32  pad_log_vram;   /* pad log allocated in VRAM */
 } game;

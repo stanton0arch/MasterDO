@@ -69,12 +69,12 @@ typedef struct {
     vdp_state    vdp;
     sms_mem      mem;       /* holds the translator callbacks */
     z80j_ctx    *ctx;
-    uint32       mem_ctrl;  /* port $3E */
-    uint32       io_ctrl;   /* port $3F */
     uint32       pad;       /* SMS_PAD_* held */
     uint32       psg_latch; /* register selected by the last latch byte */
     uint32       psg_reg[8];/* tone 0, volume 0, ..., noise, volume 3 */
     sms_io_stats io;
+    uint32       mem_ctrl;  /* port $3E */
+    uint32       io_ctrl;   /* port $3F */
     char         sdsc[80];  /* SDSC debug console line being written */
     uint32       sdsc_len;
     uint32       gg;        /* Game Gear mode */

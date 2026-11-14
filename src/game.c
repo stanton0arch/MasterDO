@@ -20,6 +20,12 @@
 #define DRAM_RESERVE    (24 * 1024)
 /* Zones the room of the renderer's bitmaps can lend to the code buffer. */
 #define ROOM_ZONES      (RENDER_ROOM_BYTES / JIT_ZONE_BYTES)
+/* Cartridge RAM: 32 KiB in VRAM, else the 16 KiB page most cartridges
+ * have, in DRAM, which also fits at the end of the room whatever it
+ * lends. */
+#define CART_VRAM_BYTES 0x8000
+#define CART_DRAM_BYTES 0x4000
+#define NO_FRAME        0xFFFFFFFFu
 /* Block descriptors (24 bytes each, about 40 KiB): the recorded plays of
  * the panel use 1 226 at most; when they run out a zone is evicted. */
 #define JIT_BLOCKS      1700
@@ -72,6 +78,10 @@ static uint32 percent(uint32 part, uint32 whole);
 
 uint32 game_hot_zones = JIT_HOT_ZONES;
 uint32 game_zones = 0;
+
+#define CHECK(name, cond) typedef char check_##name[(cond) ? 1 : -1]
+CHECK(cart_in_room, ROOM_ZONES * JIT_ZONE_BYTES + CART_DRAM_BYTES <= RENDER_ROOM_BYTES);
+CHECK(cart_in_zone, CART_DRAM_BYTES <= JIT_ZONE_BYTES);
 
 /* Records of the run's log: a record of n words of kind k is allocated
  * in the arena (NULL, counted as dropped, when it is full) and formatted
@@ -351,7 +361,10 @@ void game_free(game *g)
     if (g->pad_log != NULL) FreeMem(g->pad_log, GAME_PAD_LOGS * 4);
     if (g->code != NULL) FreeMem(g->code, (int32)g->code_bytes);
     if (g->ctx != NULL) FreeMem(g->ctx, sizeof(z80j_ctx) + sizeof(sms_machine));
-    if (g->cart_ram != NULL) FreeMem(g->cart_ram, (int32)g->cart_ram_size);
+    /* The cartridge RAM in the code buffer's block (the room or a zone)
+     * goes with it. */
+    if (g->cart_ram != NULL && g->cart_where >= GAME_CART_VRAM)
+        FreeMem(g->cart_ram, (int32)g->cart_ram_size);
     g->rd = NULL;
     g->sms = NULL;
     g->blocks = NULL;
@@ -364,15 +377,77 @@ void game_free(game *g)
     g->cart_ram = NULL;
 }
 
+/* The cartridge RAM leaves the place it was given for want of DRAM (the
+ * DRAM reserve, or the end of the room the renderer takes back) for the
+ * last zone of the code buffer, given up for it together with the zones
+ * lent, if any. Between frames only; returns 0 when the code buffer cannot
+ * give a zone up (it is then left where it is). */
+static uint32 cart_to_zone(game *g)
+{
+    uint8 *old = g->cart_ram;
+    uint8 *zone = (uint8 *)z80j_retire_zones(&g->jit, 1);
+
+    if (zone == NULL)
+        return 0;
+    memcpy(zone, old, CART_DRAM_BYTES);
+    sms_mem_move_ram(&g->sms->mem, zone);
+    if (g->cart_where == GAME_CART_BORROW)
+        FreeMem(old, CART_DRAM_BYTES);
+    g->cart_ram = zone;
+    g->cart_where = GAME_CART_ZONE;
+    g->zones = g->jit.nzones;
+    return 1;
+}
+
+/* The cartridge RAM, the first time the mapper shows it (called from its
+ * write handler, inside the run): 16 KiB of the DRAM left above the
+ * reserve when there are; else the end of the renderer's room while it is
+ * lent (the zones it lends stop before), which the cartridge RAM leaves
+ * for a zone of the code buffer when the room is taken back; else a block
+ * of the reserve, left for such a zone at the end of the frame (the zone
+ * cannot be emptied from inside the run). The room is used only when the
+ * code buffer can give a zone up with the lent ones (four zones of its own
+ * at least). Zero-filled, as a cartridge with no save would be: the end of
+ * the room still is, cleared with the pool and written by nobody while it
+ * is lent (clearing it again would cost the frame about 1 ms). */
+static uint8 *cart_ram_get(void *arg)
+{
+    game *g = (game *)arg;
+    uint32 dram = 0;
+    uint32 vram = 0;
+    uint8 *ram = NULL;
+
+    g->cart_frame = g->frame;
+    plat_mem_free(&dram, &vram);
+    g->cart_where = GAME_CART_DRAM;
+    if (dram < CART_DRAM_BYTES + DRAM_RESERVE) {
+        g->cart_where = GAME_CART_BORROW;
+        if (g->lent != 0 && g->room_frame == NO_FRAME && g->jit.nzones - g->jit.nlent >= 4) {
+            ram = g->pool + RENDER_ROOM_BYTES - CART_DRAM_BYTES;
+            g->cart_where = GAME_CART_ROOM;
+        }
+    }
+    if (ram == NULL)
+        ram = (uint8 *)AllocMem(CART_DRAM_BYTES, MEMTYPE_DRAM | MEMTYPE_FILL);
+    if (ram == NULL) {
+        g->cart_where = GAME_CART_NONE;
+        g->cart_ram_size = 0;
+    }
+    g->cart_ram = ram;
+    return ram;
+}
+
 /* The renderer needs the room of its bitmaps (a second layer, or a
- * taller mode): the zones it lent go back to it for good. */
+ * taller mode): the zones it lent go back to it for good, and the
+ * cartridge RAM held at its end moves to a zone given up with them. */
 static void give_room(void *arg)
 {
     game *g = (game *)arg;
     uint32 t0 = plat_usec_now();
     uint32 n0 = g->jit.nblocks;
 
-    z80j_retire_zones(&g->jit);
+    if (g->cart_where != GAME_CART_ROOM || !cart_to_zone(g))
+        z80j_retire_zones(&g->jit, 0);
     g->zones = g->jit.nzones;
     g->room_frame = g->frame;
     g->room_blocks = n0 - g->jit.nblocks;
@@ -405,6 +480,7 @@ static uint32 *alloc_code(game *g)
 
     g->zones = JIT_ZONES;
     g->lent = 0;
+    g->pool = NULL;
     if (game_zones != 0) {
         g->zones = game_zones;
     } else {
@@ -430,6 +506,7 @@ static uint32 *alloc_code(game *g)
 
         memset(pool, 0, RENDER_POOL_BYTES);
         render_set_pool(g->rd, pool, give_room, g);
+        g->pool = pool;
         g->lent = GAME_MAX_ZONES - g->zones;
         if (g->lent > ROOM_ZONES)
             g->lent = ROOM_ZONES;
@@ -478,21 +555,19 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
     }
     /* Cartridge RAM (the battery RAM of the Sega mapper, shown in slot 2
      * by register $FFFC): 32 KiB in VRAM, which the CPU reads and writes
-     * like DRAM, when the renderer has left some, else the 16 KiB page
-     * most cartridges have, in DRAM; zero-filled, as a cartridge with no
-     * save would be. It is allocated before the arenas of the logs, which
-     * the game can do without: a shortage of memory then hits the logs
-     * rather than the game, whose cartridge RAM holds its saves. */
-    g->cart_ram_size = 0x8000;
-    g->cart_ram_vram = 1;
-    g->cart_ram = (uint8 *)AllocMem(0x8000, MEMTYPE_VRAM | MEMTYPE_FILL);
+     * like DRAM, when the renderer has left some, zero-filled, as a
+     * cartridge with no save would be; else 16 KiB of DRAM given the first
+     * time the mapper shows it (cart_ram_get): most games never do, and
+     * the code buffer, whose zone count is taken next, counts that DRAM
+     * as its own. */
+    g->cart_ram_size = CART_VRAM_BYTES;
+    g->cart_where = GAME_CART_VRAM;
+    g->cart_frame = NO_FRAME;
+    g->cart_ram = (uint8 *)AllocMem(CART_VRAM_BYTES, MEMTYPE_VRAM | MEMTYPE_FILL);
     if (g->cart_ram == NULL) {
-        g->cart_ram_size = 0x4000;
-        g->cart_ram_vram = 0;
-        g->cart_ram = (uint8 *)AllocMem(0x4000, MEMTYPE_DRAM | MEMTYPE_FILL);
+        g->cart_ram_size = CART_DRAM_BYTES;
+        g->cart_where = GAME_CART_LATER;
     }
-    if (g->cart_ram == NULL)
-        g->cart_ram_size = 0;
     /* The pad recorder's log goes to VRAM when the renderer and the
      * cartridge RAM have left room there: its 4 KiB stay free in DRAM for
      * the code buffer, whose zone count is taken next. Without that room
@@ -512,7 +587,7 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
     z80j_init(&g->jit, g->ctx, g->code, JIT_ZONE_BYTES / 4 * g->zones, g->zones, game_hot_zones,
               g->blocks, JIT_BLOCKS, g->links, JIT_LINKS, &glue);
     z80j_lend_zones(&g->jit, g->lent);
-    g->room_frame = 0xFFFFFFFFu;
+    g->room_frame = NO_FRAME;
     z80j_set_interp(&g->jit, g->hot, HOT_QUEUE_AT, HOT_SYNC_AT);
     z80j_set_force(&g->jit, HOT_FORCE_AT);
     game_set_frame_us(g, PLAT_NTSC_FRAME_US);
@@ -524,6 +599,7 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
     if (g->pad_log == NULL)
         g->pad_log = (uint32 *)AllocMem(GAME_PAD_LOGS * 4, MEMTYPE_DRAM);
     sms_init(g->sms, g->ctx, rom, rom_size, VDP_LINES_NTSC, g->cart_ram, g->cart_ram_size, gg);
+    sms_mem_ram_source(&g->sms->mem, cart_ram_get, g);
     for (k = 0; k < Z80J_PORTS; k++) {
         if (SMS_PORT_VCOUNTER(k))
             z80j_set_line_port(&g->jit, k);
@@ -533,9 +609,9 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
             z80j_set_pair_port(&g->jit, k);
     }
     sms_pair_check(&g->jit);
-    printf("Cartridge RAM: %lu bytes in %s; entry counters in %s; log arena %s, pad log %s\n",
+    printf("Cartridge RAM: %lu bytes %s; entry counters in %s; log arena %s, pad log %s\n",
            (unsigned long)g->cart_ram_size,
-           g->cart_ram == NULL ? "no memory" : g->cart_ram_vram ? "VRAM" : "DRAM",
+           g->cart_where == GAME_CART_VRAM ? "in VRAM" : "in DRAM when shown",
            g->hot_vram ? "VRAM" : "DRAM",
            g->log != NULL ? "allocated" : "out of memory",
            g->pad_log == NULL ? "out of memory" : g->pad_log_vram ? "in VRAM" : "in DRAM");
@@ -763,6 +839,8 @@ int32 game_frame(game *g, uint32 pad, uint32 pause, uint32 start_us)
         return g->status;
     }
     g->f_idle = (ctx->idle - idle0) >> 8;
+    if (g->cart_where == GAME_CART_BORROW)
+        cart_to_zone(g);
 
     /* The PSG registers as the frame leaves them go to the DSP voices
      * before the picture is built: the sound of the frame then plays
@@ -1102,8 +1180,10 @@ void game_log_summary(game *g)
            (unsigned long)d.io.counter_r, (unsigned long)d.io.psg_w,
            (unsigned long)d.io.pad_r);
     printf("Code buffer: %lu zones, %lu lent by the picture's bitmaps taken back at frame %ld "
-           "(%lu blocks emptied, %lu us)\n", (unsigned long)g->zones, (unsigned long)g->lent,
-           (long)g->room_frame, (unsigned long)g->room_blocks, (unsigned long)g->room_us);
+           "(%lu blocks emptied, %lu us); cartridge RAM place %lu (game.h), shown at frame %ld\n",
+           (unsigned long)g->zones, (unsigned long)g->lent, (long)g->room_frame,
+           (unsigned long)g->room_blocks, (unsigned long)g->room_us,
+           (unsigned long)g->cart_where, (long)g->cart_frame);
     printf("Game summary: total frame time histogram (ms: frames)");
     for (k = 0; k < GAME_HIST; k++) {
         if (g->hist[k] != 0)
