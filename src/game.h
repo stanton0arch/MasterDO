@@ -154,8 +154,16 @@ extern uint32 game_zones;
 
 typedef struct {
     z80j_ctx     *ctx;
-    uint32       *code;
+    uint32       *code;         /* code buffer (followed by the renderer's bitmaps */
+    uint32        code_bytes;   /* when it borrows zones from them), bytes allocated */
     uint32        zones;        /* zones of 32 KiB in the code buffer */
+    /* Zones lent to the code buffer by the renderer's bitmaps (the room
+     * of its pool), and when it took them back: the frame, the blocks
+     * they held and the time it took (room_frame 0xFFFFFFFF: not yet). */
+    uint32        lent;
+    uint32        room_frame;
+    uint32        room_blocks;
+    uint32        room_us;
     void         *blocks;
     uint32       *links;
     uint8        *hot;      /* entry counts of the interpreter */

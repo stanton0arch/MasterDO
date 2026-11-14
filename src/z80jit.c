@@ -1260,23 +1260,18 @@ static void note_eviction(z80j_state *j)
  * descriptors and their lookup entries, and every direct branch into the
  * zone recorded in the link log becomes a call to the linker again (a
  * trampoline left by a retranslation becomes a jump to the translator),
- * by jit_unlink_zone (z80jit_blk.s). The cost is measured for the
- * evictions made ahead in spare time (z80j_evict_ahead).
+ * by jit_unlink_zone (z80jit_blk.s). Returns the blocks emptied.
  */
-static void evict_zone(z80j_state *j, uint32 z)
+static uint32 empty_zone(z80j_state *j, uint32 z)
 {
     z80j_ctx *ctx = j->ctx;
     uint32 lo = JIT_ADDR(j->code + z * j->zone_words);
     uint32 hi = lo + j->zone_words * 4;
-    uint32 t0;
     uint32 k;
     uint32 freed = 0;
     z80j_block *blk;
     z80j_block *next;
 
-    if (j->zone_blocks[z] == 0)
-        return;                         /* nothing to evict */
-    t0 = clock_start(j);
     for (blk = j->zone_head[z]; blk != 0; blk = next) {
         next = blk->znext;
         unhash_block(j, blk);
@@ -1293,12 +1288,6 @@ static void evict_zone(z80j_state *j, uint32 z)
         freed++;
     }
     j->zone_head[z] = 0;
-    j->stats.evicted += freed;
-    {
-        uint32 fresh;
-
-        j->stats.evicted_live += zone_live(j, z, &fresh, LIVE_AGE);
-    }
     for (k = 0; k < Z80J_RESUMES; k++) {
         if (j->resume[k].host >= lo && j->resume[k].host < hi)
             j->resume[k].host = 0;
@@ -1306,6 +1295,22 @@ static void evict_zone(z80j_state *j, uint32 z)
     j->stats.unlinked += jit_unlink_zone(j, lo, hi);
     ctx->resume_host = 0;
     j->generation++;
+    return freed;
+}
+
+/* Empties zone z to make room (see empty_zone), counted as an eviction.
+ * The cost is measured for the evictions made ahead in spare time
+ * (z80j_evict_ahead). */
+static void evict_zone(z80j_state *j, uint32 z)
+{
+    uint32 t0;
+    uint32 fresh;
+
+    if (j->zone_blocks[z] == 0)
+        return;                         /* nothing to evict */
+    t0 = clock_start(j);
+    j->stats.evicted_live += zone_live(j, z, &fresh, LIVE_AGE);
+    j->stats.evicted += empty_zone(j, z);
     j->stats.evictions++;
     note_eviction(j);
     if (j->clock != 0) {
@@ -1515,8 +1520,9 @@ void z80j_flush(z80j_state *j)
     }
     j->nblocks = 0;
     j->nlinks = 0;
-    /* The cold area starts at the first zone, the hot one at the last;
-     * the zones between are taken as code comes. */
+    /* The cold area starts at the first zone, the hot one at the last
+     * zone not lent; the zones between are taken as code comes, then the
+     * lent ones. */
     memset(j->zone_area, 0xFF, sizeof(j->zone_area));
     memset(j->zone_fill, 0, sizeof(j->zone_fill));
     for (c = 0; c < Z80J_MARK_CHUNKS; c++) {
@@ -1527,7 +1533,7 @@ void z80j_flush(z80j_state *j)
     j->area[1].count = 0;
     area_take(j, &j->area[0], 0);
     if (nhot != 0 && j->nzones >= 3)
-        area_take(j, &j->area[1], j->nzones - 1);
+        area_take(j, &j->area[1], j->nzones - j->nlent - 1);
     j->cur = j->area[0].cur;
     j->zone_end = j->area[0].end;
     j->nqueue = 0;
@@ -1540,6 +1546,43 @@ void z80j_flush(z80j_state *j)
     churn_zone = CHURN_NONE;
     churn_evict = CHURN_NONE;
 #endif
+}
+
+void z80j_lend_zones(z80j_state *j, uint32 n)
+{
+    j->nlent = (n < j->nzones && j->nzones - n >= 3) ? n : 0;
+    z80j_flush(j);
+    j->stats.flushes = 0;
+}
+
+uint32 *z80j_retire_zones(z80j_state *j)
+{
+    uint32 keep = j->nzones - j->nlent;
+    uint32 had_hot = j->area[1].count != 0;
+    uint32 z;
+
+    if (j->nlent == 0)
+        return j->code_end;
+    for (z = keep; z < j->nzones; z++) {
+        uint32 owner = j->zone_area[z];
+
+        if (j->zone_blocks[z] != 0)
+            empty_zone(j, z);
+        zone_forget(j, z);
+        if (owner < 2)
+            j->area[owner].count--;
+        j->zone_area[z] = 0xFF;
+    }
+    j->nzones = keep;
+    j->nlent = 0;
+    j->code_end = j->code + keep * j->zone_words;
+    /* An area filling a zone given back takes another (it held a count for
+     * it, given back above: taking the new zone counts it again). */
+    if (j->area[0].zone >= keep)
+        jit_next_zone(j, &j->area[0]);
+    if (had_hot && j->area[1].zone >= keep)
+        jit_next_zone(j, &j->area[1]);
+    return j->code_end;
 }
 
 uint32 jit_link_host(z80j_state *j, uint32 target, uint32 from_key, uint32 from_site)

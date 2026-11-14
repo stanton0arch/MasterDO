@@ -242,21 +242,28 @@ static void prio_mask(const vdp_state *v)
  * black. Returns the number of differing pixels, and in *outside those
  * that are not under a priority tile pixel. */
 /* -celhash: a pointer into one of the renderer's buffers as the buffer's
- * number and the offset in it; other values unchanged. */
+ * number and the offset in it; other values unchanged. The bitmaps are
+ * the offset in a layer's bitmap or priority bitmap, whatever the layer
+ * and wherever its bitmaps are (the pixels they hold are compared by the
+ * picture hash). */
 static uint32 buf_offset(const renderer *rd, uint32 v)
 {
-    uint32 base[6], size[6];
+    static const uint32 id[8] = { 1, 2, 3, 3, 4, 4, 5, 6 };
+    uint32 base[8], size[8];
     uint32 k;
 
     base[0] = (uint32)rd->tiles;      size[0] = VDP_TILES * 64;
     base[1] = (uint32)rd->tiles_f;    size[1] = VDP_TILES * 64;
-    base[2] = (uint32)rd->bm_pool[0]; size[2] = 2 * RENDER_BM_BYTES;
-    base[3] = (uint32)rd->bm_pool[1]; size[3] = 2 * RENDER_BM_BYTES;
-    base[4] = (uint32)rd->pluts;      size[4] = VDP_PAL_BANDS * RENDER_PLUT_SET * 2;
-    base[5] = (uint32)rd->blank;      size[5] = 16;
-    for (k = 0; k < 6; k++)
-        if (v - base[k] < size[k])
-            return ((k + 1) << 24) | (v - base[k]);
+    for (k = 0; k < RENDER_LAYERS; k++) {
+        base[2 + k] = (uint32)rd->layer[k].bitmap;
+        base[4 + k] = (uint32)rd->layer[k].prio_bm;
+        size[2 + k] = size[4 + k] = rd->layer[k].nrows * 8 * RENDER_W;
+    }
+    base[6] = (uint32)rd->pluts;      size[6] = VDP_PAL_BANDS * RENDER_PLUT_SET * 2;
+    base[7] = (uint32)rd->blank;      size[7] = 16;
+    for (k = 0; k < 8; k++)
+        if (base[k] != 0 && v - base[k] < size[k])
+            return (id[k] << 24) | (v - base[k]);
     return v;
 }
 

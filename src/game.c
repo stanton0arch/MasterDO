@@ -14,11 +14,12 @@
 #define JIT_ZONES       13      /* zones of the code buffer, at least */
 #define GAME_MAX_ZONES  16      /* at most: 256 run marks of 2 KiB chunks */
 #define JIT_HOT_ZONES   5       /* code translated again after an eviction goes there */
-#define JIT_CODE_BYTES  (JIT_ZONE_BYTES * g->zones)
 /* Zones beyond JIT_ZONES go to the code buffer only while the DRAM left
  * once the run is set up stays above this reserve (images small enough
  * to leave the entry counters and the cartridge RAM to VRAM). */
 #define DRAM_RESERVE    (24 * 1024)
+/* Zones the room of the renderer's bitmaps can lend to the code buffer. */
+#define ROOM_ZONES      (RENDER_ROOM_BYTES / JIT_ZONE_BYTES)
 /* Block descriptors (24 bytes each, about 40 KiB): the recorded plays of
  * the panel use 1 226 at most; when they run out a zone is evicted. */
 #define JIT_BLOCKS      1700
@@ -348,7 +349,7 @@ void game_free(game *g)
     if (g->hot != NULL) FreeMem(g->hot, 0x10000);
     if (g->log != NULL) FreeMem(g->log, GAME_LOG_WORDS * 4);
     if (g->pad_log != NULL) FreeMem(g->pad_log, GAME_PAD_LOGS * 4);
-    if (g->code != NULL) FreeMem(g->code, JIT_CODE_BYTES);
+    if (g->code != NULL) FreeMem(g->code, (int32)g->code_bytes);
     if (g->ctx != NULL) FreeMem(g->ctx, sizeof(z80j_ctx) + sizeof(sms_machine));
     if (g->cart_ram != NULL) FreeMem(g->cart_ram, (int32)g->cart_ram_size);
     g->rd = NULL;
@@ -363,24 +364,47 @@ void game_free(game *g)
     g->cart_ram = NULL;
 }
 
-/* The code buffer: JIT_ZONES zones, and up to GAME_MAX_ZONES when the
- * DRAM measured now still leaves DRAM_RESERVE free once the buffer and
- * the arenas of the logs still to come in DRAM are allocated (the pad
- * log is already in VRAM when that memory had room for it). Code that
- * outgrows the buffer is evicted and translated again where it runs
- * again, so every zone the memory allows saves translations. A buffer
- * found nowhere in one piece falls back to fewer zones. */
+/* The renderer needs the room of its bitmaps (a second layer, or a
+ * taller mode): the zones it lent go back to it for good. */
+static void give_room(void *arg)
+{
+    game *g = (game *)arg;
+    uint32 t0 = plat_usec_now();
+    uint32 n0 = g->jit.nblocks;
+
+    z80j_retire_zones(&g->jit);
+    g->zones = g->jit.nzones;
+    g->room_frame = g->frame;
+    g->room_blocks = n0 - g->jit.nblocks;
+    g->room_us = plat_usec_now() - t0;
+}
+
+/* The code buffer and the renderer's bitmaps. The buffer has JIT_ZONES
+ * zones, and up to GAME_MAX_ZONES when the DRAM measured now still leaves
+ * DRAM_RESERVE free once the buffer, the bitmaps and the arenas of the
+ * logs still to come in DRAM are allocated (the pad log is already in
+ * VRAM when that memory had room for it). Code that outgrows the buffer
+ * is evicted and translated again where it runs again, so every zone the
+ * memory allows saves translations. When the memory gives fewer than
+ * GAME_MAX_ZONES, the bitmaps follow the buffer in one block, and the
+ * room of the bitmaps (the second layer's, which most games never use,
+ * or the taller modes' rows) serves as up to ROOM_ZONES more zones until
+ * the renderer first needs it (give_room). A block found nowhere in one
+ * piece falls back to fewer zones. */
 static uint32 *alloc_code(game *g)
 {
     uint32 dram = 0;
     uint32 vram = 0;
-    uint32 need = JIT_ZONE_BYTES * JIT_ZONES + GAME_LOG_WORDS * 4 + DRAM_RESERVE;
-    uint32 *code;
+    uint32 need = JIT_ZONE_BYTES * JIT_ZONES + RENDER_POOL_BYTES + GAME_LOG_WORDS * 4 +
+                  DRAM_RESERVE;
+    uint32 extra = 0;           /* bytes allocated after the zones: the bitmaps */
+    uint8 *code;
 
     if (g->pad_log == NULL)
         need += GAME_PAD_LOGS * 4;
 
     g->zones = JIT_ZONES;
+    g->lent = 0;
     if (game_zones != 0) {
         g->zones = game_zones;
     } else {
@@ -390,12 +414,28 @@ static uint32 *alloc_code(game *g)
         if (g->zones > GAME_MAX_ZONES)
             g->zones = GAME_MAX_ZONES;
     }
+    if (g->zones < GAME_MAX_ZONES && game_zones == 0)
+        extra = RENDER_POOL_BYTES;
+    else if (render_alloc_pool(g->rd) != 0)
+        return NULL;
     for (;;) {
-        code = (uint32 *)AllocMem(JIT_CODE_BYTES, MEMTYPE_DRAM);
+        g->code_bytes = JIT_ZONE_BYTES * g->zones + extra;
+        code = (uint8 *)AllocMem((int32)g->code_bytes, MEMTYPE_DRAM | MEMTYPE_CEL);
         if (code != NULL || g->zones <= JIT_ZONES || game_zones != 0)
-            return code;
+            break;
         g->zones--;
     }
+    if (code != NULL && extra != 0) {
+        uint8 *pool = code + JIT_ZONE_BYTES * g->zones;
+
+        memset(pool, 0, RENDER_POOL_BYTES);
+        render_set_pool(g->rd, pool, give_room, g);
+        g->lent = GAME_MAX_ZONES - g->zones;
+        if (g->lent > ROOM_ZONES)
+            g->lent = ROOM_ZONES;
+        g->zones += g->lent;
+    }
+    return (uint32 *)code;
 }
 
 Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
@@ -469,8 +509,10 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
         return -1;
     }
     z80j_default_glue(&glue);
-    z80j_init(&g->jit, g->ctx, g->code, JIT_CODE_BYTES / 4, g->zones, game_hot_zones,
+    z80j_init(&g->jit, g->ctx, g->code, JIT_ZONE_BYTES / 4 * g->zones, g->zones, game_hot_zones,
               g->blocks, JIT_BLOCKS, g->links, JIT_LINKS, &glue);
+    z80j_lend_zones(&g->jit, g->lent);
+    g->room_frame = 0xFFFFFFFFu;
     z80j_set_interp(&g->jit, g->hot, HOT_QUEUE_AT, HOT_SYNC_AT);
     z80j_set_force(&g->jit, HOT_FORCE_AT);
     game_set_frame_us(g, PLAT_NTSC_FRAME_US);
@@ -578,7 +620,8 @@ void game_translate_rom(game *g)
     printf("ROM translation: %lu blocks, %lu instructions, %lu bytes of ARM code, %lu us "
            "(%lu us per instruction), %lu busy-wait loops, %lu flag scans from the cache, "
            "%lu evictions%s; code buffer "
-           "%lu zones of %d bytes shared by the cold and hot areas, run marks per "
+           "%lu zones of %d bytes (%lu lent by the picture's bitmaps) shared by the cold "
+           "and hot areas, run marks per "
            "%lu bytes, %d block descriptors, %d link entries; "
            "interpreter: translation queued at %d entries, at once from %d within "
            "%d us per frame when the frame has room, plus %d/16 us per interpreted "
@@ -589,7 +632,8 @@ void game_translate_rom(game *g)
            (unsigned long)g->rom_busy, (unsigned long)j->stats.scan_hits,
            (unsigned long)j->stats.evictions,
            g->rom_capped ? ", stopped at half of the smallest code buffer" : "",
-           (unsigned long)g->zones, JIT_ZONE_BYTES, (unsigned long)(4u << j->chunk_shift), JIT_BLOCKS, JIT_LINKS,
+           (unsigned long)g->zones, JIT_ZONE_BYTES, (unsigned long)g->lent,
+           (unsigned long)(4u << j->chunk_shift), JIT_BLOCKS, JIT_LINKS,
            HOT_QUEUE_AT, HOT_SYNC_AT, HOT_SYNC_US, HOT_INT_COST, HOT_FORCE_AT,
            (unsigned long)j->force_limit_us);
 }
@@ -1057,6 +1101,9 @@ void game_log_summary(game *g)
            (unsigned long)d.vdp_ctrl_w, (unsigned long)d.io.vdp_stat_r,
            (unsigned long)d.io.counter_r, (unsigned long)d.io.psg_w,
            (unsigned long)d.io.pad_r);
+    printf("Code buffer: %lu zones, %lu lent by the picture's bitmaps taken back at frame %ld "
+           "(%lu blocks emptied, %lu us)\n", (unsigned long)g->zones, (unsigned long)g->lent,
+           (long)g->room_frame, (unsigned long)g->room_blocks, (unsigned long)g->room_us);
     printf("Game summary: total frame time histogram (ms: frames)");
     for (k = 0; k < GAME_HIST; k++) {
         if (g->hist[k] != 0)

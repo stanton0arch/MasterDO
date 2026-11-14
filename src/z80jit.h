@@ -508,6 +508,9 @@ typedef struct {
     uint32      evict_ring;
     uint32      pressure;
     uint32      pressure_frames;
+    /* Zones at the end of the code buffer lent by the caller until it
+     * asks for them back (z80j_lend_zones, z80j_retire_zones). */
+    uint32      nlent;
 } z80j_state;
 
 /* Memory for max_blocks block descriptors, and for a link log of
@@ -571,6 +574,23 @@ int32  z80j_set_pair_check(z80j_state *j, uint32 offset, uint32 mask);
 
 /* Forgets every translation. */
 void   z80j_flush(z80j_state *j);
+
+/* Declares the last n zones of the code buffer lent by the caller, who
+ * may need their memory later: the translator uses them as any other
+ * zone, but takes them last (the areas start before them, and the zones
+ * never filled yet are taken in order) and gives them back for good when
+ * z80j_retire_zones is called. Called after z80j_init, before anything
+ * is translated (it forgets every translation); n is ignored when fewer
+ * than three zones would remain. */
+void   z80j_lend_zones(z80j_state *j, uint32 n);
+
+/* Gives the lent zones back: their blocks are emptied as by an eviction
+ * (not counted as one, nor towards the code buffer pressure), an area
+ * filling one of them moves on to another zone (emptied first if it holds
+ * code, as when it fills up), and the code buffer ends before them from
+ * then on. Called between frames, never from translated code. Returns the
+ * first word given back (the new end of the code buffer). */
+uint32 *z80j_retire_zones(z80j_state *j);
 
 /* Enables the interpreter: hot is a table of 65536 entry counts, cleared
  * here; an address is queued for translation when its count reaches

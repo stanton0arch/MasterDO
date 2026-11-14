@@ -30,9 +30,12 @@
  * shadow and cell lists), kept up to date every frame; the bands of the
  * picture are drawn from the layer of their table. A table unused for a
  * while loses its layer; a table met with no free layer takes the least
- * recently used one, which is rebuilt. The bitmaps of the two layers
- * share two memory blocks, which hold the taller bitmaps of a single
- * layer in the 224 and 240-line modes.
+ * recently used one, which is rebuilt. The bitmaps of the layers share
+ * one memory block (the pool), whose first half (the room) holds the
+ * second layer's bitmaps, or the taller bitmaps of the single layer of
+ * the 224 and 240-line modes: a game drawing one name table in the
+ * usual mode never uses it, and the caller may lend it out until the
+ * renderer first needs it (render_set_pool).
  *
  * Sprites: one 8 bpp coded cel per active sprite (8x8 or 8x16, doubled
  * by the cel engine when zoomed), colour 0 transparent, drawn after the
@@ -131,6 +134,8 @@
 #define RENDER_NT_CELLS (RENDER_NT_COLS * RENDER_NT_ROWS)
 #define RENDER_NT_CELLS_MAX (RENDER_NT_COLS * RENDER_NT_ROWS_MAX)
 #define RENDER_BM_BYTES (RENDER_W * RENDER_NT_ROWS * 8)  /* a bitmap, usual mode */
+#define RENDER_ROOM_BYTES (2 * RENDER_BM_BYTES)     /* the room of the pool */
+#define RENDER_POOL_BYTES (4 * RENDER_BM_BYTES)     /* the layers' bitmaps */
 #define RENDER_LAYERS   2           /* name tables kept as bitmaps */
 #define RENDER_MAX_PIECES 256       /* background pieces (a band per line, wraps) */
 #define RENDER_MAX_PRIO   128       /* priority strips */
@@ -264,7 +269,11 @@ typedef struct render_layer_s {
 
 typedef struct {
     render_layer layer[RENDER_LAYERS];
-    uint8  *bm_pool[2];     /* bitmaps, priority bitmaps: two RENDER_BM_BYTES each */
+    uint8  *pool;           /* the layers' bitmaps, RENDER_POOL_BYTES (set_bitmaps) */
+    uint32  pool_own;       /* allocated by render_alloc_pool */
+    uint32  room;           /* the room of the pool is the renderer's */
+    void  (*take_room)(void *arg);  /* asks the lender to give the room back */
+    void   *take_arg;
     uint32  nrows;          /* name table rows of the current mode: 28 or 32 */
     uint32  bm_h;           /* bitmap lines: nrows * 8 */
     uint32  height;         /* picture lines: 192, 224 or 240 */
@@ -342,6 +351,16 @@ typedef struct {
 
 Err   render_init(renderer *r);
 void  render_free(renderer *r);
+
+/* The layers' bitmaps, set after render_init and before the first update
+ * by one of these: render_alloc_pool allocates the pool (returns nonzero
+ * without memory); render_set_pool takes pool, RENDER_POOL_BYTES the cel
+ * engine reads, from the caller, and with take set lends its room
+ * (the first RENDER_ROOM_BYTES) to the caller: the first update or
+ * catch-up needing it (a second layer, or a taller mode) calls take(arg),
+ * which hands it back before returning. */
+Err   render_alloc_pool(renderer *r);
+void  render_set_pool(renderer *r, uint8 *pool, void (*take)(void *), void *arg);
 
 /* Forgets the picture: everything is rebuilt at the next update. */
 void  render_reset(renderer *r);

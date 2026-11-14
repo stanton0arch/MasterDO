@@ -70,7 +70,8 @@ CHECK_OFF(two_layers, RENDER_LAYERS == 2);      /* render_update handles both by
 
 #define BM_PITCH        RENDER_W            /* bytes per bitmap row */
 #define BM_WORDS        (RENDER_W / 4)      /* words per bitmap row */
-#define POOL_BYTES      (2 * RENDER_BM_BYTES)   /* a bitmap block: two usual bitmaps */
+/* Rows of the taller modes past those of the usual mode, in bytes. */
+#define TALL_EXTRA      ((RENDER_NT_ROWS_MAX - RENDER_NT_ROWS) * 8 * BM_PITCH)
 #define TILE_WORDS      16                  /* 8 rows x 2 words */
 #define WLIST_WORDS     (VDP_TILES + 1)     /* the largest work list, or an end mark */
 #define HEAD_BYTES      (VDP_TILES * 4)     /* the heads of the cell lists, before the nodes */
@@ -204,10 +205,8 @@ void render_free(renderer *r)
 
     for (k = 0; k < RENDER_LAYERS; k++)
         layer_free(&r->layer[k]);
-    for (k = 0; k < 2; k++) {
-        if (r->bm_pool[k] != NULL)
-            FreeMem(r->bm_pool[k], POOL_BYTES);
-    }
+    if (r->pool_own && r->pool != NULL)
+        FreeMem(r->pool, RENDER_POOL_BYTES);
     if (r->xtab != NULL) FreeMem(r->xtab, XT_WORDS * 4);
     if (r->blank != NULL) FreeMem(r->blank, 16);
     if (r->pluts != NULL) FreeMem(r->pluts, VDP_PAL_BANDS * RENDER_PLUT_SET * 2);
@@ -221,7 +220,7 @@ void render_free(renderer *r)
 }
 
 /* Allocates the lists of a layer for up to cap cells; returns nonzero on
- * failure. The bitmaps come from the pool (set_mode). */
+ * failure. The bitmaps come from the pool (set_bitmaps). */
 static int32 layer_init(renderer *r, render_layer *l, uint32 cap)
 {
     l->cap_cells = cap;
@@ -241,12 +240,69 @@ static int32 layer_init(renderer *r, render_layer *l, uint32 cap)
 }
 
 /*
+ * The bitmaps of the layers in the pool, four bitmaps of the usual mode:
+ * with 28 rows, the first layer's bitmap and priority bitmap in its
+ * second half, the second layer's priority bitmap and bitmap in the room
+ * (its first half); with 32 rows, a single layer whose priority bitmap
+ * starts the room and whose bitmap runs from the end of the room to the
+ * end of the usual one. Without the room (lent out) the second layer has
+ * no bitmaps: it is never given a table before take_room.
+ */
+static void set_bitmaps(renderer *r)
+{
+    uint8 *room = r->pool;
+    uint8 *own = r->pool + RENDER_ROOM_BYTES;
+
+    if (r->nrows == RENDER_NT_ROWS) {
+        r->layer[0].bitmap = own;
+        r->layer[0].prio_bm = own + RENDER_BM_BYTES;
+        r->layer[1].prio_bm = r->room ? room : NULL;
+        r->layer[1].bitmap = r->room ? room + RENDER_BM_BYTES : NULL;
+    } else {
+        r->layer[0].prio_bm = room;
+        r->layer[0].bitmap = own - TALL_EXTRA;
+        r->layer[1].prio_bm = NULL;
+        r->layer[1].bitmap = NULL;
+    }
+}
+
+/* The room of the pool, the first time the second layer or a taller mode
+ * needs it: the lender hands it back now. */
+static void take_room(renderer *r)
+{
+    if (r->room)
+        return;
+    r->take_room(r->take_arg);
+    r->room = 1;
+    set_bitmaps(r);
+}
+
+Err render_alloc_pool(renderer *r)
+{
+    r->pool = (uint8 *)AllocMem(RENDER_POOL_BYTES, CEL_MEM);
+    if (r->pool == NULL)
+        return -1;
+    r->pool_own = 1;
+    r->room = 1;
+    set_bitmaps(r);
+    return 0;
+}
+
+void render_set_pool(renderer *r, uint8 *pool, void (*take)(void *), void *arg)
+{
+    r->pool = pool;
+    r->pool_own = 0;
+    r->room = (take == NULL);
+    r->take_room = take;
+    r->take_arg = arg;
+    set_bitmaps(r);
+}
+
+/*
  * Display height of the picture: 192 lines with a name table of 28 rows,
- * or 224 / 240 lines with 32 rows. The bitmaps of the two layers share
- * the two pool blocks (bitmaps, priority bitmaps): with 28 rows each
- * layer takes half of each block, with 32 rows the first layer takes
- * 64 KiB of each and the second one is not used. Changing the number of
- * rows invalidates the layers, which are rebuilt when next used.
+ * or 224 / 240 lines with 32 rows, with one layer (set_bitmaps). Changing
+ * the number of rows invalidates the layers, which are rebuilt when next
+ * used.
  */
 static void set_mode(renderer *r, uint32 height, uint32 force)
 {
@@ -257,6 +313,8 @@ static void set_mode(renderer *r, uint32 height, uint32 force)
         r->nrows = rows;
         r->bm_h = rows * 8;
         r->nlayers = (rows == RENDER_NT_ROWS) ? RENDER_LAYERS : 1;
+        if (rows != RENDER_NT_ROWS)
+            take_room(r);
         for (k = 0; k < RENDER_LAYERS; k++) {
             render_layer *l = &r->layer[k];
 
@@ -274,11 +332,10 @@ static void set_mode(renderer *r, uint32 height, uint32 force)
             memset(l->stale_cols, 0, sizeof(l->stale_cols));
             l->pg_n = 0;
             memset(l->prio_rows, 0, sizeof(l->prio_rows));
-            l->bitmap = r->bm_pool[0] + k * RENDER_BM_BYTES;
-            l->prio_bm = r->bm_pool[1] + k * RENDER_BM_BYTES;
             l->nrows = (k < r->nlayers) ? rows : 0;
             l->ncells = l->nrows * RENDER_NT_COLS;
         }
+        set_bitmaps(r);
     }
     if (height != r->height) {
         r->height = height;
@@ -327,11 +384,9 @@ Err render_init(renderer *r)
     r->pluts = (uint16 *)AllocMem(VDP_PAL_BANDS * RENDER_PLUT_SET * 2, CEL_MEM);
     r->blank = (uint32 *)AllocMem(16, CEL_MEM);
     r->xtab = (uint32 *)AllocMem(XT_WORDS * 4, PLAIN_MEM);
-    r->bm_pool[0] = (uint8 *)AllocMem(POOL_BYTES, CEL_MEM);
-    r->bm_pool[1] = (uint8 *)AllocMem(POOL_BYTES, CEL_MEM);
     if (r->tiles == NULL || r->tiles_f == NULL || r->t_ok == NULL || r->wlist == NULL ||
         r->dlist == NULL || r->cels == NULL || r->pluts == NULL || r->blank == NULL ||
-        r->xtab == NULL || r->bm_pool[0] == NULL || r->bm_pool[1] == NULL)
+        r->xtab == NULL)
         bad = 1;
     /* The first layer holds a table of 32 rows in the taller modes. */
     for (k = 0; k < RENDER_LAYERS && !bad; k++)
@@ -577,6 +632,18 @@ static void assign_layers(renderer *r, const vdp_state *v, uint32 nnb)
                 continue;
             }
             l = best;
+            /* The second layer keeps a table besides the first one's:
+             * while its bitmaps are lent, a first layer holding no table
+             * takes the new one instead, unless an earlier band of the
+             * frame has it. */
+            if (l == &r->layer[1] && !r->room) {
+                for (j = 0; j < m && r->nlayer[j] != &r->layer[0]; j++)
+                    ;
+                if (!r->layer[0].valid && j == m)
+                    l = &r->layer[0];
+                else
+                    take_room(r);
+            }
             l->nt_base = base;
             l->valid = 0;               /* rebuilt by the update */
             l->rb_next = RENDER_NO_TILE;    /* a rebuild begun ahead for another table is dropped */
@@ -1918,6 +1985,15 @@ static void assign_ahead(renderer *r, const vdp_state *v)
     }
     if (best == NULL)
         return;
+    /* While the second layer's bitmaps are lent, a first layer being
+     * rebuilt ahead for another table starts again for this one; one
+     * holding the table of the last picture is kept. */
+    if (best == &r->layer[1] && !r->room) {
+        if (!r->layer[0].valid)
+            best = &r->layer[0];
+        else
+            take_room(r);
+    }
     best->nt_base = base;
     best->valid = 0;
     best->last_used = r->update;

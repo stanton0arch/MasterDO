@@ -661,7 +661,8 @@ int main(int argc, char **argv)
            "%d blocks per frame at most, each code zone emptied once its blocks have moved\n",
            (int)Z80J_CHURN);
 #endif
-    printf("masterdo: blocks emptied from the code buffer start again from the usual "
+    printf("masterdo: second layer's bitmaps lent to the code buffer until first drawn; "
+           "blocks emptied from the code buffer start again from the usual "
            "entry count; "
            "code entered fewer than 16 times left to the interpreter while "
            "the code buffer turns over; "
