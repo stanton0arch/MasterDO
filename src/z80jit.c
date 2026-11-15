@@ -110,7 +110,8 @@ CHECK_OFF(b_konst, offsetof(jit_block_ctx, konst) == 100);
 CHECK_OFF(b_dynm, offsetof(jit_block_ctx, dynm) == 108);
 CHECK_OFF(b_wmask, offsetof(jit_block_ctx, wmask) == 116);
 CHECK_OFF(b_wany, offsetof(jit_block_ctx, wany) == 124);
-CHECK_OFF(b_ctx_size, sizeof(jit_block_ctx) == 0x80);
+CHECK_OFF(b_stop, offsetof(jit_block_ctx, stop) == 128);
+CHECK_OFF(b_ctx_size, sizeof(jit_block_ctx) == 0x84);
 CHECK_OFF(st_words, STUB_WORDS == 4);
 CHECK_OFF(s_cur, offsetof(z80j_state, cur) == 12);
 CHECK_OFF(s_zone_end, offsetof(z80j_state, zone_end) == 16);
@@ -1548,6 +1549,7 @@ void z80j_flush(z80j_state *j)
     j->cur = j->area[0].cur;
     j->zone_end = j->area[0].end;
     j->nqueue = 0;
+    j->nchain = 0;
     memset(j->queued, 0, sizeof(j->queued));
     memset(j->resume, 0, sizeof(j->resume));
     j->generation++;
@@ -1652,6 +1654,193 @@ void jit_link_stub(z80j_state *j, uint32 *d, uint32 host)
 
 #define QUEUE_PC(e)  ((e) & 0xFFFFu)
 #define QUEUE_AGE(j, e) (((j)->frame_no - ((e) >> 16)) & 0xFFFFu)
+
+/* Straight-line code longer than a block (an unrolled copy or upload
+ * routine, often entered at an offset that depends on the amount to
+ * move) is cut into blocks of MAX_INSNS instructions, each falling
+ * through into the next. The interpreter counts entries only where a
+ * transfer or a miss leads, so the piece after the last block translated
+ * is counted once per run of the routine, and the routine gains one block
+ * per run: a routine run a few times per second stays mostly interpreted
+ * for minutes, and each run translates a block at once.
+ *
+ * So when a block cut on its size has no way out before its end, the
+ * address after it is noted with the key of its code (jit_size_cut). Once
+ * it has been reached (its entry count no longer 0: the block ran to its
+ * end at least once), it is translated in spare time after the queue
+ * (z80j_chain), with its bank shown if its paged slot shows another one
+ * by then (z80j_set_show); its own successor is noted as reached, so the
+ * rest of the routine follows within a few frames of spare time. Each
+ * block of it ends where a block translated before starts (chain_stop):
+ * a routine entered at another offset adds a block or two, not another
+ * copy of its rest. An entry waits CHAIN_FRESH frames at most; when
+ * Z80J_CHAIN entries wait, the oldest gives way. These translations never
+ * empty a zone (chain_room), stop while the code buffer turns over, and
+ * are timed apart from the others (a block of MAX_INSNS instructions costs
+ * several usual ones). */
+#define CHAIN_FRESH 64
+#define CHAIN_ROOM  4096
+#define CHAIN_GO    0x80000000u     /* chain_key: reached, translate when noted */
+
+static void note_successor(z80j_state *j, uint32 pc, uint32 go)
+{
+    uint32 key;
+    uint32 k;
+    uint32 old = 0;
+
+    pc &= 0xFFFFu;
+    if (j->hot[pc] == 255)
+        return;                         /* interpreted for good */
+    key = jit_block_key(j->ctx, pc);
+    if (find_block(j, pc, key) != 0)
+        return;
+    for (k = 0; k < j->nchain; k++) {
+        if (QUEUE_PC(j->chain_pc[k]) == pc && (j->chain_key[k] & ~CHAIN_GO) == key) {
+            go |= j->chain_key[k] & CHAIN_GO;
+            break;
+        }
+        if (QUEUE_AGE(j, j->chain_pc[k]) > QUEUE_AGE(j, j->chain_pc[old]))
+            old = k;
+    }
+    if (k == j->nchain) {
+        if (j->nchain < Z80J_CHAIN)
+            j->nchain++;
+        else
+            k = old;
+    }
+    j->chain_pc[k] = pc | j->frame_no << 16;
+    j->chain_key[k] = key | go;
+}
+
+int32 jit_size_cut(jit_block_ctx *b)
+{
+    z80j_state *j = b->j;
+    int32 i;
+
+    /* A successor translated with a stop address: the block ends there
+     * when no instruction before it can jump or check for an interrupt
+     * (the jumps back and the cuts the jumps after it called for go with
+     * them). */
+    if (b->stop != 0 && !b->end_leave) {
+        for (i = 1; i < MAX_INSNS; i++) {
+            const jit_insn *in = &b->ins[i - 1];
+
+            if (in->kind != K_NORMAL || in->ei)
+                break;
+            if (b->ins[i].pc == b->stop) {
+                b->n = i;
+                b->next_pc = b->stop;
+                b->back[0] = 0;
+                b->back[1] = 0;
+                b->dec_flags &= ~(JIT_DEC_RECUT | JIT_DEC_LOOP);
+                return i;
+            }
+        }
+    }
+    if (b->targets != 0 || j->hot == 0)
+        return b->n;                    /* before the run, or no interpreter */
+    for (i = 0; i < MAX_INSNS; i++) {
+        const jit_insn *in = &b->ins[i];
+        uint32 k = in->kind;
+
+        if (k == K_NORMAL || k == K_REP)
+            continue;
+        if ((k == K_JRCC || k == K_JPCC || k == K_DJNZ) && in->internal >= 0)
+            continue;
+        return b->n;                    /* a way out before the end */
+    }
+    note_successor(j, b->next_pc, j->chaining ? CHAIN_GO : 0);
+    return b->n;
+}
+
+/* The address of the first translated block of the given key after pc
+ * within the reach of a block (MAX_INSNS instructions of four bytes at
+ * most), 0 when none. RAM code is left whole. */
+static uint32 chain_stop(z80j_state *j, uint32 pc, uint32 key)
+{
+    uint32 a = pc + 1;
+    uint32 end = pc + 4 * MAX_INSNS;
+
+    if (key == KEY_RAM)
+        return 0;
+    if (end > 0x10000u)
+        end = 0x10000u;
+    while (a < end) {
+        uint32 w = j->seen[a >> 5] >> (a & 31);
+
+        if (w == 0) {
+            a = (a | 31) + 1;           /* nothing translated before in this word */
+            continue;
+        }
+        if ((w & 1) && find_block(j, a, key) != 0)
+            return a;
+        a++;
+    }
+    return 0;
+}
+
+/* The index of a noted successor to translate now (j->nchain: none), those
+ * translated since, interpreted for good or noted more than CHAIN_FRESH
+ * frames ago dropped on the way; one not reached yet waits. One noted
+ * under a bank its slot no longer shows is taken with that bank shown
+ * (*shown set) when the machine can show it, else it waits. */
+static uint32 chain_pick(z80j_state *j, uint32 *shown)
+{
+    uint32 k = 0;
+
+    while (k < j->nchain) {
+        uint32 e = j->chain_pc[k];
+        uint32 pc = QUEUE_PC(e);
+        uint32 go = j->chain_key[k] & CHAIN_GO;
+        uint32 key = j->chain_key[k] & ~CHAIN_GO;
+
+        if (QUEUE_AGE(j, e) > CHAIN_FRESH || j->hot[pc] == 255 ||
+            find_block(j, pc, key) != 0) {
+            j->nchain--;
+            j->chain_pc[k] = j->chain_pc[j->nchain];
+            j->chain_key[k] = j->chain_key[j->nchain];
+            continue;
+        }
+        if (!go && j->hot[pc] == 0) {
+            k++;                        /* not reached yet */
+            continue;
+        }
+        if (jit_block_key(j->ctx, pc) != key) {
+            if (!KEY_IS_SLOT(key) || j->show == 0 || !j->show(j->show_arg, key, 1)) {
+                k++;
+                continue;
+            }
+            if (jit_block_key(j->ctx, pc) != key) {
+                j->show(j->show_arg, key, 0);
+                k++;
+                continue;
+            }
+            *shown = 1;
+        }
+        return k;
+    }
+    return k;
+}
+
+/* Whether the code at pc can be translated without emptying a zone:
+ * CHAIN_ROOM bytes left in the zone of the area it goes to (see
+ * jit_translate_block), or an empty zone waiting. */
+static uint32 chain_room(const z80j_state *j, uint32 pc)
+{
+    const z80j_area *ar = &j->area[0];
+    uint32 z;
+
+    if (j->area[1].count != 0 && (((j->seen[pc >> 5] >> (pc & 31)) & 1) || j->seed_hot))
+        ar = &j->area[1];
+    if ((uint32)((uint8 *)ar->end - (uint8 *)ar->cur) >= CHAIN_ROOM)
+        return 1;
+    for (z = 0; z < j->nzones; z++) {
+        if (j->zone_blocks[z] == 0 && z != j->area[0].zone &&
+            (j->area[1].count == 0 || z != j->area[1].zone))
+            return 1;
+    }
+    return 0;
+}
 
 static void queue_hot(z80j_state *j, uint32 pc)
 {
@@ -1972,6 +2161,59 @@ uint32 z80j_prefetch(z80j_state *j, uint32 now_us)
     return 0;
 }
 
+static z80j_block *translate_block(z80j_state *j, uint32 pc, uint32 *targets,
+                                   uint32 max_targets);
+
+uint32 z80j_chain(z80j_state *j, uint32 now_us, uint32 elapsed_us, uint32 margin_us)
+{
+    uint32 est = j->chain_est_us != 0 ? j->chain_est_us : 3 * j->est_us;
+    uint32 shown = 0;
+    uint32 dt = est;
+    uint32 key;
+    uint32 pc;
+    uint32 k;
+
+    if (j->nchain == 0 || j->hot == 0 || j->pressure ||
+        elapsed_us + est + (est >> 1) + margin_us > j->frame_us)
+        return 0;
+    k = chain_pick(j, &shown);
+    if (k >= j->nchain)
+        return 0;
+    pc = QUEUE_PC(j->chain_pc[k]);
+    key = j->chain_key[k] & ~CHAIN_GO;
+    if (!chain_room(j, pc)) {
+        if (shown)
+            j->show(j->show_arg, key, 0);
+        return 0;
+    }
+    j->nchain--;
+    j->chain_pc[k] = j->chain_pc[j->nchain];
+    j->chain_key[k] = j->chain_key[j->nchain];
+    jit_bctx.stop = chain_stop(j, pc, key);
+    j->chaining = 1;
+    j->error = 0;
+    if (translate_block(j, pc, 0, 0) != 0) {
+        j->stats.prefetched++;
+        j->chained++;
+    } else if (j->error == 5 && !shown) {
+        j->hot[pc] = 255;               /* not translatable: interpreted for good */
+    }
+    j->chaining = 0;
+    jit_bctx.stop = 0;
+    if (shown) {
+        j->show(j->show_arg, key, 0);
+        /* The lookup entry stays only for code of the mapping in force:
+         * the block is found through the hash when its bank is shown. */
+        j->ctx->lookup[pc] = j->glue.miss;
+    }
+    if (j->clock != 0) {
+        j->now_us = j->clock();
+        dt = j->now_us - now_us;
+    }
+    j->chain_est_us = j->chain_est_us != 0 ? (j->chain_est_us * 3 + dt) >> 2 : dt;
+    return 1;
+}
+
 #if Z80J_CHURN
 /*
  * Diagnostic build: the code of the zone holding the most chunks run
@@ -2143,7 +2385,15 @@ void z80j_set_interp(z80j_state *j, uint8 *hot, uint32 queue_at, uint32 sync_at)
     j->ctx->int_leave = 0;
     j->ctx->hot_sync_gate = 0;
     j->nqueue = 0;
+    j->nchain = 0;
     memset(j->queued, 0, sizeof(j->queued));
+}
+
+void z80j_set_show(z80j_state *j, uint32 (*show)(void *arg, uint32 key, uint32 on),
+                   void *arg)
+{
+    j->show = show;
+    j->show_arg = arg;
 }
 
 void z80j_set_line_port(z80j_state *j, uint32 port)

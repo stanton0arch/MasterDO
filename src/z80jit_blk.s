@@ -21,6 +21,7 @@
         IMPORT  jit_next_zone
         IMPORT  jit_decode_block
         IMPORT  jit_ram_operands
+        IMPORT  jit_size_cut
         IMPORT  jit_analyse_block
         IMPORT  jit_emit_block
         IMPORT  jit_bctx
@@ -89,6 +90,8 @@ B_BUSY          EQU     68              ; then line, fused
 B_FUSED         EQU     76
 B_TARGETS       EQU     80
 B_MAX_TARGETS   EQU     84
+B_STOP          EQU     128
+MAX_INSNS       EQU     64
 DEC_SEAM        EQU     8
 
 ; z80j_ctx
@@ -249,6 +252,10 @@ tb_zone_ok
         cmp     r1,#0
         movne   r0,r7
         blne    jit_ram_operands
+        ; A block cut on its size (jit_size_cut, C; it returns the count).
+        cmp     r0,#MAX_INSNS
+        moveq   r0,r7
+        bleq    jit_size_cut
         mov     r8,r0
         ldr     r1,[r7,#B_DEC_FLAGS]
         tst     r1,#DEC_SEAM

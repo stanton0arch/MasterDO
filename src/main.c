@@ -664,9 +664,9 @@ int main(int argc, char **argv)
     /* The banner names the build by its latest changes (the oldest ones
      * dropped as new ones come: its bytes are DRAM the code buffer may
      * need). */
-    printf("masterdo: bank cache with four code zones of DRAM; images over 512 KiB "
-           "read from the disc by banks into a bank cache when mapped; cartridge "
-           "banks mapped through a table when the image is not one block\n");
+    printf("masterdo: code past blocks cut on their size translated in spare time "
+           "once reached; bank cache with four code zones of DRAM; images over 512 KiB "
+           "read from the disc by banks into a bank cache when mapped\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);

@@ -624,6 +624,7 @@ Err game_init(game *g, const uint8 *rom, sms_banks *banks, uint32 rom_size, uint
         g->pad_log = (uint32 *)AllocMem(GAME_PAD_LOGS * 4, MEMTYPE_DRAM);
     sms_init(g->sms, g->ctx, rom, banks, rom_size, VDP_LINES_NTSC, g->cart_ram, g->cart_ram_size, gg);
     sms_mem_ram_source(&g->sms->mem, cart_ram_get, g);
+    z80j_set_show(&g->jit, sms_mem_show, &g->sms->mem);
     if (banks != 0) {
         banks->note = bank_note;
         banks->note_arg = g;
@@ -1069,6 +1070,9 @@ uint32 game_spare_time(game *g, uint32 deadline_us)
             break;
         now = g->jit.now_us;
     }
+    /* Then the code after the blocks cut on their size. */
+    while (z80j_chain(&g->jit, now, now - origin, FRAME_MARGIN_US))
+        now = g->jit.now_us;
 #if Z80J_CHURN
     /* Diagnostic build: code run lately moved and translated again
      * (z80j_churn), with the display on (the spare time of the frames
@@ -1287,7 +1291,7 @@ void game_log_state(game *g)
            "%lu RAM retranslations, %lu for rewritten operands, %lu dynamic RAM "
            "blocks, %lu seams, %lu returns resumed, %lu hot addresses dropped, "
            "%lu interpreted instructions, generation %lu, %lu frames with new code "
-           "translated from %lu entries\n",
+           "translated from %lu entries, %lu blocks after blocks cut on their size\n",
            (unsigned long)j->nblocks, (unsigned long)g->blocks_peak, (unsigned long)j->nlinks,
            (unsigned long)j->max_links, (unsigned long)j->stats.link_full,
            (unsigned long)j->stats.evictions, (unsigned long)j->stats.evicted,
@@ -1298,5 +1302,5 @@ void game_log_state(game *g)
            (unsigned long)(j->stats.resumed + c->resumed_count),
            (unsigned long)j->stats.queue_full, (unsigned long)c->int_insns,
            (unsigned long)j->generation, (unsigned long)j->pressure_frames,
-           (unsigned long)Z80J_PRESSURE_AT);
+           (unsigned long)Z80J_PRESSURE_AT, (unsigned long)j->chained);
 }

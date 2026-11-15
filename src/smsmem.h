@@ -141,13 +141,11 @@ void   sms_mem_move_ram(sms_mem *s, uint8 *ram);
  * given yet is asked for by the writes that show it, never here: the
  * power-on values do not). */
 void   sms_mem_map(sms_mem *s);
-#if Z80J_CHURN
-/* Diagnostic build (z80j_churn): with on, the ROM pages of the slot of a
- * block key read as the key's bank shows them, the previous mapping kept;
- * without, that mapping put back. Returns 0 when the key is not a slot's
- * or (with on) the bank is not in the image. arg: the sms_mem. */
+/* For the translator (z80j_set_show): with on, the ROM pages of the slot
+ * of a block key read as the key's bank shows them, the previous mapping
+ * kept; without, that mapping put back. Returns 0 when the key is not a
+ * slot's or (with on) the bank is not in memory. arg: the sms_mem. */
 uint32 sms_mem_show(void *arg, uint32 key, uint32 on);
-#endif
 
 /* Paging registers to their power-on values (banks 0, 1, 2; the
  * Codemasters mapper starts with banks 0, 1, 0). */

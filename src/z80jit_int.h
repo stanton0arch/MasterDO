@@ -276,6 +276,12 @@ typedef struct jit_block_ctx_s {
     uint32      wany;       /* the same, index of the first store through a
                              * register pair, an index register or SP
                              * (MAX_INSNS: none) */
+    uint32      stop;       /* into the block management: 0, or the address
+                             * of a translated block of the same key the
+                             * block ends at when it holds MAX_INSNS
+                             * instructions and no jump, conditional or
+                             * not, nor EI before that address
+                             * (jit_size_cut) */
 } jit_block_ctx;
 
 extern jit_block_ctx jit_bctx;
@@ -308,6 +314,11 @@ int32  jit_decode_block(jit_block_ctx *b);
  * (the block decoded again with konst when one is a JP to an address of
  * the block); returns the count of instructions. */
 int32  jit_ram_operands(jit_block_ctx *b);
+/* A block decoded with MAX_INSNS instructions: ends it at b->stop when
+ * set (see jit_block_ctx), else notes the address after it for a
+ * translation in spare time when no instruction of it leads out of it
+ * (z80j_chain); returns the count of instructions. */
+int32  jit_size_cut(jit_block_ctx *b);
 
 /* z80jit_dec.s, for jit_flags_needed */
 #define JIT_SCAN_INSNS 8    /* instructions walked by the forward flag scan */

@@ -197,7 +197,6 @@ void sms_mem_map(sms_mem *s)
     }
 }
 
-#if Z80J_CHURN
 static uint32 show_bank;                /* the slot's bank before sms_mem_show */
 static uint32 show_rtab[SLOT_PAGES / RPAGE];
 
@@ -232,7 +231,6 @@ uint32 sms_mem_show(void *arg, uint32 key, uint32 on)
     ctx->slot_bank[slot] = bank;
     return 1;
 }
-#endif
 
 void sms_mem_reset(sms_mem *s)
 {

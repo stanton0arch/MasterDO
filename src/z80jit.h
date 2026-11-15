@@ -345,6 +345,7 @@ typedef struct z80j_block z80j_block;
 
 #define Z80J_QUEUE 256          /* hot addresses waiting to be translated */
 #define Z80J_WAITING 256        /* addresses kept waiting by the forced translation limit */
+#define Z80J_CHAIN 8            /* successors of blocks cut on their size waiting */
 
 #define JIT_MAX_ZONES   64
 #define JIT_SCAN_CACHE  512
@@ -511,6 +512,19 @@ typedef struct {
     /* Zones at the end of the code buffer lent by the caller until it
      * asks for them back (z80j_lend_zones, z80j_retire_zones). */
     uint32      nlent;
+    /* Successors of blocks cut on their size, waiting for the spare time
+     * (z80j_chain): the address after such a block | the frame it was
+     * noted in << 16, and the key of the code there at that moment (top
+     * bit: known to be reached). */
+    uint32      chain_pc[Z80J_CHAIN];
+    uint32      chain_key[Z80J_CHAIN];
+    uint32      nchain;
+    uint32      chained;    /* blocks translated so */
+    uint32      chain_est_us;   /* running average of their cost (0: none yet) */
+    uint32      chaining;   /* set while one is translated */
+    /* Shows a paged slot's bank for the time of a translation (z80j_set_show). */
+    uint32    (*show)(void *arg, uint32 key, uint32 on);
+    void       *show_arg;
 } z80j_state;
 
 /* Memory for max_blocks block descriptors, and for a link log of
@@ -604,6 +618,20 @@ uint32 *z80j_retire_zones(z80j_state *j, uint32 more);
  * here; an address is queued for translation when its count reaches
  * queue_at and translated at once when it reaches sync_at. */
 void   z80j_set_interp(z80j_state *j, uint8 *hot, uint32 queue_at, uint32 sync_at);
+/* The machine's way to read a paged slot as another bank shows it, for
+ * the translations in spare time of code noted under a bank the slot no
+ * longer shows: show(arg, key, 1) maps the bank of the block key key in
+ * its slot for the translator's reads (0 when it cannot: the key is not a
+ * slot's, the bank is not in memory), show(arg, key, 0) puts the mapping
+ * back. Without it, such code waits until its bank is shown. */
+void   z80j_set_show(z80j_state *j, uint32 (*show)(void *arg, uint32 key, uint32 on),
+                     void *arg);
+/* After the queue (z80j_prefetch), in spare time: translates the code
+ * after a block cut on its size (see z80jit.c) when the frame, elapsed_us
+ * into it, still has room for such a translation and margin_us; returns 1
+ * when it translated one (the clock sample ending it in j->now_us; now_us
+ * the caller's sample starting it), 0 otherwise. */
+uint32 z80j_chain(z80j_state *j, uint32 now_us, uint32 elapsed_us, uint32 margin_us);
 
 /* Entries from which an address is translated at once whatever the
  * budget (0: never): code interpreted that often is either a loop or
