@@ -200,7 +200,7 @@ Err rom_load(rom_image *rom, const char *name, uint32 size)
         rom->port = CreateMsgPort(NULL, 0, 0);
         rom->req = CreateBlockFileIOReq(rom->bf.fDevice, rom->port);
         if (rom->req >= 0)
-            rom->banks = sms_banks_new(size / 0x4000u, 0, read_bank, rom);
+            rom->banks = sms_banks_new(size / 0x4000u, 0, SMS_BANK_DRAM, read_bank, rom);
         rom->load_us = plat_usec_now() - t0;
         if (rom->banks == NULL) {
             printf("ERROR: cannot read %s by banks (no memory or a read error)\n", path);
@@ -267,9 +267,9 @@ void rom_log(const rom_image *rom)
     printf("ROM: %s, %ld bytes, first bytes %02x %02x %02x %02x\n", rom->name,
            (long)rom->size, rom->data[0], rom->data[1], rom->data[2], rom->data[3]);
     if (rom->banks != NULL)
-        printf("ROM: %ld banks read when mapped, a cache of %lu in VRAM, the first ones "
-               "read in %lu us\n", (long)(rom->size >> 14), (unsigned long)rom->banks->nbuf,
-               (unsigned long)rom->load_us);
+        printf("ROM: %ld banks read when mapped, a cache of %lu (%lu in DRAM), the first "
+               "ones read in %lu us\n", (long)(rom->size >> 14), (unsigned long)rom->banks->nbuf,
+               (unsigned long)rom->banks->ndram, (unsigned long)rom->load_us);
     if (rom->header_offset < 0) {
         printf("ROM: no TMR SEGA header\n");
         return;

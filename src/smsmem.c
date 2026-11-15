@@ -371,37 +371,49 @@ const uint8 *sms_mem_bank(const sms_mem *s, uint32 b)
     return (const uint8 *)JIT_PTR(BANK_ADDR(s, b));
 }
 
-sms_banks *sms_banks_new(uint32 banks, uint32 max, sms_bank_read read, void *arg)
+sms_banks *sms_banks_new(uint32 banks, uint32 max, uint32 dram, sms_bank_read read, void *arg)
 {
-    uint32 dram = 0;
+    uint32 free_d = 0;
     uint32 vram = 0;
     uint32 n;
     uint32 k;
     uint8 *block;
+    uint8 *more = 0;
     sms_banks *t;
 
-    plat_mem_free(&dram, &vram);
+    plat_mem_free(&free_d, &vram);
+    if (max == 0 || max > SMS_BANK_BUFS)
+        max = SMS_BANK_BUFS;
+    if (max > banks)
+        max = banks;
     n = 0;
     if (vram > SMS_BANK_KEEP + sizeof(sms_banks))
         n = (vram - SMS_BANK_KEEP - sizeof(sms_banks)) / 0x4000u;
-    if (n > SMS_BANK_BUFS)
-        n = SMS_BANK_BUFS;
-    if (max != 0 && n > max)
+    if (n > max)
         n = max;
-    if (n > banks)
-        n = banks;
-    if (n < SMS_BANK_MIN)
+    if (dram > max - n)
+        dram = max - n;
+    if (dram != 0) {
+        more = (uint8 *)AllocMem((int32)(dram * 0x4000u), MEMTYPE_DRAM);
+        if (more == 0)
+            dram = 0;
+    }
+    block = 0;
+    if (n + dram >= SMS_BANK_MIN)
+        block = (uint8 *)AllocMem((int32)(n * 0x4000u + sizeof(sms_banks)), MEMTYPE_VRAM);
+    if (block == 0) {
+        if (more != 0)
+            FreeMem(more, (int32)(dram * 0x4000u));
         return 0;
-    block = (uint8 *)AllocMem((int32)(n * 0x4000u + sizeof(sms_banks)), MEMTYPE_VRAM);
-    if (block == 0)
-        return 0;
+    }
     t = (sms_banks *)(block + n * 0x4000u);
     memset(t, 0, sizeof(*t));
-    t->nbuf = n;
+    t->nbuf = n + dram;
+    t->ndram = dram;
     t->read = read;
     t->arg = arg;
-    for (k = 0; k < n; k++) {
-        t->buf[k] = block + k * 0x4000u;
+    for (k = 0; k < t->nbuf; k++) {
+        t->buf[k] = (k < n) ? block + k * 0x4000u : more + (k - n) * 0x4000u;
         t->held[k] = (uint8)k;
         t->tab[k] = t->buf[k];
         if (read(arg, k, t->buf[k]) != 0) {
@@ -414,7 +426,11 @@ sms_banks *sms_banks_new(uint32 banks, uint32 max, sms_bank_read read, void *arg
 
 void sms_banks_free(sms_banks *t)
 {
-    FreeMem(t->buf[0], (int32)(t->nbuf * 0x4000u + sizeof(sms_banks)));
+    uint32 n = t->nbuf - t->ndram;
+
+    if (t->ndram != 0)
+        FreeMem(t->buf[n], (int32)(t->ndram * 0x4000u));
+    FreeMem((uint8 *)t - n * 0x4000u, (int32)(n * 0x4000u + sizeof(sms_banks)));
 }
 
 void sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, sms_banks *banks,

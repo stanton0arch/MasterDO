@@ -34,6 +34,12 @@
 /* VRAM a bank cache leaves to the run: what a 512 KiB image leaves (the
  * renderer's state and tile copy, the pad log) and a margin. */
 #define SMS_BANK_KEEP   (42 * 1024)
+/* Buffers a bank cache takes in DRAM after those of VRAM: the DRAM of
+ * four code zones, which the code buffer of such an image goes without
+ * (game_init). The banks a game maps over a scene or a fight outnumber
+ * the VRAM buffers: each bank read while running holds the picture for
+ * about four display periods, an eviction of code costs much less. */
+#define SMS_BANK_DRAM   8
 
 /* Reads bank b of the image into to (16 KiB); returns 0, or not 0 on an
  * error. */
@@ -51,9 +57,12 @@ typedef struct {
     const uint8  *tab[SMS_BANK_TAB];
     uint32        last[SMS_BANK_TAB];   /* paging count when the bank last entered or
                                            left a slot; 0: not since it was read */
-    uint8        *buf[SMS_BANK_BUFS];   /* in one block from buf[0], this structure after */
+    uint8        *buf[SMS_BANK_BUFS];   /* VRAM ones in one block from buf[0], this
+                                           structure after; then the DRAM ones in one
+                                           block from buf[nbuf - ndram] */
     uint8         held[SMS_BANK_BUFS];  /* the bank in each buffer */
     uint32        nbuf;
+    uint32        ndram;                /* buffers in DRAM, among the nbuf */
     sms_bank_read read;
     void         *arg;
     /* Called after each bank read while running (the cache's misses),
@@ -66,10 +75,11 @@ typedef struct {
 } sms_banks;
 
 /* A bank cache for an image of `banks` banks read by read(arg, b, to):
- * the buffers (at most max, 0 for no limit) in one block of VRAM leaving
- * SMS_BANK_KEEP of it, filled with banks 0 to nbuf - 1. Returns 0 when
- * the memory or a read fails. */
-sms_banks *sms_banks_new(uint32 banks, uint32 max, sms_bank_read read, void *arg);
+ * the buffers (at most max in all, 0 for no limit) in one block of VRAM
+ * leaving SMS_BANK_KEEP of it, then up to dram more in one block of DRAM
+ * (none when it cannot be had), filled with banks 0 to nbuf - 1. Returns
+ * 0 when the memory or a read fails. */
+sms_banks *sms_banks_new(uint32 banks, uint32 max, uint32 dram, sms_bank_read read, void *arg);
 void       sms_banks_free(sms_banks *t);
 
 typedef struct {

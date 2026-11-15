@@ -12,7 +12,8 @@
  * apart (-split: given to the program through a table), 29 the image's
  * banks read into a bank cache when mapped, as the console reads an image
  * larger than SMS_BLOCK_MAX (-cache n: at most n buffers, 0 as many as the
- * VRAM holds; set by sim for such an image unless -whole). The pad
+ * VRAM holds and SMS_BANK_DRAM more in DRAM; set by sim for such an image
+ * unless -whole). The pad
  * is scripted by the host (sim_pad). At the end, the code buffer is dumped
  * for anacode.py and hotblocks.py.
  *
@@ -832,13 +833,15 @@ void hmain(void)
         banks = &split_banks;
     }
     if (sim_arg(29)) {
-        banks = sms_banks_new((size + 0x3FFFu) / 0x4000u, sim_arg(29) - 1, sim_disc_read, 0);
+        banks = sms_banks_new((size + 0x3FFFu) / 0x4000u, sim_arg(29) - 1, SMS_BANK_DRAM,
+                              sim_disc_read, 0);
         if (banks == 0) {
             printf("ERROR: no bank cache (memory)\n");
             return;
         }
-        printf("ROM: %lu banks read when mapped, a cache of %lu in VRAM\n",
-               (unsigned long)((size + 0x3FFFu) / 0x4000u), (unsigned long)banks->nbuf);
+        printf("ROM: %lu banks read when mapped, a cache of %lu (%lu in DRAM)\n",
+               (unsigned long)((size + 0x3FFFu) / 0x4000u), (unsigned long)banks->nbuf,
+               (unsigned long)banks->ndram);
         rom = banks->tab[0];
     }
     if (game_init(&g, rom, banks, size, sim_arg(24)) != 0)    /* -gg: the Game Gear mode */

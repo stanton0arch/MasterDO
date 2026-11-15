@@ -83,7 +83,8 @@ filled with $A5 before each) and given to the program through a table, as
 for an image not loaded as one block (machine state and generated code
 must be those of the one-block load), `-cache n` the image's banks read
 into a bank cache of at most n buffers of 16 KiB (0: as many as the VRAM
-holds) when the mapper shows them, the image itself not counted in VRAM:
+holds and `SMS_BANK_DRAM` more in DRAM, as on the console, whose code
+buffer has that many fewer zones) when the mapper shows them, the image itself not counted in VRAM:
 the console's way for an image larger than 512 KiB, which such an image
 takes by default (each read charged as a read of the console's drive,
 `SIMDISC`; the machine state must not depend on the buffer count), `-whole`

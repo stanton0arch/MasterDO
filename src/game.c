@@ -11,7 +11,7 @@
 #include "mem.h"
 
 #define JIT_ZONE_BYTES  (32 * 1024)
-#define JIT_ZONES       13      /* zones of the code buffer, at least */
+#define JIT_ZONES       13      /* zones of the code buffer, at least (less a bank cache's DRAM) */
 #define GAME_MAX_ZONES  16      /* at most: 256 run marks of 2 KiB chunks */
 #define JIT_HOT_ZONES   5       /* code translated again after an eviction goes there */
 /* Zones beyond JIT_ZONES go to the code buffer only while the DRAM left
@@ -471,8 +471,9 @@ static void give_room(void *arg)
     g->room_us = plat_usec_now() - t0;
 }
 
-/* The code buffer and the renderer's bitmaps. The buffer has JIT_ZONES
- * zones, and up to GAME_MAX_ZONES when the DRAM measured now still leaves
+/* The code buffer and the renderer's bitmaps. The buffer has `least`
+ * zones (JIT_ZONES, fewer for an image whose bank cache took DRAM
+ * buffers), and up to GAME_MAX_ZONES when the DRAM measured now still leaves
  * DRAM_RESERVE free once the buffer, the bitmaps and the arenas of the
  * logs still to come in DRAM are allocated (the pad log is already in
  * VRAM when that memory had room for it). Code that outgrows the buffer
@@ -483,11 +484,11 @@ static void give_room(void *arg)
  * or the taller modes' rows) serves as up to ROOM_ZONES more zones until
  * the renderer first needs it (give_room). A block found nowhere in one
  * piece falls back to fewer zones. */
-static uint32 *alloc_code(game *g)
+static uint32 *alloc_code(game *g, uint32 least)
 {
     uint32 dram = 0;
     uint32 vram = 0;
-    uint32 need = JIT_ZONE_BYTES * JIT_ZONES + RENDER_POOL_BYTES + GAME_LOG_WORDS * 4 +
+    uint32 need = JIT_ZONE_BYTES * least + RENDER_POOL_BYTES + GAME_LOG_WORDS * 4 +
                   DRAM_RESERVE;
     uint32 extra = 0;           /* bytes allocated after the zones: the bitmaps */
     uint8 *code;
@@ -495,7 +496,7 @@ static uint32 *alloc_code(game *g)
     if (g->pad_log == NULL)
         need += GAME_PAD_LOGS * 4;
 
-    g->zones = JIT_ZONES;
+    g->zones = least;
     g->lent = 0;
     g->pool = NULL;
     if (game_zones != 0) {
@@ -514,7 +515,7 @@ static uint32 *alloc_code(game *g)
     for (;;) {
         g->code_bytes = JIT_ZONE_BYTES * g->zones + extra;
         code = (uint8 *)AllocMem((int32)g->code_bytes, MEMTYPE_DRAM | MEMTYPE_CEL);
-        if (code != NULL || g->zones <= JIT_ZONES || game_zones != 0)
+        if (code != NULL || g->zones <= least || game_zones != 0)
             break;
         g->zones--;
     }
@@ -598,7 +599,8 @@ Err game_init(game *g, const uint8 *rom, sms_banks *banks, uint32 rom_size, uint
     g->pad_log = (uint32 *)AllocMem(GAME_PAD_LOGS * 4, MEMTYPE_VRAM);
     if (g->pad_log == NULL)
         g->pad_log_vram = 0;
-    g->code = alloc_code(g);
+    /* The DRAM buffers of a bank cache were the DRAM of code zones. */
+    g->code = alloc_code(g, JIT_ZONES - ((banks != 0) ? banks->ndram * 0x4000u / JIT_ZONE_BYTES : 0));
     if (g->code == NULL) {
         printf("ERROR: out of memory for the code buffer (%lu bytes)\n",
                (unsigned long)(JIT_ZONE_BYTES * JIT_ZONES));
