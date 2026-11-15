@@ -9,8 +9,10 @@ built. It is not part of the ISO and `make` does not use it.
 - `mk.sh` links the objects of the last `make clean && make` (`build/*.o`)
   with `harness.c` (the driver), `dectest.c`, `anatest.c` and `emittest.c`
   (the checks of the assembly decoder, analysis passes and code emitter
-  against their C references), all compiled by `armcc`, and `hstub.s` (host services) into a plain binary (`armlink -bin` at 0x8000, symbols in
-  `sim.sym`), builds `sim` with `gcc` and copies the AIF header of the
+  against their C references), all compiled by `armcc`, `lzdec.s` (the
+  bank store's decoder) and `hstub.s` (host services) into a plain binary
+  (`armlink -bin` at 0x8000, symbols in `sim.sym`), builds `sim` and `lz`
+  with `gcc` and copies the AIF header of the
   console's executable of the same make (`takeme/LaunchMe`) to `sim.aif`.
 - The DRAM left to the run is the figure Phoenix gives before the
   cartridge for that executable: 1 494 784 bytes less its read-only and
@@ -192,7 +194,7 @@ simulated pc and lr with their symbols, the stack pointer, r0 and r1.
 Environment variables:
 - `SIMPAD="1600:10,1606:0,2100:8"`: buttons held from each frame on
   (`SMS_PAD_*` bits of `sms.h`, 0x100 for PAUSE, or START held on the Game
-  Gear), up to 1 024 entries.
+  Gear), up to 8 192 entries.
   The ISO records the pad changes of a run and writes them at the pause
   or the end of the run as a `Pad script:` line holding a `panel.txt`
   entry (cartridge, frames, script), so that a run played on the console
@@ -220,6 +222,11 @@ Environment variables:
   that address (a stray store into a table or a state word is caught in
   the act); `SIMWATCHSKIP=n` lets the first n writes through, each printed
   with the writing function (the set-up of the watched word).
+- `SIMBANKLOG=file`: every change of the bank a paged slot shows (a store
+  into the context's `slot_bank[0..2]` with another value, by the mapper's
+  assembly handler or by C) is written as `frame slot bank us` (the frame
+  being run, -1 before the first; the model's clock), at no simulated
+  cost: the bank traffic a bank cache would serve (`banks.py`);
 - `SIMBLOCKLOG=file`: the translator's block descriptors are scanned at
   the start of every frame (at no simulated cost) and their changes
   written to the file: `T frame slot pc key entry` for a block
@@ -278,6 +285,19 @@ each code word since the `-from` frame):
   from them, a walk of the given depth from them; and a static walk of
   the exits of the code run in the 120 frames before the burst; for each
   walk, the blocks it translates and the burst blocks among them;
+- `banks.py DIR`: the bank traffic of a run made with
+  `SIMBANKLOG=DIR/banks.txt -framelog` in DIR (`log.txt`): the changes
+  per frame and per slot, the banks held within 100 and 600 frames, the
+  banks by number of mappings, then the misses of a cache of decoded banks
+  for each slot count (`-slots`), with LRU and with the Belady bound, in
+  display-on and display-off frames and within the windows given
+  (`-window a:b`, `-warm N` leaving out the first N frames of each);
+  `banks.py -table DIR...` one line per run; `banks.py DIR -tiers
+  S1,S2,... -mem BYTES -bankfile FILE -disc MS` slots, a compressed store
+  and the disc sharing BYTES (the first S banks decoded at load, the store
+  taking the banks after them while they fit, the others read from the
+  disc when mapped), each miss charged the bank's decoding time measured
+  by `-lztest` (`LZ bank:` lines) or a disc read;
 - `cmpcode.py A/code.bin A/sim.sym B/code.bin B/sim.sym`: the code buffers
   of two builds compared word for word (the branches leaving the buffer by
   the symbol they reach, since the image's layout moves between builds),
@@ -298,6 +318,42 @@ each code word since the `-from` frame):
   sketched in the step 14 study, from the assumptions of its `PARAMS`.
 
 Pictures are PPM files; any image tool converts them.
+
+`-rom` takes images up to 3.8 MiB (the stack and the context sit at the
+top of the model's 16 MiB). The plays of the images larger than 512 KiB
+(written by hand, model only until they run on the console) are in
+`panel_large.txt`.
+
+## Bank store coder
+
+For the images larger than the memory (step 16), the banks would be kept
+compressed, each 16 KiB bank on its own, and decoded into a slot when the
+game maps them. `lzcomp.c` is the compressor (LZ4 block format, greedy,
+one 4 096-entry hash table holding each position's 4 bytes; `min_match`
+refuses shorter matches: fewer sequences, faster decoding), `lzdec.s` the
+decoder in ARM assembly (whole-word stores aligned on the output, the
+bytes past a copy rewritten by the next one; matches 1 or 4 bytes back
+as word fills; four-word blocks from 20 bytes back).
+
+```
+gcc -O2 -o lz lz.c                      # built by mk.sh too
+./lz -min 6 -blob vfa.lzb takeme/roms/gg/virtua_fighter_animation.gg
+tools/arm60model/sim -img tools/arm60model/sim.bin -sym tools/arm60model/sim.sym \
+        -rom vfa.lzb -lztest
+```
+
+`lz` prints for each image the store's size with the greedy coder, with
+an optimal parse of the same format and with an LZSS (flag bytes, 2-byte
+matches of 3 to 18 bytes within 4 KiB, optimal parse), and the shape of
+the greedy stream (sequences per bank, literals and match bytes per
+sequence, matches less than 8 and 16 bytes back, long matches); `-blob`
+writes the store of the first image with the image itself. `sim -lztest`
+starts at `lz_start` instead of `sim_start` (the harness's `hmain` is not
+run, so that the cartridge runs keep their timing): it decodes every
+bank, checks it against the image and the 16 bytes after the output,
+compresses every bank again as the console would at load (sizes checked
+against the host's), and prints the times (`LZ test:` lines) and one
+`LZ bank: bank bytes us` line per bank.
 
 ## Batch runner
 

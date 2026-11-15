@@ -36,7 +36,8 @@
  * like every cycle), SIMTRLOG=file (the cost of every block translation,
  * pass by pass and instruction by instruction, see tr_flush; needs an
  * image built with mk.sh -labels; SIMTRWORDS=1 adds the words emitted
- * for each instruction).
+ * for each instruction), SIMBANKLOG=file (the banks mapped into the
+ * paged slots, see bank_hit).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -223,6 +224,25 @@ static void watch_hit(uint32_t a, uint32_t v)
     fatal("watched write %08x = %08x", a, v);
 }
 
+/* SIMBANKLOG=file: every change of the bank a paged slot shows (a store
+ * into the context's slot_bank[0..2] with another value) is written as
+ * "frame slot bank us" (the frame of the pad service last called, -1
+ * before the first; the model's clock in microseconds), at no simulated
+ * cost: the bank traffic a bank cache would serve. */
+static FILE *banklog;
+static uint32_t bank_lo = 0xFFFFFFF0u;     /* &slot_bank[0], once registered */
+static uint32_t bank_cur[3] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
+static int32_t cur_frame = -1;
+static void bank_hit(uint32_t a, uint32_t v)
+{
+    uint32_t slot = (a - bank_lo) >> 2;
+
+    if (slot < 3 && v != bank_cur[slot]) {
+        bank_cur[slot] = v;
+        fprintf(banklog, "%d %u %u %u\n", (int)cur_frame, (unsigned)slot, (unsigned)v, (unsigned)usec_now());
+    }
+}
+
 /* With SIMBLOCKLOG, a store into the code buffer clears the execution
  * count of the word, so that the counts are those of the code it holds. */
 static uint32_t blog_lo, blog_span;
@@ -232,6 +252,7 @@ static inline void wr32(uint32_t a, uint32_t v)
     if (a >= MEM_SIZE - 3 || a < 0x100) fatal("write32 %08x", a);
     if (a - blog_lo < blog_span) jitcnt[a >> 2] = 0;
     if (a - watch_addr < 4u || watch_addr - a < 4u) watch_hit(a, v);
+    if (a - bank_lo < 12u) bank_hit(a, v);
     if (a & 3) fatal("unaligned write32 %08x", a);
     mem[a] = v >> 24; mem[a + 1] = v >> 16; mem[a + 2] = v >> 8; mem[a + 3] = v;
 }
@@ -427,7 +448,7 @@ static void do_dump(uint32_t fb, uint32_t width, uint32_t height, uint32_t tag)
 
 /* Pad script: "frame:bits" pairs in the environment variable SIMPAD
  * give the buttons held from that frame on (bit 8: PAUSE). */
-static uint32_t pad_frames[1024], pad_bits[1024];
+static uint32_t pad_frames[8192], pad_bits[8192];
 static int npad;
 
 static uint32_t pad_at(uint32_t frame)
@@ -627,7 +648,7 @@ static void do_swi(uint32_t n)
     case 6: r[0] = rom_size; break;
     case 7: do_dump(r[0], r[1], r[2], r[3]); break;
     case 8: r[0] = r[0] < 32 ? args[r[0]] : 0; break;
-    case 9: block_log((int32_t)r[0]); r[0] = pad_at(r[0]); break;
+    case 9: cur_frame = (int32_t)r[0]; block_log((int32_t)r[0]); r[0] = pad_at(r[0]); break;
     case 10: {
         uint32_t id = r[0] & 15;
         if (id == 15) { memset(jitcyc, 0, (MEM_SIZE / 4) * sizeof(float)); memset(jitcnt, 0, (MEM_SIZE / 4) * sizeof(uint32_t)); memset(prof, 0, ((img_end - LOAD_ADDR) / 4 + 1) * sizeof(double)); memset(pcount, 0, ((img_end - LOAD_ADDR) / 4 + 1) * sizeof(uint32_t)); prof_jit = 0; break; }
@@ -639,6 +660,11 @@ static void do_swi(uint32_t n)
     case 14:
         reg_code = r[0]; reg_code_end = r[1]; reg_blocks = r[2]; reg_nblocks = r[3]; reg_ctx = rd32(r[13]);
         if (blog) { blog_lo = reg_code; blog_span = reg_code_end - reg_code; }
+        if (banklog) {
+            uint32_t k;
+            bank_lo = reg_ctx + 0x57C;          /* offsetof(z80j_ctx, slot_bank) */
+            for (k = 0; k < 3; k++) bank_hit(bank_lo + 4 * k, rd32(bank_lo + 4 * k));
+        }
         break;
     default: fatal("unknown swi %x", n);
     }
@@ -1116,6 +1142,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-dectest")) args[21] = 1;
         else if (!strcmp(argv[i], "-anatest")) args[22] = 1;
         else if (!strcmp(argv[i], "-emittest")) args[23] = 1;
+        else if (!strcmp(argv[i], "-lztest")) args[26] = 1;
         else if (!strcmp(argv[i], "-force") && i + 1 < argc) args[20] = atoi(argv[++i]) + 1;
         else if (!strcmp(argv[i], "-forcelimit") && i + 1 < argc) args[25] = atoi(argv[++i]) + 1;
         else if (!strcmp(argv[i], "-zones") && i + 1 < argc) args[27] = atoi(argv[++i]);
@@ -1170,7 +1197,8 @@ int main(int argc, char **argv)
     if (romp) {
         f = fopen(romp, "rb");
         if (!f) { perror(romp); return 1; }
-        rom_size = fread(mem + ROM_ADDR, 1, 0x100000, f);
+        /* Up to 3.8 MiB: the stack and the context sit at the top. */
+        rom_size = fread(mem + ROM_ADDR, 1, STACK_TOP - 0x20000u - ROM_ADDR, f);
         fclose(f);
         /* Some dumps carry a 512-byte copier header before the image,
          * skipped as the console's loader does. */
@@ -1195,7 +1223,7 @@ int main(int argc, char **argv)
     padenv = getenv("SIMPAD");
     if (padenv) {
         char *p = padenv;
-        while (*p && npad < 1024) {
+        while (*p && npad < 8192) {
             unsigned fr, bits;
             if (sscanf(p, "%u:%x", &fr, &bits) != 2) break;
             pad_frames[npad] = fr; pad_bits[npad] = bits; npad++;
@@ -1227,13 +1255,19 @@ int main(int argc, char **argv)
             if (!strcmp(syms[i].name, "jit_bctx")) tr_bctx = syms[i].addr;
         if (!tr_bctx) fatal("SIMTRLOG: no symbol jit_bctx");
     }
-    for (i = 0; i < nsyms; i++) if (!strcmp(syms[i].name, "sim_start")) r[15] = syms[i].addr;
+    for (i = 0; i < nsyms; i++)
+        if (!strcmp(syms[i].name, args[26] ? "lz_start" : "sim_start")) r[15] = syms[i].addr;
     if (!r[15]) r[15] = LOAD_ADDR;
     r[13] = STACK_TOP;
     r[10] = STACK_TOP - 0x10000;
     r[14] = 0;
     if (getenv("SIMBLOCKLOG")) blog = fopen(getenv("SIMBLOCKLOG"), "w");
+    if (getenv("SIMBANKLOG")) {
+        banklog = fopen(getenv("SIMBANKLOG"), "w");
+        if (!banklog) { perror(getenv("SIMBANKLOG")); return 1; }
+    }
     run();
+    if (banklog) fclose(banklog);
     if (blog) { block_log(bl_frame + 1); fclose(blog); }
     if (trlog) fclose(trlog);
     fprintf(stderr, "sim: %llu instructions, S %llu N %llu I %llu, %.0f us\n",

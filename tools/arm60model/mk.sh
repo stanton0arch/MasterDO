@@ -41,7 +41,9 @@ if [ "$1" = "-labels" ]; then
 fi
 
 gcc -O2 -o sim sim.c
+gcc -O2 -o lz lz.c
 armasm -bigend -fpu none -arch 3 -apcs "3/32/nofp/swst" hstub.s -o hstub.o
+armasm -bigend -fpu none -arch 3 -apcs "3/32/nofp/swst" lzdec.s -o lzdec.o
 armcc -I$M/include/3do -I$M/include/community -I$M/include/ttl -I$M/src -DNDEBUG=1 -O2 \
       -zpno_check_stack -bigend -za1 -zi4 -fpu none -arch 3 -apcs "3/32/nofp/swst/wide/softfp" \
       -c harness.c -o harness.o 2>&1 | grep -v "Warning" | grep -v "^harness.c:" || true
@@ -54,7 +56,7 @@ armcc -I$M/include/3do -I$M/include/community -I$M/include/ttl -I$M/src -DNDEBUG
 armcc -I$M/include/3do -I$M/include/community -I$M/include/ttl -I$M/src -DNDEBUG=1 -O2 \
       -zpno_check_stack -bigend -za1 -zi4 -fpu none -arch 3 -apcs "3/32/nofp/swst/wide/softfp" \
       -c emittest.c -o emittest.o 2>&1 | grep -v "Warning" | grep -v "^emittest.c:" || true
-armlink -bin -ro-base 0x8000 -o sim.bin -symbols sim.sym hstub.o harness.o dectest.o anatest.o emittest.o \
+armlink -bin -ro-base 0x8000 -o sim.bin -symbols sim.sym hstub.o harness.o dectest.o anatest.o emittest.o lzdec.o \
         $B/game.c.o $B/sms.c.o $B/sms_io.s.o $B/vdp.c.o $B/vdp_a.s.o $B/smsmem.c.o $B/smsmem_a.s.o \
         $B/z80jit.c.o $B/z80jit_emit.c.o $JE $JB $JG $JD $JA $B/z80int_a.s.o $B/dbgview.c.o $B/render.c.o $B/render_a.s.o \
         $B/bench_cpu.c.o $B/bench_z80.s.o $B/z80prog.c.o $B/clock.c.o \

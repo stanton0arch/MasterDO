@@ -4,6 +4,7 @@
         AREA    |!!!sim|, CODE, READONLY
 
         EXPORT  sim_start
+        EXPORT  lz_start
         EXPORT  printf
         EXPORT  sprintf
         EXPORT  AllocMemFromMemLists
@@ -21,9 +22,14 @@
         EXPORT  psg_update
         EXPORT  plat_mem_free
         IMPORT  hmain
+        IMPORT  lz_main
 
 sim_start
         bl      hmain
+        swi     0xF00000
+; Entry of sim -lztest (the bank store's coder timed, see harness.c).
+lz_start
+        bl      lz_main
         swi     0xF00000
 printf
         swi     0xF00001

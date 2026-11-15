@@ -29,6 +29,7 @@
 #include "platform.h"
 #include "stdio.h"
 #include "string.h"
+#include "lzcomp.c"
 
 extern const uint8 *sim_rom(void);
 extern uint32 sim_rom_size(void);
@@ -681,6 +682,95 @@ static void check_blocks(uint32 f)
             check_printed++;
         }
     }
+}
+
+/* sim -lztest: the bank store's decoder (lzdec.s) and compressor (lzcomp.c)
+ * timed on a store made by the host tool lz (-blob), given as the image:
+ * each bank decoded and checked against the image (16 bytes past the
+ * output checked untouched), then each bank compressed again as the
+ * console would at load, its size checked against the host's. */
+extern uint32 lz4_dec_bank(const uint8 *src, uint8 *dst);
+static uint32 lz_out[(0x4000 + 16) / 4];
+static uint8 lz_cbuf[0x4000 + 0x4000 / 255 + 32];
+static unsigned lz_htab[2 << LZ_HBITS];
+
+static uint32 lz_rd32(const uint8 *p)
+{
+    return ((uint32)p[0] << 24) | ((uint32)p[1] << 16) | ((uint32)p[2] << 8) | p[3];
+}
+
+static void lz_test(const uint8 *blob, uint32 size)
+{
+    uint32 nb, minm, b, bad = 0, sum = 0, worst = 0, best = 0xFFFFFFFFu, csum = 0, cworst = 0, cbad = 0;
+    uint32 bytes = 0, wb = 0;
+    const uint8 *offs, *data, *img;
+
+    if (size < 16 || memcmp(blob, "LZB1", 4) != 0) {
+        printf("LZ test: not a store made by lz -blob\n");
+        return;
+    }
+    nb = lz_rd32(blob + 4);
+    minm = lz_rd32(blob + 8);
+    offs = blob + 12;
+    data = offs + 4 * (nb + 1);
+    img = data + lz_rd32(offs + 4 * nb);
+    for (b = 0; b < nb; b++) {
+        uint32 o0 = lz_rd32(offs + 4 * b), o1 = lz_rd32(offs + 4 * (b + 1));
+        uint32 t0, t1, end, k;
+
+        for (k = 0; k < 4; k++)
+            lz_out[0x1000 + k] = 0xA5A5A5A5u;
+        t0 = sim_time();
+        end = lz4_dec_bank(data + o0, (uint8 *)lz_out);
+        t1 = sim_time() - t0;
+        if (memcmp(lz_out, img + b * 0x4000u, 0x4000) != 0 || end > (uint32)(data + o1) ||
+            end + 4 <= (uint32)(data + o1) || lz_out[0x1000] != 0xA5A5A5A5u || lz_out[0x1003] != 0xA5A5A5A5u) {
+            if (bad < 4) {
+                for (k = 0; k < 0x4000 && ((uint8 *)lz_out)[k] == img[b * 0x4000u + k]; k++)
+                    ;
+                printf("LZ test: bank %lu decoded wrong (first difference at %lu, end %ld)\n",
+                       (unsigned long)b, (unsigned long)k, (long)(end - (uint32)(data + o1)));
+            }
+            bad++;
+        }
+        sum += t1;
+        bytes += o1 - o0;
+        if (t1 > worst) { worst = t1; wb = b; }
+        if (t1 < best) best = t1;
+    }
+    printf("LZ test: %lu banks, %lu bytes stored (%lu%%), decoded in %lu us on average, %lu best, %lu worst "
+           "(bank %lu), %lu wrong\n", (unsigned long)nb, (unsigned long)bytes,
+           (unsigned long)(bytes * 100 / (nb * 0x4000)), (unsigned long)(sum / nb), (unsigned long)best,
+           (unsigned long)worst, (unsigned long)wb, (unsigned long)bad);
+    for (b = 0; b < nb; b++) {
+        uint32 o0 = lz_rd32(offs + 4 * b), o1 = lz_rd32(offs + 4 * (b + 1));
+        uint32 t0 = sim_time(), t1, c;
+
+        c = lz_compress_bank(img + b * 0x4000u, lz_cbuf, lz_htab, minm);
+        t1 = sim_time() - t0;
+        if (((c + 3) & ~3u) != o1 - o0)
+            cbad++;
+        csum += t1;
+        if (t1 > cworst) cworst = t1;
+    }
+    printf("LZ test: compressed again in %lu us (%lu us per bank on average, %lu worst), %lu sizes differ "
+           "from the host's\n", (unsigned long)csum, (unsigned long)(csum / nb), (unsigned long)cworst,
+           (unsigned long)cbad);
+    for (b = 0; b < nb; b++) {
+        uint32 o0 = lz_rd32(offs + 4 * b), o1 = lz_rd32(offs + 4 * (b + 1));
+        uint32 t0 = sim_time(), t1;
+
+        (void)lz4_dec_bank(data + o0, (uint8 *)lz_out);
+        t1 = sim_time() - t0;
+        printf("LZ bank: %lu %lu %lu\n", (unsigned long)b, (unsigned long)(o1 - o0), (unsigned long)t1);
+    }
+}
+
+/* Entry of -lztest (lz_start in hstub.s, chosen by sim): hmain stays as
+ * it is, so that the runs of the cartridges keep their timing. */
+void lz_main(void)
+{
+    lz_test(sim_rom(), sim_rom_size());
 }
 
 void hmain(void)
