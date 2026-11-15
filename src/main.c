@@ -661,26 +661,13 @@ int main(int argc, char **argv)
            "%d blocks per frame at most, each code zone emptied once its blocks have moved\n",
            (int)Z80J_CHURN);
 #endif
-    printf("masterdo: cartridge RAM given when first shown; "
-           "second layer's bitmaps lent to the code buffer until first drawn; "
-           "blocks emptied from the code buffer start again from the usual "
-           "entry count; "
-           "code entered fewer than 16 times left to the interpreter while "
-           "the code buffer turns over; "
-           "interrupted segments resumed only under the memory they were "
-           "interrupted in, never through the linker; "
-           "pad log in VRAM, one more code zone for 512 KiB images; "
-           "RAM code operands taken as immediates until seen rewritten; "
-           "band pictures cut in one pass, written tiles walked once for both layers; "
-           "diagnostic counts carried by the loads and stores of their handlers; "
-           "VDP control port pairs sent in one call; "
-           "line interrupt delivered with the line counter event, no handler call; "
-           "display-off catch-up looks at the clock across short tile lists; "
-           "one kernel call per look at the clock, adjacent looks shared; "
-           "translator decoding from opcode records, segments cut while decoding, "
-           "flag scan in assembly; "
-           "Game Gear mode: 12-bit colours, 160x144 LCD window, START button, "
-           "PSG stereo, Game Gear images listed from the gg directory\n");
+    /* The banner names the build by its latest changes (the oldest ones
+     * dropped as new ones come: its bytes are DRAM the code buffer may
+     * need). */
+    printf("masterdo: cartridge banks mapped through a table when the image "
+           "is not one block, disc read times at start-up; "
+           "cartridge RAM given when first shown; "
+           "second layer's bitmaps lent to the code buffer until first drawn\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);
@@ -706,6 +693,8 @@ int main(int argc, char **argv)
             plat_wait_vbl(&plat);
         }
     }
+    /* The back screen, not shown, holds the blocks read. */
+    rom_disc_times(&st.roms, plat_pixels(&plat, plat.back));
     for (;;) {
         int32 pick = rom_menu(&plat, &st);
         char buf[64];
@@ -722,7 +711,7 @@ int main(int argc, char **argv)
         plat_mem_free(&st.run_free, &st.run_vram);
         st.gg = st.rom.gg;
         if (st.rom.data != NULL && st.rom.size >= 0x4000 &&
-            game_init(&g, st.rom.data, (uint32)st.rom.size, st.gg) == 0) {
+            game_init(&g, st.rom.data, 0, (uint32)st.rom.size, st.gg) == 0) {
             st.have_game = 1;
             game_set_name(&g, st.rom.name);
             game_set_sound(&g, snd.ok ? &snd : NULL);

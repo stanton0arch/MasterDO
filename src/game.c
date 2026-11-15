@@ -515,7 +515,7 @@ static uint32 *alloc_code(game *g)
     return (uint32 *)code;
 }
 
-Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
+Err game_init(game *g, const uint8 *rom, const uint8 *const *banks, uint32 rom_size, uint32 gg)
 {
     z80j_glue glue;
     uint32 k;
@@ -598,7 +598,7 @@ Err game_init(game *g, const uint8 *rom, uint32 rom_size, uint32 gg)
     g->log = (uint32 *)AllocMem(GAME_LOG_WORDS * 4, MEMTYPE_DRAM);
     if (g->pad_log == NULL)
         g->pad_log = (uint32 *)AllocMem(GAME_PAD_LOGS * 4, MEMTYPE_DRAM);
-    sms_init(g->sms, g->ctx, rom, rom_size, VDP_LINES_NTSC, g->cart_ram, g->cart_ram_size, gg);
+    sms_init(g->sms, g->ctx, rom, banks, rom_size, VDP_LINES_NTSC, g->cart_ram, g->cart_ram_size, gg);
     sms_mem_ram_source(&g->sms->mem, cart_ram_get, g);
     for (k = 0; k < Z80J_PORTS; k++) {
         if (SMS_PORT_VCOUNTER(k))
@@ -1065,7 +1065,7 @@ uint32 game_spare_time(game *g, uint32 deadline_us)
 
         while (now - t1 < DIAG_WORK_US &&
                z80j_spare_fits(&g->jit, now - origin, FRAME_MARGIN_US)) {
-            diag_work(g->sms->mem.rom, g->sms->mem.rom_size);
+            diag_work(g->rom, g->sms->mem.bank_tab != 0 ? 0x4000u : g->rom_size);
             now = plat_usec_now();
         }
     }

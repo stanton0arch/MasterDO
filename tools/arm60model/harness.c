@@ -8,7 +8,8 @@
  * pictures every n frames, 3 frame from which the profile counts, 17 write
  * only the pictures at multiples of n and the first 17 of the others that
  * differ, 18 log the writes made during the active display of every
- * frame, 15 a hash of the cel chain of every frame. The pad
+ * frame, 15 a hash of the cel chain of every frame, 28 the image's banks
+ * apart (-split: given to the program through a table). The pad
  * is scripted by the host (sim_pad). At the end, the code buffer is dumped
  * for anacode.py and hotblocks.py.
  *
@@ -33,6 +34,7 @@
 
 extern const uint8 *sim_rom(void);
 extern uint32 sim_rom_size(void);
+extern const uint8 *sim_rom_bank(uint32 b);
 extern void sim_dump(const uint32 *fb, uint32 width, uint32 height, uint32 tag);
 extern uint32 sim_arg(uint32 i);
 extern uint32 sim_pad(uint32 frame);
@@ -773,8 +775,12 @@ void lz_main(void)
     lz_test(sim_rom(), sim_rom_size());
 }
 
+/* -split: the host address of each bank of the image. */
+static const uint8 *split_banks[256];
+
 void hmain(void)
 {
+    const uint8 *const *banks = 0;
     const uint8 *rom = sim_rom();
     uint32 size = sim_rom_size();
     uint32 frames = sim_arg(0);
@@ -812,7 +818,14 @@ void hmain(void)
         game_hot_zones = sim_arg(12);   /* -hotzones n */
     if (sim_arg(27))
         game_zones = sim_arg(27);       /* -zones n */
-    if (game_init(&g, rom, size, sim_arg(24)) != 0)    /* -gg: the Game Gear mode */
+    if (sim_arg(28)) {
+        uint32 b;
+
+        for (b = 0; b < (size + 0x3FFFu) / 0x4000u && b < 256; b++)
+            split_banks[b] = sim_rom_bank(b);
+        banks = split_banks;
+    }
+    if (game_init(&g, rom, banks, size, sim_arg(24)) != 0)    /* -gg: the Game Gear mode */
         return;
     sim_register((uint32)g.jit.code, (uint32)g.jit.code_end, (uint32)g.jit.blocks, g.jit.max_blocks, (uint32)g.ctx);
     if (sim_arg(4)) {

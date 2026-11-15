@@ -13,11 +13,17 @@
 /* Offsets used by smsmem_a.s. */
 #define CHECK_OFF(name, cond) typedef char check_##name[(cond) ? 1 : -1]
 CHECK_OFF(rom, offsetof(sms_mem, rom) == 24);
+CHECK_OFF(bank_tab, offsetof(sms_mem, bank_tab) == 28);
 CHECK_OFF(cart_ram, offsetof(sms_mem, cart_ram) == 36);
 CHECK_OFF(reg, offsetof(sms_mem, reg) == 40);
 CHECK_OFF(remaps, offsetof(sms_mem, remaps) == 68);
 CHECK_OFF(bank_mask, offsetof(sms_mem, bank_mask) == 72);
 CHECK_OFF(mapper, offsetof(sms_mem, mapper) == 80);
+
+/* Host address of bank b: in the image as one block, or from the table
+ * when the banks are apart. */
+#define BANK_ADDR(s, b) ((s)->bank_tab != 0 ? JIT_ADDR((s)->bank_tab[b]) : \
+                         JIT_ADDR((s)->rom) + (b) * 0x4000u)
 
 /* The cartridge RAM, asked for when the paging registers first show it
  * (none when it is not given). Kept out of map_slot, which every bank
@@ -60,17 +66,19 @@ static void map_slot(sms_mem *s, uint32 slot)
 {
     z80j_ctx *ctx = s->ctx;
     uint32 reg = s->reg[slot + 1];
+    uint32 mapper = s->mapper;
+    uint32 bank = bank_of(s, (mapper == SMS_MAPPER_CODEMASTERS) ? reg & 0x7Fu : reg);
     uint32 base = slot * 0x4000u;
+    uint32 rom_e = BANK_ADDR(s, bank) - base;
     uint32 first = slot * SLOT_PAGES;
     uint32 end = first + SLOT_PAGES;
     uint32 ram_first = end;             /* first page showing cartridge RAM */
     uint32 ram_e = 0;
-    uint32 rom_e;
-    uint32 bank;
     uint32 p;
 
-    if (s->mapper == SMS_MAPPER_CODEMASTERS) {
-        reg &= 0x7F;
+    /* The bank first: fewer values live across the call. */
+    ctx->slot_bank[slot] = bank;
+    if (mapper == SMS_MAPPER_CODEMASTERS) {
         if (slot == 2 && (s->reg[2] & 0x80) && s->cart_ram != 0) {
             ram_first = first + SLOT_PAGES / 2;
             ram_e = JIT_ADDR(s->cart_ram) - 0xA000u;
@@ -84,9 +92,6 @@ static void map_slot(sms_mem *s, uint32 slot)
                     (((s->reg[0] & 0x04) && s->cart_ram_size >= 0x8000u) ? 0x4000u : 0u) - base;
         }
     }
-    bank = bank_of(s, reg);
-    ctx->slot_bank[slot] = bank;
-    rom_e = JIT_ADDR(s->rom) + bank * 0x4000u - base;
     if (ram_first != s->slot_ram[slot] || ram_e != s->slot_ram_e[slot]) {
         for (p = first; p < end; p++) {
             ctx->wtab[p] = (p >= ram_first) ? ram_e : 0;
@@ -146,7 +151,7 @@ uint32 sms_mem_show(void *arg, uint32 key, uint32 on)
     if (bank >= s->banks)
         return 0;
     show_bank = ctx->slot_bank[slot];
-    rom_e = JIT_ADDR(s->rom) + bank * 0x4000u - slot * 0x4000u;
+    rom_e = BANK_ADDR(s, bank) - slot * 0x4000u;
     for (q = 0; q < SLOT_PAGES / RPAGE; q++) {
         show_rtab[q] = ctx->rtab[63 - (q0 + q)];
         if ((ctx->page_kind[(q0 + q) * RPAGE] & Z80J_PAGE_KIND) == kind)
@@ -231,9 +236,9 @@ void sms_mem_move_ram(sms_mem *s, uint8 *ram)
 
 /* The Codemasters header at $7FE0: the number of 16 KiB banks, a date,
  * then a checksum and its complement (the two words add up to $10000). */
-uint32 sms_mem_detect(const uint8 *rom, uint32 rom_size)
+uint32 sms_mem_detect(const uint8 *bank1, uint32 rom_size)
 {
-    const uint8 *h = rom + 0x7FE0;
+    const uint8 *h = bank1 + 0x3FE0;
     uint32 sum;
 
     if (rom_size < 0x8000u)
@@ -268,8 +273,13 @@ static void sms_mem_event(z80j_machine *m)
     s->ctx->event_line = 0xFFFFFFFFu;
 }
 
-void sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
-                  uint8 *cart_ram, uint32 cart_ram_size)
+const uint8 *sms_mem_bank(const sms_mem *s, uint32 b)
+{
+    return (const uint8 *)JIT_PTR(BANK_ADDR(s, b));
+}
+
+void sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, const uint8 *const *banks,
+                  uint32 rom_size, uint8 *cart_ram, uint32 cart_ram_size)
 {
     uint32 p;
     uint32 ram = JIT_ADDR(ctx->mram);
@@ -277,14 +287,14 @@ void sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
     memset(s, 0, sizeof(*s));
     s->ctx = ctx;
     s->rom = rom;
-    s->rom_size = rom_size;
+    s->bank_tab = banks;
     s->banks = (rom_size + 0x3FFFu) / 0x4000u;
     if (s->banks == 0)
         s->banks = 1;
     s->bank_mask = ((s->banks & (s->banks - 1)) == 0) ? s->banks - 1 : 0xFFFFFFFFu;
     s->cart_ram = cart_ram;
     s->cart_ram_size = cart_ram_size;
-    s->mapper = sms_mem_detect(rom, rom_size);
+    s->mapper = (s->banks > 1) ? sms_mem_detect(sms_mem_bank(s, 1), rom_size) : SMS_MAPPER_SEGA;
 
     s->m.in = sms_mem_in;
     s->m.out = sms_mem_out;
@@ -292,7 +302,7 @@ void sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
     s->m.event = sms_mem_event;
     s->m.user = s;
     ctx->machine = JIT_ADDR(&s->m);
-    ctx->write_a = JIT_ADDR(sms_mem_write_a);
+    ctx->write_a = (banks != 0) ? JIT_ADDR(sms_mem_write_t) : JIT_ADDR(sms_mem_write_a);
     ctx->wdata = JIT_ADDR(s);
 
     /* System RAM, $C000-$DFFF mirrored at $E000-$FFFF; the last page

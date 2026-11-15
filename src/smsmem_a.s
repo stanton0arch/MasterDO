@@ -8,7 +8,9 @@
 ; ($FFFD-$FFFF) that changes the bank fills the read table of its slot
 ; here. The rare cases (the RAM mapping register $FFFC, slot 2 while it
 ; shows cartridge RAM, a bank count that is not a power of two) go
-; through the C callback (sms_mem_write).
+; through the C callback (sms_mem_write). sms_mem_write_t is the same
+; handler for an image whose banks are apart (sms_mem.bank_tab): the host
+; address of the bank comes from the table instead of the image's start.
 ;
 ; Layouts: CONTRACT with sms_mem (smsmem.h) and z80j_ctx (z80jit.h) - keep
 ; in sync (smsmem.c and z80jit.c check the offsets at compile time).
@@ -16,6 +18,7 @@
         AREA    |C$$code|, CODE, READONLY
 
         EXPORT  sms_mem_write_a
+        EXPORT  sms_mem_write_t
 
         IMPORT  z80j_write_generic
         IMPORT  z80j_write_result
@@ -27,6 +30,7 @@ MRAM            EQU     0x1000
 
 ; sms_mem fields.
 SM_ROM          EQU     24
+SM_BANKTAB      EQU     28
 SM_REG          EQU     40
 SM_REMAPS       EQU     68
 SM_BANKMASK     EQU     72
@@ -41,6 +45,7 @@ Z80J_WRITE_PAGING EQU   2
 sms_mem_write_a
         cmp     r12,#0xC0000000
         bhs     write_a_ram
+write_a_rom
         ldr     r1,[r10,#WDATA]         ; ROM area: ignored by the Sega
         ldr     r1,[r1,#SM_MAPPER]      ; mapper, a bank register otherwise
         teq     r1,#0
@@ -86,6 +91,7 @@ write_a_bank
         str     r4,[r1,#SM_REMAPS]
         ldr     r4,[r1,#SM_ROM]
         add     r4,r4,r0,lsl#14         ; host address of the bank
+write_a_slot
         sub     r2,r4,r12,lsl#14        ; minus the Z80 address of the slot
         ; Read table entries of the slot (1 KiB pages): page p is at
         ; r10 - 4 - 4 * p, so the 16 pages of slot s are the words from
@@ -111,5 +117,53 @@ write_a_stay
 write_a_c
         ldmfd   sp!,{r2,r4,r5,r12,lr}
         b       z80j_write_generic
+
+;----------------------------------------------------------------------------
+; The same for an image whose banks are apart, up to the bank's address;
+; the read table is filled, and the exits taken, by the code above.
+;----------------------------------------------------------------------------
+sms_mem_write_t
+        cmp     r12,#0xC0000000
+        blo     write_a_rom
+        stmfd   sp!,{r2,r4,r5,r12,lr}
+        mov     r12,r12,lsr#16          ; address, $FF00-$FFFF
+        and     r0,r0,#0xFF
+        sub     r4,r12,#0xE000          ; system RAM mirror
+        add     r4,r4,r10
+        add     r4,r4,#MRAM
+        strb    r0,[r4]
+        sub     r12,r12,#0xFF00
+        subs    r12,r12,#0xFC           ; paging register 0-3
+        blo     write_a_stay
+        ldr     r1,[r10,#WDATA]         ; sms_mem
+        ldr     r5,[r1,#SM_MAPPER]
+        teq     r5,#0                   ; plain RAM under the other mappers
+        bne     write_a_stay
+        add     r4,r1,r12,lsl#2
+        ldr     r5,[r4,#SM_REG]
+        cmp     r5,r0
+        beq     write_a_stay            ; same value: the mapping stands
+        teq     r12,#0                  ; $FFFC: RAM mapping control
+        beq     write_a_c
+        teq     r12,#3
+        bne     write_t_bank
+        ldr     r5,[r1,#SM_REG]
+        tst     r5,#0x08                ; slot 2 showing cartridge RAM
+        bne     write_a_c
+write_t_bank
+        ldr     r5,[r1,#SM_BANKMASK]
+        cmn     r5,#1                   ; bank count not a power of two
+        beq     write_a_c
+        str     r0,[r4,#SM_REG]
+        and     r0,r0,r5                ; bank
+        sub     r12,r12,#1              ; slot 0-2
+        add     r4,r10,r12,lsl#2
+        str     r0,[r4,#SLOT_BANK]
+        ldr     r4,[r1,#SM_REMAPS]
+        add     r4,r4,#1
+        str     r4,[r1,#SM_REMAPS]
+        ldr     r4,[r1,#SM_BANKTAB]
+        ldr     r4,[r4,r0,lsl#2]        ; host address of the bank
+        b       write_a_slot
 
         END

@@ -25,8 +25,8 @@
 typedef struct {
     z80j_machine m;         /* callbacks; m.user points to this structure */
     z80j_ctx    *ctx;
-    const uint8 *rom;
-    uint32       rom_size;
+    const uint8 *rom;       /* the image, or its first bank when its banks are apart */
+    const uint8 *const *bank_tab; /* host address of each bank when they are apart, or 0 */
     uint32       banks;     /* 16 KiB banks in the ROM */
     uint8       *cart_ram;  /* battery RAM shown in slot 2 by $FFFC bit 3, or 0 */
                             /* (with cart_ram_size set: given at its first showing) */
@@ -41,20 +41,30 @@ typedef struct {
     void        *ram_arg;
 } sms_mem;
 
-/* The mapper an image calls for, from its header (SMS_MAPPER_*). */
-uint32 sms_mem_detect(const uint8 *rom, uint32 rom_size);
+/* The mapper an image calls for, from its header (SMS_MAPPER_*); bank1
+ * is the address of its second bank. */
+uint32 sms_mem_detect(const uint8 *bank1, uint32 rom_size);
 
-/* Special write handler in assembly (smsmem_a.s), installed by
- * sms_mem_init. CONTRACT: the field offsets above match its equates. */
+/* Special write handlers in assembly (smsmem_a.s), installed by
+ * sms_mem_init: _a for an image in one block, _t for an image whose
+ * banks are apart (bank_tab). CONTRACT: the field offsets above match
+ * their equates. */
 void   sms_mem_write_a(void);
+void   sms_mem_write_t(void);
 
 /* Sets up the pages of ctx (system RAM in ctx->mram) for a ROM image and
- * the machine callbacks; cart_ram (cart_ram_size bytes, 16 or 32 KiB; a
- * size of 0 for none) is the cartridge RAM that register $FFFC can map
- * into slot 2. With cart_ram 0 and a size, the memory is asked for the
- * first time the mapper shows it (sms_mem_ram_source). */
-void   sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
-                    uint8 *cart_ram, uint32 cart_ram_size);
+ * the machine callbacks. The image is one block at rom, or, with banks,
+ * blocks of 16 KiB anywhere: banks[b] is the address of bank b (rom then
+ * the first one's), the table kept by the caller for the run. cart_ram
+ * (cart_ram_size bytes, 16 or 32 KiB; a size of 0 for none) is the
+ * cartridge RAM that register $FFFC can map into slot 2. With cart_ram 0
+ * and a size, the memory is asked for the first time the mapper shows it
+ * (sms_mem_ram_source). */
+void   sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, const uint8 *const *banks,
+                    uint32 rom_size, uint8 *cart_ram, uint32 cart_ram_size);
+
+/* Host address of bank b (below s->banks). */
+const uint8 *sms_mem_bank(const sms_mem *s, uint32 b);
 
 /* The cartridge RAM given at its first showing: get(arg), called from the
  * mapper's write handler (inside the run), returns cart_ram_size bytes

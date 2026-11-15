@@ -21,6 +21,9 @@
 #include "directory.h"
 #include "directoryfunctions.h"
 #include "filefunctions.h"
+#include "msgport.h"
+#include "io.h"
+#include "platform.h"
 
 static const char rom_signature[8] = { 'T', 'M', 'R', ' ', 'S', 'E', 'G', 'A' };
 static const int32 rom_header_offsets[3] = { 0x7FF0, 0x3FF0, 0x1FF0 };
@@ -181,6 +184,52 @@ Err rom_load(rom_image *rom, const char *name)
     else
         rom->gg = rom->header_offset >= 0 && rom->region >= 5 && rom->region <= 7;
     return 0;
+}
+
+void rom_disc_times(const rom_list *list, void *buf)
+{
+    BlockFile bf;
+    char path[ROM_NAME_LEN + 8];
+    uint32 bank[16];
+    uint32 us[16];
+    uint32 big = 0;
+    uint32 n;
+    uint32 k;
+    Item port;
+    Item req;
+
+    for (k = 1; k < (uint32)list->count; k++)
+        if (list->size[k] > list->size[big])
+            big = k;
+    n = list->size[big] / 0x4000u;
+    strcpy(path, ROM_DIR "/");
+    strcat(path, list->name[big]);
+    if (n < 8 || OpenBlockFile(path, &bf) < 0)
+        return;
+    port = CreateMsgPort(NULL, 0, 0);
+    req = CreateBlockFileIOReq(bf.fDevice, port);
+    if (req >= 0) {
+        for (k = 0; k < 16; k++) {
+            /* Eight in order, then from one end of the file to the other
+             * and back, a shorter way each time. */
+            uint32 b = k < 8 ? k : (k - 8) / 2 * n / 8;
+
+            if (k >= 8 && (k & 1) == 0)
+                b = n - 1 - b;
+            bank[k] = b;
+            us[k] = plat_usec_now();
+            AsynchReadBlockFile(&bf, req, buf, 0x4000, (int32)(b * 0x4000u));
+            WaitReadDoneBlockFile(req);
+            us[k] = plat_usec_now() - us[k];
+        }
+        DeleteIOReq(req);
+        printf("Disc: %s, 16 KiB reads (bank:us):", path);
+        for (k = 0; k < 16; k++)
+            printf(" %lu:%lu", (unsigned long)bank[k], (unsigned long)us[k]);
+        printf("\n");
+    }
+    DeleteMsgPort(port);
+    CloseBlockFile(&bf);
 }
 
 void rom_unload(rom_image *rom)

@@ -77,7 +77,11 @@ whatever the budget, `-forcelimit us` the elapsed time of a frame past
 which that rule waits for the next frame (0: no limit), `-zones n` the
 zones of the code buffer (default: as many as the DRAM left allows),
 `-dramfree n` the DRAM left to the run (default: derived from `sim.aif`),
-`-aif file` the console executable's header to derive it from, `-seed`
+`-aif file` the console executable's header to derive it from, `-split`
+the image's 16 KiB banks placed apart (in reverse order, a gap of 1 KiB
+filled with $A5 before each) and given to the program through a table, as
+for an image not loaded as one block (machine state and generated code
+must be those of the one-block load), `-seed`
 translate the reachable
 code into the hot area, `-hotzones n`
 (kept for older scripts: the zones are no longer split between the areas,

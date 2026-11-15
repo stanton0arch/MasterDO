@@ -42,6 +42,11 @@ int32 rom_scan(rom_list *list);
 /* Loads ROM_DIR/name. */
 Err  rom_load(rom_image *rom, const char *name);
 void rom_unload(rom_image *rom);
+
+/* Times 16 KiB reads of the largest file of the list (at least 128 KiB)
+ * into buf (16 KiB, from no allocation): eight in order from its start,
+ * then eight seeking across it; prints them as the Disc: line. */
+void rom_disc_times(const rom_list *list, void *buf);
 void rom_log(const rom_image *rom);
 
 #endif /* ROM_H */

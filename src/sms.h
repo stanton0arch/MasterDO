@@ -91,15 +91,16 @@ typedef struct {
 
 /* Region code of the cartridge header ("TMR SEGA" at $7FF0, $3FF0 or
  * $1FF0, the high nibble of its byte $0F): 3 and 4 Master System, 5, 6
- * and 7 Game Gear (Japan, export, international); 0 without a header. */
-uint32 sms_rom_region(const uint8 *rom, uint32 rom_size);
+ * and 7 Game Gear (Japan, export, international); 0 without a header.
+ * The image as the mapper m holds it. */
+uint32 sms_rom_region(const sms_mem *m, uint32 rom_size);
 #define SMS_REGION_GG(r)    ((r) >= 5 && (r) <= 7)
 
-/* Sets up the machine on ctx for a cartridge image, then resets it;
- * lines is VDP_LINES_NTSC or VDP_LINES_PAL; gg selects the Game Gear
- * mode. */
-void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
-              uint32 lines, uint8 *cart_ram, uint32 cart_ram_size, uint32 gg);
+/* Sets up the machine on ctx for a cartridge image (one block at rom, or
+ * banks apart: see sms_mem_init), then resets it; lines is VDP_LINES_NTSC
+ * or VDP_LINES_PAL; gg selects the Game Gear mode. */
+void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, const uint8 *const *banks,
+              uint32 rom_size, uint32 lines, uint8 *cart_ram, uint32 cart_ram_size, uint32 gg);
 
 /* Power-on state, as the BIOS leaves it for the cartridge. */
 void sms_reset(sms_machine *s);

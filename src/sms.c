@@ -236,29 +236,31 @@ static void sms_ports(sms_machine *s)
     ctx->pair_a = JIT_ADDR(sms_vdp_ctrl_pw);
 }
 
-uint32 sms_rom_region(const uint8 *rom, uint32 rom_size)
+uint32 sms_rom_region(const sms_mem *m, uint32 rom_size)
 {
     static const uint32 at[3] = { 0x7FF0, 0x3FF0, 0x1FF0 };
     uint32 k;
 
     for (k = 0; k < 3; k++) {
-        const uint8 *h = rom + at[k];
+        if (at[k] + 16 <= rom_size) {
+            const uint8 *h = sms_mem_bank(m, at[k] >> 14) + (at[k] & 0x3FFFu);
 
-        if (at[k] + 16 <= rom_size && memcmp(h, "TMR SEGA", 8) == 0)
-            return (uint32)h[0x0F] >> 4;
+            if (memcmp(h, "TMR SEGA", 8) == 0)
+                return (uint32)h[0x0F] >> 4;
+        }
     }
     return 0;
 }
 
-void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, uint32 rom_size,
-              uint32 lines, uint8 *cart_ram, uint32 cart_ram_size, uint32 gg)
+void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, const uint8 *const *banks,
+              uint32 rom_size, uint32 lines, uint8 *cart_ram, uint32 cart_ram_size, uint32 gg)
 {
     memset(s, 0, sizeof(*s));
     s->ctx = ctx;
     s->gg = gg != 0;
-    s->gg_japan = sms_rom_region(rom, rom_size) == 5;
     s->vdp.gg = s->gg;
-    sms_mem_init(&s->mem, ctx, rom, rom_size, cart_ram, cart_ram_size);
+    sms_mem_init(&s->mem, ctx, rom, banks, rom_size, cart_ram, cart_ram_size);
+    s->gg_japan = sms_rom_region(&s->mem, rom_size) == 5;
     s->mem.m.in = sms_in;
     s->mem.m.out = sms_out;
     s->mem.m.event = sms_event;

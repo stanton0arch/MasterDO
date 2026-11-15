@@ -18,11 +18,16 @@
  * buffer dump (code.bin), 13 free memory (plat_mem_free), 15 the
  * kernel's system time (SampleSystemTimeTV: the TimeVal at r0, the call
  * charged as SIMCLOCK microseconds of I cycles, half before the sample
- * and half after), 16 the microsecond clock without charge (sim_time).
+ * and half after), 16 the microsecond clock without charge (sim_time),
+ * 17 the address of bank r0 of the image (sim_rom_bank).
  *
  * Options: -rom file, -frames n, -bench, -dump n, -from n, -img, -sym,
  * -aif file (the AIF header of the console's executable, default sim.aif
- * beside the image), -dramfree n (overrides the figure derived from it).
+ * beside the image), -dramfree n (overrides the figure derived from it),
+ * -split (the image's 16 KiB banks apart, in reverse order with a gap
+ * of SPLIT_GAP bytes filled with SPLIT_FILL before each: the program gets
+ * them through a table, as for an image not loaded as one block; the
+ * memory counted is the same).
  * Environment: SIMPAD="frame:bits,..." (buttons held from that frame on,
  * SMS_PAD_* bits, 0x100 PAUSE), SIMPROF=1 (cycles per function, the 40
  * largest; SIMPROFALL=1 every function),
@@ -61,6 +66,13 @@ static uint64_t cS, cN, cI;
 static uint64_t ninsn;
 static uint32_t heap = HEAP_BASE;
 static uint32_t rom_size;
+/* -split: bank b of the image at ROM_ADDR + (banks - 1 - b) * SPLIT_STEP
+ * + SPLIT_GAP, a gap of SPLIT_FILL bytes before each bank. */
+#define SPLIT_GAP  0x400u
+#define SPLIT_STEP (0x4000u + SPLIT_GAP)
+#define SPLIT_FILL 0xA5
+static uint32_t rom_banks;
+static int rom_split;
 /* Memory of the console left to the cartridge's run (Phoenix, NTSC, the
  * ISO's own code and the system loaded): the allocations are counted
  * against it, an allocation past it fails as AllocMem does, and the
@@ -579,6 +591,14 @@ static void dram_from_aif(const char *path)
             "in DRAM, %s)\n", (unsigned)dram_free, (unsigned)foot, path);
 }
 
+/* Host address of bank b of the image. */
+static uint32_t rom_bank_addr(uint32_t b)
+{
+    if (rom_split)
+        return ROM_ADDR + (rom_banks - 1 - b) * SPLIT_STEP + SPLIT_GAP;
+    return ROM_ADDR + b * 0x4000u;
+}
+
 static void do_swi(uint32_t n)
 {
     switch (n) {
@@ -644,8 +664,9 @@ static void do_swi(uint32_t n)
         break;
     }
     case 16: r[0] = usec_now(); break;
-    case 5: r[0] = ROM_ADDR; break;
+    case 5: r[0] = rom_split ? rom_bank_addr(0) : ROM_ADDR; break;
     case 6: r[0] = rom_size; break;
+    case 17: r[0] = r[0] < rom_banks ? rom_bank_addr(r[0]) : 0; break;
     case 7: do_dump(r[0], r[1], r[2], r[3]); break;
     case 8: r[0] = r[0] < 32 ? args[r[0]] : 0; break;
     case 9: cur_frame = (int32_t)r[0]; block_log((int32_t)r[0]); r[0] = pad_at(r[0]); break;
@@ -1146,6 +1167,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-force") && i + 1 < argc) args[20] = atoi(argv[++i]) + 1;
         else if (!strcmp(argv[i], "-forcelimit") && i + 1 < argc) args[25] = atoi(argv[++i]) + 1;
         else if (!strcmp(argv[i], "-zones") && i + 1 < argc) args[27] = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-split")) args[28] = 1;
         else if (!strcmp(argv[i], "-dramfree") && i + 1 < argc) { dram_free = atoi(argv[++i]); dram_given = 1; }
         else if (!strcmp(argv[i], "-aif") && i + 1 < argc) aif = argv[++i];
         else if (!strcmp(argv[i], "-hotzones") && i + 1 < argc) args[12] = atoi(argv[++i]);
@@ -1205,6 +1227,22 @@ int main(int argc, char **argv)
         if (rom_size > 512 && (rom_size & 0x3FFF) == 512) {
             memmove(mem + ROM_ADDR, mem + ROM_ADDR + 512, rom_size - 512);
             rom_size -= 512;
+        }
+        rom_banks = (rom_size + 0x3FFFu) / 0x4000u;
+        if (args[28]) {
+            /* The banks apart: built from a copy of the image (the bytes
+             * past its end read as zeros, as in one block). */
+            uint8_t *copy = calloc(1, rom_banks * 0x4000u);
+            uint32_t b;
+
+            if (ROM_ADDR + rom_banks * SPLIT_STEP > STACK_TOP - 0x20000u)
+                fatal("-split: image of %u bytes too large", (unsigned)rom_size);
+            memcpy(copy, mem + ROM_ADDR, rom_size);
+            rom_split = 1;
+            memset(mem + ROM_ADDR, SPLIT_FILL, rom_banks * SPLIT_STEP);
+            for (b = 0; b < rom_banks; b++)
+                memcpy(mem + rom_bank_addr(b), copy + b * 0x4000u, 0x4000u);
+            free(copy);
         }
         vram_free = vram_free > rom_size ? vram_free - rom_size : 0;
     }
