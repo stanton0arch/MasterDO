@@ -575,6 +575,12 @@ int32  z80j_set_pair_check(z80j_state *j, uint32 offset, uint32 mask);
 /* Forgets every translation. */
 void   z80j_flush(z80j_state *j);
 
+/* Forgets the segments remembered at an interrupt whose Z80 code was read
+ * from the host bytes lo to hi - 1 (memory about to hold other code: the
+ * read table entry they are keyed by would show it). Called by the
+ * machine, from its write callback or between frames. */
+void   z80j_forget_source(z80j_ctx *ctx, uint32 lo, uint32 hi);
+
 /* Declares the last n zones of the code buffer lent by the caller, who
  * may need their memory later: the translator uses them as any other
  * zone, but takes them last (the areas start before them, and the zones

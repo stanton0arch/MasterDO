@@ -10,7 +10,8 @@
 ; shows cartridge RAM, a bank count that is not a power of two) go
 ; through the C callback (sms_mem_write). sms_mem_write_t is the same
 ; handler for an image whose banks are apart (sms_mem.bank_tab): the host
-; address of the bank comes from the table instead of the image's start.
+; address of the bank comes from the table instead of the image's start
+; (and C takes the banks absent from it).
 ;
 ; Layouts: CONTRACT with sms_mem (smsmem.h) and z80j_ctx (z80jit.h) - keep
 ; in sync (smsmem.c and z80jit.c check the offsets at compile time).
@@ -35,6 +36,9 @@ SM_REG          EQU     40
 SM_REMAPS       EQU     68
 SM_BANKMASK     EQU     72
 SM_MAPPER       EQU     80
+
+; sms_banks fields.
+SB_LAST         EQU     1024
 
 Z80J_WRITE_PAGING EQU   2
 
@@ -119,8 +123,11 @@ write_a_c
         b       z80j_write_generic
 
 ;----------------------------------------------------------------------------
-; The same for an image whose banks are apart, up to the bank's address;
-; the read table is filled, and the exits taken, by the code above.
+; The same for an image whose banks are apart (sms_banks), up to the
+; bank's address: a bank absent from the table goes to C, which reads it
+; into the bank cache; the bank leaving the slot and the bank coming are
+; stamped with the paging count, the order of that cache. The read table
+; is filled, and the exits taken, by the code above.
 ;----------------------------------------------------------------------------
 sms_mem_write_t
         cmp     r12,#0xC0000000
@@ -151,19 +158,24 @@ sms_mem_write_t
         tst     r5,#0x08                ; slot 2 showing cartridge RAM
         bne     write_a_c
 write_t_bank
-        ldr     r5,[r1,#SM_BANKMASK]
-        cmn     r5,#1                   ; bank count not a power of two
-        beq     write_a_c
+        ldr     r5,[r1,#SM_BANKMASK]    ; banks - 1, or the table's last entry
+        and     r2,r0,r5                ; bank
+        ldr     r5,[r1,#SM_BANKTAB]
+        ldr     lr,[r5,r2,lsl#2]        ; host address of the bank
+        teq     lr,#0
+        beq     write_a_c               ; absent (read into the cache), or past the count
         str     r0,[r4,#SM_REG]
-        and     r0,r0,r5                ; bank
         sub     r12,r12,#1              ; slot 0-2
         add     r4,r10,r12,lsl#2
-        str     r0,[r4,#SLOT_BANK]
+        ldr     r0,[r4,#SLOT_BANK]      ; the bank leaving the slot
+        str     r2,[r4,#SLOT_BANK]
         ldr     r4,[r1,#SM_REMAPS]
         add     r4,r4,#1
         str     r4,[r1,#SM_REMAPS]
-        ldr     r4,[r1,#SM_BANKTAB]
-        ldr     r4,[r4,r0,lsl#2]        ; host address of the bank
+        add     r5,r5,#SB_LAST          ; both stamped with the paging count
+        str     r4,[r5,r0,lsl#2]
+        str     r4,[r5,r2,lsl#2]
+        mov     r4,lr
         b       write_a_slot
 
         END

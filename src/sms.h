@@ -99,7 +99,7 @@ uint32 sms_rom_region(const sms_mem *m, uint32 rom_size);
 /* Sets up the machine on ctx for a cartridge image (one block at rom, or
  * banks apart: see sms_mem_init), then resets it; lines is VDP_LINES_NTSC
  * or VDP_LINES_PAL; gg selects the Game Gear mode. */
-void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, const uint8 *const *banks,
+void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, sms_banks *banks,
               uint32 rom_size, uint32 lines, uint8 *cart_ram, uint32 cart_ram_size, uint32 gg);
 
 /* Power-on state, as the BIOS leaves it for the cartridge. */

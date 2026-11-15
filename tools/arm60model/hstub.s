@@ -14,6 +14,7 @@
         EXPORT  sim_rom
         EXPORT  sim_rom_size
         EXPORT  sim_rom_bank
+        EXPORT  sim_disc_read
         EXPORT  sim_dump
         EXPORT  sim_arg
         EXPORT  sim_pad
@@ -61,6 +62,9 @@ sim_rom_size
         mov     pc,lr
 sim_rom_bank
         swi     0xF00011
+        mov     pc,lr
+sim_disc_read
+        swi     0xF00012
         mov     pc,lr
 sim_dump
         swi     0xF00007

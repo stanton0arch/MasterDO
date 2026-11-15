@@ -9,7 +9,10 @@
  * only the pictures at multiples of n and the first 17 of the others that
  * differ, 18 log the writes made during the active display of every
  * frame, 15 a hash of the cel chain of every frame, 28 the image's banks
- * apart (-split: given to the program through a table). The pad
+ * apart (-split: given to the program through a table), 29 the image's
+ * banks read into a bank cache when mapped, as the console reads an image
+ * larger than SMS_BLOCK_MAX (-cache n: at most n buffers, 0 as many as the
+ * VRAM holds; set by sim for such an image unless -whole). The pad
  * is scripted by the host (sim_pad). At the end, the code buffer is dumped
  * for anacode.py and hotblocks.py.
  *
@@ -35,6 +38,9 @@
 extern const uint8 *sim_rom(void);
 extern uint32 sim_rom_size(void);
 extern const uint8 *sim_rom_bank(uint32 b);
+/* The disc of the model: bank b of the image copied to to, charged as a
+ * read of the console's drive (SIMDISC); the reader of a bank cache. */
+extern uint32 sim_disc_read(void *arg, uint32 b, uint8 *to);
 extern void sim_dump(const uint32 *fb, uint32 width, uint32 height, uint32 tag);
 extern uint32 sim_arg(uint32 i);
 extern uint32 sim_pad(uint32 frame);
@@ -776,11 +782,11 @@ void lz_main(void)
 }
 
 /* -split: the host address of each bank of the image. */
-static const uint8 *split_banks[256];
+static sms_banks split_banks;
 
 void hmain(void)
 {
-    const uint8 *const *banks = 0;
+    sms_banks *banks = 0;
     const uint8 *rom = sim_rom();
     uint32 size = sim_rom_size();
     uint32 frames = sim_arg(0);
@@ -821,9 +827,19 @@ void hmain(void)
     if (sim_arg(28)) {
         uint32 b;
 
-        for (b = 0; b < (size + 0x3FFFu) / 0x4000u && b < 256; b++)
-            split_banks[b] = sim_rom_bank(b);
-        banks = split_banks;
+        for (b = 0; b < (size + 0x3FFFu) / 0x4000u && b < SMS_BANK_TAB; b++)
+            split_banks.tab[b] = sim_rom_bank(b);
+        banks = &split_banks;
+    }
+    if (sim_arg(29)) {
+        banks = sms_banks_new((size + 0x3FFFu) / 0x4000u, sim_arg(29) - 1, sim_disc_read, 0);
+        if (banks == 0) {
+            printf("ERROR: no bank cache (memory)\n");
+            return;
+        }
+        printf("ROM: %lu banks read when mapped, a cache of %lu in VRAM\n",
+               (unsigned long)((size + 0x3FFFu) / 0x4000u), (unsigned long)banks->nbuf);
+        rom = banks->tab[0];
     }
     if (game_init(&g, rom, banks, size, sim_arg(24)) != 0)    /* -gg: the Game Gear mode */
         return;
@@ -870,6 +886,7 @@ void hmain(void)
              * time): those looks and the frame's bookkeeping. */
             z80j_stats s0 = g.jit.stats;
             uint32 i0 = g.ctx->int_insns;
+            uint32 disc0 = banks != 0 ? banks->reads : 0;
             uint32 c0 = sim_time();
             /* The harness's own work between two frames (its checks) is
              * not the frame loop's: the frame starts that much later. */
@@ -913,7 +930,7 @@ void hmain(void)
                 printf("Frame: %lu emu %lu upd %lu draw %lu spare %lu sync %lu sync_us %lu "
                        "forced %lu refused %lu spare_blocks %lu insns %lu shown %lu "
                        "dataw %lu dirty %lu evict %lu evict_ahead %lu evict_us %lu repeat %lu "
-                       "other %lu banks %lu %lu %lu\n",
+                       "other %lu disc %lu banks %lu %lu %lu\n",
                        (unsigned long)f, (unsigned long)g.last_us, (unsigned long)g.last_upd_us,
                        (unsigned long)draw, (unsigned long)g.last_spare_us,
                        (unsigned long)(s->sync - s0.sync), (unsigned long)(s->sync_us - s0.sync_us),
@@ -928,6 +945,7 @@ void hmain(void)
                        (unsigned long)(s->evict_ahead - s0.evict_ahead),
                        (unsigned long)(s->evict_us - s0.evict_us),
                        (unsigned long)render_repeated(g.rd), (unsigned long)other,
+                       (unsigned long)(banks != 0 ? banks->reads - disc0 : 0),
                        (unsigned long)g.ctx->slot_bank[0], (unsigned long)g.ctx->slot_bank[1],
                        (unsigned long)g.ctx->slot_bank[2]);
             }

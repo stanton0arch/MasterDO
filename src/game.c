@@ -277,6 +277,10 @@ void game_log_flush(game *g)
         case GAME_REC_SLOW:   print_slow((const game_slow_rec *)body); break;
         case GAME_REC_LONG:   print_long((const game_long_rec *)body); break;
         case GAME_REC_HASH:   print_hash((const game_hash_rec *)body); break;
+        case GAME_REC_BANK:
+            printf("Bank: frame %lu: bank %lu read in %lu us\n", (unsigned long)body[0],
+                   (unsigned long)body[1], (unsigned long)body[2]);
+            break;
         default: break;
         }
         k += 1 + (head & 0xFFFFFFu);
@@ -437,6 +441,19 @@ static uint8 *cart_ram_get(void *arg)
     return ram;
 }
 
+/* A bank read into the bank cache while running. */
+static void bank_note(void *arg, uint32 b, uint32 us)
+{
+    game *g = (game *)arg;
+    uint32 *p = rec_alloc(g, GAME_REC_BANK, 12);
+
+    if (p != NULL) {
+        p[0] = g->frame;
+        p[1] = b;
+        p[2] = us;
+    }
+}
+
 /* The renderer needs the room of its bitmaps (a second layer, or a
  * taller mode): the zones it lent go back to it for good, and the
  * cartridge RAM held at its end moves to a zone given up with them. */
@@ -515,7 +532,7 @@ static uint32 *alloc_code(game *g)
     return (uint32 *)code;
 }
 
-Err game_init(game *g, const uint8 *rom, const uint8 *const *banks, uint32 rom_size, uint32 gg)
+Err game_init(game *g, const uint8 *rom, sms_banks *banks, uint32 rom_size, uint32 gg)
 {
     z80j_glue glue;
     uint32 k;
@@ -539,7 +556,12 @@ Err game_init(game *g, const uint8 *rom, const uint8 *const *banks, uint32 rom_s
         g->hot_vram = 0;
         g->hot = (uint8 *)AllocMem(0x10000, MEMTYPE_DRAM);
     }
-    g->rd = (renderer *)AllocMem(sizeof(renderer), MEMTYPE_DRAM | MEMTYPE_FILL);
+    /* The renderer's own state (not its bitmaps or cels, which the CEL
+     * engine reads, faster from DRAM) goes to VRAM as well when there is
+     * room: a 512 KiB image or a bank cache still leaves it some. */
+    g->rd = (renderer *)AllocMem(sizeof(renderer), MEMTYPE_VRAM | MEMTYPE_FILL);
+    if (g->rd == NULL)
+        g->rd = (renderer *)AllocMem(sizeof(renderer), MEMTYPE_DRAM | MEMTYPE_FILL);
     if (g->ctx == NULL || g->blocks == NULL || g->links == NULL ||
         g->hot == NULL || g->sms == NULL || g->rd == NULL) {
         printf("ERROR: out of memory for the machine (%lu + %lu + %lu + %lu bytes)\n",
@@ -600,6 +622,10 @@ Err game_init(game *g, const uint8 *rom, const uint8 *const *banks, uint32 rom_s
         g->pad_log = (uint32 *)AllocMem(GAME_PAD_LOGS * 4, MEMTYPE_DRAM);
     sms_init(g->sms, g->ctx, rom, banks, rom_size, VDP_LINES_NTSC, g->cart_ram, g->cart_ram_size, gg);
     sms_mem_ram_source(&g->sms->mem, cart_ram_get, g);
+    if (banks != 0) {
+        banks->note = bank_note;
+        banks->note_arg = g;
+    }
     for (k = 0; k < Z80J_PORTS; k++) {
         if (SMS_PORT_VCOUNTER(k))
             z80j_set_line_port(&g->jit, k);
@@ -1184,6 +1210,13 @@ void game_log_summary(game *g)
            (unsigned long)g->zones, (unsigned long)g->lent, (long)g->room_frame,
            (unsigned long)g->room_blocks, (unsigned long)g->room_us,
            (unsigned long)g->cart_where, (long)g->cart_frame);
+    if (g->sms->mem.bank_tab != 0) {
+        const sms_banks *t = g->sms->mem.bank_tab;
+
+        printf("Banks: %lu buffers of 16 KiB, %lu banks read while running in %lu us, "
+               "%lu read errors\n", (unsigned long)t->nbuf, (unsigned long)t->reads,
+               (unsigned long)t->read_us, (unsigned long)t->errors);
+    }
     printf("Game summary: total frame time histogram (ms: frames)");
     for (k = 0; k < GAME_HIST; k++) {
         if (g->hist[k] != 0)

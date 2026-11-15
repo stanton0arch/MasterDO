@@ -3,9 +3,11 @@
  */
 
 #include "smsmem.h"
+#include "platform.h"
 
 #include "string.h"
 #include "stddef.h"
+#include "mem.h"
 
 #define SLOT_PAGES 64u          /* 16 KiB of 256-byte pages (write table, page kinds) */
 #define RPAGE      4u           /* 256-byte pages per 1 KiB page of the read table */
@@ -19,10 +21,11 @@ CHECK_OFF(reg, offsetof(sms_mem, reg) == 40);
 CHECK_OFF(remaps, offsetof(sms_mem, remaps) == 68);
 CHECK_OFF(bank_mask, offsetof(sms_mem, bank_mask) == 72);
 CHECK_OFF(mapper, offsetof(sms_mem, mapper) == 80);
+CHECK_OFF(last, offsetof(sms_banks, last) == 4 * SMS_BANK_TAB);
 
 /* Host address of bank b: in the image as one block, or from the table
  * when the banks are apart. */
-#define BANK_ADDR(s, b) ((s)->bank_tab != 0 ? JIT_ADDR((s)->bank_tab[b]) : \
+#define BANK_ADDR(s, b) ((s)->bank_tab != 0 ? JIT_ADDR((s)->bank_tab->tab[b]) : \
                          JIT_ADDR((s)->rom) + (b) * 0x4000u)
 
 /* The cartridge RAM, asked for when the paging registers first show it
@@ -56,6 +59,70 @@ static uint32 bank_of(const sms_mem *s, uint32 reg)
     if ((s->banks & (s->banks - 1)) == 0)
         return reg & (s->banks - 1);
     return reg % s->banks;
+}
+
+/* Bank b, absent, read into the cache. The buffer given up is never bank
+ * 0's (the fixed first 1 KiB) nor that of a bank a slot shows, the one
+ * this write leaves included (its slot is not remapped yet): a bank not
+ * shown since it was read when there is one, the highest first, else the
+ * bank shown least lately. The segments remembered at an interrupt in the
+ * buffer's code are forgotten: they are keyed by its read table entry,
+ * which the bank read there brings back. */
+static void bank_miss(sms_mem *s, uint32 b)
+{
+    sms_banks *t = s->bank_tab;
+    const uint32 *shown = s->ctx->slot_bank;
+    uint32 fresh = 0;               /* the highest bank not shown since read, plus one */
+    uint32 old = 0xFFFFFFFFu;       /* the least lately shown bank's paging count */
+    uint32 pick = 0;
+    uint32 us;
+    uint32 k;
+    uint8 *buf;
+
+    for (k = 0; k < t->nbuf; k++) {
+        uint32 h = t->held[k];
+        uint32 last = t->last[h];
+
+        if (h == 0 || h == shown[0] || h == shown[1] || h == shown[2])
+            continue;
+        if (last == 0) {
+            if (h >= fresh) {
+                fresh = h + 1;
+                pick = k;
+            }
+        } else if (fresh == 0 && last < old) {
+            old = last;
+            pick = k;
+        }
+    }
+    buf = t->buf[pick];
+    t->tab[t->held[pick]] = 0;
+    t->held[pick] = (uint8)b;
+    z80j_forget_source(s->ctx, JIT_ADDR(buf), JIT_ADDR(buf) + 0x4000u);
+    us = plat_usec_now();
+    if (t->read(t->arg, b, buf) != 0)
+        t->errors++;
+    us = plat_usec_now() - us;
+    t->tab[b] = buf;
+    t->reads++;
+    t->read_us += us;
+    if (t->note != 0)
+        t->note(t->note_arg, b, us);
+}
+
+/* Bank b about to be mapped into a slot of an image whose banks are
+ * apart (before map_slot, which reads the table and stays free of calls):
+ * read first when absent; the bank the slot shows and the one coming
+ * stamped with the paging count (the cache's order). */
+static void table_bank(sms_mem *s, uint32 slot, uint32 b)
+{
+    sms_banks *t = s->bank_tab;
+    uint32 now = s->remaps + 1;
+
+    if (t->tab[b] == 0)
+        bank_miss(s, b);
+    t->last[s->ctx->slot_bank[slot]] = now;
+    t->last[b] = now;
 }
 
 /* Maps the bank selected for a slot, and the cartridge RAM where the
@@ -120,9 +187,14 @@ void sms_mem_map(sms_mem *s)
             s->ctx->page_kind[p] = Z80J_PAGE_FIXED | Z80J_PAGE_RFIXED;
         }
     }
-    map_slot(s, 0);
-    map_slot(s, 1);
-    map_slot(s, 2);
+    for (p = 0; p < 3; p++) {
+        if (s->bank_tab != 0) {
+            uint32 reg = s->reg[p + 1];
+
+            table_bank(s, p, bank_of(s, (s->mapper == SMS_MAPPER_CODEMASTERS) ? reg & 0x7Fu : reg));
+        }
+        map_slot(s, p);
+    }
 }
 
 #if Z80J_CHURN
@@ -148,7 +220,7 @@ uint32 sms_mem_show(void *arg, uint32 key, uint32 on)
             ctx->rtab[63 - (q0 + q)] = show_rtab[q];
         return 1;
     }
-    if (bank >= s->banks)
+    if (bank >= s->banks || BANK_ADDR(s, bank) == 0)
         return 0;
     show_bank = ctx->slot_bank[slot];
     rom_e = BANK_ADDR(s, bank) - slot * 0x4000u;
@@ -205,10 +277,30 @@ uint32 sms_mem_write(z80j_machine *m, uint32 addr, uint32 value)
     return Z80J_WRITE_STAY;     /* ROM area: ignored */
 }
 
+/* The write callback of an image whose banks are apart: the bank a
+ * paging register write selects is made present in the bank cache before
+ * sms_mem_write maps it, and the Sega mapper's cartridge RAM is asked for
+ * at its first showing as write_first does (both kept out of the
+ * callbacks of the images in one block). */
+static uint32 write_banked(z80j_machine *m, uint32 addr, uint32 value)
+{
+    sms_mem *s = (sms_mem *)m->user;
+
+    if (s->mapper == SMS_MAPPER_CODEMASTERS) {
+        if (addr < 0xC000u)
+            table_bank(s, addr >> 14, bank_of(s, value & 0x7Fu));
+    } else if (addr >= 0xFFFDu) {
+        table_bank(s, addr - 0xFFFDu, bank_of(s, value));
+    } else if (addr == 0xFFFCu && (value & 0x08) && s->cart_ram == 0 && s->cart_ram_size != 0) {
+        take_ram(s);
+    }
+    return sms_mem_write(m, addr, value);
+}
+
 /* The write callback of the Sega mapper while its cartridge RAM has not
- * been given: the write to $FFFC that first shows it asks for it, then
- * sms_mem_write takes over for good. The test stays off sms_mem_write,
- * which every write to $FFFC goes through. */
+ * been given (images in one block): the write to $FFFC that first shows
+ * it asks for it, then sms_mem_write takes over for good. The test stays
+ * off sms_mem_write, which every write to $FFFC goes through. */
 static uint32 write_first(z80j_machine *m, uint32 addr, uint32 value)
 {
     sms_mem *s = (sms_mem *)m->user;
@@ -224,7 +316,8 @@ void sms_mem_ram_source(sms_mem *s, uint8 *(*get)(void *arg), void *arg)
 {
     s->ram_get = get;
     s->ram_arg = arg;
-    if (s->cart_ram == 0 && s->cart_ram_size != 0 && s->mapper != SMS_MAPPER_CODEMASTERS)
+    if (s->cart_ram == 0 && s->cart_ram_size != 0 && s->mapper != SMS_MAPPER_CODEMASTERS &&
+        s->bank_tab == 0)
         s->m.write = write_first;
 }
 
@@ -278,7 +371,53 @@ const uint8 *sms_mem_bank(const sms_mem *s, uint32 b)
     return (const uint8 *)JIT_PTR(BANK_ADDR(s, b));
 }
 
-void sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, const uint8 *const *banks,
+sms_banks *sms_banks_new(uint32 banks, uint32 max, sms_bank_read read, void *arg)
+{
+    uint32 dram = 0;
+    uint32 vram = 0;
+    uint32 n;
+    uint32 k;
+    uint8 *block;
+    sms_banks *t;
+
+    plat_mem_free(&dram, &vram);
+    n = 0;
+    if (vram > SMS_BANK_KEEP + sizeof(sms_banks))
+        n = (vram - SMS_BANK_KEEP - sizeof(sms_banks)) / 0x4000u;
+    if (n > SMS_BANK_BUFS)
+        n = SMS_BANK_BUFS;
+    if (max != 0 && n > max)
+        n = max;
+    if (n > banks)
+        n = banks;
+    if (n < SMS_BANK_MIN)
+        return 0;
+    block = (uint8 *)AllocMem((int32)(n * 0x4000u + sizeof(sms_banks)), MEMTYPE_VRAM);
+    if (block == 0)
+        return 0;
+    t = (sms_banks *)(block + n * 0x4000u);
+    memset(t, 0, sizeof(*t));
+    t->nbuf = n;
+    t->read = read;
+    t->arg = arg;
+    for (k = 0; k < n; k++) {
+        t->buf[k] = block + k * 0x4000u;
+        t->held[k] = (uint8)k;
+        t->tab[k] = t->buf[k];
+        if (read(arg, k, t->buf[k]) != 0) {
+            sms_banks_free(t);
+            return 0;
+        }
+    }
+    return t;
+}
+
+void sms_banks_free(sms_banks *t)
+{
+    FreeMem(t->buf[0], (int32)(t->nbuf * 0x4000u + sizeof(sms_banks)));
+}
+
+void sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, sms_banks *banks,
                   uint32 rom_size, uint8 *cart_ram, uint32 cart_ram_size)
 {
     uint32 p;
@@ -291,14 +430,18 @@ void sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, const uint8 *cons
     s->banks = (rom_size + 0x3FFFu) / 0x4000u;
     if (s->banks == 0)
         s->banks = 1;
-    s->bank_mask = ((s->banks & (s->banks - 1)) == 0) ? s->banks - 1 : 0xFFFFFFFFu;
+    /* A bank count that is not a power of two sends the bank switches to
+     * C (bank_of), except through a table: its entries past the count are
+     * 0, so the values below 256 index it and the others go to C. */
+    s->bank_mask = ((s->banks & (s->banks - 1)) == 0) ? s->banks - 1 :
+                   (banks != 0) ? SMS_BANK_TAB - 1 : 0xFFFFFFFFu;
     s->cart_ram = cart_ram;
     s->cart_ram_size = cart_ram_size;
     s->mapper = (s->banks > 1) ? sms_mem_detect(sms_mem_bank(s, 1), rom_size) : SMS_MAPPER_SEGA;
 
     s->m.in = sms_mem_in;
     s->m.out = sms_mem_out;
-    s->m.write = sms_mem_write;
+    s->m.write = (banks != 0) ? write_banked : sms_mem_write;
     s->m.event = sms_mem_event;
     s->m.user = s;
     ctx->machine = JIT_ADDR(&s->m);

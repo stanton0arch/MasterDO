@@ -6,6 +6,8 @@
  */
 
 #include "types.h"
+#include "blockfile.h"
+#include "smsmem.h"
 
 #define ROM_DIR       "roms"
 #define ROM_GG_DIR    "gg"      /* a subdirectory of ROM_DIR: Game Gear images */
@@ -22,8 +24,17 @@ typedef struct {
 
 typedef struct {
     uint8  *raw;           /* file as loaded from the CD */
-    uint8  *data;          /* the image: the file, less a 512-byte copier header */
+    uint8  *data;          /* the image: the file, less a 512-byte copier header
+                              (its first bank when read by banks) */
     int32   size;          /* size in bytes, or a negative error code */
+    /* An image larger than SMS_BLOCK_MAX: its banks read from the file
+     * into a bank cache when the mapper shows them (the file stays open
+     * for the run), the first ones at the load (load_us). */
+    sms_banks *banks;
+    BlockFile bf;
+    Item    port;
+    Item    req;
+    uint32  load_us;
     char    name[ROM_NAME_LEN];
     int32   header_offset; /* offset of "TMR SEGA", -1 when absent */
     uint32  checksum;      /* checksum stored in the header */
@@ -39,14 +50,10 @@ typedef struct {
  * or a negative error. */
 int32 rom_scan(rom_list *list);
 
-/* Loads ROM_DIR/name. */
-Err  rom_load(rom_image *rom, const char *name);
+/* Loads ROM_DIR/name, a file of size bytes (from the list): as one block
+ * of VRAM, or by banks above SMS_BLOCK_MAX. */
+Err  rom_load(rom_image *rom, const char *name, uint32 size);
 void rom_unload(rom_image *rom);
-
-/* Times 16 KiB reads of the largest file of the list (at least 128 KiB)
- * into buf (16 KiB, from no allocation): eight in order from its start,
- * then eight seeking across it; prints them as the Disc: line. */
-void rom_disc_times(const rom_list *list, void *buf);
 void rom_log(const rom_image *rom);
 
 #endif /* ROM_H */

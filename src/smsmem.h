@@ -22,11 +22,61 @@
 #define SMS_MAPPER_SEGA        0
 #define SMS_MAPPER_CODEMASTERS 1
 
+/* Images larger than this are not loaded as one block: their banks are
+ * read into a bank cache (sms_banks_new) when the mapper shows them. */
+#define SMS_BLOCK_MAX   (512 * 1024)
+/* Entries of a bank table: every value of an 8-bit bank register. */
+#define SMS_BANK_TAB    256
+/* Buffers of a bank cache: at most, and at least (bank 0, the banks the
+ * three slots show, and one to read into). */
+#define SMS_BANK_BUFS   64
+#define SMS_BANK_MIN    5
+/* VRAM a bank cache leaves to the run: what a 512 KiB image leaves (the
+ * renderer's state and tile copy, the pad log) and a margin. */
+#define SMS_BANK_KEEP   (42 * 1024)
+
+/* Reads bank b of the image into to (16 KiB); returns 0, or not 0 on an
+ * error. */
+typedef uint32 (*sms_bank_read)(void *arg, uint32 b, uint8 *to);
+
+/* The banks of an image not loaded as one block. The table gives the host
+ * address of each bank, 0 while the bank is absent (always past the bank
+ * count); a cache of nbuf buffers of 16 KiB holds the banks present, and
+ * a bank the mapper shows while absent is read into the buffer of the
+ * bank shown least lately (bank 0, the fixed first 1 KiB, and the banks
+ * the slots show stay; the banks not shown since they were read go
+ * first, the highest first). Without a reader every bank is present.
+ * CONTRACT: tab and last at offsets 0 and 1024 (smsmem_a.s). */
+typedef struct {
+    const uint8  *tab[SMS_BANK_TAB];
+    uint32        last[SMS_BANK_TAB];   /* paging count when the bank last entered or
+                                           left a slot; 0: not since it was read */
+    uint8        *buf[SMS_BANK_BUFS];   /* in one block from buf[0], this structure after */
+    uint8         held[SMS_BANK_BUFS];  /* the bank in each buffer */
+    uint32        nbuf;
+    sms_bank_read read;
+    void         *arg;
+    /* Called after each bank read while running (the cache's misses),
+     * with its time in microseconds. */
+    void        (*note)(void *arg, uint32 b, uint32 us);
+    void         *note_arg;
+    uint32        reads;                /* banks read while running, their time, */
+    uint32        read_us;              /* the reads that failed */
+    uint32        errors;
+} sms_banks;
+
+/* A bank cache for an image of `banks` banks read by read(arg, b, to):
+ * the buffers (at most max, 0 for no limit) in one block of VRAM leaving
+ * SMS_BANK_KEEP of it, filled with banks 0 to nbuf - 1. Returns 0 when
+ * the memory or a read fails. */
+sms_banks *sms_banks_new(uint32 banks, uint32 max, sms_bank_read read, void *arg);
+void       sms_banks_free(sms_banks *t);
+
 typedef struct {
     z80j_machine m;         /* callbacks; m.user points to this structure */
     z80j_ctx    *ctx;
     const uint8 *rom;       /* the image, or its first bank when its banks are apart */
-    const uint8 *const *bank_tab; /* host address of each bank when they are apart, or 0 */
+    sms_banks   *bank_tab;  /* the banks when they are apart, or 0 */
     uint32       banks;     /* 16 KiB banks in the ROM */
     uint8       *cart_ram;  /* battery RAM shown in slot 2 by $FFFC bit 3, or 0 */
                             /* (with cart_ram_size set: given at its first showing) */
@@ -54,16 +104,17 @@ void   sms_mem_write_t(void);
 
 /* Sets up the pages of ctx (system RAM in ctx->mram) for a ROM image and
  * the machine callbacks. The image is one block at rom, or, with banks,
- * blocks of 16 KiB anywhere: banks[b] is the address of bank b (rom then
- * the first one's), the table kept by the caller for the run. cart_ram
+ * blocks of 16 KiB anywhere: banks->tab[b] is the address of bank b (rom
+ * then the first one's), kept by the caller for the run. cart_ram
  * (cart_ram_size bytes, 16 or 32 KiB; a size of 0 for none) is the
  * cartridge RAM that register $FFFC can map into slot 2. With cart_ram 0
  * and a size, the memory is asked for the first time the mapper shows it
  * (sms_mem_ram_source). */
-void   sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, const uint8 *const *banks,
+void   sms_mem_init(sms_mem *s, z80j_ctx *ctx, const uint8 *rom, sms_banks *banks,
                     uint32 rom_size, uint8 *cart_ram, uint32 cart_ram_size);
 
-/* Host address of bank b (below s->banks). */
+/* Host address of bank b (below s->banks; present: banks 0 and 1 are at
+ * the set-up). */
 const uint8 *sms_mem_bank(const sms_mem *s, uint32 b);
 
 /* The cartridge RAM given at its first showing: get(arg), called from the

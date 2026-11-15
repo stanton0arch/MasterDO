@@ -28,6 +28,14 @@
 static const char rom_signature[8] = { 'T', 'M', 'R', ' ', 'S', 'E', 'G', 'A' };
 static const int32 rom_header_offsets[3] = { 0x7FF0, 0x3FF0, 0x1FF0 };
 
+/* The image's byte at off (in its first two banks when read by banks). */
+static const uint8 *rom_at(const rom_image *rom, int32 off)
+{
+    if (rom->banks != NULL)
+        return rom->banks->tab[off >> 14] + (off & 0x3FFF);
+    return rom->data + off;
+}
+
 static void rom_parse_header(rom_image *rom)
 {
     const uint8 *h;
@@ -37,7 +45,7 @@ static void rom_parse_header(rom_image *rom)
     for (i = 0; i < 3; i++) {
         int32 off = rom_header_offsets[i];
         if (off + 16 <= rom->size &&
-            memcmp(rom->data + off, rom_signature, sizeof(rom_signature)) == 0) {
+            memcmp(rom_at(rom, off), rom_signature, sizeof(rom_signature)) == 0) {
             rom->header_offset = off;
             break;
         }
@@ -45,7 +53,7 @@ static void rom_parse_header(rom_image *rom)
     if (rom->header_offset < 0)
         return;
 
-    h = rom->data + rom->header_offset;
+    h = rom_at(rom, rom->header_offset);
     rom->checksum = (uint32)h[0x0A] | ((uint32)h[0x0B] << 8);
     rom->product = (uint32)h[0x0C] | ((uint32)h[0x0D] << 8) | (((uint32)h[0x0E] >> 4) << 16);
     rom->version = (uint32)h[0x0E] & 0x0F;
@@ -149,10 +157,22 @@ static uint32 has_ext(const char *name, const char *ext)
     return 1;
 }
 
-Err rom_load(rom_image *rom, const char *name)
+/* Bank b of an image read by banks (the reader of its bank cache), from
+ * the file; waits for the read: the emulation stops meanwhile. */
+static uint32 read_bank(void *arg, uint32 b, uint8 *to)
+{
+    rom_image *rom = (rom_image *)arg;
+    Err e;
+
+    e = AsynchReadBlockFile(&rom->bf, rom->req, to, 0x4000, (int32)(b * 0x4000u));
+    if (e >= 0)
+        e = WaitReadDoneBlockFile(rom->req);
+    return e < 0;
+}
+
+Err rom_load(rom_image *rom, const char *name, uint32 size)
 {
     char path[ROM_NAME_LEN + 8];
-    int32 size = 0;
 
     memset(rom, 0, sizeof(*rom));
     rom->header_offset = -1;
@@ -160,21 +180,54 @@ Err rom_load(rom_image *rom, const char *name)
     strcpy(path, ROM_DIR "/");
     strcat(path, rom->name);
 
-    /* The image goes to VRAM, which the CPU reads like DRAM, to leave
-     * the DRAM to the translator (code buffer) and the renderer. */
-    rom->raw = (uint8 *)LoadFile(path, &size, MEMTYPE_VRAM);
-    if (rom->raw == NULL) {
-        rom->size = size < 0 ? size : -1;
-        printf("ERROR: cannot load %s (0x%lx)\n", path, (unsigned long)size);
-        return rom->size;
-    }
-    rom->data = rom->raw;
-    rom->size = size;
-    /* Some dumps carry a 512-byte copier header before the image. */
-    if (size > 512 && (size & 0x3FFF) == 512) {
-        rom->data += 512;
-        rom->size -= 512;
-        printf("ROM: %s has a 512-byte header, skipped\n", rom->name);
+    if (size > SMS_BLOCK_MAX + 512) {
+        /* Larger than the VRAM holds: read by banks, the file kept open
+         * with a reply port for its requests (WaitIO never returns on the
+         * console without one). */
+        uint32 t0 = plat_usec_now();
+
+        rom->size = -1;
+        if ((size & 0x3FFF) != 0 || size > SMS_BANK_TAB * 0x4000u) {
+            printf("ERROR: %s: an image read by banks must be whole banks of 16 KiB, "
+                   "4 MiB at most (no copier header)\n", path);
+            return -1;
+        }
+        if (OpenBlockFile(path, &rom->bf) < 0) {
+            printf("ERROR: cannot open %s\n", path);
+            return -1;
+        }
+        rom->size = (int32)size;
+        rom->port = CreateMsgPort(NULL, 0, 0);
+        rom->req = CreateBlockFileIOReq(rom->bf.fDevice, rom->port);
+        if (rom->req >= 0)
+            rom->banks = sms_banks_new(size / 0x4000u, 0, read_bank, rom);
+        rom->load_us = plat_usec_now() - t0;
+        if (rom->banks == NULL) {
+            printf("ERROR: cannot read %s by banks (no memory or a read error)\n", path);
+            rom_unload(rom);
+            rom->size = -1;
+            return -1;
+        }
+        rom->data = (uint8 *)rom->banks->tab[0];
+    } else {
+        /* The image goes to VRAM, which the CPU reads like DRAM, to leave
+         * the DRAM to the translator (code buffer) and the renderer. */
+        int32 got = 0;
+
+        rom->raw = (uint8 *)LoadFile(path, &got, MEMTYPE_VRAM);
+        if (rom->raw == NULL) {
+            rom->size = got < 0 ? got : -1;
+            printf("ERROR: cannot load %s (0x%lx)\n", path, (unsigned long)got);
+            return rom->size;
+        }
+        rom->data = rom->raw;
+        rom->size = got;
+        /* Some dumps carry a 512-byte copier header before the image. */
+        if (got > 512 && (got & 0x3FFF) == 512) {
+            rom->data += 512;
+            rom->size -= 512;
+            printf("ROM: %s has a 512-byte header, skipped\n", rom->name);
+        }
     }
     rom_parse_header(rom);
     if (has_ext(rom->name, ".gg"))
@@ -186,58 +239,23 @@ Err rom_load(rom_image *rom, const char *name)
     return 0;
 }
 
-void rom_disc_times(const rom_list *list, void *buf)
-{
-    BlockFile bf;
-    char path[ROM_NAME_LEN + 8];
-    uint32 bank[16];
-    uint32 us[16];
-    uint32 big = 0;
-    uint32 n;
-    uint32 k;
-    Item port;
-    Item req;
-
-    for (k = 1; k < (uint32)list->count; k++)
-        if (list->size[k] > list->size[big])
-            big = k;
-    n = list->size[big] / 0x4000u;
-    strcpy(path, ROM_DIR "/");
-    strcat(path, list->name[big]);
-    if (n < 8 || OpenBlockFile(path, &bf) < 0)
-        return;
-    port = CreateMsgPort(NULL, 0, 0);
-    req = CreateBlockFileIOReq(bf.fDevice, port);
-    if (req >= 0) {
-        for (k = 0; k < 16; k++) {
-            /* Eight in order, then from one end of the file to the other
-             * and back, a shorter way each time. */
-            uint32 b = k < 8 ? k : (k - 8) / 2 * n / 8;
-
-            if (k >= 8 && (k & 1) == 0)
-                b = n - 1 - b;
-            bank[k] = b;
-            us[k] = plat_usec_now();
-            AsynchReadBlockFile(&bf, req, buf, 0x4000, (int32)(b * 0x4000u));
-            WaitReadDoneBlockFile(req);
-            us[k] = plat_usec_now() - us[k];
-        }
-        DeleteIOReq(req);
-        printf("Disc: %s, 16 KiB reads (bank:us):", path);
-        for (k = 0; k < 16; k++)
-            printf(" %lu:%lu", (unsigned long)bank[k], (unsigned long)us[k]);
-        printf("\n");
-    }
-    DeleteMsgPort(port);
-    CloseBlockFile(&bf);
-}
-
 void rom_unload(rom_image *rom)
 {
     if (rom->raw != NULL)
         UnloadFile(rom->raw);
+    if (rom->banks != NULL)
+        sms_banks_free(rom->banks);
+    if (rom->bf.fDevice > 0) {
+        if (rom->req > 0)
+            DeleteIOReq(rom->req);
+        if (rom->port > 0)
+            DeleteMsgPort(rom->port);
+        CloseBlockFile(&rom->bf);
+    }
     rom->raw = NULL;
     rom->data = NULL;
+    rom->banks = NULL;
+    rom->bf.fDevice = 0;
 }
 
 void rom_log(const rom_image *rom)
@@ -248,6 +266,10 @@ void rom_log(const rom_image *rom)
     }
     printf("ROM: %s, %ld bytes, first bytes %02x %02x %02x %02x\n", rom->name,
            (long)rom->size, rom->data[0], rom->data[1], rom->data[2], rom->data[3]);
+    if (rom->banks != NULL)
+        printf("ROM: %ld banks read when mapped, a cache of %lu in VRAM, the first ones "
+               "read in %lu us\n", (long)(rom->size >> 14), (unsigned long)rom->banks->nbuf,
+               (unsigned long)rom->load_us);
     if (rom->header_offset < 0) {
         printf("ROM: no TMR SEGA header\n");
         return;

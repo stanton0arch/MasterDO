@@ -94,6 +94,7 @@ typedef struct {
 #define GAME_REC_SLOW   2
 #define GAME_REC_LONG   3
 #define GAME_REC_HASH   4       /* machine state hashes, one every GAME_HASH_EVERY frames */
+#define GAME_REC_BANK   5       /* a bank read into the bank cache: frame, bank, us */
 #define GAME_HASH_EVERY 16
 #define GAME_HASH_PER_REC 8
 #define GAME_TRACE      32      /* last frames kept for the log (ring) */
@@ -267,9 +268,10 @@ typedef struct {
 } game;
 
 /* Allocates the translator and the machine for a cartridge image, one
- * block at rom or, with banks, blocks of 16 KiB apart (see sms_mem_init);
- * gg selects the Game Gear mode. */
-Err   game_init(game *g, const uint8 *rom, const uint8 *const *banks, uint32 rom_size, uint32 gg);
+ * block at rom or, with banks, blocks of 16 KiB apart (see sms_mem_init;
+ * the banks a bank cache reads while running are logged); gg selects the
+ * Game Gear mode. */
+Err   game_init(game *g, const uint8 *rom, sms_banks *banks, uint32 rom_size, uint32 gg);
 void  game_free(game *g);
 
 /* Translates the code reachable from the entry points ($0000, $0038,

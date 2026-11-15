@@ -664,10 +664,9 @@ int main(int argc, char **argv)
     /* The banner names the build by its latest changes (the oldest ones
      * dropped as new ones come: its bytes are DRAM the code buffer may
      * need). */
-    printf("masterdo: cartridge banks mapped through a table when the image "
-           "is not one block, disc read times at start-up; "
-           "cartridge RAM given when first shown; "
-           "second layer's bitmaps lent to the code buffer until first drawn\n");
+    printf("masterdo: images over 512 KiB read from the disc by banks into a "
+           "bank cache when mapped; cartridge banks mapped through a table when "
+           "the image is not one block; cartridge RAM given when first shown\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);
@@ -693,8 +692,6 @@ int main(int argc, char **argv)
             plat_wait_vbl(&plat);
         }
     }
-    /* The back screen, not shown, holds the blocks read. */
-    rom_disc_times(&st.roms, plat_pixels(&plat, plat.back));
     for (;;) {
         int32 pick = rom_menu(&plat, &st);
         char buf[64];
@@ -704,14 +701,14 @@ int main(int argc, char **argv)
         sprintf(buf, "Loading %s...", st.roms.name[pick]);
         show_message(&plat, buf);
         st.have_game = 0;
-        if (rom_load(&st.rom, st.roms.name[pick]) == 0)
+        if (rom_load(&st.rom, st.roms.name[pick], st.roms.size[pick]) == 0)
             rom_log(&st.rom);
         /* The memory left after a failed load (the results screen shows
          * it); replaced by the run's figures once the game is set up. */
         plat_mem_free(&st.run_free, &st.run_vram);
         st.gg = st.rom.gg;
         if (st.rom.data != NULL && st.rom.size >= 0x4000 &&
-            game_init(&g, st.rom.data, 0, (uint32)st.rom.size, st.gg) == 0) {
+            game_init(&g, st.rom.data, st.rom.banks, (uint32)st.rom.size, st.gg) == 0) {
             st.have_game = 1;
             game_set_name(&g, st.rom.name);
             game_set_sound(&g, snd.ok ? &snd : NULL);

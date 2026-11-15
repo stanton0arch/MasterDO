@@ -1497,6 +1497,17 @@ static z80j_block *churn_next;          /* next descriptor of its chain to look 
 static uint32 churn_evict = CHURN_NONE; /* zone moved, waiting for its eviction */
 #endif
 
+void z80j_forget_source(z80j_ctx *ctx, uint32 lo, uint32 hi)
+{
+    z80j_resume *e = (z80j_resume *)JIT_PTR(ctx->resume_tab);
+    uint32 k;
+
+    for (k = 0; k < Z80J_RESUMES; k++, e++) {
+        if (e->key + e->pc - lo < hi - lo)
+            e->host = 0;
+    }
+}
+
 void z80j_flush(z80j_state *j)
 {
     uint32 k;

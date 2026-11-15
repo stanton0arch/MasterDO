@@ -252,7 +252,7 @@ uint32 sms_rom_region(const sms_mem *m, uint32 rom_size)
     return 0;
 }
 
-void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, const uint8 *const *banks,
+void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, sms_banks *banks,
               uint32 rom_size, uint32 lines, uint8 *cart_ram, uint32 cart_ram_size, uint32 gg)
 {
     memset(s, 0, sizeof(*s));

@@ -81,7 +81,15 @@ zones of the code buffer (default: as many as the DRAM left allows),
 the image's 16 KiB banks placed apart (in reverse order, a gap of 1 KiB
 filled with $A5 before each) and given to the program through a table, as
 for an image not loaded as one block (machine state and generated code
-must be those of the one-block load), `-seed`
+must be those of the one-block load), `-cache n` the image's banks read
+into a bank cache of at most n buffers of 16 KiB (0: as many as the VRAM
+holds) when the mapper shows them, the image itself not counted in VRAM:
+the console's way for an image larger than 512 KiB, which such an image
+takes by default (each read charged as a read of the console's drive,
+`SIMDISC`; the machine state must not depend on the buffer count), `-whole`
+an image larger than 512 KiB loaded as one block instead (counted in VRAM,
+which it fills: every other allocation then falls back to DRAM, run it
+with `-dramfree 1600000`), `-seed`
 translate the reachable
 code into the hot area, `-hotzones n`
 (kept for older scripts: the zones are no longer split between the areas,
@@ -119,7 +127,9 @@ instructions, display on, VDP data writes, dirty tiles left at the end
 of the frame, code buffer evictions, those made ahead in spare time and
 their time, the time of the frame outside the parts given (`other`: the
 looks at the clock of the frame loop, the frame's bookkeeping), the banks
-of the three paged slots at the end of the frame); `present.py` replays
+the bank cache read from the disc in the frame (`disc`, inside the
+emulation time), the banks of the three paged slots at the end of the
+frame); `present.py` replays
 those lines through the queued presentation of the ISO. The harness runs
 the frame loop of `src/main.c` with its looks at the clock (the end of
 the pad read, which starts the emulation, the end of the drawing, which
@@ -226,6 +236,10 @@ Environment variables:
   that address (a stray store into a table or a state word is caught in
   the act); `SIMWATCHSKIP=n` lets the first n writes through, each printed
   with the writing function (the set-up of the watched word).
+- `SIMDISC=us`: the time of a bank read from the disc by the bank cache
+  (16 KiB), charged as I cycles (scaled by `SIMSCALE`), 56 400 by default
+  (Phoenix: 53.3 ms of transfer at 300 KiB/s and about 3 ms of access
+  whatever the distance);
 - `SIMBANKLOG=file`: every change of the bank a paged slot shows (a store
   into the context's `slot_bank[0..2]` with another value, by the mapper's
   assembly handler or by C) is written as `frame slot bank us` (the frame
@@ -325,8 +339,10 @@ Pictures are PPM files; any image tool converts them.
 
 `-rom` takes images up to 3.8 MiB (the stack and the context sit at the
 top of the model's 16 MiB). The plays of the images larger than 512 KiB
-(written by hand, model only until they run on the console) are in
-`panel_large.txt`.
+(written by hand) are in `panel_large.txt`; they run with the console's
+layout (a bank cache of 32 buffers in VRAM, the rest as for a 512 KiB
+image), their reads given by the `Bank:` lines of the log and the `disc`
+field of the `Frame:` lines.
 
 ## Bank store coder
 

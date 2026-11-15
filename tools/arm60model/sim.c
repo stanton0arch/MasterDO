@@ -19,7 +19,9 @@
  * kernel's system time (SampleSystemTimeTV: the TimeVal at r0, the call
  * charged as SIMCLOCK microseconds of I cycles, half before the sample
  * and half after), 16 the microsecond clock without charge (sim_time),
- * 17 the address of bank r0 of the image (sim_rom_bank).
+ * 17 the address of bank r0 of the image (sim_rom_bank), 18 bank r1 of
+ * the image copied to r2 (sim_disc_read: a read of the console's drive,
+ * charged as SIMDISC microseconds of I cycles).
  *
  * Options: -rom file, -frames n, -bench, -dump n, -from n, -img, -sym,
  * -aif file (the AIF header of the console's executable, default sim.aif
@@ -27,7 +29,12 @@
  * -split (the image's 16 KiB banks apart, in reverse order with a gap
  * of SPLIT_GAP bytes filled with SPLIT_FILL before each: the program gets
  * them through a table, as for an image not loaded as one block; the
- * memory counted is the same).
+ * memory counted is the same), -cache n (the image's banks read into a
+ * bank cache of at most n buffers of 16 KiB when the mapper shows them, n
+ * 0 for as many as the VRAM holds, the image itself not counted: the
+ * console's way for an image larger than 512 KiB, which an image that
+ * large takes by default), -whole (such an image loaded as one block,
+ * counted in VRAM, as before step 16.2).
  * Environment: SIMPAD="frame:bits,..." (buttons held from that frame on,
  * SMS_PAD_* bits, 0x100 PAUSE), SIMPROF=1 (cycles per function, the 40
  * largest; SIMPROFALL=1 every function),
@@ -42,7 +49,9 @@
  * pass by pass and instruction by instruction, see tr_flush; needs an
  * image built with mk.sh -labels; SIMTRWORDS=1 adds the words emitted
  * for each instruction), SIMBANKLOG=file (the banks mapped into the
- * paged slots, see bank_hit).
+ * paged slots, see bank_hit), SIMDISC=us (a bank read from the disc,
+ * default 56 400: 16 KiB with an access, Phoenix's figure; scaled by
+ * SIMSCALE).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,6 +82,8 @@ static uint32_t rom_size;
 #define SPLIT_FILL 0xA5
 static uint32_t rom_banks;
 static int rom_split;
+/* A bank read from the disc (sim_disc_read), in I cycles. */
+static uint64_t disc_cycles;
 /* Memory of the console left to the cartridge's run (Phoenix, NTSC, the
  * ISO's own code and the system loaded): the allocations are counted
  * against it, an allocation past it fails as AllocMem does, and the
@@ -667,6 +678,12 @@ static void do_swi(uint32_t n)
     case 5: r[0] = rom_split ? rom_bank_addr(0) : ROM_ADDR; break;
     case 6: r[0] = rom_size; break;
     case 17: r[0] = r[0] < rom_banks ? rom_bank_addr(r[0]) : 0; break;
+    case 18:
+        if (r[1] >= rom_banks) fatal("disc read of bank %u", (unsigned)r[1]);
+        memcpy(mem + r[2], mem + ROM_ADDR + r[1] * 0x4000u, 0x4000u);
+        cI += disc_cycles;
+        r[0] = 0;
+        break;
     case 7: do_dump(r[0], r[1], r[2], r[3]); break;
     case 8: r[0] = r[0] < 32 ? args[r[0]] : 0; break;
     case 9: cur_frame = (int32_t)r[0]; block_log((int32_t)r[0]); r[0] = pad_at(r[0]); break;
@@ -1168,6 +1185,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-forcelimit") && i + 1 < argc) args[25] = atoi(argv[++i]) + 1;
         else if (!strcmp(argv[i], "-zones") && i + 1 < argc) args[27] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-split")) args[28] = 1;
+        else if (!strcmp(argv[i], "-cache") && i + 1 < argc) args[29] = atoi(argv[++i]) + 1;
+        else if (!strcmp(argv[i], "-whole")) args[30] = 1;
         else if (!strcmp(argv[i], "-dramfree") && i + 1 < argc) { dram_free = atoi(argv[++i]); dram_given = 1; }
         else if (!strcmp(argv[i], "-aif") && i + 1 < argc) aif = argv[++i];
         else if (!strcmp(argv[i], "-hotzones") && i + 1 < argc) args[12] = atoi(argv[++i]);
@@ -1229,6 +1248,10 @@ int main(int argc, char **argv)
             rom_size -= 512;
         }
         rom_banks = (rom_size + 0x3FFFu) / 0x4000u;
+        if (!args[29] && !args[30] && !args[28] && rom_size > 0x80000u)
+            args[29] = 1;           /* larger than 512 KiB: by banks, as on the console */
+        if (args[28] && args[29])
+            fatal("-split and -cache exclude each other (-whole with -split)");
         if (args[28]) {
             /* The banks apart: built from a copy of the image (the bytes
              * past its end read as zeros, as in one block). */
@@ -1244,8 +1267,10 @@ int main(int argc, char **argv)
                 memcpy(mem + rom_bank_addr(b), copy + b * 0x4000u, 0x4000u);
             free(copy);
         }
-        vram_free = vram_free > rom_size ? vram_free - rom_size : 0;
+        if (!args[29])
+            vram_free = vram_free > rom_size ? vram_free - rom_size : 0;
     }
+    disc_cycles = (uint64_t)((getenv("SIMDISC") ? atof(getenv("SIMDISC")) : 56400.0) / 0.08 + 0.5);
     if (getenv("SIMSCALE")) {
         /* Every cycle weight scaled: another host timing, to see whether
          * a run that depends on its own clock takes another course. */
