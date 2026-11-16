@@ -232,6 +232,34 @@ uint32 sms_mem_show(void *arg, uint32 key, uint32 on)
     return 1;
 }
 
+static uint32 write_first(z80j_machine *m, uint32 addr, uint32 value);
+
+void sms_mem_restore(sms_mem *s, const uint32 *reg, uint32 ram)
+{
+    uint32 k;
+
+    if (ram && s->cart_ram == 0 && s->cart_ram_size != 0)
+        take_ram(s);
+    if (s->cart_ram != 0 && s->m.write == write_first)
+        s->m.write = sms_mem_write;
+    for (k = 0; k < 4; k++)
+        s->reg[k] = reg[k] & 0xFFu;
+    sms_mem_map(s);
+}
+
+uint32 sms_mem_bank_copy(const sms_mem *s, uint32 b, uint8 *to)
+{
+    const sms_banks *t = s->bank_tab;
+
+    if (t == 0 || b >= s->banks)
+        return 1;
+    if (t->tab[b] != 0) {
+        memcpy(to, t->tab[b], 0x4000u);
+        return 0;
+    }
+    return t->read(t->arg, b, to);
+}
+
 void sms_mem_reset(sms_mem *s)
 {
     s->reg[0] = 0;

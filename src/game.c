@@ -4,6 +4,7 @@
 
 #include "game.h"
 #include "platform.h"
+#include "state.h"
 #include "z80jit_int.h"
 
 #include "stdio.h"
@@ -288,6 +289,29 @@ static void print_save(const uint32 *p)
                (unsigned long)r, (unsigned long)p[3]);
 }
 
+/* A savestate written or read (state.c): frame, 0 written or 1 read,
+ * result, state bytes, file bytes, packing or unpacking us, NVRAM us,
+ * frame of the state, image index stride | (from an earlier run) << 8. */
+static void print_state(const uint32 *p)
+{
+    int32 r = (int32)p[2];
+
+    printf("State: frame %lu: ", (unsigned long)p[0]);
+    if (r < 0)
+        printf("%s failed: %s (%lu us)\n", p[1] ? "load" : "save", state_why(r),
+               (unsigned long)(p[5] + p[6]));
+    else if (p[1] == 0)
+        printf("saved, %lu bytes packed into a file of %lu bytes (image indexed every %lu "
+               "bytes) in %lu us, written to the NVRAM in %lu us\n", (unsigned long)p[3],
+               (unsigned long)p[4], (unsigned long)(p[8] & 0xFF), (unsigned long)p[5],
+               (unsigned long)p[6]);
+    else
+        printf("loaded the state saved at frame %lu of %s, file of %lu bytes read from the "
+               "NVRAM in %lu us, unpacked to %lu bytes in %lu us\n", (unsigned long)p[7],
+               (p[8] >> 8) ? "an earlier run" : "this run", (unsigned long)p[4],
+               (unsigned long)p[6], (unsigned long)p[3], (unsigned long)p[5]);
+}
+
 void game_log_flush(game *g)
 {
     uint32 k = 0;
@@ -313,6 +337,7 @@ void game_log_flush(game *g)
                    (unsigned long)body[1], (unsigned long)body[2]);
             break;
         case GAME_REC_SAVE:   print_save(body); break;
+        case GAME_REC_STATE:  print_state(body); break;
         default: break;
         }
         k += 1 + (head & 0xFFFFFFu);
@@ -1123,6 +1148,22 @@ void game_pad_time(game *g, uint32 us)
 {
     g->win.pad_us += us;
     g->last_pad_us = us;
+}
+
+void game_pad_event(game *g, uint32 bits)
+{
+    if (g->pad_log != NULL && g->pad_log_n < GAME_PAD_LOGS)
+        g->pad_log[g->pad_log_n++] = (g->frame << 9) | bits;
+    else
+        g->pad_log_dropped++;
+}
+
+void game_note_state(game *g, const uint32 *w)
+{
+    uint32 *p = rec_alloc(g, GAME_REC_STATE, GAME_STATE_WORDS * 4);
+
+    if (p != NULL)
+        memcpy(p, w, GAME_STATE_WORDS * 4);
 }
 
 void game_set_name(game *g, const char *name)

@@ -470,17 +470,23 @@ static void do_dump(uint32_t fb, uint32_t width, uint32_t height, uint32_t tag)
 }
 
 /* Pad script: "frame:bits" pairs in the environment variable SIMPAD
- * give the buttons held from that frame on (bit 8: PAUSE). */
+ * give the buttons held from that frame on (bit 8: PAUSE). An entry of
+ * bits 6-7 alone is an event before that frame (a savestate written,
+ * read back, or read from an earlier run: game.h), returned in bits
+ * 16-23 for that frame only. */
 static uint32_t pad_frames[8192], pad_bits[8192];
 static int npad;
 
 static uint32_t pad_at(uint32_t frame)
 {
-    uint32_t b = 0;
+    uint32_t b = 0, ev = 0;
     int i;
-    for (i = 0; i < npad; i++)
-        if (pad_frames[i] <= frame) b = pad_bits[i];
-    return b;
+    for (i = 0; i < npad; i++) {
+        if (pad_frames[i] > frame) continue;
+        if ((pad_bits[i] & 0xC0u) == 0) b = pad_bits[i];
+        else if (pad_frames[i] == frame) ev |= pad_bits[i] & 0xC0u;
+    }
+    return b | ev << 16;
 }
 
 static double mark_t[16];
@@ -706,6 +712,21 @@ static void do_swi(uint32_t n)
             fwrite(mem + r[0], 1, r[1], f);
             fclose(f);
         }
+        break;
+    }
+    case 20: {
+        /* Savestate file kept on the host between runs: r2 = 0 writes the
+         * r1 bytes at r0 to $SIMSTATEOUT, r2 = 1 reads $SIMSTATEIN into r0
+         * (r1 bytes at most) and returns its size (0: none). */
+        const char *name = getenv(r[2] ? "SIMSTATEIN" : "SIMSTATEOUT");
+        FILE *f = name ? fopen(name, r[2] ? "rb" : "wb") : NULL;
+        uint32_t n = 0;
+        if (f) {
+            if (r[2]) n = (uint32_t)fread(mem + r[0], 1, r[1], f);
+            else fwrite(mem + r[0], 1, r[1], f);
+            fclose(f);
+        }
+        r[0] = n;
         break;
     }
     case 14:

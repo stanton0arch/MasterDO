@@ -17,12 +17,16 @@
  * mode: the LCD window of 160 x 144 pixels in a black case, 12-bit
  * colours, P held as the START button. Pad during
  * the run: D-pad, A (button 1) and B (button 2) for the SMS pad, P for
- * PAUSE (START on the Game Gear); L pauses the run and shows the reference picture drawn by the CPU
- * (debug view) to compare with the cels (A: reference, B: cels, L: resume);
- * R toggles the presentation between the queue (a presenter thread shows
- * the finished screens one per VBL, the emulation working a frame ahead)
- * and the direct mode (present and wait for the VBL after each frame);
- * X ends the run. Results go to the debug log and to the screen. The PSG
+ * PAUSE (START on the Game Gear); L saves the machine's state in the
+ * NVRAM and R puts it back (state.c: one state for the console, kept
+ * across a power-off, refused for another cartridge image), the screens
+ * not on display lending their memory to the packing; C pauses the run
+ * and shows the reference picture drawn by the CPU (debug view) to
+ * compare with the cels (A: reference, B: cels, R: presentation between
+ * the queue, where a presenter thread shows the finished screens one per
+ * VBL with the emulation working a frame ahead, and the direct mode,
+ * present and wait for the VBL after each frame; C: resume); X ends the
+ * run. Results go to the debug log and to the screen. The PSG
  * registers of each frame drive voices on the DSP (psg.c), silenced
  * whenever the run pauses or ends. The cartridge's battery RAM is kept
  * in a file of the NVRAM (save.c): read when the RAM is given, written
@@ -35,8 +39,10 @@
 #include "game.h"
 #include "dbgview.h"
 #include "save.h"
+#include "state.h"
 
 #include "stdio.h"      /* SDK header: plain sprintf, not the compiler built-in */
+#include "mem.h"
 #include "string.h"
 #include "event.h"
 
@@ -54,6 +60,8 @@
 #define NO_COLOR    0xFFFFFFFFu
 
 #define DRAW_ERR_LOGS   20      /* DrawCels errors logged one by one */
+#define NOTE_FRAMES     150     /* a note over the picture: about 2.5 s */
+#define STATE_VRAM_KEEP (32 * 1024) /* VRAM a savestate leaves to the system */
 
 typedef struct {
     rom_list           roms;
@@ -71,6 +79,9 @@ typedef struct {
     uint32             border[PLAT_NUM_SCREENS];  /* colour each screen is filled with */
     uint32             direct;      /* presentation without the queue */
     uint32             draw_errors;
+    const char        *note;        /* told over the next pictures, or NULL */
+    uint32             note_left;   /* frames it stays */
+    Color              note_color;
 } app_state;
 
 /* The run holds the translator state, the application its lists and
@@ -239,8 +250,9 @@ static uint32 draw_picture(platform *p, app_state *st)
 }
 
 /* Paused view: the reference picture drawn by the CPU (A) or the cels
- * (B), with the palette under it; returns the buttons held when it ends,
- * with ControlX set when the run must end. */
+ * (B), with the palette under it; R switches the presentation mode;
+ * returns the buttons held when it ends, with ControlX set when the run
+ * must end. */
 static uint32 show_snapshot(platform *p, app_state *st, uint32 prev)
 {
     const vdp_state *v = &g.sms->vdp;
@@ -279,7 +291,7 @@ static uint32 show_snapshot(platform *p, app_state *st, uint32 prev)
             if (st->pic_y + (int32)st->pic_h + 4 + 16 <= p->height)
                 dbgview_palette(v, plat_pixels(p, p->back), p->width, st->pic_x,
                                 st->pic_y + (int32)st->pic_h + 4);
-            sprintf(buf, "PAUSED FRAME %lu: %s   A/B: VIEW  L: RESUME  X: END",
+            sprintf(buf, "PAUSED FRAME %lu: %s   A/B: VIEW  C: RESUME  X: END",
                     (unsigned long)g.frame,
                     which == 1 ? "CELS" : no_mem ? "NO MEMORY" : "CPU REFERENCE");
             text_line(p, p->back, 0, COLOR_TITLE, buf);
@@ -295,8 +307,14 @@ static uint32 show_snapshot(platform *p, app_state *st, uint32 prev)
         prev = held;
         if (pressed & ControlX)
             return held | ControlX;
-        if (pressed & ControlLeftShift)
+        if (pressed & ControlC)
             return held;
+        if (pressed & ControlRightShift) {
+            st->direct = !st->direct;
+            printf("Present: frame %lu: %s\n", (unsigned long)g.frame,
+                   (plat_has_presenter(p) && !st->direct) ? "queued (presenter thread)" :
+                   "direct (present, then wait for the VBL)");
+        }
         if ((pressed & ControlA) && which != 0) {
             which = 0;
             redraw = 1;
@@ -317,6 +335,60 @@ static void reset_borders(app_state *st)
         st->border[i] = NO_COLOR;
 }
 
+/* Between frames: the machine's state saved to the NVRAM, or loaded
+ * from it, with a word on the screen on display while it works (a few
+ * seconds to save) and the result told over the next pictures. The
+ * screens not on display lend their memory, and to a save the VRAM left
+ * free beyond STATE_VRAM_KEEP; they are filled again before being drawn
+ * into. */
+static void state_op(platform *p, app_state *st, uint32 load)
+{
+    stp_mem m;
+    uint32 dram = 0;
+    uint32 vram = 0;
+    uint32 more = 0;
+    uint8 *extra = NULL;
+    int32 i;
+    int32 r;
+
+    plat_drain(p);
+    psg_mute(&snd);
+    plat_reset_clip(p);
+    if (p->displayed >= 0)
+        plat_text(p, p->displayed, st->pic_x + 4, st->pic_y + 14,
+                  load ? "LOADING STATE..." : "SAVING STATE...", COLOR_TITLE);
+    memset(&m, 0, sizeof(m));
+    for (i = 0; i < p->num_screens; i++) {
+        if (i != p->displayed)
+            stp_lend(&m, plat_pixels(p, i), (uint32)(p->width * p->height * 2));
+    }
+    if (!load) {
+        plat_mem_free(&dram, &vram);
+        if (vram > STATE_VRAM_KEEP + 16 * 1024) {
+            more = vram - STATE_VRAM_KEEP;
+            extra = (uint8 *)AllocMem((int32)more, MEMTYPE_VRAM);
+            if (extra != NULL)
+                stp_lend(&m, extra, more);
+        }
+    }
+    r = load ? state_load(&g, &m) : state_save(&g, &m);
+    if (extra != NULL)
+        FreeMem(extra, (int32)more);
+    st->note_left = NOTE_FRAMES;
+    st->note_color = (r < 0) ? COLOR_BAD : COLOR_GOOD;
+    st->note = (r >= 0) ? (load ? "STATE LOADED" : "STATE SAVED") :
+               (r == STATE_NONE || r == STATE_OTHER) ? "NO STATE SAVED FOR THIS GAME" :
+               r == STATE_FULL ? "STATE: NVRAM FULL" :
+               r == STATE_NOMEM ? "STATE: NO MEMORY" :
+               r == STATE_LARGE ? "STATE TOO LARGE" :
+               r == STATE_BAD ? "STATE DAMAGED" : "STATE: NVRAM ERROR";
+    /* The screens lent hold garbage: filled before being drawn into, and
+     * no picture shown again from them. */
+    reset_borders(st);
+    set_picture(p, st, render_win_w(g.rd), render_win_h(g.rd));
+    render_forget_picture(g.rd);
+}
+
 /* The frame loop looks at the clock (a kernel call of tens of
  * microseconds on the console) at the end of the pad read, which starts
  * the emulation, at the ends of the emulation, of the picture update
@@ -335,6 +407,7 @@ static void run_game(platform *p, app_state *st)
 
     reset_borders(st);
     st->draw_errors = 0;
+    st->note_left = 0;
     set_picture(p, st, render_win_w(g.rd), render_win_h(g.rd));
     render_forget_picture(g.rd);
     for (;;) {
@@ -349,7 +422,14 @@ static void run_game(platform *p, app_state *st)
         prev = held;
         if (pressed & ControlX)
             break;
-        if (pressed & ControlLeftShift) {
+        if (pressed & (ControlLeftShift | ControlRightShift)) {
+            state_op(p, st, (pressed & ControlLeftShift) == 0);
+            shown = plat_usec_now();
+            last = shown;
+            longs = p->long_presents;
+            continue;
+        }
+        if (pressed & ControlC) {
             plat_drain(p);
             psg_mute(&snd);
             game_save(&g);
@@ -357,6 +437,7 @@ static void run_game(platform *p, app_state *st)
             prev = show_snapshot(p, st, prev);
             if (prev & ControlX)
                 break;
+            queued = plat_has_presenter(p) && !st->direct;
             reset_borders(st);
             set_picture(p, st, st->pic_w, st->pic_h);
             render_forget_picture(g.rd);
@@ -364,17 +445,6 @@ static void run_game(platform *p, app_state *st)
             last = shown;
             longs = p->long_presents;
             continue;
-        }
-        if (pressed & ControlRightShift) {
-            plat_drain(p);
-            st->direct = !st->direct;
-            queued = plat_has_presenter(p) && !st->direct;
-            printf("Present: frame %lu: %s\n", (unsigned long)g.frame,
-                   queued ? "queued (presenter thread)" : "direct (present, then wait for the VBL)");
-            render_forget_picture(g.rd);
-            shown = plat_usec_now();
-            now = shown;
-            longs = p->long_presents;
         }
 
         /* P: the PAUSE button when pressed, or START while held on the
@@ -397,12 +467,27 @@ static void run_game(platform *p, app_state *st)
          * holding it is shown once more. */
         again = render_repeated(g.rd);
         draw_us = again ? 0 : draw_picture(p, st);
-        /* A save the NVRAM had no room for, told over the picture for a
-         * few seconds (a picture shown again already holds it). */
+        /* A save the NVRAM had no room for, or the result of a
+         * savestate, told over the picture for a few seconds (a picture
+         * shown again already holds it); when it ends, the screens get
+         * their border again and the next picture is drawn. */
         if (g.save_note != 0) {
             g.save_note--;
             if (!again)
                 plat_text(p, p->back, 4, 4, "SAVE: NVRAM FULL", COLOR_BAD);
+            if (g.save_note == 0) {
+                reset_borders(st);
+                render_forget_picture(g.rd);
+            }
+        }
+        if (st->note_left != 0) {
+            st->note_left--;
+            if (!again)
+                plat_text(p, p->back, 4, 14, st->note, st->note_color);
+            if (st->note_left == 0) {
+                reset_borders(st);
+                render_forget_picture(g.rd);
+            }
         }
         game_frame_done(&g, draw_us);
         if (queued && p->errors != 0) {
@@ -641,9 +726,9 @@ int main(int argc, char **argv)
     /* The banner names the build by its latest changes (the oldest ones
      * dropped as new ones come: its bytes are DRAM the code buffer may
      * need). */
-    printf("masterdo: a finished save written to the NVRAM within 0.25 s; code past "
-           "blocks cut on their size translated in spare time once reached; bank cache "
-           "with four code zones of DRAM\n");
+    printf("masterdo: one savestate kept in the NVRAM (L saves, R loads, C pauses); a "
+           "finished save written to the NVRAM within 0.25 s; code past blocks cut on their "
+           "size translated in spare time once reached\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);

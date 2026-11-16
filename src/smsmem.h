@@ -158,6 +158,18 @@ void   sms_mem_map(sms_mem *s);
  * slot's or (with on) the bank is not in memory. arg: the sms_mem. */
 uint32 sms_mem_show(void *arg, uint32 key, uint32 on);
 
+/* Between frames: the paging registers set to reg (4 values) and
+ * applied, the banks they select read into the bank cache when absent;
+ * with ram, the cartridge RAM given first if it has not been (to be
+ * filled by the caller). */
+void   sms_mem_restore(sms_mem *s, const uint32 *reg, uint32 ram);
+
+/* An image whose banks are apart: copies bank b to to (16 KiB), read
+ * from the image file when the bank cache does not hold it (the cache
+ * left as it is); returns 0, or not 0 (an image in one block, a bank
+ * past the image, a read that failed). */
+uint32 sms_mem_bank_copy(const sms_mem *s, uint32 b, uint8 *to);
+
 /* Paging registers to their power-on values (banks 0, 1, 2; the
  * Codemasters mapper starts with banks 0, 1, 0). */
 void   sms_mem_reset(sms_mem *s);

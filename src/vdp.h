@@ -195,6 +195,14 @@ typedef struct {
 void   vdp_init(vdp_state *v, z80j_ctx *ctx, uint32 lines);
 void   vdp_reset(vdp_state *v);
 
+/* Between frames, after a saved state was written into the registers,
+ * the access state, the line counter state and the video and colour
+ * RAMs: the timing taken up from the frame boundary it was saved at
+ * (line_rel: ctx->line less the start of the frame then; event_rel: the
+ * next event line less that start, or 0xFFFFFFFF), the display mode
+ * derived again, every tile and colour marked written for the renderer. */
+void   vdp_restored(vdp_state *v, uint32 line_rel, uint32 event_rel);
+
 /* Starts a frame at ctx->line and schedules its first event. */
 void   vdp_frame_begin(vdp_state *v);
 

@@ -22,6 +22,7 @@
         EXPORT  sim_codedump
         EXPORT  sim_register
         EXPORT  sim_state
+        EXPORT  sim_file
         EXPORT  psg_update
         EXPORT  plat_mem_free
         IMPORT  hmain
@@ -88,6 +89,10 @@ sim_register
 ; -statedump: bytes appended to a host file (see harness.c).
 sim_state
         swi     0xF00013
+        mov     pc,lr
+; The savestate file kept on the host (see harness.c).
+sim_file
+        swi     0xF00014
         mov     pc,lr
 plat_mem_free
         swi     0xF0000D

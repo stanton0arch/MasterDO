@@ -479,6 +479,10 @@ void render_reset(renderer *r)
     r->npb = 1;
     r->backdrop = 0xFFFFFFFFu;
     r->display_on = 0;
+    /* The last cel of the chain drawn before keeps no CCB_LAST: the next
+     * chain may run past it (renderer reset after pictures were drawn). */
+    if (r->last_cel != NULL && r->last_cel != &r->cels[CEL_TERM])
+        r->last_cel->ccb_Flags &= ~CCB_LAST;
     r->chain = &r->cels[CEL_TERM];
     r->last_cel = &r->cels[CEL_TERM];
     r->pic_valid = 0;

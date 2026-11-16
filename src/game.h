@@ -96,6 +96,7 @@ typedef struct {
 #define GAME_REC_HASH   4       /* machine state hashes, one every GAME_HASH_EVERY frames */
 #define GAME_REC_BANK   5       /* a bank read into the bank cache: frame, bank, us */
 #define GAME_REC_SAVE   6       /* a save read or written: frame, GAME_SAVE_*, result, us */
+#define GAME_REC_STATE  7       /* a savestate written or read (game_note_state) */
 #define GAME_HASH_EVERY 16
 #define GAME_HASH_PER_REC 8
 #define GAME_TRACE      32      /* last frames kept for the log (ring) */
@@ -300,6 +301,7 @@ typedef struct {
     uint8  *pool;           /* the renderer's bitmaps when they follow the code buffer */
     uint32  hot_vram;       /* entry counters allocated in VRAM */
     uint32  pad_log_vram;   /* pad log allocated in VRAM */
+    uint32  state_saved;    /* a savestate written in this run (state.c) */
 } game;
 
 /* Allocates the translator and the machine for a cartridge image, one
@@ -337,6 +339,18 @@ void  game_note_long_vbl(game *g, uint32 period_us);
 
 /* Adds the time of a pad read to the current window. */
 void  game_pad_time(game *g, uint32 us);
+
+/* Between frames: a savestate written (GAME_PAD_SAVE), read back
+ * (GAME_PAD_LOAD), or read from an earlier run (both), kept in the pad
+ * log at the frame about to run so that the pad script replays it. */
+#define GAME_PAD_SAVE 0x40
+#define GAME_PAD_LOAD 0x80
+void  game_pad_event(game *g, uint32 bits);
+
+/* A savestate written or read, for the log: GAME_STATE_WORDS words
+ * (state.c fills them, game_log_flush prints them). */
+#define GAME_STATE_WORDS 9
+void  game_note_state(game *g, const uint32 *w);
 
 /* Period of the display, in microseconds: the budget of a frame (NTSC
  * by default). */

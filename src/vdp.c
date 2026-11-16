@@ -232,6 +232,21 @@ void vdp_init(vdp_state *v, z80j_ctx *ctx, uint32 lines)
     vdp_reset(v);
 }
 
+void vdp_restored(vdp_state *v, uint32 line_rel, uint32 event_rel)
+{
+    v->frame_base = v->ctx->line - line_rel;
+    v->ctx->event_line = (event_rel == 0xFFFFFFFFu) ? event_rel : v->frame_base + event_rel;
+    v->hs_n = 0;
+    v->nt_n = 0;
+    v->de_n = 0;
+    v->cr_n = 0;
+    v->de_start = ((uint32)v->reg[1] >> 6) & 1;
+    vdp_mode(v);
+    memset(v->dirty, 1, sizeof(v->dirty));
+    memset(v->spr_tile_ok, 0, sizeof(v->spr_tile_ok));
+    v->cram_dirty = 1;
+}
+
 void vdp_frame_begin(vdp_state *v)
 {
     if (v->frames != 0)

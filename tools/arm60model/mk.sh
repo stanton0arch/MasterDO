@@ -59,7 +59,7 @@ armcc -I$M/include/3do -I$M/include/community -I$M/include/ttl -I$M/src -DNDEBUG
 armlink -bin -ro-base 0x8000 -o sim.bin -symbols sim.sym hstub.o harness.o dectest.o anatest.o emittest.o lzdec.o \
         $B/game.c.o $B/sms.c.o $B/sms_io.s.o $B/vdp.c.o $B/vdp_a.s.o $B/smsmem.c.o $B/smsmem_a.s.o \
         $B/z80jit.c.o $B/z80jit_emit.c.o $JE $JB $JG $JD $JA $B/z80int_a.s.o $B/dbgview.c.o $B/render.c.o $B/render_a.s.o \
-        $B/bench_cpu.c.o $B/bench_z80.s.o $B/z80prog.c.o $B/clock.c.o \
+        $B/bench_cpu.c.o $B/bench_z80.s.o $B/z80prog.c.o $B/clock.c.o $B/stpack.c.o \
         $M/lib/community/libc.lib > link.txt 2>&1 || { cat link.txt; exit 1; }
 head -c 128 $M/takeme/LaunchMe > sim.aif
 echo "sim, sim.bin, sim.sym and sim.aif built"

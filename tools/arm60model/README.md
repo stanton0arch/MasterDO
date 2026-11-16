@@ -213,7 +213,15 @@ Environment variables:
   The ISO records the pad changes of a run and writes them at the pause
   or the end of the run as a `Pad script:` line holding a `panel.txt`
   entry (cartridge, frames, script), so that a run played on the console
-  or on Phoenix is replayed here;
+  or on Phoenix is replayed here. An entry of bits 0x40 and 0x80 alone is a
+  savestate before that frame (L and R on the console, `state.c`): 0x40
+  written, 0x80 read back, 0xC0 read from a state of an earlier run
+  (replayed only with that state in `SIMSTATEIN`, the run stops there
+  otherwise);
+- `SIMSTATEOUT=file`, `SIMSTATEIN=file`: the savestate file (`state.c`
+  keeps it in memory in the model) written to the host at each save, read
+  from the host at the start of the run, so that a load in a fresh run
+  (after a reset or a power-off on the console) is replayed;
 - `SIMPROF=1`: cycles per function of the image, and of the generated code
   (the 40 largest; `SIMPROFALL=1` lists every function with cycles), with
   the executions of the first word of each (the entries, or the passes
@@ -378,7 +386,9 @@ against the host's), and prints the times (`LZ test:` lines) and one
 
 ## Savestate coders
 
-Study of step 19 (how small a savestate can be packed for the NVRAM).
+The console's coder is `src/stpack.c` (`src/state.c` around it), run here
+as the console runs it at the pad script's savestate entries. Study of
+the coders (how small a savestate can be packed for the NVRAM):
 `sim -statedump n` writes, every n frames, the machine state a savestate
 would hold, raw, to `state_NNNNNN.bin` in the work directory: a head of
 words (Z80 registers and interrupt state, VDP registers and access state,

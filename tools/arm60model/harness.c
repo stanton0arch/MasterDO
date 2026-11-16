@@ -55,6 +55,9 @@ extern void sim_codedump(uint32 code, uint32 cur, uint32 blocks, uint32 nblocks)
 extern void sim_register(uint32 code, uint32 cur, uint32 blocks, uint32 nblocks, uint32 ctx);
 /* -statedump: n bytes at a appended to state_<tag>.bin (part 0 starts it). */
 extern void sim_state(const void *a, uint32 n, uint32 tag, uint32 part);
+/* The savestate file on the host: write (in 0) or read (in 1, returns
+ * the bytes read). */
+extern uint32 sim_file(void *a, uint32 n, uint32 in);
 extern void dec_test(void);
 extern void ana_test(void);
 extern void emit_test(void);
@@ -486,6 +489,46 @@ static uint32 sprite_flag_frames[2];
 
 static save_file harness_sv;
 
+/* Savestates (state.c) as the ISO writes and reads them at L and R, the
+ * file kept in memory: the pad script's events (game.h) replay them
+ * between frames. The two screens the console lends are two blocks of
+ * the model's memory that nothing else uses; a save also gets the VRAM
+ * left beyond 32 KiB, as main.c does. */
+#define STATE_NO_FILES
+#include "state.c"
+
+#define HARNESS_SCREEN 0x25800u     /* a 320 x 240 screen of 16-bit pixels */
+#define HARNESS_LENT   0x00B00000u  /* the model's memory between its heap and the image */
+
+static int32 harness_state(uint32 load)
+{
+    stp_mem m;
+    uint32 dram = 0;
+    uint32 vram = 0;
+    uint32 more = 0;
+    uint8 *extra = NULL;
+    int32 r;
+
+    memset(&m, 0, sizeof(m));
+    stp_lend(&m, (void *)HARNESS_LENT, HARNESS_SCREEN);
+    stp_lend(&m, (void *)(HARNESS_LENT + HARNESS_SCREEN), HARNESS_SCREEN);
+    if (!load) {
+        plat_mem_free(&dram, &vram);
+        if (vram > 32 * 1024 + 16 * 1024) {
+            more = vram - 32 * 1024;
+            extra = (uint8 *)AllocMem((int32)more, MEMTYPE_VRAM);
+            if (extra != NULL)
+                stp_lend(&m, extra, more);
+        }
+    }
+    r = load ? state_load(&g, &m) : state_save(&g, &m);
+    if (extra != NULL)
+        FreeMem(extra, (int32)more);
+    if (!load && r >= 0)
+        sim_file(file_mem, file_len, 0);    /* $SIMSTATEOUT */
+    return r;
+}
+
 static uint32 count_dirty(const vdp_state *v)
 {
     uint32 n = 0;
@@ -882,10 +925,25 @@ void hmain(void)
         z80j_set_budget(&g.jit, plat_usec_now, sim_arg(5), sim_arg(6), PLAT_NTSC_FRAME_US);
     }
     game_reset(&g);
+    file_len = sim_file(file_mem, sizeof(file_mem), 1);    /* $SIMSTATEIN: a state of a run before */
     last = plat_usec_now();
     last_end = sim_time();
     for (f = 0; f < frames; f++) {
         uint32 pad = sim_pad(f);
+
+        if ((pad >> 16) & 0xC0) {
+            /* A savestate written or read by the play, before this frame. */
+            uint32 ev = (pad >> 16) & 0xC0;
+
+            if (ev == (GAME_PAD_SAVE | GAME_PAD_LOAD) && file_len == 0) {
+                printf("State: frame %lu: the play loads a state of an earlier run, "
+                       "not replayable without it ($SIMSTATEIN)\n", (unsigned long)f);
+                break;
+            }
+            harness_state((ev & GAME_PAD_LOAD) != 0);
+            last = plat_usec_now();
+            last_end = sim_time();
+        }
 
         if (f == sim_arg(3))
             sim_mark(15);           /* profile from here on */
@@ -1062,7 +1120,8 @@ void hmain(void)
             hd[n++] = c->bc2;
             hd[n++] = c->de2;
             hd[n++] = c->hl2;
-            hd[n++] = c->i | c->r << 8 | c->iff1 << 16 | c->iff2 << 17 | c->im << 18 |
+            hd[n++] = c->i | R_SEEN(c->r, c->line) << 8 | c->iff1 << 16 | c->iff2 << 17 |
+                      c->im << 18 |
                       c->halted << 20 | c->irq_line << 21 | c->nmi << 22;
             hd[n++] = c->line - v->frame_base;
             hd[n++] = c->event_line - v->frame_base;
