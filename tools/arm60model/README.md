@@ -376,6 +376,31 @@ compresses every bank again as the console would at load (sizes checked
 against the host's), and prints the times (`LZ test:` lines) and one
 `LZ bank: bank bytes us` line per bank.
 
+## Savestate coders
+
+Study of step 19 (how small a savestate can be packed for the NVRAM).
+`sim -statedump n` writes, every n frames, the machine state a savestate
+would hold, raw, to `state_NNNNNN.bin` in the work directory: a head of
+words (Z80 registers and interrupt state, VDP registers and access state,
+paging, PSG, Game Gear ports, the sizes of what follows), the Z80 RAM, the
+video RAM, the colour RAM (32 bytes, 64 in Game Gear mode) and the
+cartridge RAM when it has been given. `stc.c` holds two coders of such a
+state (integer C89, built for the host and for the ARM60 model): an LZ77
+with matches into the cartridge image, tokens coded with adaptive binary
+probabilities and an arithmetic coder, and a context mixing coder (the
+size bound, far too slow for the console).
+
+```
+gcc -O2 -DROMMAP=8 -DLZ_DEPTH=8 -o stc_host stc_host.c
+./stc_host lz 8 WORK/state_001250.bin takeme/roms/sonic2.sms   # size, round trip
+STFLAGS="-DPROB_T=u32 -DROMMAP=8 -DLZ_DEPTH=8" ./stmk.sh WORK/state_001250.bin
+./sim -img sttest.bin -sym sttest.sym -rom takeme/roms/sonic2.sms -frames 1
+```
+
+`stmk.sh` builds the state into `sttest.bin` (`sttest.c`), which codes and
+decodes it on the model with the image from `-rom` (no image, every 8 and
+every 16 bytes indexed) and prints the sizes and times.
+
 ## Batch runner
 
 `batch.py` runs every cartridge of `takeme/roms` in the model, in parallel,

@@ -53,6 +53,8 @@ extern void sim_codedump(uint32 code, uint32 cur, uint32 blocks, uint32 nblocks)
 /* Registers the code buffer, the descriptors and the context with the
  * simulator, which dumps them on a fatal error (code.bin, lookup.bin). */
 extern void sim_register(uint32 code, uint32 cur, uint32 blocks, uint32 nblocks, uint32 ctx);
+/* -statedump: n bytes at a appended to state_<tag>.bin (part 0 starts it). */
+extern void sim_state(const void *a, uint32 n, uint32 tag, uint32 part);
 extern void dec_test(void);
 extern void ana_test(void);
 extern void emit_test(void);
@@ -1029,6 +1031,61 @@ void hmain(void)
             uint32 h = game_state_hash(&g);
 
             printf("Hash: frame %lu: %08lx\n", (unsigned long)(f + 1), (unsigned long)h);
+        }
+        if (sim_arg(32) && (f + 1) % sim_arg(32) == 0) {
+            /* -statedump n: the machine state a savestate would hold, raw,
+             * every n frames (state_NNNNNN.bin): a head of words (Z80
+             * registers and interrupt state, VDP registers and access
+             * state, paging, PSG, Game Gear ports, the sizes of what
+             * follows), the Z80 RAM, the video RAM, the colour RAM (32
+             * bytes, 64 in Game Gear mode) and the cartridge RAM when it
+             * has been given. */
+            const z80j_ctx *c = g.ctx;
+            const sms_machine *s = g.sms;
+            const vdp_state *v = &s->vdp;
+            uint32 hd[64];
+            uint32 n = 0;
+            uint32 k;
+            uint32 cram = s->gg ? VDP_GG_CRAM : 32;
+            uint32 cart = (s->mem.cart_ram != 0) ? s->mem.cart_ram_size : 0;
+
+            hd[n++] = 0x53544154;           /* "STAT" */
+            hd[n++] = s->gg;
+            hd[n++] = cram;
+            hd[n++] = cart;
+            for (k = 0; k < 8; k++)
+                hd[n++] = c->regs[k];
+            hd[n++] = c->ix;
+            hd[n++] = c->iy;
+            hd[n++] = c->f2;
+            hd[n++] = c->a2;
+            hd[n++] = c->bc2;
+            hd[n++] = c->de2;
+            hd[n++] = c->hl2;
+            hd[n++] = c->i | c->r << 8 | c->iff1 << 16 | c->iff2 << 17 | c->im << 18 |
+                      c->halted << 20 | c->irq_line << 21 | c->nmi << 22;
+            hd[n++] = c->line - v->frame_base;
+            hd[n++] = c->event_line - v->frame_base;
+            hd[n++] = v->acc;
+            hd[n++] = v->buffer;
+            hd[n++] = v->line_flag | v->status << 8 | v->gg_latch << 16;
+            hd[n++] = v->vbl_done | v->lc_k << 8 | v->lc_val << 16;
+            for (k = 0; k < 4; k++)
+                hd[n++] = v->reg[4 * k] | v->reg[4 * k + 1] << 8 | v->reg[4 * k + 2] << 16 |
+                          (uint32)v->reg[4 * k + 3] << 24;
+            hd[n++] = s->mem.reg[0] | s->mem.reg[1] << 8 | s->mem.reg[2] << 16 |
+                      s->mem.reg[3] << 24;
+            hd[n++] = s->psg_latch | s->mem_ctrl << 8 | s->io_ctrl << 16;
+            for (k = 0; k < 8; k++)
+                hd[n++] = s->psg_reg[k];
+            for (k = 0; k < 7; k++)
+                hd[n++] = s->gg_port[k];
+            sim_state(hd, 4 * n, f + 1, 0);
+            sim_state(c->mram, 0x2000, f + 1, 1);
+            sim_state(v->vram, VDP_VRAM_SIZE, f + 1, 2);
+            sim_state(s->gg ? v->gg_cram : v->cram, cram, f + 1, 3);
+            if (cart != 0)
+                sim_state(s->mem.cart_ram, cart, f + 1, 4);
         }
         {
             const vdp_state *v = &g.sms->vdp;

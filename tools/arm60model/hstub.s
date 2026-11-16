@@ -21,6 +21,7 @@
         EXPORT  sim_mark
         EXPORT  sim_codedump
         EXPORT  sim_register
+        EXPORT  sim_state
         EXPORT  psg_update
         EXPORT  plat_mem_free
         IMPORT  hmain
@@ -83,6 +84,10 @@ sim_codedump
         mov     pc,lr
 sim_register
         swi     0xF0000E
+        mov     pc,lr
+; -statedump: bytes appended to a host file (see harness.c).
+sim_state
+        swi     0xF00013
         mov     pc,lr
 plat_mem_free
         swi     0xF0000D

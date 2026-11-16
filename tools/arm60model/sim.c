@@ -102,7 +102,7 @@ static int dram_given;
 #define DRAM_PHOENIX 1494784u
 static struct { uint32_t a, size, vram; } allocs[256];
 static uint32_t nallocs;
-static uint32_t args[32] = { 0, 0, 0, 0xFFFFFFFFu };
+static uint32_t args[40] = { 0, 0, 0, 0xFFFFFFFFu };
 static int done;
 
 /* Profile: cycles (x100) per instruction word of the image. */
@@ -685,7 +685,7 @@ static void do_swi(uint32_t n)
         r[0] = 0;
         break;
     case 7: do_dump(r[0], r[1], r[2], r[3]); break;
-    case 8: r[0] = r[0] < 32 ? args[r[0]] : 0; break;
+    case 8: r[0] = r[0] < 40 ? args[r[0]] : 0; break;
     case 9: cur_frame = (int32_t)r[0]; block_log((int32_t)r[0]); r[0] = pad_at(r[0]); break;
     case 10: {
         uint32_t id = r[0] & 15;
@@ -695,6 +695,19 @@ static void do_swi(uint32_t n)
         break;
     }
     case 11: dump_code(r[0], r[1], r[2], r[3]); break;
+    case 19: {
+        /* -statedump: r1 bytes at r0 appended to state_<r2>.bin (part r3,
+         * 0 starts the file). */
+        char name[64];
+        FILE *f;
+        sprintf(name, "state_%06u.bin", (unsigned)r[2]);
+        f = fopen(name, r[3] == 0 ? "wb" : "ab");
+        if (f) {
+            fwrite(mem + r[0], 1, r[1], f);
+            fclose(f);
+        }
+        break;
+    }
     case 14:
         reg_code = r[0]; reg_code_end = r[1]; reg_blocks = r[2]; reg_nblocks = r[3]; reg_ctx = rd32(r[13]);
         if (blog) { blog_lo = reg_code; blog_span = reg_code_end - reg_code; }
@@ -1188,6 +1201,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-cache") && i + 1 < argc) args[29] = atoi(argv[++i]) + 1;
         else if (!strcmp(argv[i], "-whole")) args[30] = 1;
         else if (!strcmp(argv[i], "-saves")) args[31] = 1;
+        else if (!strcmp(argv[i], "-statedump") && i + 1 < argc) args[32] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-dramfree") && i + 1 < argc) { dram_free = atoi(argv[++i]); dram_given = 1; }
         else if (!strcmp(argv[i], "-aif") && i + 1 < argc) aif = argv[++i];
         else if (!strcmp(argv[i], "-hotzones") && i + 1 < argc) args[12] = atoi(argv[++i]);
