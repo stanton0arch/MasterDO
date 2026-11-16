@@ -4,8 +4,8 @@
  * pieces and sprite cels, render.c). The spare time at the end of a frame
  * goes to the translation of code the game is about to reach.
  *
- * Boot: display, cartridge image, the CPU and CEL benchmarks of steps 0
- * and 1 (logged), then the code reachable in the cartridge is translated
+ * Boot: display, a measure of the system clock calls (logged), cartridge
+ * image, then the code reachable in the cartridge is translated
  * and the game runs at the pace of the display: one emulated frame, the
  * picture update, DrawCels into a free screen, which is queued for the
  * presenter thread (platform.c) to show at a VBL; the emulation may thus
@@ -24,15 +24,17 @@
  * and the direct mode (present and wait for the VBL after each frame);
  * X ends the run. Results go to the debug log and to the screen. The PSG
  * registers of each frame drive voices on the DSP (psg.c), silenced
- * whenever the run pauses or ends.
+ * whenever the run pauses or ends. The cartridge's battery RAM is kept
+ * in a file of the NVRAM (save.c): read when the RAM is given, written
+ * when a look between frames finds a save the game has finished, and
+ * when the run pauses or ends.
  */
 
 #include "platform.h"
 #include "rom.h"
-#include "bench_cpu.h"
-#include "bench_video.h"
 #include "game.h"
 #include "dbgview.h"
+#include "save.h"
 
 #include "stdio.h"      /* SDK header: plain sprintf, not the compiler built-in */
 #include "string.h"
@@ -56,11 +58,8 @@
 typedef struct {
     rom_list           roms;
     rom_image          rom;
-    bench_cpu_result   cpu;
-    bench_video_result video;
-    int32              have_video;
     int32              have_game;
-    uint32             dram_free;   /* before the benchmarks */
+    uint32             dram_free;   /* before the cartridge */
     uint32             vram_free;
     uint32             run_free;    /* DRAM free during the run */
     uint32             run_vram;    /* VRAM free during the run, or after a failed load */
@@ -81,6 +80,9 @@ static app_state st;
 
 /* The PSG voices on the DSP, opened once for the whole session. */
 static psg_dsp snd;
+
+/* The NVRAM file of the cartridge's battery RAM. */
+static save_file sv;
 
 static void text_line(const platform *p, int32 screen, int32 line, Color color,
                       const char *text)
@@ -350,6 +352,7 @@ static void run_game(platform *p, app_state *st)
         if (pressed & ControlLeftShift) {
             plat_drain(p);
             psg_mute(&snd);
+            game_save(&g);
             game_log_flush(&g);
             prev = show_snapshot(p, st, prev);
             if (prev & ControlX)
@@ -394,6 +397,13 @@ static void run_game(platform *p, app_state *st)
          * holding it is shown once more. */
         again = render_repeated(g.rd);
         draw_us = again ? 0 : draw_picture(p, st);
+        /* A save the NVRAM had no room for, told over the picture for a
+         * few seconds (a picture shown again already holds it). */
+        if (g.save_note != 0) {
+            g.save_note--;
+            if (!again)
+                plat_text(p, p->back, 4, 4, "SAVE: NVRAM FULL", COLOR_BAD);
+        }
         game_frame_done(&g, draw_us);
         if (queued && p->errors != 0) {
             /* The thread cannot show the screens: back to the direct mode. */
@@ -446,6 +456,7 @@ static void run_game(platform *p, app_state *st)
     plat_drain(p);
     psg_mute(&snd);
     plat_reset_clip(p);
+    game_save(&g);
     game_log_summary(&g);
 }
 
@@ -528,41 +539,8 @@ static int32 rom_menu(platform *p, const app_state *st)
 }
 
 /*--------------------------------------------------------------------------
- * Benchmarks and results
+ * Results
  *------------------------------------------------------------------------*/
-
-static void run_benchmarks(platform *p, app_state *st)
-{
-    bench_video bv;
-
-    plat_clock_bench();
-    bench_cpu_run(&st->cpu);
-    bench_cpu_log(&st->cpu);
-    memset(&bv, 0, sizeof(bv));
-    if (bench_video_init(&bv, p) == 0) {
-        st->have_video = 1;
-        bench_video_run(&bv, p, &st->video);
-        bench_video_log(&st->video);
-        bench_video_free(&bv);
-    }
-}
-
-static void draw_core(const platform *p, int32 screen, int32 line,
-                      const char *name, const bench_z80_result *r)
-{
-    char buf[64];
-
-    if (r->status != 0) {
-        sprintf(buf, " %s stopped: %lX PC %04lX", name,
-                (unsigned long)r->stop_op, (unsigned long)r->stop_pc);
-        text_line(p, screen, line, COLOR_BAD, buf);
-    } else {
-        sprintf(buf, " %-12s %6lu us %3lu pct %s", name, (unsigned long)r->frame_us,
-                (unsigned long)percent_of(r->frame_us, p->frame_us),
-                r->check ? "OK" : "BAD");
-        text_line(p, screen, line, r->check ? COLOR_TEXT : COLOR_BAD, buf);
-    }
-}
 
 static void draw_results(platform *p, const app_state *st)
 {
@@ -579,15 +557,6 @@ static void draw_results(platform *p, const app_state *st)
         sprintf(buf, "%s: %ld bytes", st->rom.name, (long)st->rom.size);
     text_line(p, s, n++, st->rom.size > 0 ? COLOR_TEXT : COLOR_BAD, buf);
     memory_line(p, s, n++, st->run_free, st->run_vram);
-
-    text_line(p, s, n++, COLOR_HEAD, p->is_pal ? "BENCHMARKS (Z80 PER PAL FRAME)"
-                                               : "BENCHMARKS (Z80 PER NTSC FRAME)");
-    draw_core(p, s, n++, "interpreted", &st->cpu.interp);
-    draw_core(p, s, n++, "translated", &st->cpu.jit);
-    if (st->have_video) {
-        sprintf(buf, " tiles + sprites %lu us", (unsigned long)st->video.all_us);
-        text_line(p, s, n++, COLOR_TEXT, buf);
-    }
 
     text_line(p, s, n++, COLOR_HEAD, "CARTRIDGE RUN WITH CELS (US PER FRAME)");
     if (!st->have_game) {
@@ -614,6 +583,14 @@ static void draw_results(platform *p, const app_state *st)
         sprintf(buf, " worst %lu us, %lu over %lu us", (unsigned long)g.max_all_us,
                 (unsigned long)g.over, (unsigned long)p->frame_us);
         text_line(p, s, n++, g.over == 0 ? COLOR_GOOD : COLOR_TEXT, buf);
+        if (g.save_last != 0) {
+            if (g.save_last > 0)
+                sprintf(buf, " save written to NVRAM: %ld bytes", (long)g.save_last);
+            else
+                sprintf(buf, " save NOT written: %s", g.save_last == GAME_SAVE_FULL ?
+                        "NVRAM FULL" : "error");
+            text_line(p, s, n++, g.save_last > 0 ? COLOR_GOOD : COLOR_BAD, buf);
+        }
     }
     text_line(p, s, n + 1, COLOR_HEAD, st->have_game ? "B: RUN AGAIN   X: BACK TO THE MENU"
                                                      : "X: BACK TO THE MENU");
@@ -664,9 +641,9 @@ int main(int argc, char **argv)
     /* The banner names the build by its latest changes (the oldest ones
      * dropped as new ones come: its bytes are DRAM the code buffer may
      * need). */
-    printf("masterdo: code past blocks cut on their size translated in spare time "
-           "once reached; bank cache with four code zones of DRAM; images over 512 KiB "
-           "read from the disc by banks into a bank cache when mapped\n");
+    printf("masterdo: battery RAM saved in the NVRAM, no boot benchmarks; code past "
+           "blocks cut on their size translated in spare time once reached; bank cache "
+           "with four code zones of DRAM\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);
@@ -676,8 +653,7 @@ int main(int argc, char **argv)
     st.pic_w = RENDER_W;
     st.pic_h = RENDER_H;
 
-    show_message(&plat, "Benchmarks of steps 0 and 1...");
-    run_benchmarks(&plat, &st);
+    plat_clock_bench();
     plat_mem_free(&st.dram_free, &st.vram_free);
     printf("Memory: %lu bytes of DRAM and %lu bytes of VRAM free before the cartridge\n",
            (unsigned long)st.dram_free, (unsigned long)st.vram_free);
@@ -713,6 +689,8 @@ int main(int argc, char **argv)
             game_set_name(&g, st.rom.name);
             game_set_sound(&g, snd.ok ? &snd : NULL);
             game_set_frame_us(&g, plat.frame_us);
+            save_init(&sv, st.rom.name);
+            game_set_saves(&g, save_io, &sv);
             show_message(&plat, "Translating the cartridge code...");
             game_translate_rom(&g);
             plat_mem_free(&st.run_free, &st.run_vram);

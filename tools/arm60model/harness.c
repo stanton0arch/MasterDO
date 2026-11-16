@@ -13,7 +13,8 @@
  * banks read into a bank cache when mapped, as the console reads an image
  * larger than SMS_BLOCK_MAX (-cache n: at most n buffers, 0 as many as the
  * VRAM holds and SMS_BANK_DRAM more in DRAM; set by sim for such an image
- * unless -whole). The pad
+ * unless -whole), 31 the native saves of the ISO without the NVRAM
+ * (-saves: save.c's decisions and packing, nothing read or written). The pad
  * is scripted by the host (sim_pad). At the end, the code buffer is dumped
  * for anacode.py and hotblocks.py.
  *
@@ -476,6 +477,13 @@ static uint32 sprite_flag_frames[2];
  * reference (both pure functions of the VDP state apart from the status
  * bits, which the assembly ORs in again here). */
 /* Tiles whose dirty byte is set (work waiting for the renderer). */
+/* -saves: the save function of the ISO (save.c) without the NVRAM, its
+ * decisions and packing as on the console. */
+#define SAVE_NO_FILES
+#include "save.c"
+
+static save_file harness_sv;
+
 static uint32 count_dirty(const vdp_state *v)
 {
     uint32 n = 0;
@@ -846,6 +854,8 @@ void hmain(void)
     }
     if (game_init(&g, rom, banks, size, sim_arg(24)) != 0)    /* -gg: the Game Gear mode */
         return;
+    if (sim_arg(31))
+        game_set_saves(&g, save_io, &harness_sv);           /* -saves */
     sim_register((uint32)g.jit.code, (uint32)g.jit.code_end, (uint32)g.jit.blocks, g.jit.max_blocks, (uint32)g.ctx);
     if (sim_arg(4)) {
         /* -interp: nothing is translated, everything is interpreted. */
@@ -1163,6 +1173,8 @@ void hmain(void)
         }
         prev_on = render_display_on(g.rd);
     }
+    if (sim_arg(31))
+        game_save(&g);
     game_log_summary(&g);
     printf("Sprites: %lu frames checked, %lu with differences, %lu with overflow, %lu with collision\n",
            (unsigned long)sprite_checks, (unsigned long)sprite_errors,

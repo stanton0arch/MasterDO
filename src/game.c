@@ -74,6 +74,17 @@
 
 #define FRAME_T         (VDP_LINES_NTSC * VDP_LINE_T)   /* T-states per frame */
 
+/* Native saves: a look at the cartridge RAM starts every SAVE_LOOK_FRAMES
+ * frames at most and hashes a block of 1 KiB per frame in a spare time of
+ * SAVE_STEP_US at least (about 0.1 ms each); a save found finished waits
+ * SAVE_WRITE_WAIT frames at most for a spare time that holds its write;
+ * the NVRAM full message stays on the screen for SAVE_NOTE_FRAMES
+ * frames. */
+#define SAVE_LOOK_FRAMES 60
+#define SAVE_STEP_US    400
+#define SAVE_WRITE_WAIT 300
+#define SAVE_NOTE_FRAMES 180
+
 static uint32 percent(uint32 part, uint32 whole);
 
 uint32 game_hot_zones = JIT_HOT_ZONES;
@@ -257,6 +268,24 @@ static void print_pad_script(game *g)
     g->pad_log_printed = g->pad_log_n;
 }
 
+/* A save read or written: frame, GAME_SAVE_*, result, us. */
+static void print_save(const uint32 *p)
+{
+    int32 r = (int32)p[2];
+
+    printf("Save: frame %lu: ", (unsigned long)p[0]);
+    if (r > 0)
+        printf("%ld bytes %s in %lu us (case %lu)\n", (long)r,
+               p[1] == GAME_SAVE_LOAD ? "read from the NVRAM" : "written to the NVRAM",
+               (unsigned long)p[3], (unsigned long)p[1]);
+    else if (r == 0)
+        printf("no save in the NVRAM (%lu us)\n", (unsigned long)p[3]);
+    else
+        printf("%s, case %lu, error %ld (game.h) or 0x%lx (%lu us)\n",
+               r == GAME_SAVE_FULL ? "NVRAM FULL" : "failed", (unsigned long)p[1], (long)r,
+               (unsigned long)r, (unsigned long)p[3]);
+}
+
 void game_log_flush(game *g)
 {
     uint32 k = 0;
@@ -281,6 +310,7 @@ void game_log_flush(game *g)
             printf("Bank: frame %lu: bank %lu read in %lu us\n", (unsigned long)body[0],
                    (unsigned long)body[1], (unsigned long)body[2]);
             break;
+        case GAME_REC_SAVE:   print_save(body); break;
         default: break;
         }
         k += 1 + (head & 0xFFFFFFu);
@@ -403,6 +433,94 @@ static uint32 cart_to_zone(game *g)
     return 1;
 }
 
+/* The save function on the cartridge RAM (game_set_saves), from t0 on;
+ * what it did is recorded, or printed with print when outside the run.
+ * Returns the clock at its end. */
+static uint32 save_run(game *g, uint32 why, uint32 t0, uint32 print)
+{
+    int32 r = g->save_fn(g->save_arg, g->cart_ram, g->cart_ram_size, why);
+    uint32 t1 = plat_usec_now();
+    uint32 rec[4];
+    uint32 *p = rec;
+
+    if (why != GAME_SAVE_LOAD) {
+        g->save_steps = (why == GAME_SAVE_STEP && r == GAME_SAVE_MORE);
+        if (g->save_steps)
+            return t1;
+        g->save_wait = (r == GAME_SAVE_WAIT);
+        if (r == GAME_SAVE_READY) {
+            g->save_due = g->frame | 1;
+            return t1;
+        }
+        g->save_due = 0;
+        if (r == 0 || r == GAME_SAVE_WAIT)
+            return t1;
+        g->save_last = r;
+        if (r > 0)
+            g->save_est_us = t1 - t0;
+    }
+    if (r == GAME_SAVE_FULL)
+        g->save_note = SAVE_NOTE_FRAMES;
+    if (!print)
+        p = rec_alloc(g, GAME_REC_SAVE, sizeof(rec));
+    if (p != NULL) {
+        p[0] = g->frame;
+        p[1] = why;
+        p[2] = (uint32)r;
+        p[3] = t1 - t0;
+        if (print)
+            print_save(p);
+    }
+    return t1;
+}
+
+/* At the end of the spare time, with FRAME_MARGIN_US kept: the
+ * cartridge RAM looked at every SAVE_LOOK_FRAMES frames, a block per frame
+ * in SAVE_STEP_US at least, unless nothing could have changed it since the
+ * last look started (not seen shown at the end of a frame, no hide counted
+ * by the Sega mapper, no other look asked for); a save the look finds finished is looked at whole again and
+ * written in a spare time that holds it (as long as the last write took),
+ * SAVE_WRITE_WAIT frames later at most. Returns the clock. */
+static uint32 save_check(game *g, uint32 now, uint32 deadline_us)
+{
+    const sms_mem *m = &g->sms->mem;
+    int32 left = (int32)(deadline_us - now) - FRAME_MARGIN_US;
+    uint32 why = GAME_SAVE_STEP;
+
+    g->save_shown |= SMS_RAM_SHOWN(m);
+    if (g->save_due != 0) {
+        if (left < (int32)g->save_est_us && g->frame - g->save_due < SAVE_WRITE_WAIT)
+            return now;
+        why = GAME_SAVE_LOOK;
+    } else if (!g->save_steps) {
+        if (g->frame - g->save_look < SAVE_LOOK_FRAMES || left < SAVE_STEP_US)
+            return now;
+        if (!g->save_wait && !g->save_shown && m->ram_hides == g->save_hides)
+            return now;
+        g->save_hides = m->ram_hides;
+        g->save_shown = 0;
+        g->save_look = g->frame;
+    } else if (left < SAVE_STEP_US) {
+        return now;
+    }
+    return save_run(g, why, now, 0);
+}
+
+void game_set_saves(game *g, game_save_fn fn, void *arg)
+{
+    g->save_fn = fn;
+    g->save_arg = arg;
+    g->save_est_us = g->cart_ram_size * 3 / 8;    /* about what the model gives */
+    if (g->cart_ram != NULL)
+        save_run(g, GAME_SAVE_LOAD, plat_usec_now(), 1);
+}
+
+void game_save(game *g)
+{
+    if (g->save_fn != NULL && g->cart_ram != NULL)
+        save_run(g, GAME_SAVE_END, plat_usec_now(), 0);
+}
+
 /* The cartridge RAM, the first time the mapper shows it (called from its
  * write handler, inside the run): 16 KiB of the DRAM left above the
  * reserve when there are; else the end of the renderer's room while it is
@@ -438,6 +556,9 @@ static uint8 *cart_ram_get(void *arg)
         g->cart_ram_size = 0;
     }
     g->cart_ram = ram;
+    /* The save kept for the image (a frame of the boot pays the read). */
+    if (ram != NULL && g->save_fn != NULL)
+        save_run(g, GAME_SAVE_LOAD, plat_usec_now(), 0);
     return ram;
 }
 
@@ -1070,9 +1191,12 @@ uint32 game_spare_time(game *g, uint32 deadline_us)
             break;
         now = g->jit.now_us;
     }
-    /* Then the code after the blocks cut on their size. */
+    /* Then the code after the blocks cut on their size, and the cartridge
+     * RAM looked at in what is left. */
     while (z80j_chain(&g->jit, now, now - origin, FRAME_MARGIN_US))
         now = g->jit.now_us;
+    if (g->save_fn != NULL && g->cart_ram != NULL)
+        now = save_check(g, now, deadline_us);
 #if Z80J_CHURN
     /* Diagnostic build: code run lately moved and translated again
      * (z80j_churn), with the display on (the spare time of the frames
@@ -1212,10 +1336,12 @@ void game_log_summary(game *g)
            (unsigned long)d.io.counter_r, (unsigned long)d.io.psg_w,
            (unsigned long)d.io.pad_r);
     printf("Code buffer: %lu zones, %lu lent by the picture's bitmaps taken back at frame %ld "
-           "(%lu blocks emptied, %lu us); cartridge RAM place %lu (game.h), shown at frame %ld\n",
+           "(%lu blocks emptied, %lu us); cartridge RAM place %lu (game.h), shown at frame %ld, "
+           "hidden %lu times\n",
            (unsigned long)g->zones, (unsigned long)g->lent, (long)g->room_frame,
            (unsigned long)g->room_blocks, (unsigned long)g->room_us,
-           (unsigned long)g->cart_where, (long)g->cart_frame);
+           (unsigned long)g->cart_where, (long)g->cart_frame,
+           (unsigned long)g->sms->mem.ram_hides);
     if (g->sms->mem.bank_tab != 0) {
         const sms_banks *t = g->sms->mem.bank_tab;
 

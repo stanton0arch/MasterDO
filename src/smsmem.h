@@ -99,7 +99,12 @@ typedef struct {
     uint32       slot_ram_e[3]; /* read table entry of that RAM, as mapped */
     uint8     *(*ram_get)(void *arg); /* gives the cartridge RAM (sms_mem_ram_source) */
     void        *ram_arg;
+    uint32       ram_hides; /* writes that hid the cartridge RAM again (Sega mapper) */
 } sms_mem;
+
+/* Does slot 2 show cartridge RAM now? (Its first 256-byte page showing
+ * RAM is before the end of the slot, page $C0.) */
+#define SMS_RAM_SHOWN(s) ((s)->slot_ram[2] < 0xC0u)
 
 /* The mapper an image calls for, from its header (SMS_MAPPER_*); bank1
  * is the address of its second bank. */
@@ -129,7 +134,13 @@ const uint8 *sms_mem_bank(const sms_mem *s, uint32 b);
 
 /* The cartridge RAM given at its first showing: get(arg), called from the
  * mapper's write handler (inside the run), returns cart_ram_size bytes
- * filled with zeros, or 0 (the cartridge then has no RAM). */
+ * filled with zeros, or 0 (the cartridge then has no RAM).
+ *
+ * The Sega mapper counts in ram_hides the writes to $FFFC that hide the
+ * RAM again (sms_mem_write, which every change of $FFFC reaches): a game
+ * shows its battery RAM to write its save and hides it when the save is
+ * done. The Codemasters mapper counts none (its RAM is seen shown or not
+ * between frames, SMS_RAM_SHOWN). */
 void   sms_mem_ram_source(sms_mem *s, uint8 *(*get)(void *arg), void *arg);
 
 /* The cartridge RAM moved to ram, its bytes already copied there by the

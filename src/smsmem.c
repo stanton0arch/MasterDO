@@ -249,6 +249,8 @@ uint32 sms_mem_write(z80j_machine *m, uint32 addr, uint32 value)
         s->ctx->mram[addr & 0x1FFFu] = (uint8)value;
         if (addr >= 0xFFFCu && s->mapper != SMS_MAPPER_CODEMASTERS) {
             uint32 r = addr - 0xFFFCu;
+            if (r == 0)         /* a write that hides the cartridge RAM again */
+                s->ram_hides += (s->reg[0] & ~value & 0x08u) >> 3;
             s->reg[r] = value;
             map_slot(s, r == 0 ? 2 : r - 1);
             /* $FFFC maps cartridge RAM (page kinds change), the others

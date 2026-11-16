@@ -1187,6 +1187,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-split")) args[28] = 1;
         else if (!strcmp(argv[i], "-cache") && i + 1 < argc) args[29] = atoi(argv[++i]) + 1;
         else if (!strcmp(argv[i], "-whole")) args[30] = 1;
+        else if (!strcmp(argv[i], "-saves")) args[31] = 1;
         else if (!strcmp(argv[i], "-dramfree") && i + 1 < argc) { dram_free = atoi(argv[++i]); dram_given = 1; }
         else if (!strcmp(argv[i], "-aif") && i + 1 < argc) aif = argv[++i];
         else if (!strcmp(argv[i], "-hotzones") && i + 1 < argc) args[12] = atoi(argv[++i]);

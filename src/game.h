@@ -95,6 +95,7 @@ typedef struct {
 #define GAME_REC_LONG   3
 #define GAME_REC_HASH   4       /* machine state hashes, one every GAME_HASH_EVERY frames */
 #define GAME_REC_BANK   5       /* a bank read into the bank cache: frame, bank, us */
+#define GAME_REC_SAVE   6       /* a save read or written: frame, GAME_SAVE_*, result, us */
 #define GAME_HASH_EVERY 16
 #define GAME_HASH_PER_REC 8
 #define GAME_TRACE      32      /* last frames kept for the log (ring) */
@@ -156,6 +157,22 @@ typedef struct {
 #define GAME_CART_VRAM   4  /* in VRAM from the set-up */
 #define GAME_CART_DRAM   5  /* from the DRAM left above the reserve */
 #define GAME_CART_BORROW 6  /* from the DRAM reserve, until the frame ends */
+
+/* Native saves (game_set_saves): what the save function is asked to do
+ * with the cartridge RAM, and its results besides the bytes read or
+ * written (0: nothing to do). */
+#define GAME_SAVE_LOAD    0     /* the RAM just given (zero-filled): fill it from the save */
+#define GAME_SAVE_LOOK    1     /* between frames: keep it if the game's save looks done */
+#define GAME_SAVE_END     2     /* the run pauses or ends: keep it if it changed */
+#define GAME_SAVE_STEP    3     /* between frames: a part of a look, never a write */
+#define GAME_SAVE_WAIT    1     /* changed since kept, nothing written: look again */
+#define GAME_SAVE_READY   2     /* a look of steps found a finished save: GAME_SAVE_LOOK */
+#define GAME_SAVE_MORE    3     /* the look of steps goes on */
+#define GAME_SAVE_FULL    (-1)  /* no room in the NVRAM: the save kept there is unchanged */
+#define GAME_SAVE_FOREIGN (-2)  /* a file of that name not made by this program: untouched */
+#define GAME_SAVE_BAD     (-3)  /* a damaged save: the RAM left blank */
+#define GAME_SAVE_MEM     (-4)  /* no memory for the file */
+typedef int32 (*game_save_fn)(void *arg, uint8 *ram, uint32 bytes, uint32 why);
 
 /* Zones of the code buffer given to the hot area, and the number of
  * zones of the code buffer (0: chosen by game_init from the DRAM left);
@@ -262,6 +279,24 @@ typedef struct {
     uint32  cart_ram_size;
     uint32  cart_where;
     uint32  cart_frame;
+    /* Native saves: the save function and its argument (none: no saves),
+     * the RAM hides seen when the last look started, its frame, whether
+     * the RAM was seen shown since, whether the look goes on, whether it
+     * asked for another, the frame (odd) since
+     * which a save waits for its write (0: none), the time a write is
+     * expected to take, the result of the last write (0: none), and the
+     * frames left to show that the NVRAM is full. */
+    game_save_fn save_fn;
+    void   *save_arg;
+    uint32  save_hides;
+    uint32  save_look;
+    uint32  save_shown;
+    uint32  save_steps;
+    uint32  save_wait;
+    uint32  save_due;
+    uint32  save_est_us;
+    int32   save_last;
+    uint32  save_note;
     uint8  *pool;           /* the renderer's bitmaps when they follow the code buffer */
     uint32  hot_vram;       /* entry counters allocated in VRAM */
     uint32  pad_log_vram;   /* pad log allocated in VRAM */
@@ -314,6 +349,21 @@ void  game_set_name(game *g, const char *name);
 /* The PSG voices the frames send their registers to (NULL: none). The
  * caller silences them when the run pauses or ends. */
 void  game_set_sound(game *g, psg_dsp *snd);
+
+/* Native saves: fn(arg, ram, bytes, why) fills the cartridge RAM from the
+ * save kept for the image when the RAM is given (now when it is in VRAM
+ * from the set-up, else the first time the mapper shows it), looks at it
+ * about once a second in spare time, a part per frame (not when nothing
+ * could have changed it: Sega mapper, not shown since the last look,
+ * which asked for no other), writes a save it finds finished in a spare
+ * time that holds the write, and keeps it at game_save; it returns the
+ * bytes read or written, 0 for nothing to do, GAME_SAVE_WAIT, _READY,
+ * _MORE, or a negative error (GAME_SAVE_*, or a system error). Called
+ * once, before the run. */
+void  game_set_saves(game *g, game_save_fn fn, void *arg);
+/* Keeps the cartridge RAM if it changed: when the run pauses or ends,
+ * between frames. */
+void  game_save(game *g);
 
 /* Spare time at the end of a frame: translates queued code ahead while a
  * translation still fits before deadline_us (a clock value: the end of
