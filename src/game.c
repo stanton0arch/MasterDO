@@ -77,12 +77,14 @@
 /* Native saves: a look at the cartridge RAM starts every SAVE_LOOK_FRAMES
  * frames at most and hashes a block of 1 KiB per frame in a spare time of
  * SAVE_STEP_US at least (about 0.1 ms each); a save found finished waits
- * SAVE_WRITE_WAIT frames at most for a spare time that holds its write;
- * the NVRAM full message stays on the screen for SAVE_NOTE_FRAMES
- * frames. */
+ * SAVE_WRITE_WAIT frames at most for a spare time that holds its write
+ * (short: a write may take longer than any spare time, as the NVRAM of
+ * some machines does, and the save is lost if the console is reset
+ * before it); the NVRAM full message stays on the screen for
+ * SAVE_NOTE_FRAMES frames. */
 #define SAVE_LOOK_FRAMES 60
 #define SAVE_STEP_US    400
-#define SAVE_WRITE_WAIT 300
+#define SAVE_WRITE_WAIT 15
 #define SAVE_NOTE_FRAMES 180
 
 static uint32 percent(uint32 part, uint32 whole);

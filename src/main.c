@@ -641,7 +641,7 @@ int main(int argc, char **argv)
     /* The banner names the build by its latest changes (the oldest ones
      * dropped as new ones come: its bytes are DRAM the code buffer may
      * need). */
-    printf("masterdo: battery RAM saved in the NVRAM, no boot benchmarks; code past "
+    printf("masterdo: a finished save written to the NVRAM within 0.25 s; code past "
            "blocks cut on their size translated in spare time once reached; bank cache "
            "with four code zones of DRAM\n");
     if (plat_init(&plat) < 0)
