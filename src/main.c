@@ -12,10 +12,11 @@
  * presenter thread (platform.c) to show at a VBL; the emulation may thus
  * run a frame ahead of the display. game.c records the emulation, update
  * and drawing times, and the frames where the pad changed, written out
- * when the run pauses or ends (the pad changes as a pad script that the
- * cycle model replays). Game Gear images (the .gg files, or a Game Gear
- * region in the header) run in the Game Gear mode: the LCD window of 160 x 144 pixels in a black case, 12-bit
- * colours, P held as the START button. Pad during
+ * at the debug pause (C) or when the emulation stops (the pad changes as
+ * a pad script that the cycle model replays). Game Gear images (the .gg
+ * files, or a Game Gear region in the header) run in the Game Gear mode:
+ * the LCD window of 160 x 144 pixels in a black case, 12-bit colours, P
+ * held as the START button. Pad during
  * the run: D-pad, A (button 1) and B (button 2) for the SMS pad, P for
  * PAUSE (START on the Game Gear); L saves the machine's state in the
  * NVRAM and R puts it back (state.c: one state for the console, kept
@@ -25,8 +26,10 @@
  * compare with the cels (A: reference, B: cels, R: presentation between
  * the queue, where a presenter thread shows the finished screens one per
  * VBL with the emulation working a frame ahead, and the direct mode,
- * present and wait for the VBL after each frame; C: resume); X ends the
- * run. Results go to the debug log and to the screen. The PSG
+ * present and wait for the VBL after each frame; C: resume), and writes
+ * the run's records to the debug log; STOP (X) pauses the run on a black
+ * screen naming the image and the display, where A resumes it and STOP
+ * goes back to the menu. The PSG
  * registers of each frame drive voices on the DSP (psg.c), silenced
  * whenever the run pauses or ends. The cartridge's battery RAM is kept
  * in a file of the NVRAM (save.c): read when the RAM is given, written
@@ -122,9 +125,16 @@ static void show_message(platform *p, const char *text)
     plat_present(p);
 }
 
-static uint32 percent_of(uint32 us, uint32 frame_us)
+/* Copies a name as shown: underscores as spaces. */
+static char *shown(char *to, const char *name)
 {
-    return us * 100u / frame_us;
+    char *t = to;
+
+    do {
+        *t = (*name == '_') ? ' ' : *name;
+        t++;
+    } while (*name++ != 0);
+    return to;
 }
 
 /* SMS pad bits for the 3DO buttons held. */
@@ -304,7 +314,7 @@ static uint32 show_snapshot(platform *p, app_state *st, uint32 prev)
             if (st->pic_y + (int32)st->pic_h + 4 + 16 <= p->height)
                 dbgview_palette(v, plat_pixels(p, p->back), p->width, st->pic_x,
                                 st->pic_y + (int32)st->pic_h + 4);
-            sprintf(buf, "PAUSED FRAME %lu: %s   A/B: VIEW  C: RESUME  X: END",
+            sprintf(buf, "PAUSED FRAME %lu: %s   A/B: VIEW  C: RESUME  STOP: MENU",
                     (unsigned long)g.frame,
                     which == 1 ? "CELS" : no_mem ? "NO MEMORY" : "CPU REFERENCE");
             text_line(p, p->back, 0, COLOR_TITLE, buf);
@@ -346,6 +356,46 @@ static void reset_borders(app_state *st)
 
     for (i = 0; i < PLAT_NUM_SCREENS; i++)
         st->border[i] = NO_COLOR;
+}
+
+/* The screen of STOP: black, the image's name and size and the display;
+ * A resumes the run (returns 0, once A is released: it is also the pad's
+ * button 1), STOP leaves it (returns 1). With a problem (the image not
+ * loaded, the run stopped), the problem instead of A's line, and only
+ * STOP. */
+static uint32 stop_screen(platform *p, const app_state *st, const char *problem)
+{
+    int32 s = p->back;
+    uint32 prev = plat_pad_state();
+    char name[ROM_NAME_LEN];
+    char buf[64];
+
+    plat_reset_clip(p);
+    plat_clear(p, s);
+    text_line(p, s, 0, COLOR_TITLE, "MASTERDO");
+    sprintf(buf, "%s : %luK", shown(name, st->place.name),
+            (unsigned long)((st->place.size + 1023) / 1024));
+    text_line(p, s, 1, COLOR_TEXT, buf);
+    sprintf(buf, "%s %ldX%ld", p->is_pal ? "PAL" : "NTSC", (long)p->width, (long)p->height);
+    text_line(p, s, 2, COLOR_TEXT, buf);
+    text_line(p, s, 4, problem != NULL ? COLOR_BAD : COLOR_HEAD,
+              problem != NULL ? problem : "A: RESUME THE GAME");
+    text_line(p, s, 5, COLOR_HEAD, "STOP: BACK TO THE MASTERDO MAIN MENU");
+    plat_present(p);
+    for (;;) {
+        uint32 held = plat_pad_state();
+        uint32 pressed = held & ~prev;
+
+        prev = held;
+        if (pressed & ControlX)
+            return 1;
+        if ((pressed & ControlA) && problem == NULL) {
+            while (plat_pad_state() & ControlA)
+                plat_wait_vbl(p);
+            return 0;
+        }
+        plat_wait_vbl(p);
+    }
 }
 
 /* Between frames: the machine's state saved to the NVRAM, or loaded
@@ -451,8 +501,22 @@ static void run_game(platform *p, app_state *st)
 
         game_pad_time(&g, now - t0);
         prev = held;
-        if (pressed & ControlX)
-            break;
+        if (pressed & ControlX) {
+            plat_drain(p);
+            psg_mute(&snd);
+            game_save(&g);
+            if (stop_screen(p, st, NULL))
+                break;
+            prev = plat_pad_state();
+            reset_borders(st);
+            set_picture(p, st, st->pic_w, st->pic_h);
+            render_forget_picture(g.rd);
+            shown = plat_usec_now();
+            last = shown;
+            next = shown;
+            longs = p->long_presents;
+            continue;
+        }
         if (pressed & (ControlLeftShift | ControlRightShift)) {
             state_op(p, st, (pressed & ControlLeftShift) == 0);
             shown = plat_usec_now();
@@ -497,10 +561,15 @@ static void run_game(platform *p, app_state *st)
          * Game Gear. */
         if (game_frame(&g, sms_buttons(held),
                        ((st->gg ? held : pressed) & ControlStart) != 0, now) != 0) {
+            /* The emulation stopped: its records and summary go to the
+             * log (a fault to report). */
             plat_drain(p);
-            plat_reset_clip(p);
+            psg_mute(&snd);
+            game_save(&g);
+            game_log_summary(&g);
+            log_pace(st);
             sprintf(buf, "RUN STOPPED AT PC %04lX", (unsigned long)g.stop_pc);
-            show_message(p, buf);
+            stop_screen(p, st, buf);
             break;
         }
         if (render_win_h(g.rd) != st->pic_h || render_win_w(g.rd) != st->pic_w) {
@@ -624,8 +693,6 @@ static void run_game(platform *p, app_state *st)
     psg_mute(&snd);
     plat_reset_clip(p);
     game_save(&g);
-    game_log_summary(&g);
-    log_pace(st);
 }
 
 /* The display and the memory left, for the screens: the console has no
@@ -647,24 +714,12 @@ static void memory_line(platform *p, int32 screen, int32 line, uint32 dram, uint
  * A browser of the roms directory: a folder's folders, then its images,
  * 20 lines a page. Up / Down one line (held: a repeat that speeds up),
  * Left / Right one page, L / R the previous / next initial letter, A or
- * START opens the folder or runs the image, B goes up, X quits (at the
- * root). The folder's list is read when the folder is shown, into a block
+ * START opens the folder or runs the image, B goes up, STOP (X) quits (at
+ * the root). The folder's list is read when the folder is shown, into a block
  * freed before the image loads. Underscores are shown as spaces: the names
  * under the CD's root directory cannot hold spaces (the build's dependency
  * list would split them).
  *------------------------------------------------------------------------*/
-
-/* Copies a name as shown: underscores as spaces. */
-static char *shown(char *to, const char *name)
-{
-    char *t = to;
-
-    do {
-        *t = (*name == '_') ? ' ' : *name;
-        t++;
-    } while (*name++ != 0);
-    return to;
-}
 
 static void draw_menu(platform *p, const app_state *st, const rom_dir *d, int32 cur)
 {
@@ -679,10 +734,10 @@ static void draw_menu(platform *p, const app_state *st, const rom_dir *d, int32 
 
     plat_clear(p, s);
 #if Z80J_DIAG || Z80J_CHURN
-    sprintf(buf, "MASTERDO DIAGNOSTIC %d  A:OPEN  %s", (int)Z80J_DIAG,
-            root ? "X:QUIT" : "B:BACK");
+    sprintf(buf, "MASTERDO DIAGNOSTIC %d A:OPEN %s", (int)Z80J_DIAG,
+            root ? "STOP:QUIT" : "B:BACK");
 #else
-    sprintf(buf, "MASTERDO   A:OPEN  %s  L/R:LETTER", root ? "X:QUIT" : "B:BACK");
+    sprintf(buf, "MASTERDO  A:OPEN  %s  L/R:LETTER", root ? "STOP:QUIT" : "B:BACK");
 #endif
     text_line(p, s, 0, COLOR_TITLE, buf);
     memory_line(p, s, 1, st->dram_free, st->vram_free);
@@ -896,69 +951,9 @@ static int32 rom_menu(platform *p, app_state *st)
     return res;
 }
 
-/*--------------------------------------------------------------------------
- * Results
- *------------------------------------------------------------------------*/
-
-static void draw_results(platform *p, const app_state *st)
-{
-    char buf[64];
-    int32 s = p->back;
-    int32 n = 0;
-    uint32 frames = g.frame ? g.frame : 1;
-
-    plat_clear(p, s);
-    text_line(p, s, n++, COLOR_TITLE, "MASTERDO - RESULTS");
-    if (st->rom.size <= 0)
-        sprintf(buf, "ROM not loaded (0x%lx)", (unsigned long)st->rom.size);
-    else
-        sprintf(buf, "%s: %ld bytes", st->rom.name, (long)st->rom.size);
-    text_line(p, s, n++, st->rom.size > 0 ? COLOR_TEXT : COLOR_BAD, buf);
-    memory_line(p, s, n++, st->run_free, st->run_vram);
-
-    text_line(p, s, n++, COLOR_HEAD, "CARTRIDGE RUN WITH CELS (US PER FRAME)");
-    if (!st->have_game) {
-        text_line(p, s, n++, COLOR_BAD, " not run");
-    } else {
-        uint32 all = g.all_total_us / frames;
-
-        sprintf(buf, " code: %lu blocks, %lu busy loops", (unsigned long)g.rom_blocks,
-                (unsigned long)g.jit.stats.busy_loops);
-        text_line(p, s, n++, COLOR_TEXT, buf);
-        if (g.status != 0) {
-            sprintf(buf, " stopped: exit %ld at %04lX", (long)g.status,
-                    (unsigned long)g.stop_pc);
-            text_line(p, s, n++, COLOR_BAD, buf);
-        }
-        sprintf(buf, " %lu frames: emulation %lu, update %lu", (unsigned long)g.frame,
-                (unsigned long)(g.total_us / frames), (unsigned long)(g.upd_total_us / frames));
-        text_line(p, s, n++, COLOR_TEXT, buf);
-        sprintf(buf, " draw %lu, sound %lu, total %lu = %lu pct",
-                (unsigned long)(g.draw_total_us / frames),
-                (unsigned long)(g.snd_total_us / frames), (unsigned long)all,
-                (unsigned long)percent_of(all, g.frame_us));
-        text_line(p, s, n++, all <= g.frame_us ? COLOR_GOOD : COLOR_BAD, buf);
-        sprintf(buf, " worst %lu us, %lu over %lu us", (unsigned long)g.max_all_us,
-                (unsigned long)g.over, (unsigned long)g.frame_us);
-        text_line(p, s, n++, g.over == 0 ? COLOR_GOOD : COLOR_TEXT, buf);
-        if (g.save_last != 0) {
-            if (g.save_last > 0)
-                sprintf(buf, " save written to NVRAM: %ld bytes", (long)g.save_last);
-            else
-                sprintf(buf, " save NOT written: %s", g.save_last == GAME_SAVE_FULL ?
-                        "NVRAM FULL" : "error");
-            text_line(p, s, n++, g.save_last > 0 ? COLOR_GOOD : COLOR_BAD, buf);
-        }
-    }
-    text_line(p, s, n + 1, COLOR_HEAD, st->have_game ? "B: RUN AGAIN   X: BACK TO THE MENU"
-                                                     : "X: BACK TO THE MENU");
-    plat_present(p);
-}
-
 int main(int argc, char **argv)
 {
     platform plat;
-    uint32 prev;
 
     (void)argc;
     (void)argv;
@@ -999,9 +994,9 @@ int main(int argc, char **argv)
     /* The banner names the build by its latest changes (the oldest ones
      * dropped as new ones come: its bytes are DRAM the code buffer may
      * need). */
-    printf("masterdo: ROM menu by folders, underscores shown as spaces; 60 emulated frames "
-           "per second on 50 Hz displays, one picture in six not shown; one savestate kept in "
-           "the NVRAM (L saves, R loads, C pauses)\n");
+    printf("masterdo: STOP pauses the game (A resumes, STOP goes back to the menu); ROM menu "
+           "by folders, underscores shown as spaces; 60 emulated frames per second on 50 Hz "
+           "displays, one picture in six not shown\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);
@@ -1044,8 +1039,8 @@ int main(int argc, char **argv)
         st.have_game = 0;
         if (rom_load(&st.rom, st.place.dir, st.place.name, st.place.size) == 0)
             rom_log(&st.rom);
-        /* The memory left after a failed load (the results screen shows
-         * it); replaced by the run's figures once the game is set up. */
+        /* The memory left after a failed load; replaced by the run's
+         * figures once the game is set up. */
         plat_mem_free(&st.run_free, &st.run_vram);
         st.gg = st.rom.gg;
         if (st.rom.data != NULL && st.rom.size >= 0x4000 &&
@@ -1067,28 +1062,14 @@ int main(int argc, char **argv)
                    (long)(((plat.height - (int32)render_win_h(g.rd)) / 2) & ~1));
         }
 
-        for (;;) {
-            if (st.have_game) {
-                game_reset(&g);
-                run_game(&plat, &st);
-            }
-            draw_results(&plat, &st);
-            prev = plat_pad_state();
-            for (;;) {
-                uint32 held = plat_pad_state();
-                uint32 pressed = held & ~prev;
-
-                prev = held;
-                if (pressed & ControlX)
-                    goto leave;
-                if ((pressed & ControlB) && st.have_game)
-                    break;
-                plat_wait_vbl(&plat);
-            }
-        }
-leave:
-        if (st.have_game)
+        if (st.have_game) {
+            game_reset(&g);
+            run_game(&plat, &st);
             game_free(&g);
+        } else {
+            stop_screen(&plat, &st, st.rom.data == NULL ? "CANNOT LOAD THIS IMAGE"
+                                                        : "CANNOT RUN THIS IMAGE");
+        }
         rom_unload(&st.rom);
     }
 
