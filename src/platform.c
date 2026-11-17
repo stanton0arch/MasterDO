@@ -216,6 +216,7 @@ Err plat_init(platform *p)
     memset(p, 0, sizeof(*p));
     p->vbl_ior = -1;
     p->vram_ior = -1;
+    p->timer_ior = -1;
 
     err = OpenGraphicsFolio();
     if (err < 0) {
@@ -296,6 +297,13 @@ Err plat_init(platform *p)
     p->vram_ior = GetVRAMIOReq();
     if (p->vram_ior < 0)
         printf("WARNING: GetVRAMIOReq failed (0x%lx)\n", (unsigned long)p->vram_ior);
+    /* A 50 Hz display shows a 60 Hz machine whose frames follow the
+     * clock: the main task sleeps on the timer device between them. */
+    if (p->is_pal) {
+        p->timer_ior = CreateTimerIOReq();
+        if (p->timer_ior < 0)
+            printf("WARNING: CreateTimerIOReq failed (0x%lx)\n", (unsigned long)p->timer_ior);
+    }
 
     p->back = 0;
     p->displayed = -1;
@@ -319,6 +327,8 @@ Err plat_init(platform *p)
 void plat_shutdown(platform *p)
 {
     presenter_stop(p);
+    if (p->timer_ior >= 0)
+        DeleteTimerIOReq(p->timer_ior);
     KillControlPad();
     if (p->bm_mem != NULL)
         delete_group(p);
@@ -531,6 +541,12 @@ void plat_wait_vbl(const platform *p)
 {
     if (p->vbl_ior >= 0)
         WaitVBL(p->vbl_ior, 1);
+}
+
+void plat_sleep(const platform *p, uint32 us)
+{
+    if (p->timer_ior >= 0)
+        WaitTime(p->timer_ior, 0, us);
 }
 
 void plat_mem_free(uint32 *dram, uint32 *vram)

@@ -32,6 +32,14 @@
  * in a file of the NVRAM (save.c): read when the RAM is given, written
  * when a look between frames finds a save the game has finished, and
  * when the run pauses or ends.
+ *
+ * On a 50 Hz (PAL) display the machine still runs 60 frames a second, as
+ * on an NTSC console: the frames follow the clock, one per NTSC period
+ * (the main task sleeps on the timer device between them), while the
+ * presenter thread shows one picture per VBL; the picture of a frame that
+ * starts while the presentation queue is full is not drawn, one in six.
+ * The games and their music keep their speed, the pictures shown are
+ * spaced unevenly in game time (a regular judder on scrolls).
  */
 
 #include "platform.h"
@@ -78,6 +86,9 @@ typedef struct {
     uint32             gg;          /* the cartridge runs in the Game Gear mode */
     uint32             border[PLAT_NUM_SCREENS];  /* colour each screen is filled with */
     uint32             direct;      /* presentation without the queue */
+    uint32             pal60;       /* 50 Hz display: 60 frames a second on the clock */
+    uint32             dropped;     /* the run's pictures not shown (pal60) */
+    uint32             late;        /* its frames started over a period late (pal60) */
     uint32             draw_errors;
     const char        *note;        /* told over the next pictures, or NULL */
     uint32             note_left;   /* frames it stays */
@@ -389,18 +400,32 @@ static void state_op(platform *p, app_state *st, uint32 load)
     render_forget_picture(g.rd);
 }
 
+/* 50 Hz display: the frames emulated since the reset, the pictures not
+ * shown and the frames that started over a period late (the clock then
+ * followed from there: game time lost), for the log. */
+static void log_pace(const app_state *st)
+{
+    if (st->pal60)
+        printf("Pace: %lu frames emulated on the clock, %lu pictures not shown, "
+               "%lu frames started over a period late\n", (unsigned long)g.frame,
+               (unsigned long)st->dropped, (unsigned long)st->late);
+}
+
 /* The frame loop looks at the clock (a kernel call of tens of
  * microseconds on the console) at the end of the pad read, which starts
  * the emulation, at the ends of the emulation, of the picture update
  * (the start of the drawing) and of the drawing, and in the spare time.
  * A frame starts at the loop's last look: the end of the previous
  * frame's spare time, or the presentation that freed the screen the loop
- * waited for (the presenter thread looks at the clock then). */
+ * waited for (the presenter thread looks at the clock then). On a 50 Hz
+ * display a frame starts at its time on the clock (the end of the sleep
+ * before it), or at the last look when it starts late. */
 static void run_game(platform *p, app_state *st)
 {
     uint32 prev = plat_pad_state();
     uint32 shown = plat_usec_now();     /* direct mode: return of the last presentation */
     uint32 last = shown;                /* the loop's last look at the clock */
+    uint32 next = shown;                /* 50 Hz display: the frame's time on the clock */
     uint32 longs = p->long_presents;    /* queued mode: long presents seen */
     uint32 queued = plat_has_presenter(p) && !st->direct;
     char buf[48];
@@ -408,6 +433,8 @@ static void run_game(platform *p, app_state *st)
     reset_borders(st);
     st->draw_errors = 0;
     st->note_left = 0;
+    st->dropped = 0;
+    st->late = 0;
     set_picture(p, st, render_win_w(g.rd), render_win_h(g.rd));
     render_forget_picture(g.rd);
     for (;;) {
@@ -416,6 +443,8 @@ static void run_game(platform *p, app_state *st)
         uint32 pressed = held & ~prev;
         uint32 draw_us;
         uint32 again;
+        uint32 drop = 0;                /* the frame's picture is not shown */
+        uint32 fresh;                   /* it is drawn */
         uint32 now = plat_usec_now();
 
         game_pad_time(&g, now - t0);
@@ -426,6 +455,7 @@ static void run_game(platform *p, app_state *st)
             state_op(p, st, (pressed & ControlLeftShift) == 0);
             shown = plat_usec_now();
             last = shown;
+            next = shown;
             longs = p->long_presents;
             continue;
         }
@@ -434,6 +464,7 @@ static void run_game(platform *p, app_state *st)
             psg_mute(&snd);
             game_save(&g);
             game_log_flush(&g);
+            log_pace(st);
             prev = show_snapshot(p, st, prev);
             if (prev & ControlX)
                 break;
@@ -443,8 +474,21 @@ static void run_game(platform *p, app_state *st)
             render_forget_picture(g.rd);
             shown = plat_usec_now();
             last = shown;
+            next = shown;
             longs = p->long_presents;
             continue;
+        }
+        /* 50 Hz display: the queue takes one picture per VBL, 50 of the 60
+         * frames a second; a frame that starts while it is full is not
+         * shown (one in six, wherever the VBLs fall), and the screens never
+         * hold the main task. In the direct mode, the sixth of every six. */
+        if (st->pal60) {
+            if (!queued)
+                drop = (g.frame % 6) == 5;
+            else if (plat_free_screen(p))
+                plat_next_screen(p);
+            else
+                drop = 1;
         }
 
         /* P: the PAUSE button when pressed, or START while held on the
@@ -466,14 +510,21 @@ static void run_game(platform *p, app_state *st)
         /* A picture identical to the previous one is not drawn: the screen
          * holding it is shown once more. */
         again = render_repeated(g.rd);
-        draw_us = again ? 0 : draw_picture(p, st);
+        if (drop) {
+            /* The next picture repeats only a picture the screens hold. */
+            if (!again)
+                render_forget_picture(g.rd);
+            st->dropped++;
+        }
+        fresh = !again && !drop;
+        draw_us = fresh ? draw_picture(p, st) : 0;
         /* A save the NVRAM had no room for, or the result of a
          * savestate, told over the picture for a few seconds (a picture
          * shown again already holds it); when it ends, the screens get
          * their border again and the next picture is drawn. */
         if (g.save_note != 0) {
             g.save_note--;
-            if (!again)
+            if (fresh)
                 plat_text(p, p->back, 4, 4, "SAVE: NVRAM FULL", COLOR_BAD);
             if (g.save_note == 0) {
                 reset_borders(st);
@@ -482,7 +533,7 @@ static void run_game(platform *p, app_state *st)
         }
         if (st->note_left != 0) {
             st->note_left--;
-            if (!again)
+            if (fresh)
                 plat_text(p, p->back, 4, 14, st->note, st->note_color);
             if (st->note_left == 0) {
                 reset_borders(st);
@@ -499,7 +550,32 @@ static void run_game(platform *p, app_state *st)
             printf("Present: frame %lu: the presenter thread fails, direct mode\n",
                    (unsigned long)g.frame);
         }
-        if (queued) {
+        if (queued && st->pal60) {
+            /* 50 Hz display: the next frame's time is one NTSC period
+             * later on the clock, wherever the VBLs fall. A frame that ends
+             * past it is followed at once (later frames catch up), but a
+             * frame that would start over a period late starts the clock
+             * again from there. */
+            if (!drop) {
+                if (again)
+                    plat_queue_again(p);
+                else
+                    plat_queue(p);
+            }
+            next += PLAT_NTSC_FRAME_US;
+            last = game_spare_time(&g, next);
+            if ((int32)(next - last) > 0) {
+                plat_sleep(p, next - last);
+                last = next;
+            } else if ((int32)(last - next) > PLAT_NTSC_FRAME_US) {
+                next = last;
+                st->late++;
+            }
+            if (p->long_presents != longs) {
+                longs = p->long_presents;
+                game_note_long_vbl(&g, p->long_us);
+            }
+        } else if (queued) {
             uint32 deadline = t0 + p->frame_us;
 
             /* The finished screen goes to the presenter at once. When
@@ -525,6 +601,10 @@ static void run_game(platform *p, app_state *st)
                 longs = p->long_presents;
                 game_note_long_vbl(&g, p->long_us);
             }
+        } else if (drop) {
+            /* Direct mode, 50 Hz display: a frame not shown ends with its
+             * update, and the next one follows. */
+            last = g.upd_end_us;
         } else {
             game_spare_time(&g, t0 + p->frame_us);
             if (again)
@@ -543,6 +623,7 @@ static void run_game(platform *p, app_state *st)
     plat_reset_clip(p);
     game_save(&g);
     game_log_summary(&g);
+    log_pace(st);
 }
 
 /* The display and the memory left, for the screens: the console has no
@@ -663,10 +744,10 @@ static void draw_results(platform *p, const app_state *st)
         sprintf(buf, " draw %lu, sound %lu, total %lu = %lu pct",
                 (unsigned long)(g.draw_total_us / frames),
                 (unsigned long)(g.snd_total_us / frames), (unsigned long)all,
-                (unsigned long)percent_of(all, p->frame_us));
-        text_line(p, s, n++, all <= p->frame_us ? COLOR_GOOD : COLOR_BAD, buf);
+                (unsigned long)percent_of(all, g.frame_us));
+        text_line(p, s, n++, all <= g.frame_us ? COLOR_GOOD : COLOR_BAD, buf);
         sprintf(buf, " worst %lu us, %lu over %lu us", (unsigned long)g.max_all_us,
-                (unsigned long)g.over, (unsigned long)p->frame_us);
+                (unsigned long)g.over, (unsigned long)g.frame_us);
         text_line(p, s, n++, g.over == 0 ? COLOR_GOOD : COLOR_TEXT, buf);
         if (g.save_last != 0) {
             if (g.save_last > 0)
@@ -726,13 +807,20 @@ int main(int argc, char **argv)
     /* The banner names the build by its latest changes (the oldest ones
      * dropped as new ones come: its bytes are DRAM the code buffer may
      * need). */
-    printf("masterdo: one savestate kept in the NVRAM (L saves, R loads, C pauses); a "
-           "finished save written to the NVRAM within 0.25 s; code past blocks cut on their "
-           "size translated in spare time once reached\n");
+    printf("masterdo: 60 emulated frames per second on 50 Hz displays, one picture in six "
+           "not shown; one savestate kept in the NVRAM (L saves, R loads, C pauses); a "
+           "finished save written to the NVRAM within 0.25 s\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);
     memset(&st, 0, sizeof(st));
+    /* 50 Hz display: the 60 Hz machine paced by the clock (without a timer
+     * request, one emulated frame per VBL, 17 % slow). */
+    st.pal60 = plat.is_pal && plat.timer_ior >= 0;
+    if (plat.is_pal)
+        printf("Pace: %s\n", st.pal60 ? "50 Hz display, 60 emulated frames per second on the "
+               "clock, the picture of one in six not shown" : "50 Hz display, one emulated "
+               "frame per VBL");
     st.pic_x = (plat.width - RENDER_W) / 2;
     st.pic_y = ((plat.height - RENDER_H) / 2) & ~1;
     st.pic_w = RENDER_W;
@@ -773,7 +861,7 @@ int main(int argc, char **argv)
             st.have_game = 1;
             game_set_name(&g, st.rom.name);
             game_set_sound(&g, snd.ok ? &snd : NULL);
-            game_set_frame_us(&g, plat.frame_us);
+            game_set_frame_us(&g, st.pal60 ? PLAT_NTSC_FRAME_US : plat.frame_us);
             save_init(&sv, st.rom.name);
             game_set_saves(&g, save_io, &sv);
             show_message(&plat, "Translating the cartridge code...");

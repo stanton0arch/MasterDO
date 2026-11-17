@@ -47,6 +47,7 @@ typedef struct {
     int32  height;
     int32  is_pal;      /* 1 when the console runs a 50 Hz display */
     uint32 frame_us;    /* period of the display */
+    Item   timer_ior;   /* timer request of plat_sleep (PAL display only), or -1 */
     int32  num_screens; /* screens created (3, or 2 without memory for the third) */
     void  *bm_mem;      /* the bitmaps, when the group was built here (else NULL) */
     uint32 bm_bytes;    /* bytes per bitmap in that block */
@@ -94,6 +95,9 @@ void   plat_present(platform *p);
  * screen stays the back screen). */
 void   plat_present_again(platform *p);
 void   plat_wait_vbl(const platform *p);
+/* Puts the main task to sleep for us microseconds (the timer device),
+ * when the platform has a timer request (timer_ior >= 0). */
+void   plat_sleep(const platform *p, uint32 us);
 
 /* Queued presentation (the presenter thread; plat_has_presenter() tells
  * whether it runs). plat_queue() hands the back screen to the thread;
