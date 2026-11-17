@@ -1,5 +1,5 @@
-# Panel of the batch runner for the Game Gear images of takeme/roms/gg, in
-# the format of panel.txt (run with -roms takeme/roms/gg -panel this file
+# Panel of the batch runner for the Game Gear images of takeme/roms/Game_Gear,
+# in the format of panel.txt (run with -roms takeme/roms/Game_Gear -panel this file
 # -reports reports/gg). In the pad scripts, 100 is START, held on port $00
 # as long as the bit is set.
 #

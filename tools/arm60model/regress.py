@@ -54,8 +54,8 @@ sys.path.insert(0, HERE)
 import present  # noqa: E402
 
 ROMS = os.path.join(ROOT, 'takeme', 'roms')
-PANELS = [(os.path.join(HERE, 'panel.txt'), ROMS),
-          (os.path.join(HERE, 'panel_gg.txt'), os.path.join(ROMS, 'gg'))]
+PANELS = [(os.path.join(HERE, 'panel.txt'), os.path.join(ROMS, 'Master_System')),
+          (os.path.join(HERE, 'panel_gg.txt'), os.path.join(ROMS, 'Game_Gear'))]
 SCALES = '0.9975,0.998,0.9985,0.999,0.9995,1,1.0005,1.001,1.0015,1.002,1.0025'
 P = 16683
 SYNC = re.compile(r' sync_us (\d+)')

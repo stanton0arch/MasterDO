@@ -57,7 +57,7 @@ cd <a work directory>
 S=<repository>/tools/arm60model
 $S/sim -img $S/sim.bin -sym $S/sim.sym -bench -frames 0           # benchmarks of steps 0-1
 $S/sim -img $S/sim.bin -sym $S/sim.sym -frames 3000 -dump 250 \
-       -rom <repository>/takeme/roms/rom.sms                      # cartridge run
+       -rom <repository>/takeme/roms/Master_System/sonic2.sms     # cartridge run
 ```
 
 `mk.sh -labels` builds the same image (byte for byte) with every label of
@@ -366,7 +366,7 @@ as word fills; four-word blocks from 20 bytes back).
 
 ```
 gcc -O2 -o lz lz.c                      # built by mk.sh too
-./lz -min 6 -blob vfa.lzb takeme/roms/gg/virtua_fighter_animation.gg
+./lz -min 6 -blob vfa.lzb takeme/roms/Game_Gear/virtua_fighter_animation.gg
 tools/arm60model/sim -img tools/arm60model/sim.bin -sym tools/arm60model/sim.sym \
         -rom vfa.lzb -lztest
 ```
@@ -402,9 +402,9 @@ size bound, far too slow for the console).
 
 ```
 gcc -O2 -DROMMAP=8 -DLZ_DEPTH=8 -o stc_host stc_host.c
-./stc_host lz 8 WORK/state_001250.bin takeme/roms/sonic2.sms   # size, round trip
+./stc_host lz 8 WORK/state_001250.bin takeme/roms/Master_System/sonic2.sms   # size, round trip
 STFLAGS="-DPROB_T=u32 -DROMMAP=8 -DLZ_DEPTH=8" ./stmk.sh WORK/state_001250.bin
-./sim -img sttest.bin -sym sttest.sym -rom takeme/roms/sonic2.sms -frames 1
+./sim -img sttest.bin -sym sttest.sym -rom takeme/roms/Master_System/sonic2.sms -frames 1
 ```
 
 `stmk.sh` builds the state into `sttest.bin` (`sttest.c`), which codes and
@@ -413,7 +413,7 @@ every 16 bytes indexed) and prints the sizes and times.
 
 ## Batch runner
 
-`batch.py` runs every cartridge of `takeme/roms` in the model, in parallel,
+`batch.py` runs every cartridge of `takeme/roms/Master_System` in the model, in parallel,
 with the frame count and the pad script of `panel.txt` (cartridges absent
 from it get 3 000 frames and button 1 tapped every 300 frames), and writes a
 one-page report in `reports/` (`<date>-<commit>.txt`, with the data in a
@@ -433,12 +433,14 @@ differing frames side by side (`diff_NNNNNN.png`) are kept in
 ```
 tools/arm60model/batch.py                 # the whole panel, about 3 minutes
 tools/arm60model/batch.py -only sonic2,ys -frames 1800 -label "trial"
-tools/arm60model/batch.py -roms takeme/roms/gg -panel tools/arm60model/panel_gg.txt \
+tools/arm60model/batch.py -roms takeme/roms/Game_Gear -panel tools/arm60model/panel_gg.txt \
         -reports tools/arm60model/reports/gg   # the Game Gear panel
 ```
 
-The Game Gear images live in `takeme/roms/gg` (the ISO lists them after
-those of `takeme/roms`) and have their own panel file and report
+The Game Gear images live in `takeme/roms/Game_Gear` (the ISO's menu
+shows each folder of `takeme/roms` as a folder: no space in the names, the
+build's dependency list would split them; the menu shows underscores as
+spaces) and have their own panel file and report
 directory, so that each panel's report is compared with the previous one
 of the same panel.
 

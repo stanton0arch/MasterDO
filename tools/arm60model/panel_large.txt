@@ -2,7 +2,7 @@
 # traffic of step 16.0: SIMBANKLOG and banks.py; see README.md). The model
 # reads their banks into a bank cache as the console does (step 16.2), e.g.
 #
-#   tools/arm60model/batch.py -roms takeme/roms/gg -panel tools/arm60model/panel_large.txt \
+#   tools/arm60model/batch.py -roms takeme/roms/Game_Gear -panel tools/arm60model/panel_large.txt \
 #       -only virtua_fighter_animation -reports DIR
 #
 # (-simargs "-whole -dramfree 1600000": the image in one block, as before).
@@ -19,12 +19,13 @@
 # second line, commented: the Baryonyx mission, its stage (2 350 on), the
 # player held at a tree from frame 3 000 to the end.
 #
-# Sonic Blast (Master System conversion, 1 MiB, in takeme/roms: run it
-# with -roms takeme/roms): Sonic, the first act (frames 1 350-4 000), then
-# the bonus stage (4 020-8 400). The second line, commented: Knuckles,
+# Sonic Blast (Master System conversion, 1 MiB, in takeme/roms/Master_System:
+# run it with -roms takeme/roms/Master_System): Sonic, the first act (frames
+# 1 350-4 000), then the bonus stage (4 020-8 400). The second line, commented: Knuckles,
 # the first act (1 450-2 900), then held at a loop to the end.
 #
-# Street Fighter II (Master System, 800 KiB, 50 banks, in takeme/roms):
+# Street Fighter II (Master System, 800 KiB, 50 banks, in
+# takeme/roms/Master_System):
 # a play recorded on Phoenix (3 294 frames, no disc read with 32 buffers).
 #
 # The lines marked "Phoenix" are plays recorded on Phoenix with the

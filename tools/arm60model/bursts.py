@@ -10,7 +10,8 @@ nothing is evicted: the blocks then sit in the code buffer in the order
 they were translated (the cold area takes the zones one after the other),
 and the frame of each block is found from the per-frame counts of the
 Frame: lines (translations at once plus those of the spare time). The ROM
-image defaults to takeme/roms/<name of DIR>.
+image defaults to takeme/roms/Master_System/<name of DIR> or
+takeme/roms/Game_Gear/<name of DIR>.
 
 A burst is a run of frames whose translations at once took 4 ms or more
 (frames at most 10 apart merged). For each burst of 10 blocks or more:
@@ -47,7 +48,9 @@ if len(sys.argv) > 3:
     rom_path = sys.argv[3]
 else:
     roms = os.path.join(here, '..', '..', 'takeme', 'roms')
-    rom_path = os.path.join(roms, name) if os.path.exists(os.path.join(roms, name)) else os.path.join(roms, 'gg', name)
+    rom_path = os.path.join(roms, 'Master_System', name)
+    if not os.path.exists(rom_path):
+        rom_path = os.path.join(roms, 'Game_Gear', name)
 
 syms = {}
 for line in open(sym_path):

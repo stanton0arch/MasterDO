@@ -4,17 +4,17 @@
  * pieces and sprite cels, render.c). The spare time at the end of a frame
  * goes to the translation of code the game is about to reach.
  *
- * Boot: display, a measure of the system clock calls (logged), cartridge
- * image, then the code reachable in the cartridge is translated
+ * Boot: display, a measure of the system clock calls (logged), the ROM
+ * menu (a browser of the roms directory's folders), the cartridge image,
+ * then the code reachable in the cartridge is translated
  * and the game runs at the pace of the display: one emulated frame, the
  * picture update, DrawCels into a free screen, which is queued for the
  * presenter thread (platform.c) to show at a VBL; the emulation may thus
  * run a frame ahead of the display. game.c records the emulation, update
  * and drawing times, and the frames where the pad changed, written out
  * when the run pauses or ends (the pad changes as a pad script that the
- * cycle model replays). Game Gear images (the .gg files of the gg
- * directory, or a Game Gear region in the header) run in the Game Gear
- * mode: the LCD window of 160 x 144 pixels in a black case, 12-bit
+ * cycle model replays). Game Gear images (the .gg files, or a Game Gear
+ * region in the header) run in the Game Gear mode: the LCD window of 160 x 144 pixels in a black case, 12-bit
  * colours, P held as the START button. Pad during
  * the run: D-pad, A (button 1) and B (button 2) for the SMS pad, P for
  * PAUSE (START on the Game Gear); L saves the machine's state in the
@@ -54,7 +54,9 @@
 #include "string.h"
 #include "event.h"
 
-#define MENU_LINES 20           /* ROM names shown at once */
+#define MENU_LINES  20          /* entries of a folder shown at once */
+#define MENU_COLS   39          /* characters of a menu line */
+#define MENU_REPEAT 16          /* a direction held repeats after these loop turns */
 
 #define TEXT_X 8
 #define TEXT_Y 4
@@ -72,7 +74,7 @@
 #define STATE_VRAM_KEEP (32 * 1024) /* VRAM a savestate leaves to the system */
 
 typedef struct {
-    rom_list           roms;
+    rom_place          place;       /* the menu's folder and entry */
     rom_image          rom;
     int32              have_game;
     uint32             dram_free;   /* before the cartridge */
@@ -641,67 +643,257 @@ static void memory_line(platform *p, int32 screen, int32 line, uint32 dram, uint
 
 /*--------------------------------------------------------------------------
  * ROM menu
+ *
+ * A browser of the roms directory: a folder's folders, then its images,
+ * 20 lines a page. Up / Down one line (held: a repeat that speeds up),
+ * Left / Right one page, L / R the previous / next initial letter, A or
+ * START opens the folder or runs the image, B goes up, X quits (at the
+ * root). The folder's list is read when the folder is shown, into a block
+ * freed before the image loads. Underscores are shown as spaces: the names
+ * under the CD's root directory cannot hold spaces (the build's dependency
+ * list would split them).
  *------------------------------------------------------------------------*/
 
-static void draw_menu(platform *p, const app_state *st, int32 cur)
+/* Copies a name as shown: underscores as spaces. */
+static char *shown(char *to, const char *name)
+{
+    char *t = to;
+
+    do {
+        *t = (*name == '_') ? ' ' : *name;
+        t++;
+    } while (*name++ != 0);
+    return to;
+}
+
+static void draw_menu(platform *p, const app_state *st, const rom_dir *d, int32 cur)
 {
     int32 s = p->back;
     int32 first = (cur / MENU_LINES) * MENU_LINES;
+    int32 root = st->place.dir[0] == 0;
     int32 k;
+    uint32 n;
+    uint32 room;
+    char pos[24];
     char buf[64];
 
     plat_clear(p, s);
-#if Z80J_DIAG
-    sprintf(buf, "MASTERDO DIAGNOSTIC %d - %ld FILES   A: RUN  X: QUIT", (int)Z80J_DIAG,
-            (long)st->roms.count);
-#elif Z80J_CHURN
-    sprintf(buf, "MASTERDO DIAGNOSTIC - %ld FILES   A: RUN  X: QUIT", (long)st->roms.count);
+#if Z80J_DIAG || Z80J_CHURN
+    sprintf(buf, "MASTERDO DIAGNOSTIC %d  A:OPEN  %s", (int)Z80J_DIAG,
+            root ? "X:QUIT" : "B:BACK");
 #else
-    sprintf(buf, "MASTERDO - CHOOSE A CARTRIDGE (%ld FILES)   A: RUN  X: QUIT",
-            (long)st->roms.count);
+    sprintf(buf, "MASTERDO   A:OPEN  %s  L/R:LETTER", root ? "X:QUIT" : "B:BACK");
 #endif
     text_line(p, s, 0, COLOR_TITLE, buf);
     memory_line(p, s, 1, st->dram_free, st->vram_free);
-    for (k = first; k < st->roms.count && k < first + MENU_LINES; k++) {
-        sprintf(buf, "%c %-32s %4luK", k == cur ? '>' : ' ', st->roms.name[k],
-                (unsigned long)((st->roms.size[k] + 1023) / 1024));
-        text_line(p, s, 2 + k - first, k == cur ? COLOR_GOOD : COLOR_TEXT, buf);
+
+    /* The folder (its end when too long) and the position in it. */
+    sprintf(pos, " %ld/%ld%s", (long)(d->count ? cur + 1 : 0), (long)d->count,
+            d->left_out ? "+" : "");
+    room = MENU_COLS - strlen(pos);
+    n = 1 + strlen(st->place.dir);
+    if (n <= room) {
+        buf[0] = '/';
+        shown(buf + 1, st->place.dir);
+    } else {
+        strcpy(buf, "...");
+        shown(buf + 3, st->place.dir + (n - 1) - (room - 3));
+        n = room;
     }
+    while (n < room)
+        buf[n++] = ' ';
+    strcpy(buf + n, pos);
+    text_line(p, s, 2, COLOR_HEAD, buf);
+
+    for (k = first; k < d->count && k < first + MENU_LINES; k++) {
+        uint32 size = rom_dir_size(d, k);
+        Color c = COLOR_TEXT;
+        char name[ROM_NAME_LEN];
+
+        shown(name, rom_dir_name(d, k));
+        if (size == ROM_FOLDER) {
+            sprintf(buf, "%c %s/", k == cur ? '>' : ' ', name);
+            c = COLOR_HEAD;
+        } else {
+            sprintf(buf, "%c %-31s %4luK", k == cur ? '>' : ' ', name,
+                    (unsigned long)((size + 1023) / 1024));
+        }
+        text_line(p, s, 3 + k - first, k == cur ? COLOR_GOOD : c, buf);
+    }
+    if (d->count == 0)
+        text_line(p, s, 3, COLOR_BAD, "  no folder or image here");
     plat_present(p);
 }
 
-/* Returns the index of the file chosen, or -1 to quit. */
-static int32 rom_menu(platform *p, const app_state *st)
+static uint32 initial(const rom_dir *d, int32 k)
 {
-    int32 cur = 0;
+    uint32 c = (uint8)rom_dir_name(d, k)[0];
+
+    return (c >= 'a' && c <= 'z') ? c - 'a' + 'A' : c;
+}
+
+/* The first entry of the run of entries that share entry k's initial. */
+static int32 letter_start(const rom_dir *d, int32 k)
+{
+    uint32 c = initial(d, k);
+
+    while (k > 0 && initial(d, k - 1) == c)
+        k--;
+    return k;
+}
+
+/* Reads the place's folder, back to the root when it cannot be read;
+ * returns the entry of the place's name (0 when absent), or -1 when
+ * not even the root can be read. */
+static int32 menu_read(app_state *st, rom_dir *d)
+{
+    for (;;) {
+        if (rom_dir_read(d, st->place.dir) >= 0)
+            break;
+        printf("Menu: cannot read " ROM_DIR "/%s\n", st->place.dir);
+        if (st->place.dir[0] == 0)
+            return -1;
+        st->place.dir[0] = 0;
+        st->place.name[0] = 0;
+    }
+    printf("Menu: /%s: %ld entries (%ld folders) read in %lu us, sorted in %lu us",
+           st->place.dir, (long)d->count, (long)d->folders, (unsigned long)d->read_us,
+           (unsigned long)d->sort_us);
+    if (d->left_out)
+        printf(", %ld left out (the list is full)", (long)d->left_out);
+    printf("\n");
+    return rom_dir_find(d, st->place.name);
+}
+
+/* Returns 1 with the image chosen in st->place (its folder, name and
+ * size), 0 to quit, -1 when the roms directory cannot be read. */
+static int32 rom_menu(platform *p, app_state *st)
+{
+    rom_dir d;
+    rom_place *pl = &st->place;
+    int32 cur;
+    int32 res = -1;
     uint32 prev = plat_pad_state();
     uint32 hold = 0;
+    uint32 held_dir = 0;
 
-    if (st->roms.count == 1)
-        return 0;
-    draw_menu(p, st, cur);
-    for (;;) {
+    memset(&d, 0, sizeof(d));
+    d.mem = (uint8 *)AllocMem(ROM_LIST_BYTES, MEMTYPE_DRAM);
+    if (d.mem == NULL) {
+        printf("Menu: no memory for the list\n");
+        return -1;
+    }
+    cur = menu_read(st, &d);
+    if (cur >= 0)
+        draw_menu(p, st, &d, cur);
+    while (cur >= 0) {
         uint32 held = plat_pad_state();
         uint32 pressed = held & ~prev;
+        uint32 moves = held & (ControlUp | ControlDown | ControlLeft | ControlRight);
+        uint32 fresh = pressed;
         int32 was = cur;
+        int32 last = d.count - 1;
 
-        /* Auto-repeat of the direction keys after a while. */
-        hold = (held & (ControlUp | ControlDown)) ? hold + 1 : 0;
-        if (hold > 20 && (hold & 3) == 0)
-            pressed |= held & (ControlUp | ControlDown);
+        /* A direction held repeats, faster and faster. */
+        if (moves != 0 && moves == held_dir) {
+            hold++;
+            if (hold >= MENU_REPEAT) {
+                uint32 every = (hold >= 4 * MENU_REPEAT) ? 1 : (hold >= 2 * MENU_REPEAT) ? 2 : 4;
+
+                if ((hold & (every - 1)) == 0)
+                    pressed |= moves;
+            }
+        } else {
+            hold = 0;
+        }
+        held_dir = moves;
         prev = held;
-        if (pressed & ControlX)
-            return -1;
-        if (pressed & (ControlA | ControlStart))
-            return cur;
-        if ((pressed & ControlUp) && cur > 0)
-            cur--;
-        if ((pressed & ControlDown) && cur + 1 < st->roms.count)
-            cur++;
+
+        if (pressed & ControlX) {
+            if (pl->dir[0] == 0) {
+                res = 0;
+                break;
+            }
+        } else if (pressed & (ControlA | ControlStart)) {
+            if (d.count > 0 && rom_dir_size(&d, cur) != ROM_FOLDER) {
+                strcpy(pl->name, rom_dir_name(&d, cur));
+                pl->size = rom_dir_size(&d, cur);
+                res = 1;
+                break;
+            }
+            if (d.count > 0) {
+                const char *name = rom_dir_name(&d, cur);
+                uint32 n = strlen(pl->dir);
+
+                if (n + 1 + strlen(name) < ROM_DIR_LEN) {
+                    if (n != 0)
+                        pl->dir[n++] = '/';
+                    strcpy(pl->dir + n, name);
+                    pl->name[0] = 0;
+                    cur = menu_read(st, &d);
+                    was = -1;
+                } else {
+                    printf("Menu: %s/%s: path too long\n", pl->dir, name);
+                }
+            }
+        } else if ((pressed & ControlB) && pl->dir[0] != 0) {
+            /* Up, the cursor on the folder left. */
+            char *slash = NULL;
+            char *leaf = pl->dir;
+            char *c;
+
+            for (c = pl->dir; *c != 0; c++) {
+                if (*c == '/')
+                    slash = c;
+            }
+            if (slash != NULL)
+                leaf = slash + 1;
+
+            strcpy(pl->name, leaf);
+            if (slash != NULL)
+                *slash = 0;
+            else
+                pl->dir[0] = 0;
+            cur = menu_read(st, &d);
+            was = -1;
+        } else if (d.count > 0) {
+            if (pressed & ControlRightShift) {
+                uint32 c = initial(&d, cur);
+
+                while (cur < last && initial(&d, cur) == c)
+                    cur++;
+                if (initial(&d, cur) == c)
+                    cur = 0;
+            } else if (pressed & ControlLeftShift) {
+                cur = letter_start(&d, cur);
+                cur = letter_start(&d, cur > 0 ? cur - 1 : last);
+            } else if (pressed & ControlUp) {
+                if (cur > 0)
+                    cur--;
+                else if (fresh & ControlUp)
+                    cur = last;
+            } else if (pressed & ControlDown) {
+                if (cur < last)
+                    cur++;
+                else if (fresh & ControlDown)
+                    cur = 0;
+            } else if (pressed & ControlLeft) {
+                cur = (cur > MENU_LINES) ? cur - MENU_LINES : 0;
+            } else if (pressed & ControlRight) {
+                cur = (cur + MENU_LINES < last) ? cur + MENU_LINES : last;
+            }
+        }
+        if (cur < 0)
+            break;
         if (cur != was)
-            draw_menu(p, st, cur);
-        plat_wait_vbl(p);
+            draw_menu(p, st, &d, cur);
+        else
+            plat_wait_vbl(p);
     }
+    /* Nothing of the list stays for the run. */
+    FreeMem(d.mem, ROM_LIST_BYTES);
+    ScavengeMem();
+    return res;
 }
 
 /*--------------------------------------------------------------------------
@@ -807,9 +999,9 @@ int main(int argc, char **argv)
     /* The banner names the build by its latest changes (the oldest ones
      * dropped as new ones come: its bytes are DRAM the code buffer may
      * need). */
-    printf("masterdo: 60 emulated frames per second on 50 Hz displays, one picture in six "
-           "not shown; one savestate kept in the NVRAM (L saves, R loads, C pauses); a "
-           "finished save written to the NVRAM within 0.25 s\n");
+    printf("masterdo: ROM menu by folders, underscores shown as spaces; 60 emulated frames "
+           "per second on 50 Hz displays, one picture in six not shown; one savestate kept in "
+           "the NVRAM (L saves, R loads, C pauses)\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);
@@ -831,26 +1023,26 @@ int main(int argc, char **argv)
     printf("Memory: %lu bytes of DRAM and %lu bytes of VRAM free before the cartridge\n",
            (unsigned long)st.dram_free, (unsigned long)st.vram_free);
 
-    if (rom_scan(&st.roms) <= 0) {
-        show_message(&plat, "No cartridge image in the " ROM_DIR " directory");
-        printf("ROM: no file in " ROM_DIR "\n");
-        plat_wait_vbl(&plat);
-        for (;;) {
-            if (plat_pad_pressed() & ControlX)
-                goto quit;
-            plat_wait_vbl(&plat);
-        }
-    }
     for (;;) {
         int32 pick = rom_menu(&plat, &st);
+        char name[ROM_NAME_LEN];
         char buf[64];
 
-        if (pick < 0)
+        if (pick == 0)
             goto quit;
-        sprintf(buf, "Loading %s...", st.roms.name[pick]);
+        if (pick < 0) {
+            show_message(&plat, "No cartridge image in the " ROM_DIR " directory");
+            plat_wait_vbl(&plat);
+            for (;;) {
+                if (plat_pad_pressed() & ControlX)
+                    goto quit;
+                plat_wait_vbl(&plat);
+            }
+        }
+        sprintf(buf, "Loading %s...", shown(name, st.place.name));
         show_message(&plat, buf);
         st.have_game = 0;
-        if (rom_load(&st.rom, st.roms.name[pick], st.roms.size[pick]) == 0)
+        if (rom_load(&st.rom, st.place.dir, st.place.name, st.place.size) == 0)
             rom_log(&st.rom);
         /* The memory left after a failed load (the results screen shows
          * it); replaced by the run's figures once the game is set up. */
@@ -898,8 +1090,6 @@ leave:
         if (st.have_game)
             game_free(&g);
         rom_unload(&st.rom);
-        if (st.roms.count == 1)
-            goto quit;
     }
 
 quit:

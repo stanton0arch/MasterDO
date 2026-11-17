@@ -647,7 +647,7 @@ def git_state():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("-roms", default=os.path.join(ROOT, "takeme", "roms"))
+    ap.add_argument("-roms", default=os.path.join(ROOT, "takeme", "roms", "Master_System"))
     ap.add_argument("-panel", default=os.path.join(HERE, "panel.txt"))
     ap.add_argument("-frames", type=int, default=3000, help="default frame count (3000)")
     ap.add_argument("-jobs", type=int, default=0, help="parallel runs (default: the CPUs)")

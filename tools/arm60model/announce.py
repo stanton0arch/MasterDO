@@ -7,7 +7,8 @@ Usage: announce.py DIR [rom] [depth]
 DIR holds the run.txt (stdout of sim, run with -framelog, whose Frame:
 lines end with the slot banks) and the blocks.txt (SIMBLOCKLOG) of a run
 made with -zones 48 -dramfree 3000000, so that nothing is evicted. The ROM
-image defaults to takeme/roms/<name of DIR>.sms or takeme/roms/gg/<name>.gg.
+image defaults to takeme/roms/Master_System/<name of DIR>.sms or
+takeme/roms/Game_Gear/<name>.gg.
 
 A burst is a run of frames whose translations at once took 4 ms or more
 (frames at most 10 apart merged, 10 blocks or more), as in bursts.py. The
@@ -431,7 +432,8 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     roms = os.path.join(here, '..', '..', 'takeme', 'roms')
     rom_path = sys.argv[2] if len(sys.argv) > 2 else next(
-        (p for p in (os.path.join(roms, name + '.sms'), os.path.join(roms, 'gg', name + '.gg')) if os.path.exists(p)),
+        (p for p in (os.path.join(roms, 'Master_System', name + '.sms'),
+                   os.path.join(roms, 'Game_Gear', name + '.gg')) if os.path.exists(p)),
         None)
     depth = int(sys.argv[3]) if len(sys.argv) > 3 else 4
     r = Run(d, rom_path)

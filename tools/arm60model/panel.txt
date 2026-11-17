@@ -1,4 +1,4 @@
-# Panel of the batch runner (batch.py): one cartridge of the roms directory
+# Panel of the batch runner (batch.py): one cartridge of takeme/roms/Master_System
 # per line, with the number of frames to run and the pad script, in the
 # SIMPAD format: "frame:bits,..." gives the buttons held from each frame on,
 # bits in hexadecimal (01 up, 02 down, 04 left, 08 right, 10 button 1,

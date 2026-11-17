@@ -61,81 +61,6 @@ static void rom_parse_header(rom_image *rom)
     rom->size_code = (uint32)h[0x0F] & 0x0F;
 }
 
-/* Adds the files of directory sub (relative to ROM_DIR, "" for ROM_DIR
- * itself) to the list, sorted by name after those already listed, each
- * name prefixed with sub and a slash. */
-static int32 scan_dir(rom_list *list, const char *sub)
-{
-    Directory *dir;
-    DirectoryEntry de;
-    char path[256];
-    int32 first = list->count;
-
-    strcpy(path, ROM_DIR);
-    if (sub[0]) {
-        strcat(path, "/");
-        strcat(path, sub);
-    }
-    dir = OpenDirectoryPath(path);
-    if (dir == NULL) {
-        /* Relative to the current directory, spelled out. */
-        if (GetDirectory(path, sizeof(path) - 8 - ROM_NAME_LEN) >= 0) {
-            strcat(path, "/" ROM_DIR);
-            if (sub[0]) {
-                strcat(path, "/");
-                strcat(path, sub);
-            }
-            dir = OpenDirectoryPath(path);
-        }
-        if (dir == NULL)
-            return -1;
-    }
-    while (ReadDirectory(dir, &de) >= 0) {
-        char name[ROM_NAME_LEN];
-        int32 k;
-        int32 n = list->count;
-
-        if (de.de_Flags & FILE_IS_DIRECTORY)
-            continue;
-        if (n >= ROM_LIST_MAX) {
-            printf("ROM: more than %d files in " ROM_DIR ", the rest is ignored\n",
-                   ROM_LIST_MAX);
-            break;
-        }
-        name[0] = 0;
-        if (sub[0]) {
-            strcpy(name, sub);
-            strcat(name, "/");
-        }
-        strncat(name, de.de_FileName, ROM_NAME_LEN - 1 - strlen(name));
-        /* Insertion in name order. */
-        for (k = n; k > first && strcmp(list->name[k - 1], name) > 0; k--) {
-            strcpy(list->name[k], list->name[k - 1]);
-            list->size[k] = list->size[k - 1];
-        }
-        strcpy(list->name[k], name);
-        list->size[k] = de.de_ByteCount;
-        list->count++;
-    }
-    CloseDirectory(dir);
-    return list->count - first;
-}
-
-int32 rom_scan(rom_list *list)
-{
-    int32 n;
-
-    list->count = 0;
-    if (scan_dir(list, "") < 0) {
-        printf("ERROR: cannot open the " ROM_DIR " directory\n");
-        return -1;
-    }
-    n = scan_dir(list, ROM_GG_DIR);
-    if (n > 0)
-        printf("ROM: %ld Game Gear images in " ROM_DIR "/" ROM_GG_DIR "\n", (long)n);
-    return list->count;
-}
-
 /* Does the name end with the extension ext (lower case, with its dot),
  * whatever the case of the name? */
 static uint32 has_ext(const char *name, const char *ext)
@@ -157,6 +82,214 @@ static uint32 has_ext(const char *name, const char *ext)
     return 1;
 }
 
+/*--------------------------------------------------------------------------
+ * Folder lists of the ROM menu
+ *
+ * A record per entry, packed from the start of the block: the size (word,
+ * ROM_FOLDER for a folder), the rank (byte: the order of the groups), the
+ * name and its NUL, padded to a word. The index (a word per entry, the
+ * offset of its record) grows down from the end of the block, with room
+ * kept below it for the merge sort's second index.
+ *------------------------------------------------------------------------*/
+
+#define REC_RANK 4              /* offset of the rank byte in a record */
+#define REC_NAME 5              /* offset of the name */
+#define RANK_FOLDER 8           /* folders not in the root order */
+#define RANK_FILE   9
+
+/* The folders of the root shown first, in this order (one per console,
+ * underscores read as spaces); any other folder of the root follows them,
+ * sorted by name. */
+static const char *const root_order[] = { "Master System", "Game Gear" };
+
+/* A character as the names are compared: lower case, an underscore as
+ * the space it is shown as (the menu shows underscores as spaces: names
+ * under the CD's root directory cannot hold spaces, the build's
+ * dependency list splits them). */
+static uint32 lower(uint32 c)
+{
+    if (c == '_')
+        return ' ';
+    return (c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c;
+}
+
+/* Names compared whatever the case and the underscores. */
+static int32 name_ci(const char *a, const char *b)
+{
+    const uint8 *x = (const uint8 *)a;
+    const uint8 *y = (const uint8 *)b;
+
+    for (;; x++, y++) {
+        uint32 c = lower(*x);
+        uint32 d = lower(*y);
+
+        if (c != d || c == 0)
+            return (int32)c - (int32)d;
+    }
+}
+
+/* Names compared as shown, then as they are. */
+static int32 name_cmp(const char *a, const char *b)
+{
+    int32 r = name_ci(a, b);
+
+    return (r != 0) ? r : strcmp(a, b);
+}
+
+static int32 rec_cmp(const uint8 *a, const uint8 *b)
+{
+    if (a[REC_RANK] != b[REC_RANK])
+        return (int32)a[REC_RANK] - (int32)b[REC_RANK];
+    return name_cmp((const char *)a + REC_NAME, (const char *)b + REC_NAME);
+}
+
+static uint32 entry_rank(uint32 root, uint32 folder, const char *name)
+{
+    uint32 k;
+
+    if (!folder)
+        return RANK_FILE;
+    if (root) {
+        for (k = 0; k < sizeof(root_order) / sizeof(root_order[0]); k++) {
+            if (name_ci(name, root_order[k]) == 0)
+                return k;
+        }
+    }
+    return RANK_FOLDER;
+}
+
+/* Bottom-up merge sort of the n offsets of idx (tmp: room for n more),
+ * stable. */
+static void sort_entries(const uint8 *mem, uint32 *idx, uint32 *tmp, uint32 n)
+{
+    uint32 *a = idx;
+    uint32 *b = tmp;
+    uint32 w;
+
+    for (w = 1; w < n; w *= 2) {
+        uint32 i;
+        uint32 *t;
+
+        for (i = 0; i < n; i += 2 * w) {
+            uint32 mid = (i + w < n) ? i + w : n;
+            uint32 hi = (i + 2 * w < n) ? i + 2 * w : n;
+            uint32 p = i;
+            uint32 q = mid;
+            uint32 k = i;
+
+            while (p < mid && q < hi)
+                b[k++] = (rec_cmp(mem + a[q], mem + a[p]) < 0) ? a[q++] : a[p++];
+            while (p < mid)
+                b[k++] = a[p++];
+            while (q < hi)
+                b[k++] = a[q++];
+        }
+        t = a;
+        a = b;
+        b = t;
+    }
+    if (a != idx)
+        memcpy(idx, a, n * sizeof(uint32));
+}
+
+/* Opens folder dir of ROM_DIR. */
+static Directory *open_folder(const char *dir)
+{
+    char path[FILESYSTEM_MAX_PATH_LEN];
+    Directory *d;
+
+    strcpy(path, ROM_DIR);
+    if (dir[0]) {
+        strcat(path, "/");
+        strcat(path, dir);
+    }
+    d = OpenDirectoryPath(path);
+    if (d != NULL)
+        return d;
+    /* Relative to the current directory, spelled out. */
+    if (GetDirectory(path, sizeof(path) - sizeof(ROM_DIR) - ROM_DIR_LEN) < 0)
+        return NULL;
+    strcat(path, "/" ROM_DIR);
+    if (dir[0]) {
+        strcat(path, "/");
+        strcat(path, dir);
+    }
+    return OpenDirectoryPath(path);
+}
+
+int32 rom_dir_read(rom_dir *d, const char *dir)
+{
+    uint32 *top = (uint32 *)(d->mem + ROM_LIST_BYTES);
+    uint32 used = 0;
+    uint32 t0 = plat_usec_now();
+    uint32 t1;
+    Directory *f;
+    DirectoryEntry de;
+
+    d->count = 0;
+    d->folders = 0;
+    d->left_out = 0;
+    d->idx = top;
+    f = open_folder(dir);
+    if (f == NULL)
+        return -1;
+    while (ReadDirectory(f, &de) >= 0) {
+        uint32 folder = (de.de_Flags & FILE_IS_DIRECTORY) != 0;
+        uint32 len = 0;
+        uint32 need;
+        uint8 *rec;
+
+        while (len < FILESYSTEM_MAX_NAME_LEN - 1 && de.de_FileName[len] != 0)
+            len++;
+        de.de_FileName[len] = 0;
+        if (len == 0 || (!folder && !has_ext(de.de_FileName, ".sms") &&
+                         !has_ext(de.de_FileName, ".gg")))
+            continue;
+        /* The record, its index word and the sort's one below the index. */
+        need = (REC_NAME + len + 1 + 3) & ~3u;
+        if (used + need + 2 * sizeof(uint32) * (uint32)(d->count + 1) > ROM_LIST_BYTES) {
+            d->left_out++;
+            continue;
+        }
+        rec = d->mem + used;
+        *(uint32 *)rec = folder ? ROM_FOLDER : de.de_ByteCount;
+        rec[REC_RANK] = (uint8)entry_rank(dir[0] == 0, folder, de.de_FileName);
+        memcpy(rec + REC_NAME, de.de_FileName, len + 1);
+        d->count++;
+        d->folders += (int32)folder;
+        top[-d->count] = used;
+        used += need;
+    }
+    CloseDirectory(f);
+    t1 = plat_usec_now();
+    d->idx = top - d->count;
+    sort_entries(d->mem, d->idx, d->idx - d->count, (uint32)d->count);
+    d->sort_us = plat_usec_now() - t1;
+    d->read_us = t1 - t0;
+    return d->count;
+}
+
+const char *rom_dir_name(const rom_dir *d, int32 k)
+{
+    return (const char *)d->mem + d->idx[k] + REC_NAME;
+}
+
+uint32 rom_dir_size(const rom_dir *d, int32 k)
+{
+    return *(const uint32 *)(d->mem + d->idx[k]);
+}
+
+int32 rom_dir_find(const rom_dir *d, const char *name)
+{
+    int32 k;
+
+    for (k = 0; k < d->count; k++) {
+        if (strcmp(rom_dir_name(d, k), name) == 0)
+            return k;
+    }
+    return 0;
+}
+
 /* Bank b of an image read by banks (the reader of its bank cache), from
  * the file; waits for the read: the emulation stops meanwhile. */
 static uint32 read_bank(void *arg, uint32 b, uint8 *to)
@@ -170,14 +303,18 @@ static uint32 read_bank(void *arg, uint32 b, uint8 *to)
     return e < 0;
 }
 
-Err rom_load(rom_image *rom, const char *name, uint32 size)
+Err rom_load(rom_image *rom, const char *dir, const char *name, uint32 size)
 {
-    char path[ROM_NAME_LEN + 8];
+    char path[sizeof(ROM_DIR) + ROM_DIR_LEN + ROM_NAME_LEN];
 
     memset(rom, 0, sizeof(*rom));
     rom->header_offset = -1;
     strncpy(rom->name, name, ROM_NAME_LEN - 1);
     strcpy(path, ROM_DIR "/");
+    if (dir[0]) {
+        strcat(path, dir);
+        strcat(path, "/");
+    }
     strcat(path, rom->name);
 
     if (size > SMS_BLOCK_MAX + 512) {
