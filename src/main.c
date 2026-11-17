@@ -27,7 +27,7 @@
  * the queue, where a presenter thread shows the finished screens one per
  * VBL with the emulation working a frame ahead, and the direct mode,
  * present and wait for the VBL after each frame; C: resume), and writes
- * the run's records to the debug log; STOP (X) pauses the run on a black
+ * the run's records and summary to the debug log; STOP (X) pauses the run on a black
  * screen naming the image and the display, where A resumes it and STOP
  * goes back to the menu. The PSG
  * registers of each frame drive voices on the DSP (psg.c), silenced
@@ -463,6 +463,20 @@ static void log_pace(const app_state *st)
                (unsigned long)st->dropped, (unsigned long)st->late);
 }
 
+/* The run's records and summary for the log (debug pause), the window
+ * of measures in progress left open: the summary closes the current
+ * window unless it holds no frame, and a window closed early would put
+ * the next ones off the 100-frame grid that the cycle model's follow. */
+static void log_run(const app_state *st)
+{
+    uint32 frames = g.win.frames;
+
+    g.win.frames = 0;
+    game_log_summary(&g);
+    g.win.frames = frames;
+    log_pace(st);
+}
+
 /* The frame loop looks at the clock (a kernel call of tens of
  * microseconds on the console) at the end of the pad read, which starts
  * the emulation, at the ends of the emulation, of the picture update
@@ -529,8 +543,7 @@ static void run_game(platform *p, app_state *st)
             plat_drain(p);
             psg_mute(&snd);
             game_save(&g);
-            game_log_flush(&g);
-            log_pace(st);
+            log_run(st);
             prev = show_snapshot(p, st, prev);
             if (prev & ControlX)
                 break;
@@ -994,9 +1007,8 @@ int main(int argc, char **argv)
     /* The banner names the build by its latest changes (the oldest ones
      * dropped as new ones come: its bytes are DRAM the code buffer may
      * need). */
-    printf("masterdo: STOP pauses the game (A resumes, STOP goes back to the menu); ROM menu "
-           "by folders, underscores shown as spaces; 60 emulated frames per second on 50 Hz "
-           "displays, one picture in six not shown\n");
+    printf("masterdo: the run's summary written at C too; STOP pauses the game (A resumes, "
+           "STOP goes back to the menu); ROM menu by folders, underscores shown as spaces\n");
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);
