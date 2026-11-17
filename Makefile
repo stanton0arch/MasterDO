@@ -1,6 +1,6 @@
 NAME       = helloworld
 ISO_DIR    = iso
-ISONAME    = $(ISO_DIR)/$(NAME).iso
+ISONAME    = $(ISO_DIR)/masterdo.iso
 FILESYSTEM = takeme
 LAUNCHME   = $(FILESYSTEM)/LaunchMe
 STACKSIZE  = 8192
