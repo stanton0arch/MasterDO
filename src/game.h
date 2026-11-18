@@ -22,6 +22,7 @@
 #define GAME_LONG_LOGS  60      /* frames shown late while under budget */
 #define GAME_LOG_WORDS  (24 * 1024 / 4) /* record arena of the run's log */
 #define GAME_PAD_LOGS   1024    /* pad changes kept by the pad recorder */
+#define GAME_PAD_SHIFT  15      /* pad log entry: frame << 15 | buttons (game.c) */
 
 /* Cumulative counters of the machine and the translator. */
 typedef struct {
@@ -86,10 +87,11 @@ typedef struct {
  * (top byte) and its length in words; a full arena drops records.
  *
  * The pad recorder keeps, apart from the arena, the frames where the
- * buttons held changed (PAUSE as bit 8) and writes them out with the log
- * as a pad script in the format of the analysis harness ("frame:bits,..."
- * preceded by the cartridge name and the frame count), so that a run on
- * the console can be replayed in the cycle model. */
+ * buttons held changed (pad 1 in bits 0-5, PAUSE as bit 8, pad 2 in bits
+ * 9-14; up to frame 131 071, about 36 minutes) and writes them out with
+ * the log as a pad script in the format of the analysis harness
+ * ("frame:bits,..." preceded by the cartridge name and the frame count),
+ * so that a run on the console can be replayed in the cycle model. */
 #define GAME_REC_WINDOW 1
 #define GAME_REC_SLOW   2
 #define GAME_REC_LONG   3
@@ -200,7 +202,7 @@ typedef struct {
     uint32        log_len;  /* words used */
     uint32        log_from; /* first frame the records cover */
     uint32        log_dropped;
-    uint32       *pad_log;  /* pad changes: frame << 9 | buttons (PAUSE bit 8) */
+    uint32       *pad_log;  /* pad changes: frame << GAME_PAD_SHIFT | buttons */
     uint32        pad_log_n;
     uint32        pad_log_printed; /* entries already written out */
     uint32        pad_log_dropped;
@@ -318,16 +320,16 @@ void  game_translate_rom(game *g);
 /* Resets the machine (translations are kept) and the statistics. */
 void  game_reset(game *g);
 
-/* Runs one frame with the buttons held (SMS_PAD_*) and the PAUSE button
- * (pressed in this frame), or in Game Gear mode the START button (held),
- * then updates the picture; returns 0, or the translator exit reason once
- * the run has stopped. start_us is a clock sample the caller has just
- * taken (the start of the emulation); the sample ending the picture
- * update is left in g->upd_end_us, the start of the drawing. The caller
- * then draws render_chain(g->rd) when render_display_on(g->rd), and calls
- * game_frame_done() with the drawing time. Every look at the clock is a
- * kernel call of tens of microseconds on the console: the frame loop
- * shares adjacent ones. */
+/* Runs one frame with the buttons held (SMS_PAD_*, SMS_PAD2()) and the
+ * PAUSE button (pressed in this frame), or in Game Gear mode the START
+ * button (held), then updates the picture; returns 0, or the translator
+ * exit reason once the run has stopped. start_us is a clock sample the
+ * caller has just taken (the start of the emulation); the sample ending
+ * the picture update is left in g->upd_end_us, the start of the drawing.
+ * The caller then draws render_chain(g->rd) when render_display_on(g->rd),
+ * and calls game_frame_done() with the drawing time. Every look at the
+ * clock is a kernel call of tens of microseconds on the console: the
+ * frame loop shares adjacent ones. */
 int32 game_frame(game *g, uint32 pad, uint32 pause, uint32 start_us);
 void  game_frame_done(game *g, uint32 draw_us);
 

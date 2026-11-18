@@ -41,13 +41,17 @@
  * VDP's access word tells when one is half written (sms_pair_check). */
 #define SMS_PORT_CTRL(p) (((p) & 0xC1u) == 0x81u)
 
-/* Buttons of pad 1 (sms_frame argument). */
+/* Buttons of pad 1 (sms_frame argument), and SMS_PAD2() of them for pad
+ * 2: the bits as ports $DC and $DD give them, active high (pad 1 in $DC
+ * bits 0-5, pad 2's Up and Down in $DC bits 6-7, the rest of pad 2 in $DD
+ * bits 0-3). */
 #define SMS_PAD_UP     0x01
 #define SMS_PAD_DOWN   0x02
 #define SMS_PAD_LEFT   0x04
 #define SMS_PAD_RIGHT  0x08
 #define SMS_PAD_1      0x10
 #define SMS_PAD_2      0x20
+#define SMS_PAD2(b)    ((b) << 6)
 
 /* Port accesses handled in C, by kind (the VDP data and control ports
  * are counted by the VDP, see vdp_state). */
@@ -72,7 +76,7 @@ typedef struct {
     uint32       psg_latch; /* register selected by the last latch byte */
     uint32       psg_reg[8];/* tone 0, volume 0, ..., noise, volume 3 */
     sms_io_stats io;
-    uint32       pad;       /* SMS_PAD_* held */
+    uint32       pad;       /* SMS_PAD_* and SMS_PAD2() held */
     uint32       mem_ctrl;  /* port $3E */
     uint32       io_ctrl;   /* port $3F */
     char         sdsc[80];  /* SDSC debug console line being written */
@@ -81,6 +85,9 @@ typedef struct {
     uint32       gg_japan;  /* region reported by port $00: Japan */
     uint32       gg_start;  /* START held */
     uint32       gg_port[7];/* ports $00-$06 ($06: PSG stereo distribution) */
+    uint32       pad2_read; /* port $DD read since sms_init (pad 2's buttons
+                             * there, or RESET): the caller may leave pad 2
+                             * unread until then */
 } sms_machine;
 
 /* Offset of the VDP state from the context (its size): the machine must
@@ -105,8 +112,9 @@ void sms_init(sms_machine *s, z80j_ctx *ctx, const uint8 *rom, sms_banks *banks,
 /* Power-on state, as the BIOS leaves it for the cartridge. */
 void sms_reset(sms_machine *s);
 
-/* Runs one frame with the buttons held (SMS_PAD_*); pause presses the
- * PAUSE button (NMI), or in Game Gear mode is the START button held. */
+/* Runs one frame with the buttons held (SMS_PAD_*, SMS_PAD2() for pad 2,
+ * which the Game Gear does not have); pause presses the PAUSE button
+ * (NMI), or in Game Gear mode is the START button held. */
 void sms_frame(sms_machine *s, uint32 pad, uint32 pause);
 
 /* Port handlers in assembly (sms_io.s). */

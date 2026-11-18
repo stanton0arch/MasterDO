@@ -36,7 +36,7 @@
  * large takes by default), -whole (such an image loaded as one block,
  * counted in VRAM, as before step 16.2).
  * Environment: SIMPAD="frame:bits,..." (buttons held from that frame on,
- * SMS_PAD_* bits, 0x100 PAUSE), SIMPROF=1 (cycles per function, the 40
+ * SMS_PAD_* bits, 0x100 PAUSE, pad 2's SMS_PAD_* in bits 9-14), SIMPROF=1 (cycles per function, the 40
  * largest; SIMPROFALL=1 every function),
  * SIMALLOC=1 (every allocation with its size and memory type), SIMSCALE=f
  * (every cycle weight multiplied by f: another host timing),
@@ -470,7 +470,8 @@ static void do_dump(uint32_t fb, uint32_t width, uint32_t height, uint32_t tag)
 }
 
 /* Pad script: "frame:bits" pairs in the environment variable SIMPAD
- * give the buttons held from that frame on (bit 8: PAUSE). An entry of
+ * give the buttons held from that frame on (bits 0-5 pad 1, bit 8 PAUSE,
+ * bits 9-14 pad 2). An entry of
  * bits 6-7 alone is an event before that frame (a savestate written,
  * read back, or read from an earlier run: game.h), returned in bits
  * 16-23 for that frame only. */

@@ -3,7 +3,7 @@
 
 /*
  * 3DO platform layer: display (three screens), microsecond clock, text
- * output and control pad.
+ * output and control pads (two).
  *
  * Presentation: plat_present() shows the back screen and waits for the
  * vertical blank (the text screens, the pause). The run instead queues
@@ -125,8 +125,10 @@ void   plat_mem_free(uint32 *dram, uint32 *vram);
 /* Buttons newly pressed since the previous call (ControlX, ControlA...). */
 uint32 plat_pad_pressed(void);
 
-/* Buttons held down (ControlX, ControlA...). */
+/* Buttons held down (ControlX, ControlA...), on the first pad of the
+ * chain, and on the second (0 when there is none). */
 uint32 plat_pad_state(void);
+uint32 plat_pad2_state(void);
 
 /* Pixels of a screen: 16-bit LRFORM, p->width pixels per line. */
 uint32 *plat_pixels(const platform *p, int32 screen);

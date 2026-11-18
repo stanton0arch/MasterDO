@@ -209,7 +209,8 @@ simulated pc and lr with their symbols, the stack pointer, r0 and r1.
 Environment variables:
 - `SIMPAD="1600:10,1606:0,2100:8"`: buttons held from each frame on
   (`SMS_PAD_*` bits of `sms.h`, 0x100 for PAUSE, or START held on the Game
-  Gear), up to 8 192 entries.
+  Gear, the second pad's `SMS_PAD_*` bits in bits 9-14), up to 8 192
+  entries.
   The ISO records the pad changes of a run and writes them at the pause
   or the end of the run as a `Pad script:` line holding a `panel.txt`
   entry (cartridge, frames, script), so that a run played on the console

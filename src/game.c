@@ -250,7 +250,8 @@ static void print_long(const game_long_rec *p)
 
 /* The pad script of the run so far, as a line of the panel file of the
  * analysis harness: the cartridge name, the frames run, then the buttons
- * held from each frame where they changed (hexadecimal, PAUSE as bit 8).
+ * held from each frame where they changed (hexadecimal: pad 1 in bits
+ * 0-5, PAUSE as bit 8, pad 2 in bits 9-14).
  * The whole script is written each time, so that the last one in the
  * log is complete; nothing is written when no change was recorded since
  * the previous time. */
@@ -265,8 +266,8 @@ static void print_pad_script(game *g)
     printf("Pad script: %s %lu ", g->name != NULL ? g->name : "rom.sms",
            (unsigned long)g->frame);
     for (k = 0; k < g->pad_log_n; k++)
-        printf("%s%lu:%lx", k ? "," : "", (unsigned long)(g->pad_log[k] >> 9),
-               (unsigned long)(g->pad_log[k] & 0x1FF));
+        printf("%s%lu:%lx", k ? "," : "", (unsigned long)(g->pad_log[k] >> GAME_PAD_SHIFT),
+               (unsigned long)(g->pad_log[k] & ((1u << GAME_PAD_SHIFT) - 1)));
     printf("\n");
     g->pad_log_printed = g->pad_log_n;
 }
@@ -987,14 +988,11 @@ int32 game_frame(game *g, uint32 pad, uint32 pause, uint32 start_us)
 
     /* Pad recorder: a change of the buttons held is kept with its frame. */
     {
-        uint32 bits = (pad & 0x3F) | (pause ? 0x100 : 0);
+        uint32 bits = (pad & 0x3F) | (pause ? 0x100 : 0) | (pad >> 6 & 0x3F) << 9;
 
         if (bits != g->pad_last) {
             g->pad_last = bits;
-            if (g->pad_log != NULL && g->pad_log_n < GAME_PAD_LOGS)
-                g->pad_log[g->pad_log_n++] = (g->frame << 9) | bits;
-            else
-                g->pad_log_dropped++;
+            game_pad_event(g, bits);
         }
     }
 
@@ -1152,8 +1150,9 @@ void game_pad_time(game *g, uint32 us)
 
 void game_pad_event(game *g, uint32 bits)
 {
-    if (g->pad_log != NULL && g->pad_log_n < GAME_PAD_LOGS)
-        g->pad_log[g->pad_log_n++] = (g->frame << 9) | bits;
+    if (g->pad_log != NULL && g->pad_log_n < GAME_PAD_LOGS &&
+        g->frame < 1u << (32 - GAME_PAD_SHIFT))
+        g->pad_log[g->pad_log_n++] = g->frame << GAME_PAD_SHIFT | bits;
     else
         g->pad_log_dropped++;
 }

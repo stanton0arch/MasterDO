@@ -971,7 +971,7 @@ void hmain(void)
             uint32 other;
 
             game_pad_time(&g, now - t0);
-            if (game_frame(&g, pad & 0x3F, (pad >> 8) & 1, now) != 0)
+            if (game_frame(&g, (pad & 0x3F) | SMS_PAD2(pad >> 9 & 0x3F), (pad >> 8) & 1, now) != 0)
                 break;
             /* A DrawCels of 3.5 ms is added to the frame time, as on
              * the console, before the spare time is used (none with the

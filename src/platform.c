@@ -1,5 +1,5 @@
 /*
- * 3DO platform layer: display, clock, text output and control pad.
+ * 3DO platform layer: display, clock, text output and control pads.
  */
 
 #include "options.h"
@@ -288,7 +288,7 @@ Err plat_init(platform *p)
         page_size = 2048;
     p->sc.sc_NumBitmapPages = (uint32)((p->width * p->height * 2 + page_size - 1) / page_size);
 
-    err = InitControlPad(1);
+    err = InitControlPad(2);
     if (err < 0)
         printf("WARNING: InitControlPad failed (0x%lx)\n", (unsigned long)err);
 
@@ -577,6 +577,15 @@ uint32 plat_pad_state(void)
 
     /* Every button reported while held. */
     if (DoControlPad(1, &buttons, (int32)PLAT_ALL_BUTTONS) < 0)
+        buttons = 0;
+    return buttons;
+}
+
+uint32 plat_pad2_state(void)
+{
+    uint32 buttons = 0;
+
+    if (DoControlPad(2, &buttons, (int32)PLAT_ALL_BUTTONS) < 0)
         buttons = 0;
     return buttons;
 }

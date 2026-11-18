@@ -18,8 +18,10 @@
  * the LCD window of 160 x 144 pixels in a black case, 12-bit colours, P
  * held as the START button. Pad during
  * the run: D-pad, A (button 1) and B (button 2) for the SMS pad, P for
- * PAUSE (START on the Game Gear); L saves the machine's state in the
- * NVRAM and R puts it back (state.c: one state for the console, kept
+ * PAUSE (START on the Game Gear); the second 3DO pad of the chain is the
+ * second SMS pad (P PAUSE too), read once the game has read port $DD,
+ * where most of it is (none on the Game Gear); L saves the machine's
+ * state in the NVRAM and R puts it back (state.c: one state for the console, kept
  * across a power-off, refused for another cartridge image), the screens
  * not on display lending their memory to the packing; C pauses the run
  * and shows the reference picture drawn by the CPU (debug view) to
@@ -500,6 +502,7 @@ static void log_run(const app_state *st)
 static void run_game(platform *p, app_state *st)
 {
     uint32 prev = plat_pad_state();
+    uint32 prev2 = 0;                   /* second pad */
     uint32 shown = plat_usec_now();     /* direct mode: return of the last presentation */
     uint32 last = shown;                /* the loop's last look at the clock */
     uint32 next = shown;                /* 50 Hz display: the frame's time on the clock */
@@ -517,7 +520,9 @@ static void run_game(platform *p, app_state *st)
     for (;;) {
         uint32 t0 = last;
         uint32 held = plat_pad_state();
+        uint32 held2 = (g.sms->pad2_read && !st->gg) ? plat_pad2_state() : 0;
         uint32 pressed = held & ~prev;
+        uint32 pause;
         uint32 draw_us;
         uint32 again;
         uint32 drop = 0;                /* the frame's picture is not shown */
@@ -583,10 +588,11 @@ static void run_game(platform *p, app_state *st)
                 drop = 1;
         }
 
-        /* P: the PAUSE button when pressed, or START while held on the
-         * Game Gear. */
-        if (game_frame(&g, sms_buttons(held),
-                       ((st->gg ? held : pressed) & ControlStart) != 0, now) != 0) {
+        /* P: the PAUSE button when pressed on either pad, or START while
+         * held on the Game Gear. */
+        pause = (((st->gg ? held : pressed) | (held2 & ~prev2)) & ControlStart) != 0;
+        prev2 = held2;
+        if (game_frame(&g, sms_buttons(held) | SMS_PAD2(sms_buttons(held2)), pause, now) != 0) {
             /* The emulation stopped: its records and summary go to the
              * log (a fault to report). */
             plat_drain(p);
@@ -1023,8 +1029,8 @@ int main(int argc, char **argv)
     /* The banner names the build by its latest changes (the oldest ones
      * dropped as new ones come: its bytes are DRAM the code buffer may
      * need). */
-    printf("masterdo: the run's summary written at C too; STOP pauses the game (A resumes, "
-           "STOP goes back to the menu); ROM menu by folders, underscores shown as spaces\n");
+    printf("masterdo: second pad, read once the game reads port $DD; the run's summary "
+           "written at C too; STOP pauses the game (A resumes, STOP goes back to the menu)\n");
 #else
     printf("masterdo " MASTERDO_VERSION "\n");
 #endif

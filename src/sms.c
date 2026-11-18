@@ -47,12 +47,12 @@ static void psg_write(sms_machine *s, uint32 v)
     }
 }
 
-/* Port $DD: port B pins (nothing connected), RESET button released, and
- * the TH pins, which read back their output level when set as outputs
- * (export console). */
+/* Port $DD: the rest of pad 2 (Left, Right, buttons 1 and 2, bits 0-3,
+ * 0 when held), RESET button released, and the TH pins, which read back
+ * their output level when set as outputs (export console). */
 static uint32 port_dd(const sms_machine *s)
 {
-    uint32 v = 0x3F;
+    uint32 v = 0x30 | (~s->pad >> 8 & 0x0F);
     uint32 c = s->io_ctrl;
 
     if (!(c & 0x02) ? (c & 0x20) : 1)
@@ -113,11 +113,12 @@ static uint32 sms_in(z80j_machine *m, uint32 port, uint32 left)
     case 5:
         s->io.vdp_stat_r++;
         return vdp_status_read(&s->vdp, left);
-    case 6:
+    case 6:                         /* $DC: pad 1, pad 2's Up and Down */
         s->io.pad_r++;
         return (s->mem_ctrl & 0x04) ? 0xFF : (~s->pad & 0xFF);
     case 7:
         s->io.pad_r++;
+        s->pad2_read = 1;
         return (s->mem_ctrl & 0x04) ? 0xFF : port_dd(s);
     default:
         s->io.other++;
@@ -280,8 +281,10 @@ void sms_pair_check(z80j_state *j)
 void sms_frame(sms_machine *s, uint32 pad, uint32 pause)
 {
     s->pad = pad;
-    if (s->gg)
+    if (s->gg) {
+        s->pad = pad & 0x3F;
         s->gg_start = pause;
+    }
     else if (pause)
         s->ctx->nmi = 1;
     vdp_frame_begin(&s->vdp);
