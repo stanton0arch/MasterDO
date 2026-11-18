@@ -80,7 +80,8 @@ void   plat_shutdown(platform *p);
 uint32 plat_usec_now(void);
 /* Looks at the clock taken so far and the kernel calls they made. */
 void   plat_clock_counts(uint32 *looks, uint32 *calls);
-/* Logs the cost of the clock's kernel calls and of the VBL counter. */
+/* Logs the cost of the clock's kernel calls and of the VBL counter
+ * (development build: MASTERDO_DEBUG, options.h). */
 void   plat_clock_bench(void);
 
 Item   plat_bitmap(const platform *p, int32 screen);

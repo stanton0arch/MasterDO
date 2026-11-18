@@ -43,8 +43,13 @@
  * starts while the presentation queue is full is not drawn, one in six.
  * The games and their music keep their speed, the pictures shown are
  * spaced unevenly in game time (a regular judder on scrolls).
+ *
+ * The release build (MASTERDO_DEBUG 0, options.h) has no debug pause: C
+ * does nothing, no record of the run is written to the log, the clock is
+ * not measured at start-up, and the banner names the version.
  */
 
+#include "options.h"
 #include "platform.h"
 #include "rom.h"
 #include "game.h"
@@ -155,6 +160,7 @@ static uint32 sms_buttons(uint32 held)
  * Run
  *------------------------------------------------------------------------*/
 
+#if MASTERDO_DEBUG
 static void log_vdp(const char *what)
 {
     const vdp_state *v = &g.sms->vdp;
@@ -204,6 +210,7 @@ static void log_vdp(const char *what)
     }
     printf("\n");
 }
+#endif
 
 /* The picture on the screens: centred, with the size of the part shown
  * (the 256-pixel picture of the display mode, 192, 224 or 240 lines, or
@@ -272,6 +279,7 @@ static uint32 draw_picture(platform *p, app_state *st)
     return dt;
 }
 
+#if MASTERDO_DEBUG
 /* Paused view: the reference picture drawn by the CPU (A) or the cels
  * (B), with the palette under it; R switches the presentation mode;
  * returns the buttons held when it ends, with ControlX set when the run
@@ -349,6 +357,7 @@ static uint32 show_snapshot(platform *p, app_state *st, uint32 prev)
         plat_wait_vbl(p);
     }
 }
+#endif
 
 static void reset_borders(app_state *st)
 {
@@ -452,6 +461,7 @@ static void state_op(platform *p, app_state *st, uint32 load)
     render_forget_picture(g.rd);
 }
 
+#if MASTERDO_DEBUG
 /* 50 Hz display: the frames emulated since the reset, the pictures not
  * shown and the frames that started over a period late (the clock then
  * followed from there: game time lost), for the log. */
@@ -476,6 +486,7 @@ static void log_run(const app_state *st)
     g.win.frames = frames;
     log_pace(st);
 }
+#endif
 
 /* The frame loop looks at the clock (a kernel call of tens of
  * microseconds on the console) at the end of the pad read, which starts
@@ -539,6 +550,7 @@ static void run_game(platform *p, app_state *st)
             longs = p->long_presents;
             continue;
         }
+#if MASTERDO_DEBUG
         if (pressed & ControlC) {
             plat_drain(p);
             psg_mute(&snd);
@@ -557,6 +569,7 @@ static void run_game(platform *p, app_state *st)
             longs = p->long_presents;
             continue;
         }
+#endif
         /* 50 Hz display: the queue takes one picture per VBL, 50 of the 60
          * frames a second; a frame that starts while it is full is not
          * shown (one in six, wherever the VBLs fall), and the screens never
@@ -579,8 +592,10 @@ static void run_game(platform *p, app_state *st)
             plat_drain(p);
             psg_mute(&snd);
             game_save(&g);
+#if MASTERDO_DEBUG
             game_log_summary(&g);
             log_pace(st);
+#endif
             sprintf(buf, "RUN STOPPED AT PC %04lX", (unsigned long)g.stop_pc);
             stop_screen(p, st, buf);
             break;
@@ -1004,11 +1019,15 @@ int main(int argc, char **argv)
            "%d blocks per frame at most, each code zone emptied once its blocks have moved\n",
            (int)Z80J_CHURN);
 #endif
+#if MASTERDO_DEBUG
     /* The banner names the build by its latest changes (the oldest ones
      * dropped as new ones come: its bytes are DRAM the code buffer may
      * need). */
     printf("masterdo: the run's summary written at C too; STOP pauses the game (A resumes, "
            "STOP goes back to the menu); ROM menu by folders, underscores shown as spaces\n");
+#else
+    printf("masterdo " MASTERDO_VERSION "\n");
+#endif
     if (plat_init(&plat) < 0)
         return 1;
     psg_open(&snd);
@@ -1025,7 +1044,9 @@ int main(int argc, char **argv)
     st.pic_w = RENDER_W;
     st.pic_h = RENDER_H;
 
+#if MASTERDO_DEBUG
     plat_clock_bench();
+#endif
     plat_mem_free(&st.dram_free, &st.vram_free);
     printf("Memory: %lu bytes of DRAM and %lu bytes of VRAM free before the cartridge\n",
            (unsigned long)st.dram_free, (unsigned long)st.vram_free);

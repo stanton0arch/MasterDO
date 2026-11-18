@@ -2,6 +2,7 @@
  * 3DO platform layer: display, clock, text output and control pad.
  */
 
+#include "options.h"
 #include "platform.h"
 
 #include "stdio.h"
@@ -336,6 +337,7 @@ void plat_shutdown(platform *p)
         DeleteBasicDisplay(&p->sc);
 }
 
+#if MASTERDO_DEBUG
 /* Cost of the clock, measured at start-up: kernel calls of the system
  * time (the convenience call and the system call under it), looks at the
  * clock as the program takes them, and reads of the VBL counter the
@@ -378,6 +380,7 @@ void plat_clock_bench(void)
            (unsigned long)(t3 - t2), (unsigned long)(t4 - t3), (unsigned long)v0,
            (unsigned long)v1, (unsigned long)(t4 - t0));
 }
+#endif
 
 Item plat_bitmap(const platform *p, int32 screen)
 {
