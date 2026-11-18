@@ -17,10 +17,10 @@
  *      records are still kept in memory.
  */
 #ifndef MASTERDO_DEBUG
-#define MASTERDO_DEBUG 1
+#define MASTERDO_DEBUG 0
 #endif
 
 /* The version a release build names. */
-#define MASTERDO_VERSION "0.1"
+#define MASTERDO_VERSION "0.2"
 
 #endif
