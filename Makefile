@@ -1,4 +1,4 @@
-NAME       = helloworld
+NAME       = masterdo
 ISO_DIR    = iso
 ISONAME    = $(ISO_DIR)/masterdo.iso
 FILESYSTEM = takeme
