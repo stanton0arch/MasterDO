@@ -17,7 +17,7 @@
  *      records are still kept in memory.
  */
 #ifndef MASTERDO_DEBUG
-#define MASTERDO_DEBUG 0
+#define MASTERDO_DEBUG 1
 #endif
 
 /* The version a release build names. */
