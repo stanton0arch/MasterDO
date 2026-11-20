@@ -9,10 +9,14 @@ means over several timing scales (SIMSCALE), per cartridge, per burst
 window and per 100-frame window, against the build it replaces.
 
 Usage (after make and mk.sh):
-  regress.py run OUT [-img DIR] [-scales a,b,...] [-only c1,c2] [-args "sim args"] [-jobs N]
+  regress.py run OUT [-img DIR] [-roms DIR] [-scales a,b,...] [-only c1,c2] [-args "sim args"]
+                     [-jobs N]
       Runs every play of panel.txt and panel_gg.txt with -framelog at each
       scale and keeps the Frame: lines in OUT/<cartridge>@<scale>.txt (a
-      run already there is kept). DIR holds the sim, sim.bin, sim.sym and
+      run already there is kept). The images are looked up under the
+      Master_System and Game_Gear folders of -roms (default takeme/roms),
+      by the names the panels give; a play whose image is missing is
+      skipped and named. DIR holds the sim, sim.bin, sim.sym and
       sim.aif of the build to run (default: this directory); copy them
       aside to keep a build to compare with (sim.aif gives the DRAM the
       console leaves to that build, hence its code buffer zones).
@@ -65,14 +69,19 @@ LIMITS = {'vis': 0.25, 'long': 0.5, 'worst': 2.0}
 # ---------------------------------------------------------------- run
 
 
-def plays():
+def plays(roms=ROMS):
     out = []
     for path, d in PANELS:
+        d = os.path.join(roms, os.path.basename(d))
         for line in open(path):
             line = line.split('#', 1)[0].strip()
             if line:
                 p = line.split()
-                out.append((p[0], os.path.join(d, p[0]), int(p[1]), p[2] if len(p) > 2 else ''))
+                rom = os.path.join(d, p[0])
+                if not os.path.exists(rom):
+                    print('skipped: %s (no image %s)' % (p[0], rom))
+                    continue
+                out.append((p[0], rom, int(p[1]), p[2] if len(p) > 2 else ''))
     return out
 
 
@@ -100,10 +109,13 @@ def run_one(img, out, cart, rom, frames, pad, scale, extra):
 def cmd_run(a):
     out = a.pop(0)
     img, scales, only, extra, jobs = HERE, SCALES.split(','), None, [], os.cpu_count() or 4
+    roms = ROMS
     while a:
         k = a.pop(0)
         if k == '-img':
             img = os.path.abspath(a.pop(0))
+        elif k == '-roms':
+            roms = os.path.abspath(a.pop(0))
         elif k == '-scales':
             scales = a.pop(0).split(',')
         elif k == '-only':
@@ -113,7 +125,7 @@ def cmd_run(a):
         elif k == '-jobs':
             jobs = int(a.pop(0))
     os.makedirs(out, exist_ok=True)
-    work = [(img, out, c, r, f, p, s, extra) for (c, r, f, p) in plays()
+    work = [(img, out, c, r, f, p, s, extra) for (c, r, f, p) in plays(roms)
             if not only or c in only or c.split('.')[0] in only for s in scales]
     work.sort(key=lambda w: -w[4])
     t0 = time.time()

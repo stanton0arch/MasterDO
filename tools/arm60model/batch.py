@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Batch runner of the ARM60 cycle model.
 
-Runs every cartridge of a directory in the model (sim), in parallel, each
-with its own pad script and frame count from the panel file, and writes a
+Runs the cartridges of a panel file in the model (sim), in parallel, each
+with its own pad script and frame count, and writes a
 one-page report: per cartridge the status of the run, the emulation,
 picture update and total times (over the run and across the 100-frame
 windows), the frames over budget and the worst frames, the translator and
@@ -14,9 +14,14 @@ that a change of the emulator is measured on the whole panel at once.
 
 Usage (after make and mk.sh):
   tools/arm60model/batch.py [-roms DIR] [-panel FILE] [-frames N] [-jobs N]
-                            [-only name,...] [-out DIR] [-reports DIR]
+                            [-only name,...] [-all] [-out DIR] [-reports DIR]
                             [-against REPORT.json] [-timeout SECONDS]
                             [-dump N] [-nosheets] [-label TEXT]
+
+The images are looked up by name in -roms, then in the Master_System and
+Game_Gear folders of takeme/roms (they hold whole sets, so only the
+panel's cartridges run, or those of -only; -all runs every image of
+-roms, with the default pad script where the panel has none).
 
 Outputs:
   <out>/<cartridge>/        log.txt (stdout of sim), sim.err, the PPM
@@ -652,6 +657,7 @@ def main():
     ap.add_argument("-frames", type=int, default=3000, help="default frame count (3000)")
     ap.add_argument("-jobs", type=int, default=0, help="parallel runs (default: the CPUs)")
     ap.add_argument("-only", default="", help="comma-separated cartridge names to run")
+    ap.add_argument("-all", action="store_true", help="every image of -roms, not the panel's")
     ap.add_argument("-out", default=os.path.join(HERE, "batch"), help="work directories")
     ap.add_argument("-reports", default=os.path.join(HERE, "reports"))
     ap.add_argument("-against", default="", help="previous report (.json) to compare with")
@@ -674,12 +680,28 @@ def main():
         print("warning: %d objects of build/ are newer than sim.bin (run mk.sh)" % len(stale))
 
     panel = read_panel(args.panel)
-    roms = sorted(f for f in os.listdir(args.roms) if f.lower().endswith((".sms", ".gg")))
+    dirs = [args.roms] + [os.path.join(ROOT, "takeme", "roms", d) for d in ("Master_System", "Game_Gear")]
+    files = {}
+    for d in reversed(dirs):
+        if os.path.isdir(d):
+            for f in os.listdir(d):
+                if f.lower().endswith((".sms", ".gg")):
+                    files[f] = os.path.join(d, f)
+    if args.all:
+        roms = sorted(f for f in os.listdir(args.roms) if f.lower().endswith((".sms", ".gg")))
+        files.update((f, os.path.join(args.roms, f)) for f in roms)
+    else:
+        roms = sorted(panel)
     if args.only:
         wanted = set(args.only.split(","))
-        roms = [r for r in roms if r in wanted or os.path.splitext(r)[0] in wanted]
+        named = [f for f in files if (f in wanted or os.path.splitext(f)[0] in wanted)]
+        roms = sorted(set(r for r in roms if r in wanted or os.path.splitext(r)[0] in wanted) |
+                      set(named))
+    for r in [r for r in roms if r not in files]:
+        print("%s: no image found" % r)
+    roms = [r for r in roms if r in files]
     if not roms:
-        sys.exit("no cartridge found in %s" % args.roms)
+        sys.exit("no cartridge found")
     jobs = args.jobs or min(len(roms), os.cpu_count() or 1)
     sha, dirty = git_state()
     stamp = datetime.datetime.now()
@@ -695,7 +717,7 @@ def main():
             frames, pad = panel.get(rom, (None, DEFAULT_PAD))
             frames = frames or args.frames
             workdir = os.path.join(args.out, os.path.splitext(rom)[0])
-            fut = ex.submit(run_one, args, rom, os.path.join(args.roms, rom), frames, pad, workdir)
+            fut = ex.submit(run_one, args, rom, files[rom], frames, pad, workdir)
             futures[fut] = rom
         for fut in concurrent.futures.as_completed(futures):
             g = fut.result()
