@@ -558,8 +558,8 @@ void game_save(game *g)
  * cannot be emptied from inside the run). The room is used only when the
  * code buffer can give a zone up with the lent ones (four zones of its own
  * at least). Zero-filled, as a cartridge with no save would be: the end of
- * the room still is, cleared with the pool and written by nobody while it
- * is lent (clearing it again would cost the frame about 1 ms). */
+ * the room still is, cleared with the code buffer and written by nobody
+ * while it is lent (clearing it again would cost the frame about 1 ms). */
 static uint8 *cart_ram_get(void *arg)
 {
     game *g = (game *)arg;
@@ -632,7 +632,13 @@ static void give_room(void *arg)
  * room of the bitmaps (the second layer's, which most games never use,
  * or the taller modes' rows) serves as up to ROOM_ZONES more zones until
  * the renderer first needs it (give_room). A block found nowhere in one
- * piece falls back to fewer zones. */
+ * piece falls back to fewer zones.
+ * The block is zero-filled when allocated: it usually lies where the
+ * previous game's buffer was, and the ARM code left there by that game is
+ * overwritten while the game loads rather than block by block during the
+ * play, when the new translations land on it (a host that recompiles the
+ * ARM code it runs then has to drop its stale translations of that
+ * memory). It also gives the bitmaps their blank start. */
 static uint32 *alloc_code(game *g, uint32 least)
 {
     uint32 dram = 0;
@@ -663,7 +669,8 @@ static uint32 *alloc_code(game *g, uint32 least)
         return NULL;
     for (;;) {
         g->code_bytes = JIT_ZONE_BYTES * g->zones + extra;
-        code = (uint8 *)AllocMem((int32)g->code_bytes, MEMTYPE_DRAM | MEMTYPE_CEL);
+        code = (uint8 *)AllocMem((int32)g->code_bytes,
+                                 MEMTYPE_DRAM | MEMTYPE_CEL | MEMTYPE_FILL);
         if (code != NULL || g->zones <= least || game_zones != 0)
             break;
         g->zones--;
@@ -671,7 +678,6 @@ static uint32 *alloc_code(game *g, uint32 least)
     if (code != NULL && extra != 0) {
         uint8 *pool = code + JIT_ZONE_BYTES * g->zones;
 
-        memset(pool, 0, RENDER_POOL_BYTES);
         render_set_pool(g->rd, pool, give_room, g);
         g->pool = pool;
         g->lent = GAME_MAX_ZONES - g->zones;

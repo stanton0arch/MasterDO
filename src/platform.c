@@ -538,6 +538,10 @@ void plat_drain(platform *p)
     while (p->q_head != p->q_tail)
         WaitSignal((uint32)p->free_sig);
     p->back = (p->displayed + 1) % p->num_screens;
+    /* The frame loop stops here (end of a game, a pause): the next
+     * presentation starts a new series, its gap from the last one is not
+     * a long present. The thread, its queue empty, waits for a signal. */
+    p->presented = 0;
 }
 
 void plat_wait_vbl(const platform *p)

@@ -1029,8 +1029,9 @@ int main(int argc, char **argv)
     /* The banner names the build by its latest changes (the oldest ones
      * dropped as new ones come: its bytes are DRAM the code buffer may
      * need). */
-    printf("masterdo: second pad, read once the game reads port $DD; the run's summary "
-           "written at C too; STOP pauses the game (A resumes, STOP goes back to the menu)\n");
+    printf("masterdo: code buffer cleared when a game starts, no long present counted "
+           "across a pause; second pad, read once the game reads port $DD; the run's summary "
+           "written at C too\n");
 #else
     printf("masterdo " MASTERDO_VERSION "\n");
 #endif

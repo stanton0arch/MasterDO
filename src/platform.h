@@ -106,7 +106,8 @@ void   plat_sleep(const platform *p, uint32 us);
  * for one when none is free; plat_free_screen() tells whether one is free
  * now; plat_next_vbl_us() estimates the clock value of the next vertical
  * blank from the last presentation; plat_drain() waits until every queued
- * screen has been shown (before plat_present() is used again).
+ * screen has been shown (before plat_present() is used again), and the
+ * next presentation is not counted as long for the time spent since.
  * plat_queue_again() queues the screen of the last queued picture once
  * more, the back screen staying free; since such entries take no screen,
  * the main task also waits while more than PLAT_NUM_SCREENS - 2 entries
