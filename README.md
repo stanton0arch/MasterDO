@@ -4,6 +4,8 @@
 
 **A Sega Master System and Game Gear emulator for the 3DO Interactive Multiplayer.**
 
+Demo of the emulator on a PAL FZ-1: https://youtu.be/oiTg0YGS2Z8
+
 ## Table of contents
 
 - [Intro](#intro)
