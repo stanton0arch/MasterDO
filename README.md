@@ -97,8 +97,9 @@ When a game is left, the menu comes back on the same folder and the same game.
   second controller. It is read once the game reads the second controller
   port, and never in Game Gear mode (the Game Gear has a single pad).
 - **Pause screen** (X): a black screen with the image's name and size and the
-  display type. A resumes the game, X goes back to the main menu. The game's
-  save is written to the NVRAM when the pause screen opens.
+  display type. P resumes the game, X goes back to the main menu; the other
+  buttons do nothing. The game's save is written to the NVRAM when the pause
+  screen opens.
 - **Savestate** (L / R): there is one savestate for the whole console, kept in
   the NVRAM across resets and power-offs. Saving replaces the previous state,
   whichever game it belonged to, and takes a few seconds (the state is

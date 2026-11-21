@@ -30,7 +30,7 @@
  * VBL with the emulation working a frame ahead, and the direct mode,
  * present and wait for the VBL after each frame; C: resume), and writes
  * the run's records and summary to the debug log; STOP (X) pauses the run on a black
- * screen naming the image and the display, where A resumes it and STOP
+ * screen naming the image and the display, where P resumes it and STOP
  * goes back to the menu. The PSG
  * registers of each frame drive voices on the DSP (psg.c), silenced
  * whenever the run pauses or ends. The cartridge's battery RAM is kept
@@ -370,10 +370,11 @@ static void reset_borders(app_state *st)
 }
 
 /* The screen of STOP: black, the image's name and size and the display;
- * A resumes the run (returns 0, once A is released: it is also the pad's
- * button 1), STOP leaves it (returns 1). With a problem (the image not
- * loaded, the run stopped), the problem instead of A's line, and only
- * STOP. */
+ * P resumes the run (returns 0, once P is released: it is also the
+ * machine's PAUSE, or START held on the Game Gear), STOP leaves it
+ * (returns 1), the other buttons do nothing. With a problem (the image
+ * not loaded, the run stopped), the problem instead of P's line, and
+ * only STOP. */
 static uint32 stop_screen(platform *p, const app_state *st, const char *problem)
 {
     int32 s = p->back;
@@ -390,7 +391,7 @@ static uint32 stop_screen(platform *p, const app_state *st, const char *problem)
     sprintf(buf, "%s %ldX%ld", p->is_pal ? "PAL" : "NTSC", (long)p->width, (long)p->height);
     text_line(p, s, 2, COLOR_TEXT, buf);
     text_line(p, s, 4, problem != NULL ? COLOR_BAD : COLOR_HEAD,
-              problem != NULL ? problem : "A: RESUME THE GAME");
+              problem != NULL ? problem : "P: RESUME THE GAME");
     text_line(p, s, 5, COLOR_HEAD, "STOP: BACK TO THE MASTERDO MAIN MENU");
     plat_present(p);
     for (;;) {
@@ -400,8 +401,8 @@ static uint32 stop_screen(platform *p, const app_state *st, const char *problem)
         prev = held;
         if (pressed & ControlX)
             return 1;
-        if ((pressed & ControlA) && problem == NULL) {
-            while (plat_pad_state() & ControlA)
+        if ((pressed & ControlStart) && problem == NULL) {
+            while (plat_pad_state() & ControlStart)
                 plat_wait_vbl(p);
             return 0;
         }
