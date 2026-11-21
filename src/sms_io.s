@@ -1218,8 +1218,10 @@ ev_tail
         add     r6,r12,#V_LCK
         stmia   r6,{r3,r4}
 ev_synced
-        ; VBlank flag at the end of the line after the active display
-        cmp     r0,r5
+        ; VBlank flag at the end of the second line after the active
+        ; display, one line after the last countdown
+        add     r6,r5,#1
+        cmp     r0,r6
         bls     ev_irq
         teq     r2,#0
         bne     ev_irq
@@ -1244,7 +1246,7 @@ ev_irq
         ; interrupts are enabled, else the end of the frame
         ldr     r6,[r12,#V_LINES]
         teq     r2,#0
-        addeq   r6,r5,#1
+        addeq   r6,r5,#2
         tst     r0,#0x10000000
         beq     ev_sched
         cmp     r3,r5
