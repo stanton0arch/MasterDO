@@ -67,8 +67,9 @@ The menu lists the folders of the disc's `roms` directory, then the `.sms` and
 `Master_System` and `Game_Gear` folders come first, then any other folder.
 Underscores in file and folder names are shown as spaces. The first lines show
 the display type (NTSC or PAL), the memory left, the current folder and the
-cursor's position in it. At the root, a panel under the folders explains the
-region and translation codes that end the image names.
+cursor's position in it. At the root (three folders at most), each folder is
+shown as a box, over a "ROM nomenclature" panel that explains the region and
+translation codes that end the image names.
 
 | 3DO button   | Action                                              |
 |--------------|-----------------------------------------------------|

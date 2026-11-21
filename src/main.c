@@ -755,16 +755,25 @@ static void memory_line(platform *p, int32 screen, int32 line, uint32 dram, uint
  * under the CD's root directory cannot hold spaces (the build's dependency
  * list would split them).
  *
- * At the root, a panel under the folders explains the region and
- * translation codes of the image names.
+ * At the root, when it holds only a few folders, each folder is shown as
+ * a box, and a panel under them explains the region and translation
+ * codes of the image names.
  *------------------------------------------------------------------------*/
 
-#define LEGEND_X     8          /* panel's left edge */
-#define LEGEND_W     304
-#define LEGEND_H     141
-#define LEGEND_PITCH 11         /* pixels between two lines of the panel */
-#define LEGEND_FILL  MakeRGB15(2, 3, 9)
-#define LEGEND_EDGE  MakeRGB15(8, 14, 24)
+#define HOME_MAX     3          /* root folders shown as boxes over the legend */
+#define HOME_FILL    MakeRGB15(2, 5, 10)
+#define HOME_FILL_CUR MakeRGB15(2, 9, 3)
+#define BOX_X        8          /* boxes span the text's width */
+#define BOX_W        304
+#define BOX_Y        36         /* first folder box, under the folder line */
+#define BOX_H        14
+#define BOX_PITCH    18
+#define LEGEND_H     140        /* under three folder boxes: ends at line 236 */
+#define LEGEND_BAR   12         /* title bar */
+#define LEGEND_PITCH 10         /* pixels between two lines of the panel */
+#define LEGEND_FILL  MakeRGB15(1, 2, 6)
+#define LEGEND_EDGE  MakeRGB15(6, 9, 15)
+#define LEGEND_TITLE "ROM NOMENCLATURE"
 
 /* The panel's lines, '\n' apart; bytes 1 to 3 choose the colour of what
  * follows: headings, codes, plain text. */
@@ -782,50 +791,65 @@ static const char legend[] =
     "\2  T_ \3+ 3-letter language code:\n"
     "\2  eng, fre, spa, ger, ita, bra, cat";
 
-static void draw_legend(const platform *p, int32 s, int32 y)
+/* A box across the text's width: a 1-pixel edge around a fill, which
+ * becomes the background of the text drawn next with gc. */
+static void draw_box(Item bm, GrafCon *gc, int32 y, int32 h, Color edge, Color fill)
 {
-    static const Color ink[3] = { COLOR_HEAD, COLOR_TITLE, COLOR_TEXT };
-    Item bm = plat_bitmap(p, s);
-    const char *c = legend;
-    GrafCon gc;
     Rect r;
 
-    /* Edge, fill, and the rule between the two sections. */
-    memset(&gc, 0, sizeof(gc));
-    gc.gc_FGPen = LEGEND_EDGE;
-    r.rect_XLeft = LEGEND_X;
+    gc->gc_FGPen = edge;
+    r.rect_XLeft = BOX_X;
     r.rect_YTop = y;
-    r.rect_XRight = LEGEND_X + LEGEND_W;
-    r.rect_YBottom = y + LEGEND_H;
-    FillRect(bm, &gc, &r);
-    gc.gc_FGPen = LEGEND_FILL;
-    r.rect_XLeft = LEGEND_X + 1;
+    r.rect_XRight = BOX_X + BOX_W;
+    r.rect_YBottom = y + h;
+    FillRect(bm, gc, &r);
+    gc->gc_FGPen = fill;
+    r.rect_XLeft = BOX_X + 1;
     r.rect_YTop = y + 1;
-    r.rect_XRight = LEGEND_X + LEGEND_W - 1;
-    r.rect_YBottom = y + LEGEND_H - 1;
-    FillRect(bm, &gc, &r);
-    gc.gc_FGPen = LEGEND_EDGE;
-    r.rect_XLeft = LEGEND_X + 8;
-    r.rect_XRight = LEGEND_X + LEGEND_W - 8;
-    r.rect_YTop = y + 6 + 8 * LEGEND_PITCH + 3;     /* the blank line before TRANSLATION */
-    r.rect_YBottom = r.rect_YTop + 1;
-    FillRect(bm, &gc, &r);
+    r.rect_XRight = BOX_X + BOX_W - 1;
+    r.rect_YBottom = y + h - 1;
+    FillRect(bm, gc, &r);
+    gc->gc_BGPen = fill;
+}
 
-    /* Text over the fill, its background in the fill's colour; each
-     * character drawn moves the pen past it. */
-    gc.gc_BGPen = LEGEND_FILL;
-    gc.gc_PenX = LEGEND_X + 8;
-    gc.gc_PenY = y + 6;
+static void draw_legend(Item bm, GrafCon *gc, int32 y)
+{
+    static const Color ink[3] = {
+        MakeRGB15(10, 17, 25), MakeRGB15(25, 23, 10), MakeRGB15(20, 20, 20)
+    };
+    const char *c = legend;
+    Rect r;
+
+    /* The panel, the rule between its two sections (in the blank line
+     * before TRANSLATION), the title bar and its title. */
+    draw_box(bm, gc, y, LEGEND_H, LEGEND_EDGE, LEGEND_FILL);
+    gc->gc_FGPen = LEGEND_EDGE;
+    r.rect_XLeft = BOX_X + 8;
+    r.rect_XRight = BOX_X + BOX_W - 8;
+    r.rect_YTop = y + LEGEND_BAR + 5 + 8 * LEGEND_PITCH + 4;
+    r.rect_YBottom = r.rect_YTop + 1;
+    FillRect(bm, gc, &r);
+    draw_box(bm, gc, y, LEGEND_BAR, LEGEND_EDGE, LEGEND_EDGE);
+    gc->gc_FGPen = MakeRGB15(20, 23, 28);
+    gc->gc_PenX = BOX_X + (BOX_W - (sizeof(LEGEND_TITLE) - 1) * PLAT_GLYPH_W) / 2;
+    gc->gc_PenY = y + 2;
+    DrawText8(gc, bm, (const uint8 *)LEGEND_TITLE);
+
+    /* The lines, their background in the fill's colour; each character
+     * drawn moves the pen past it. */
+    gc->gc_BGPen = LEGEND_FILL;
+    gc->gc_PenX = BOX_X + 8;
+    gc->gc_PenY = y + LEGEND_BAR + 5;
     for (;;) {
         uint32 ch = (uint8)*c++;
 
         if (ch >= ' ') {
-            DrawChar(&gc, bm, ch);
+            DrawChar(gc, bm, ch);
         } else if (ch == '\n') {
-            gc.gc_PenX = LEGEND_X + 8;
-            gc.gc_PenY += LEGEND_PITCH;
+            gc->gc_PenX = BOX_X + 8;
+            gc->gc_PenY += LEGEND_PITCH;
         } else if (ch != 0) {
-            gc.gc_FGPen = ink[ch - 1];
+            gc->gc_FGPen = ink[ch - 1];
         } else {
             break;
         }
@@ -837,6 +861,9 @@ static void draw_menu(platform *p, const app_state *st, const rom_dir *d, int32 
     int32 s = p->back;
     int32 first = (cur / MENU_LINES) * MENU_LINES;
     int32 root = st->place.dir[0] == 0;
+    int32 home = root && d->count > 0 && d->count <= HOME_MAX && d->folders == d->count;
+    Item bm = plat_bitmap(p, s);
+    GrafCon gc;
     int32 k;
     uint32 n;
     uint32 room;
@@ -844,6 +871,7 @@ static void draw_menu(platform *p, const app_state *st, const rom_dir *d, int32 
     char buf[64];
 
     plat_clear(p, s);
+    memset(&gc, 0, sizeof(gc));
 #if Z80J_DIAG || Z80J_CHURN
     sprintf(buf, "MASTERDO DIAGNOSTIC %d A:OPEN %s", (int)Z80J_DIAG,
             root ? "STOP:QUIT" : "B:BACK");
@@ -884,17 +912,24 @@ static void draw_menu(platform *p, const app_state *st, const rom_dir *d, int32 
             sprintf(buf, "%c %-31s %4luK", k == cur ? '>' : ' ', name,
                     (unsigned long)((size + 1023) / 1024));
         }
-        text_line(p, s, 3 + k - first, k == cur ? COLOR_GOOD : c, buf);
+        if (k == cur)
+            c = COLOR_GOOD;
+        if (home) {
+            int32 y = BOX_Y + k * BOX_PITCH;
+
+            draw_box(bm, &gc, y, BOX_H, c, k == cur ? HOME_FILL_CUR : HOME_FILL);
+            gc.gc_FGPen = c;
+            gc.gc_PenX = BOX_X + 8;
+            gc.gc_PenY = y + 3;
+            DrawText8(&gc, bm, (const uint8 *)buf);
+        } else {
+            text_line(p, s, 3 + k - first, c, buf);
+        }
     }
     if (d->count == 0)
         text_line(p, s, 3, COLOR_BAD, "  no folder or image here");
-    /* The legend under the root's folders, when it fits. */
-    if (root) {
-        int32 y = TEXT_Y + (3 + (k - first) + (d->count == 0)) * PLAT_LINE_H + 4;
-
-        if (y + LEGEND_H <= p->height - 4)
-            draw_legend(p, s, y);
-    }
+    if (home)
+        draw_legend(bm, &gc, BOX_Y + d->count * BOX_PITCH + 6);
     plat_present(p);
 }
 
