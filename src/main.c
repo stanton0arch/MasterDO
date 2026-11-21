@@ -30,8 +30,8 @@
  * VBL with the emulation working a frame ahead, and the direct mode,
  * present and wait for the VBL after each frame; C: resume), and writes
  * the run's records and summary to the debug log; STOP (X) pauses the run on a black
- * screen naming the image and the display, where P resumes it and STOP
- * goes back to the menu. The PSG
+ * screen naming the image and the display, where STOP or P resumes it
+ * and C goes back to the menu. The PSG
  * registers of each frame drive voices on the DSP (psg.c), silenced
  * whenever the run pauses or ends. The cartridge's battery RAM is kept
  * in a file of the NVRAM (save.c): read when the RAM is given, written
@@ -370,11 +370,11 @@ static void reset_borders(app_state *st)
 }
 
 /* The screen of STOP: black, the image's name and size and the display;
- * P resumes the run (returns 0, once P is released: it is also the
- * machine's PAUSE, or START held on the Game Gear), STOP leaves it
- * (returns 1), the other buttons do nothing. With a problem (the image
- * not loaded, the run stopped), the problem instead of P's line, and
- * only STOP. */
+ * STOP or P resumes the run (returns 0, once both are released: STOP
+ * would open this screen again, P is also the machine's PAUSE, or START
+ * held on the Game Gear), C leaves it (returns 1), the other buttons do
+ * nothing. With a problem (the image not loaded, the run stopped), the
+ * problem instead of the resume line, and only C. */
 static uint32 stop_screen(platform *p, const app_state *st, const char *problem)
 {
     int32 s = p->back;
@@ -391,18 +391,18 @@ static uint32 stop_screen(platform *p, const app_state *st, const char *problem)
     sprintf(buf, "%s %ldX%ld", p->is_pal ? "PAL" : "NTSC", (long)p->width, (long)p->height);
     text_line(p, s, 2, COLOR_TEXT, buf);
     text_line(p, s, 4, problem != NULL ? COLOR_BAD : COLOR_HEAD,
-              problem != NULL ? problem : "P: RESUME THE GAME");
-    text_line(p, s, 5, COLOR_HEAD, "STOP: BACK TO THE MASTERDO MAIN MENU");
+              problem != NULL ? problem : "STOP OR P: RESUME THE GAME");
+    text_line(p, s, 5, COLOR_HEAD, "C: BACK TO THE MASTERDO MAIN MENU");
     plat_present(p);
     for (;;) {
         uint32 held = plat_pad_state();
         uint32 pressed = held & ~prev;
 
         prev = held;
-        if (pressed & ControlX)
+        if (pressed & ControlC)
             return 1;
-        if ((pressed & ControlStart) && problem == NULL) {
-            while (plat_pad_state() & ControlStart)
+        if ((pressed & (ControlX | ControlStart)) && problem == NULL) {
+            while (plat_pad_state() & (ControlX | ControlStart))
                 plat_wait_vbl(p);
             return 0;
         }
