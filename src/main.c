@@ -754,7 +754,83 @@ static void memory_line(platform *p, int32 screen, int32 line, uint32 dram, uint
  * freed before the image loads. Underscores are shown as spaces: the names
  * under the CD's root directory cannot hold spaces (the build's dependency
  * list would split them).
+ *
+ * At the root, a panel under the folders explains the region and
+ * translation codes of the image names.
  *------------------------------------------------------------------------*/
+
+#define LEGEND_X     8          /* panel's left edge */
+#define LEGEND_W     304
+#define LEGEND_H     141
+#define LEGEND_PITCH 11         /* pixels between two lines of the panel */
+#define LEGEND_FILL  MakeRGB15(2, 3, 9)
+#define LEGEND_EDGE  MakeRGB15(8, 14, 24)
+
+/* The panel's lines, '\n' apart; bytes 1 to 3 choose the colour of what
+ * follows: headings, codes, plain text. */
+static const char legend[] =
+    "\1REGION\n"
+    "  \2j  \3Japan        \2b  \3Brazil\n"
+    "  \2u  \3USA          \2k  \3Korea\n"
+    "  \2e  \3Europe       \2w  \3World\n"
+    "\n"
+    "\3  Combinations are kept as-is:\n"
+    "\2  ue, ju, ueb...\n"
+    "\3  (USA, Europe) -> \2ue\n"
+    "\n"
+    "\1TRANSLATION\n"
+    "\2  T_ \3+ 3-letter language code:\n"
+    "\2  eng, fre, spa, ger, ita, bra, cat";
+
+static void draw_legend(const platform *p, int32 s, int32 y)
+{
+    static const Color ink[3] = { COLOR_HEAD, COLOR_TITLE, COLOR_TEXT };
+    Item bm = plat_bitmap(p, s);
+    const char *c = legend;
+    GrafCon gc;
+    Rect r;
+
+    /* Edge, fill, and the rule between the two sections. */
+    memset(&gc, 0, sizeof(gc));
+    gc.gc_FGPen = LEGEND_EDGE;
+    r.rect_XLeft = LEGEND_X;
+    r.rect_YTop = y;
+    r.rect_XRight = LEGEND_X + LEGEND_W;
+    r.rect_YBottom = y + LEGEND_H;
+    FillRect(bm, &gc, &r);
+    gc.gc_FGPen = LEGEND_FILL;
+    r.rect_XLeft = LEGEND_X + 1;
+    r.rect_YTop = y + 1;
+    r.rect_XRight = LEGEND_X + LEGEND_W - 1;
+    r.rect_YBottom = y + LEGEND_H - 1;
+    FillRect(bm, &gc, &r);
+    gc.gc_FGPen = LEGEND_EDGE;
+    r.rect_XLeft = LEGEND_X + 8;
+    r.rect_XRight = LEGEND_X + LEGEND_W - 8;
+    r.rect_YTop = y + 6 + 8 * LEGEND_PITCH + 3;     /* the blank line before TRANSLATION */
+    r.rect_YBottom = r.rect_YTop + 1;
+    FillRect(bm, &gc, &r);
+
+    /* Text over the fill, its background in the fill's colour; each
+     * character drawn moves the pen past it. */
+    gc.gc_BGPen = LEGEND_FILL;
+    gc.gc_PenX = LEGEND_X + 8;
+    gc.gc_PenY = y + 6;
+    for (;;) {
+        uint32 ch = (uint8)*c++;
+
+        if (ch >= ' ') {
+            DrawChar(&gc, bm, ch);
+        } else if (ch == '\n') {
+            gc.gc_PenX = LEGEND_X + 8;
+            gc.gc_PenY += LEGEND_PITCH;
+        } else if (ch != 0) {
+            gc.gc_FGPen = ink[ch - 1];
+        } else {
+            break;
+        }
+    }
+}
 
 static void draw_menu(platform *p, const app_state *st, const rom_dir *d, int32 cur)
 {
@@ -812,6 +888,13 @@ static void draw_menu(platform *p, const app_state *st, const rom_dir *d, int32 
     }
     if (d->count == 0)
         text_line(p, s, 3, COLOR_BAD, "  no folder or image here");
+    /* The legend under the root's folders, when it fits. */
+    if (root) {
+        int32 y = TEXT_Y + (3 + (k - first) + (d->count == 0)) * PLAT_LINE_H + 4;
+
+        if (y + LEGEND_H <= p->height - 4)
+            draw_legend(p, s, y);
+    }
     plat_present(p);
 }
 
