@@ -179,7 +179,12 @@ No game image is provided with MasterDO: use dumps of your own cartridges.
 
 ## Compatibility list
 
-Coming soon.
+- [Master System](compatibility_master_system.md)
+- [Game Gear](compatibility_game_gear.md)
+
+The fluidity of each title is estimated in the ARM60 cycle model of the
+emulator (`tools/arm60model/compat.py`), not measured by playing the games
+on a console: one image per title, a few minutes of blind play each.
 
 ## Technical aspects
 
