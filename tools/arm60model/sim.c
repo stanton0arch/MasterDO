@@ -1210,6 +1210,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-cels") && i + 1 < argc) args[16] = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-celhash")) args[15] = 1;
         else if (!strcmp(argv[i], "-dumpdiff") && i + 1 < argc) args[17] = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-dumponly")) args[33] = 1;
         else if (!strcmp(argv[i], "-rasterlog")) args[18] = 1;
         else if (!strcmp(argv[i], "-framelog")) args[19] = 1;
         else if (!strcmp(argv[i], "-dectest")) args[21] = 1;

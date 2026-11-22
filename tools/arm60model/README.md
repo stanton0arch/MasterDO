@@ -144,6 +144,14 @@ display band are only written when they differ, the first n of them; the
 pictures at multiples of the dump period are always written (a raster game
 compares thousands of frames per run).
 
+`-dumponly` with `-dump`: only the frames at multiples of the dump period
+are compared, not those with bands or display changes (a raster game runs
+ten to forty times faster; `compat.py` uses it). The comparisons are made
+between two frames, outside the modelled time, but the clock can still move
+by a microsecond around them: a run with and without it takes the same
+course to within that noise (Hang-On, 1 500 frames: 17 674 and 17 651 us per
+frame), not frame for frame.
+
 `-cels n` prints the sprites of frame n as the VDP evaluated them, the
 register 8 and colour RAM writes of the frame with their lines, the
 cel chain (position, size, bits per pixel) and, when the priority layer
@@ -485,6 +493,54 @@ shown at the same VBL as before). Running one build twice at two sets of
 scales marks nothing. A whole run of the 24 plays takes about 90 seconds
 on 16 cores; `-args` passes options to `sim` (`-force 16`), `-only`
 restricts the cartridges.
+
+## Compatibility survey
+
+`compat.py` estimates the fluidity of every title of the Master System
+and Game Gear sets of `takeme/roms` without playing them, and writes
+`compatibility_master_system.md` and `compatibility_game_gear.md` at the
+root of the repository (a table: game, fluidity, remarks):
+
+```
+tools/arm60model/compat.py list                  # the titles and the image measured for each
+tools/arm60model/compat.py run [-set ms|gg] [-only title,...]   # runs what is missing, then reports
+tools/arm60model/compat.py report                # the reports again from the kept runs
+```
+
+- One image per title (the file name up to its first `-`): the panel's
+  image when it has a recorded play, else an untranslated one, by region
+  (ue, u, w, e, b, j, k).
+- Each title runs 90 seconds four times: without a button (title and
+  attract mode) and with three generic pad sequences (30 s of menus, then
+  blind play tapping button 1, holding button 1 or holding button 2; the
+  Game Gear set presses START 7, 8 or 9 times, so that one of the three
+  leaves the game unpaused whatever press starts it, and its Master System
+  mode cartridges get the same, START being their PAUSE), plus the panel's
+  recorded play if any. The runs use `-dumponly`; one run takes 5 to 30 s,
+  both sets about an hour on 16 cores.
+- The frame times of each run go through `present.py`'s presentation. A
+  picture held a VBL or more because of new code translated at once, an
+  eviction or a disc read, or held two VBLs or more among frames on time,
+  is a held picture; held pictures less than two seconds apart make a
+  hitch, which counts when it lost three VBLs or more. The speed of a
+  100-frame window with the display on is its frames over its VBLs, the
+  VBLs of the hitches left out; the run's fluidity is the speed held in
+  nine windows out of ten; the title's is the lowest of its runs, to the
+  nearest 5 %.
+- Remarks in a fixed vocabulary (the list ends each Markdown file): does
+  not load, crash, emulation stops, unsupported mapper (an image over
+  48 KiB whose game never writes the Sega or Codemasters paging
+  registers), black screen (every reference picture of every run one
+  colour), stuck on one screen, graphical artifacts (the cel engine's
+  picture differs from the reference view, compared every 100 frames),
+  slowdown in some scenes, frequent hitches, hitches at scene starts
+  (new code), occasional hitches (evictions, disc reads, heavy frames).
+- Kept per run in `batch/compat/<set>/<title>/<run>/`: `log.txt.gz`,
+  `sim.err`, `run.json` and `sheet.png` (the reference picture every 300
+  frames: whether a pad sequence reached the game is seen there); a run
+  is made again when `sim.bin`, the image, the pad script or the frame
+  count change. The figures of every run go to
+  `reports/compat/<set>-<date>-<commit>.json`.
 
 `../z80int_test/` holds the reference Z80 interpreter in C (the assembly
 one of `src/z80int_a.s` follows it) with a native ZEXDOC harness; see the

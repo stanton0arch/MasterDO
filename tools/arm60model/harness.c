@@ -14,7 +14,10 @@
  * larger than SMS_BLOCK_MAX (-cache n: at most n buffers, 0 as many as the
  * VRAM holds and SMS_BANK_DRAM more in DRAM; set by sim for such an image
  * unless -whole), 31 the native saves of the ISO without the NVRAM
- * (-saves: save.c's decisions and packing, nothing read or written). The pad
+ * (-saves: save.c's decisions and packing, nothing read or written), 33
+ * compare only the frames at multiples of the dump period (-dumponly: no
+ * compare at the frames with bands or display changes, which raster games
+ * have on every frame). The pad
  * is scripted by the host (sim_pad). At the end, the code buffer is dumped
  * for anacode.py and hotblocks.py.
  *
@@ -1251,9 +1254,10 @@ void hmain(void)
          * from its start with no band is blank in both pictures), and
          * the first frame with the display on after frames without it
          * (the picture caught up in their spare time). */
-        if (dump_every && ((f + 1) % dump_every == 0 || g.sms->vdp.de_n != 0 ||
-                           g.sms->vdp.hs_n != 0 || g.sms->vdp.cr_n != 0 ||
-                           (render_display_on(g.rd) && !prev_on))) {
+        if (dump_every && ((f + 1) % dump_every == 0 ||
+                           (!sim_arg(33) &&
+                            (g.sms->vdp.de_n != 0 || g.sms->vdp.hs_n != 0 ||
+                             g.sms->vdp.cr_n != 0 || (render_display_on(g.rd) && !prev_on))))) {
             const vdp_state *v = &g.sms->vdp;
 
             set_window(v);
