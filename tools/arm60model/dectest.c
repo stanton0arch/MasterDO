@@ -608,10 +608,10 @@ static int32 ref_decode_block(const z80j_ctx *ctx, jit_insn *ins, uint32 pc, uin
                 m[4] = (uint32)(n - 1);
         }
         if (n >= 2 && in[-1].ei) {
-            if (in->kind != K_NORMAL)
-                in[-1].irq_check = 1;
-            else
+            if (in->kind == K_NORMAL)
                 in->irq_check = 1;
+            else if (in->kind != K_HALT)    /* HALT: its glue takes it after it */
+                in[-1].irq_check = 1;
         }
         /* The segment starts the decoder now sets ahead of the analysis:
          * the block start, the instruction after a conditional one, and

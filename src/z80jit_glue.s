@@ -341,9 +341,18 @@ z80j_glue_leave
 
 ;----------------------------------------------------------------------------
 ; HALT: the rest of the stretch goes by idle, and so do the next ones until
-; an interrupt. In: r0 = Z80 PC after the HALT.
+; an interrupt. An interrupt already pending (the HALT right after EI) is
+; taken at once, as the Z80 takes it after the HALT, with the address
+; after the HALT pushed. In: r0 = Z80 PC after the HALT.
 ;----------------------------------------------------------------------------
 z80j_glue_halt
+        ldr     r1,[r10,#IRQ_LINE]
+        ldr     r2,[r10,#IFF1]
+        ldr     r12,[r10,#NMI]
+        and     r1,r1,r2
+        orrs    r1,r1,r12
+        movne   r1,#0
+        bne     z80j_glue_leave
         ldr     r1,[r10,#IDLE]          ; the rest of the stretch is idle
         add     r1,r1,r8
         str     r1,[r10,#IDLE]

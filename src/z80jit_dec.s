@@ -103,6 +103,7 @@ K_CALL          EQU     9
 K_RST           EQU     10
 K_RET           EQU     11
 K_RETN          EQU     12
+K_HALT          EQU     14
 
 FL_Z            EQU     0x02
 FL_H            EQU     0x04
@@ -674,7 +675,8 @@ sn_core
 ; for those that would take their segment past SEG_MAX_T T-states (the
 ; segments as the analysis cuts them, but for the jump targets: see
 ; below), irq_check set when it follows EI and is no transfer or
-; conditional (the EI gets it otherwise), dyn set in RAM for JP / CALL
+; conditional (the EI gets it otherwise, but for a HALT: neither gets
+; it), dyn set in RAM for JP / CALL
 ; and the absolute loads and stores of A and HL (but for those whose bit
 ; is set in b->konst), internal the index of the instruction its static
 ; target starts, or -1.
@@ -1336,10 +1338,16 @@ db_seam
         b       db_end
 
 ; The previous instruction is EI: the interrupt check comes after this one,
-; or right after EI when this one is a transfer or a conditional.
+; or right after EI when this one is a transfer or a conditional. A HALT
+; gets none: the Z80 takes the interrupt after it, with the address after
+; it pushed, and so does the HALT glue (a check on EI would push the
+; HALT's own address, and a handler returning without EI would come back
+; to a HALT with interrupts off).
 db_after_ei
         cmp     r2,#K_NORMAL
-        bicne   r8,r8,#M_IRQ
+        beq     db_set
+        bic     r8,r8,#M_IRQ
+        cmp     r2,#K_HALT
         movne   r3,#1
         strneb  r3,[r0,#I_IRQ_CHECK - I_CORE - I_SIZE]
         b       db_set
