@@ -178,6 +178,8 @@ typedef struct {
     uint32 repeats;         /* pictures identical to the previous one */
     uint32 spr_cut;         /* sprite cels cut at the top of a palette band */
     uint32 spr_uncut;       /* of those, left whole for lack of cels */
+    uint32 sat_views;       /* frames whose sprites came from the sprite table
+                               the lines saw (vdp_sat_view) */
 } render_stats;
 
 /*

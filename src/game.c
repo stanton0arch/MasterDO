@@ -172,7 +172,7 @@ static void print_window(const game_window_rec *p)
            "%lu frames in palette bands, %lu colour writes merged, %lu frames of more than "
            "192 lines, %lu cells and %lu tiles ahead in %lu frames with the display off "
            "(%lu us, %lu cut short), %lu pictures shown again, %lu sprite cels cut at "
-           "palette bands (%lu left whole)\n",
+           "palette bands (%lu left whole), %lu frames with the sprite table the lines saw\n",
            (unsigned long)p->first, (unsigned long)p->last,
            (unsigned long)d->rd.tiles, (unsigned long)d->rd.cells, (unsigned long)d->rd.rebuilds,
            (unsigned long)d->rd.tile_cells, (unsigned long)d->rd.palettes,
@@ -187,7 +187,8 @@ static void print_window(const game_window_rec *p)
            (unsigned long)d->rd.ahead_cells, (unsigned long)d->rd.ahead_tiles,
            (unsigned long)d->rd.ahead_calls, (unsigned long)d->rd.ahead_us,
            (unsigned long)d->rd.ahead_cut, (unsigned long)d->rd.repeats,
-           (unsigned long)d->rd.spr_cut, (unsigned long)d->rd.spr_uncut);
+           (unsigned long)d->rd.spr_cut, (unsigned long)d->rd.spr_uncut,
+           (unsigned long)d->rd.sat_views);
 }
 
 static void print_slow(const game_slow_rec *p)
@@ -374,7 +375,7 @@ static void read_counters(const game *g, game_counters *c)
     plat_clock_counts(&c->clock_looks, &c->clock_calls);
     c->vdp_data_w = g->data_w_total;
     c->vdp_data_r = g->sms->vdp.n_data_r;
-    c->vdp_ctrl_w = g->sms->vdp.n_ctrl_w;
+    c->vdp_ctrl_w = vdp_ctrl_writes(&g->sms->vdp);
     memcpy(&c->io, &g->sms->io, sizeof(c->io));
     c->io.vdp_stat_r += g->sms->vdp.n_stat_r;   /* the assembly handlers count apart */
     c->io.counter_r += g->sms->vdp.n_count_r;
@@ -406,6 +407,7 @@ static uint32 percent(uint32 part, uint32 whole)
 static void window_start(game *g, uint32 now_us)
 {
     memset(&g->win, 0, sizeof(g->win));
+    vdp_fold_ctrl_writes(&g->sms->vdp);     /* at most a few hundred thousand */
     read_counters(g, &g->win_start);
     g->win.start_us = now_us;
 }
@@ -421,6 +423,7 @@ void game_free(game *g)
     if (g->hot != NULL) FreeMem(g->hot, 0x10000);
     if (g->log != NULL) FreeMem(g->log, GAME_LOG_WORDS * 4);
     if (g->pad_log != NULL) FreeMem(g->pad_log, GAME_PAD_LOGS * 4);
+    if (g->sat_mem != NULL) FreeMem(g->sat_mem, VDP_SAT_LOG_BYTES + VDP_SAT_VIEW_BYTES);
     if (g->code != NULL) FreeMem(g->code, (int32)g->code_bytes);
     if (g->ctx != NULL) FreeMem(g->ctx, sizeof(z80j_ctx) + sizeof(sms_machine));
     /* The cartridge RAM in the code buffer's block (the room or a zone)
@@ -434,6 +437,7 @@ void game_free(game *g)
     g->hot = NULL;
     g->log = NULL;
     g->pad_log = NULL;
+    g->sat_mem = NULL;
     g->code = NULL;
     g->ctx = NULL;
     g->cart_ram = NULL;
@@ -777,7 +781,13 @@ Err game_init(game *g, const uint8 *rom, sms_banks *banks, uint32 rom_size, uint
     g->log = (uint32 *)AllocMem(GAME_LOG_WORDS * 4, MEMTYPE_DRAM);
     if (g->pad_log == NULL)
         g->pad_log = (uint32 *)AllocMem(GAME_PAD_LOGS * 4, MEMTYPE_DRAM);
+    /* The VDP's record of the sprite table writes made during the active
+     * display (vdp.h), last, in VRAM when the rest left room there:
+     * without it the table in video RAM is the only one. */
+    g->sat_mem = (uint8 *)AllocMem(VDP_SAT_LOG_BYTES + VDP_SAT_VIEW_BYTES, MEMTYPE_VRAM);
     sms_init(g->sms, g->ctx, rom, banks, rom_size, VDP_LINES_NTSC, g->cart_ram, g->cart_ram_size, gg);
+    if (g->sat_mem != NULL)
+        vdp_set_sat_log(&g->sms->vdp, (uint32 *)g->sat_mem, g->sat_mem + VDP_SAT_LOG_BYTES);
     sms_mem_ram_source(&g->sms->mem, cart_ram_get, g);
     z80j_set_show(&g->jit, sms_mem_show, &g->sms->mem);
     if (banks != 0) {
@@ -793,12 +803,14 @@ Err game_init(game *g, const uint8 *rom, sms_banks *banks, uint32 rom_size, uint
             z80j_set_pair_port(&g->jit, k);
     }
     sms_pair_check(&g->jit);
-    printf("Cartridge RAM: %lu bytes %s; entry counters in %s; log arena %s, pad log %s\n",
+    printf("Cartridge RAM: %lu bytes %s; entry counters in %s; log arena %s, pad log %s, "
+           "sprite table writes %s\n",
            (unsigned long)g->cart_ram_size,
            g->cart_where == GAME_CART_VRAM ? "in VRAM" : "in DRAM when shown",
            g->hot_vram ? "VRAM" : "DRAM",
            g->log != NULL ? "allocated" : "out of memory",
-           g->pad_log == NULL ? "out of memory" : g->pad_log_vram ? "in VRAM" : "in DRAM");
+           g->pad_log == NULL ? "out of memory" : g->pad_log_vram ? "in VRAM" : "in DRAM",
+           g->sat_mem != NULL ? "recorded in VRAM" : "not recorded (no VRAM left)");
     printf("Mapper: %s\n", g->sms->mem.mapper == SMS_MAPPER_CODEMASTERS ?
            "Codemasters (header at $7FE0; slots paged by writes to $0000, $4000, $8000)" :
            "Sega (paging registers at $FFFC-$FFFF)");
@@ -1363,7 +1375,7 @@ void game_log_summary(game *g)
            "%lu frames in palette bands, %lu colour writes merged, %lu frames of more than "
            "192 lines, %lu cells and %lu tiles ahead in %lu frames with the display off "
            "(%lu us, %lu cut short), %lu pictures shown again, %lu sprite cels cut at "
-           "palette bands (%lu left whole)\n",
+           "palette bands (%lu left whole), %lu frames with the sprite table the lines saw\n",
            (unsigned long)d.rd.tiles, (unsigned long)d.rd.cells, (unsigned long)d.rd.rebuilds,
            (unsigned long)d.rd.tile_cells, (unsigned long)d.rd.palettes,
            (unsigned long)d.rd.sprites, (unsigned long)d.rd.pieces,
@@ -1376,13 +1388,17 @@ void game_log_summary(game *g)
            (unsigned long)d.rd.ahead_cells, (unsigned long)d.rd.ahead_tiles,
            (unsigned long)d.rd.ahead_calls, (unsigned long)d.rd.ahead_us,
            (unsigned long)d.rd.ahead_cut, (unsigned long)d.rd.repeats,
-           (unsigned long)d.rd.spr_cut, (unsigned long)d.rd.spr_uncut);
+           (unsigned long)d.rd.spr_cut, (unsigned long)d.rd.spr_uncut,
+           (unsigned long)d.rd.sat_views);
     printf("Game summary: VDP %lu data writes, %lu data reads, %lu control writes, "
            "%lu status reads, %lu counter reads, PSG %lu writes, pad %lu reads\n",
            (unsigned long)d.vdp_data_w, (unsigned long)d.vdp_data_r,
            (unsigned long)d.vdp_ctrl_w, (unsigned long)d.io.vdp_stat_r,
            (unsigned long)d.io.counter_r, (unsigned long)d.io.psg_w,
            (unsigned long)d.io.pad_r);
+    if (g->sms->vdp.sat_lost != 0)
+        printf("Sprite table: %lu writes of the active display not recorded (record full)\n",
+               (unsigned long)g->sms->vdp.sat_lost);
     printf("Code buffer: %lu zones, %lu lent by the picture's bitmaps taken back at frame %ld "
            "(%lu blocks emptied, %lu us); cartridge RAM place %lu (game.h), shown at frame %ld, "
            "hidden %lu times\n",

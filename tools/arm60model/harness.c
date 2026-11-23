@@ -331,7 +331,7 @@ static uint32 ref_sprites(const vdp_state *v, int32 *spr_y, uint32 *spr_vis, uin
                           uint32 *partial)
 {
     const uint8 *vram = v->vram;
-    const uint8 *sat = vram + ((v->reg[5] & 0x7E) << 7);
+    const uint8 *sat = vdp_spr_table(v);
     uint32 zoom = (uint32)v->reg[1] & 1;
     uint32 h = ((v->reg[1] & 0x02) ? 16 : 8) << zoom;
     int32 w = 8 << zoom;
@@ -477,6 +477,10 @@ static uint32 ref_sprites(const vdp_state *v, int32 *spr_y, uint32 *spr_vis, uin
     return flags;
 }
 
+static uint8 sat_prev[256];    /* -satlog: the sprite table at the previous frame's end */
+static uint32 sat_log_on;      /* -satlog given */
+static uint32 sat_writes;      /* sprite table writes recorded (vdp.h) */
+static uint32 sat_most;
 static uint32 sprite_checks;
 static uint32 sprite_errors;
 static uint32 sprite_flag_frames[2];
@@ -594,7 +598,7 @@ static void check_sprites(vdp_state *v, uint32 f)
      * screen with an opaque pixel, none missing), their boxes, and the
      * order by first row. */
     if (!bad) {
-        const uint8 *sat = v->vram + ((v->reg[5] & 0x7E) << 7);
+        const uint8 *sat = vdp_spr_table(v);
         int32 h = (int32)v->spr_h;
         int32 act = (int32)v->active;
         uint32 want = 0;
@@ -638,7 +642,7 @@ static void check_sprites(vdp_state *v, uint32 f)
                    (unsigned long)f, (unsigned long)v->spr_nord, (unsigned long)want);
     }
     if (bad && sprite_errors++ < 20) {
-        const uint8 *sat = v->vram + ((v->reg[5] & 0x7E) << 7);
+        const uint8 *sat = vdp_spr_table(v);
 
         printf("Sprites: frame %lu: assembly flags %lx n %lu partial %lu, reference flags %lx n %lu partial %lu\n",
                (unsigned long)f, (unsigned long)aflags, (unsigned long)v->spr_n,
@@ -859,6 +863,7 @@ void hmain(void)
 
     kb.kb_CurrentTask = &task;
     KernelBase = &kb;
+    sat_log_on = sim_arg(34);
     if (bench) {
         bench_cpu_run(&bres);
         bench_cpu_log(&bres);
@@ -1083,6 +1088,43 @@ void hmain(void)
             check_blocks(f);
         if (render_display_on(g.rd))
             check_sprites(&g.sms->vdp, f);
+        if (sat_log_on && g.sms->vdp.sat_n != 0) {
+            /* -satlog: the sprite table writes of the frame's active
+             * display: lines, entries whose value differs from the final
+             * table's byte, writes equal to the byte they replaced. */
+            const vdp_state *v = &g.sms->vdp;
+            const uint8 *sat = v->vram + (((uint32)v->reg[5] & 0x7E) << 7);
+            uint32 k, lo = 999, hi = 0, diff = 0;
+
+            for (k = 0; k < v->sat_n; k++) {
+                uint32 e = v->sat_log[k];
+                uint32 line = VDP_SAT_LINE(e);
+
+                if (line < lo) lo = line;
+                if (line > hi) hi = line;
+                if ((e & 0xFF) != sat[(e >> 8) & 0xFF])
+                    diff++;
+            }
+            {
+                uint32 same = 0;
+
+                for (k = 0; k < v->sat_n; k++)
+                    if ((v->sat_log[k] & 0xFF) == sat_prev[(v->sat_log[k] >> 8) & 0xFF])
+                        same++;
+                printf("Sat: frame %lu: %lu writes, lines %lu-%lu, %lu differ from the final table, "
+                       "%lu equal to the previous frame's, view %s\n",
+                       (unsigned long)f, (unsigned long)v->sat_n, (unsigned long)lo, (unsigned long)hi,
+                       (unsigned long)diff, (unsigned long)same, v->spr_sat != NULL ? "built" : "none");
+            }
+        }
+        if (sat_log_on) {
+            const vdp_state *v = &g.sms->vdp;
+
+            memcpy(sat_prev, v->vram + (((uint32)v->reg[5] & 0x7E) << 7), 256);
+        }
+        sat_writes += g.sms->vdp.sat_n;
+        if (g.sms->vdp.sat_n > sat_most)
+            sat_most = g.sms->vdp.sat_n;
         if (sim_arg(14) && (f + 1) % sim_arg(14) == 0) {
             /* -hash: a hash of the machine state (Z80 RAM and registers,
              * VDP registers, video and colour RAM) every 100 frames
@@ -1192,7 +1234,7 @@ void hmain(void)
         if (sim_arg(16) == f + 1 && render_display_on(g.rd)) {
             const CCB *c;
             const vdp_state *v = &g.sms->vdp;
-            const uint8 *sat = v->vram + ((v->reg[5] & 0x7E) << 7);
+            const uint8 *sat = vdp_spr_table(v);
             uint32 k;
 
             for (k = 0; k < v->spr_n; k++)
@@ -1299,6 +1341,8 @@ void hmain(void)
     printf("Sprites: %lu frames checked, %lu with differences, %lu with overflow, %lu with collision\n",
            (unsigned long)sprite_checks, (unsigned long)sprite_errors,
            (unsigned long)sprite_flag_frames[0], (unsigned long)sprite_flag_frames[1]);
+    printf("Sprite table: %lu writes of the active display recorded, %lu in a frame at most\n",
+           (unsigned long)sat_writes, (unsigned long)sat_most);
     printf("Repeats: %lu pictures shown again, %lu checked against the previous picture, %lu differing\n",
            (unsigned long)rep_count, (unsigned long)rep_checked, (unsigned long)rep_errors);
     sim_codedump((uint32)g.jit.code, (uint32)g.jit.code_end, (uint32)g.jit.blocks, g.jit.nblocks);

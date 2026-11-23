@@ -1225,6 +1225,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-whole")) args[30] = 1;
         else if (!strcmp(argv[i], "-saves")) args[31] = 1;
         else if (!strcmp(argv[i], "-statedump") && i + 1 < argc) args[32] = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-satlog")) args[34] = 1;
         else if (!strcmp(argv[i], "-dramfree") && i + 1 < argc) { dram_free = atoi(argv[++i]); dram_given = 1; }
         else if (!strcmp(argv[i], "-aif") && i + 1 < argc) aif = argv[++i];
         else if (!strcmp(argv[i], "-hotzones") && i + 1 < argc) args[12] = atoi(argv[++i]);

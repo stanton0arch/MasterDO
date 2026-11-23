@@ -1306,7 +1306,7 @@ static uint32 update_pieces(renderer *r, const vdp_state *v, uint32 *nprio, uint
         a.nstrips = ns;
         a.xoff = (reg0 & 0x08) ? 8 : 0;
         a.v = v;
-        a.sat = v->vram + ((v->reg[5] & 0x7E) << 7);
+        a.sat = vdp_spr_table(v);
         a.limit = pixels;
         a.area = 0;
         a.p = &pp;
@@ -1538,7 +1538,7 @@ static uint32 split_sprites(renderer *r, uint32 n, const spr_group *grp)
 static uint32 update_sprites(renderer *r, const vdp_state *v)
 {
     const uint8 *vram = v->vram;
-    const uint8 *sat = vram + ((v->reg[5] & 0x7E) << 7);
+    const uint8 *sat = vdp_spr_table(v);
     uint32 tall = (v->reg[1] & 0x02) ? 1 : 0;
     uint32 mode = tall | (v->spr_zoom << 1);
     render_sprite_args a;
@@ -1770,8 +1770,13 @@ static void update_picture(renderer *r, vdp_state *v)
         return;
     }
     shown_columns(r, v);
-    /* The sprites the hardware shows on each line, and the flags it sets
-     * while drawing them. */
+    /* The sprites the hardware shows on each line, from the sprite table
+     * the lines saw, and the flags it sets while drawing them. */
+    if (v->sat_n != 0) {
+        vdp_sat_view(v);
+        if (v->spr_sat != NULL)
+            r->st.sat_views++;
+    }
     k = vdp_sprites(v);
     if (k & VDP_ST_OVERFLOW)
         r->st.overflows++;

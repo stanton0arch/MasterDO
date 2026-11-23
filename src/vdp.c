@@ -48,6 +48,14 @@ CHECK_OFF(dirty, offsetof(vdp_state, dirty) == 0x200);
 CHECK_OFF(vram, offsetof(vdp_state, vram) == 0x400);
 CHECK_OFF(hs_n, offsetof(vdp_state, hs_n) == 0x4400);
 CHECK_OFF(hs_log, offsetof(vdp_state, hs_log) == 0x4404);
+CHECK_OFF(sat_log, offsetof(vdp_state, sat_log) == 0x1AC);
+CHECK_OFF(sat_n, offsetof(vdp_state, sat_n) == 0x1B0);
+CHECK_OFF(sat_lost, offsetof(vdp_state, sat_lost) == 0x1B4);
+CHECK_OFF(sat_view, offsetof(vdp_state, sat_view) == 0x1B8);
+CHECK_OFF(spr_sat, offsetof(vdp_state, spr_sat) == 0x1BC);
+CHECK_OFF(sat_tmax, offsetof(vdp_state, sat_tmax) == 0x1C0);
+CHECK_OFF(ctrl_base, offsetof(vdp_state, ctrl_base) == 0x1C4);
+CHECK_OFF(dirty_after_pad, offsetof(vdp_state, pad) + sizeof(((vdp_state *)0)->pad) == 0x200);
 
 /* Register values left by the BIOS (SMS official documentation). */
 static const uint8 vdp_power_on[11] = {
@@ -104,6 +112,10 @@ static void vdp_mode(vdp_state *v)
     v->active = VDP_ACTIVE_STD;
     if (m4 && m2 && (m1 ^ m3))
         v->active = m1 ? 224 : 240;
+    /* A sprite table write shows from the next line: one made on the last
+     * line shown (the LCD window's in Game Gear mode) or later changes no
+     * line of the picture (t / 4 = 57 per line). */
+    v->sat_tmax = 57 * (vdp_win_y(v) + vdp_win_h(v) - 1);
     v->nt_rows = (v->active > VDP_ACTIVE_STD) ? 32 : 28;
     /* V counter: the lines up to vc_jump count from 0 (modulo 256), the
      * later ones jump back by vc_back. NTSC: $00-$DA then $D5-$FF (192
@@ -178,6 +190,19 @@ static void vdp_schedule(vdp_state *v)
     v->ctx->event_line = v->frame_base + next;
 }
 
+/* The sprite table watch (vdp.h): armed during the active display of the
+ * frame when the machine gave it memory. */
+static void sat_arm(vdp_state *v)
+{
+    uint32 key = ((uint32)v->reg[5] >> 1) & VDP_NCTRL_TABLE;
+
+    if (v->vbl_done)
+        key |= VDP_NCTRL_OFF;
+    if (v->sat_log != NULL)
+        key |= VDP_NCTRL_LOG;
+    v->n_ctrl_w = (v->n_ctrl_w & ~(uint32)VDP_NCTRL_KEY) | key;
+}
+
 void vdp_reset(vdp_state *v)
 {
     memset(v->vram, 0, sizeof(v->vram));
@@ -197,6 +222,8 @@ void vdp_reset(vdp_state *v)
     v->nt_n = 0;
     v->de_n = 0;
     v->cr_n = 0;
+    v->sat_n = 0;
+    v->spr_sat = NULL;
     v->de_start = ((uint32)v->reg[1] >> 6) & 1;
     v->lc_k = 0;
     v->lc_val = v->reg[10];
@@ -206,8 +233,10 @@ void vdp_reset(vdp_state *v)
     v->cram_dirty = 1;
     v->n_data_r = 0;
     v->n_ctrl_w = 0;
+    v->ctrl_base = 0;
     v->n_stat_r = 0;
     v->n_count_r = 0;
+    sat_arm(v);
 }
 
 void vdp_init(vdp_state *v, z80j_ctx *ctx, uint32 lines)
@@ -215,6 +244,9 @@ void vdp_init(vdp_state *v, z80j_ctx *ctx, uint32 lines)
     uint32 t;
 
     v->ctx = ctx;
+    v->sat_log = NULL;
+    v->sat_view = NULL;
+    v->sat_lost = 0;
     v->spr_n = 0;
     v->spr_partial = 0;
     v->spr_nord = 0;
@@ -240,8 +272,11 @@ void vdp_restored(vdp_state *v, uint32 line_rel, uint32 event_rel)
     v->nt_n = 0;
     v->de_n = 0;
     v->cr_n = 0;
+    v->sat_n = 0;
+    v->spr_sat = NULL;
     v->de_start = ((uint32)v->reg[1] >> 6) & 1;
     vdp_mode(v);
+    sat_arm(v);
     memset(v->dirty, 1, sizeof(v->dirty));
     memset(v->spr_tile_ok, 0, sizeof(v->spr_tile_ok));
     v->cram_dirty = 1;
@@ -258,9 +293,12 @@ void vdp_frame_begin(vdp_state *v)
     v->hs_n = 0;
     v->nt_n = 0;
     v->de_n = 0;
+    v->sat_n = 0;
+    v->spr_sat = NULL;
     v->cr_n = 0;
     v->de_start = ((uint32)v->reg[1] >> 6) & 1;
     v->frames++;
+    v->n_ctrl_w &= ~(uint32)VDP_NCTRL_OFF;  /* the watch armed for the active display */
     vdp_schedule(v);
 }
 
@@ -271,6 +309,7 @@ void vdp_event(vdp_state *v)
     lc_sync(v, k);
     if (k > v->active + 1 && !v->vbl_done) {
         v->vbl_done = 1;
+        v->n_ctrl_w |= VDP_NCTRL_OFF;
         v->status |= VDP_ST_VBLANK;
     }
     vdp_irq(v);
@@ -298,9 +337,39 @@ uint32 vdp_data_read(vdp_state *v)
     return r;
 }
 
+/* The sprite attribute table holds video RAM address a (register 5). */
+#define IN_SAT(v, a)    ((((a) ^ (((uint32)(v)->reg[5] & 0x7E) << 7)) & 0x3F00) == 0)
+
+/* A video RAM write at address a, made while the access word was watched
+ * (see vdp.h): recorded with its time when it falls in the sprite table
+ * during the watched lines (VDP_SAT_SAME when it leaves the byte old as it
+ * was). Returns the slow mark the access word keeps:
+ * none once the address has left the table or the watched lines have
+ * ended. */
+static uint32 sat_write(vdp_state *v, uint32 a, uint32 value, uint32 old, uint32 left)
+{
+    int32 t;
+
+    if (!IN_SAT(v, a))
+        return 0;
+    t = vdp_time(v, left);
+    if (t < 0)
+        return VDP_ACC_SLOW;            /* it ends the previous frame */
+    t >>= 2;
+    if ((uint32)t >= v->sat_tmax)
+        return 0;
+    if (v->sat_n < VDP_SAT_LOG)
+        v->sat_log[v->sat_n++] = ((uint32)t << 16) | ((a & 0xFF) << 8) | value
+                                 | (old == value ? VDP_SAT_SAME : 0);
+    else
+        v->sat_lost++;
+    return VDP_ACC_SLOW;
+}
+
 void vdp_data_write(vdp_state *v, uint32 value, uint32 left)
 {
-    uint32 acc = acc_unpend(v->acc);
+    uint32 acc0 = v->acc;
+    uint32 acc = acc_unpend(acc0);
     uint32 a = acc >> VDP_ACC_ADDR_SHIFT;
 
     v->buffer = value;
@@ -331,8 +400,13 @@ void vdp_data_write(vdp_state *v, uint32 value, uint32 left)
                 v->cr_log[v->cr_n++] = (line << 16) | ((a & 31) << 8) | (value & 0x3F);
         }
     } else {
+        uint32 old = v->vram[a];
+
         v->vram[a] = (uint8)value;
         v->dirty[a >> 5] = 1;
+        /* Slow with nothing pending and a video RAM code: watched. */
+        if ((acc0 & (VDP_ACC_SLOW | VDP_PENDING)) == VDP_ACC_SLOW)
+            acc |= sat_write(v, a, value, old, left);
     }
     /* The next address (wrapping by itself), one more write. */
     v->acc = acc + (1u << VDP_ACC_ADDR_SHIFT) + 1;
@@ -407,7 +481,7 @@ uint32 vdp_control_write(vdp_state *v, uint32 value, uint32 left)
     uint32 addr;
     uint32 latch;
 
-    v->n_ctrl_w++;
+    v->n_ctrl_w += VDP_NCTRL_ONE;
     if (!(v->acc & VDP_PENDING)) {
         v->acc = (v->acc & ~(0xFFu << VDP_ACC_ADDR_SHIFT)) | (value << VDP_ACC_ADDR_SHIFT) |
                  VDP_PENDING | VDP_ACC_SLOW;
@@ -419,12 +493,20 @@ uint32 vdp_control_write(vdp_state *v, uint32 value, uint32 left)
     addr = ((value & 0x3F) << 8) | latch;
     v->acc = (v->acc & VDP_ACC_DW_MASK) | (code << VDP_ACC_CODE_SHIFT) |
              (addr << VDP_ACC_ADDR_SHIFT) | (code == 3 ? VDP_ACC_SLOW : 0);
+    if (code == 2) {
+        if (value == 0x85)              /* the sprite table watch follows the table */
+            v->n_ctrl_w = (v->n_ctrl_w & ~(uint32)VDP_NCTRL_TABLE) |
+                          ((latch >> 1) & VDP_NCTRL_TABLE);
+        return vdp_reg_write(v, value & 0x0F, latch, left);
+    }
     if (code == 0) {
         v->buffer = v->vram[addr];
         v->acc += 1u << VDP_ACC_ADDR_SHIFT;
-    } else if (code == 2) {
-        return vdp_reg_write(v, value & 0x0F, latch, left);
     }
+    /* The next address in the sprite table during the active display: the
+     * data port writes are watched (see vdp.h; code 3 is slow anyway). */
+    if ((((v->acc >> 26) ^ v->n_ctrl_w) & VDP_NCTRL_KEY) == VDP_NCTRL_LOG)
+        v->acc |= VDP_ACC_SLOW;
     return 0;
 }
 
@@ -556,4 +638,13 @@ uint32 vdp_palette_bands(const vdp_state *v, uint32 *tops, uint32 *cram, uint32 
     if (nb > 1 && cram_same(cram + 8 * (nb - 1), cram + 8 * (nb - 2)))
         nb--;
     return nb;
+}
+
+void vdp_set_sat_log(vdp_state *v, uint32 *log, uint8 *view)
+{
+    v->sat_log = (view != NULL) ? log : NULL;
+    v->sat_view = (log != NULL) ? view : NULL;
+    v->sat_n = 0;
+    v->spr_sat = NULL;
+    sat_arm(v);
 }

@@ -58,6 +58,28 @@
  * flags stay set until the status register is read. Zoomed sprites
  * (register 1 bit 0) are 16 x 16 or 16 x 32 pixels; every sprite of a
  * line is zoomed, as on the later VDP revisions.
+ *
+ * The hardware reads the sprite attribute table again for every line, so
+ * a game may rewrite it during the active display, ahead of the beam, to
+ * show more sprites than the table holds (a slot reused lower down the
+ * screen, typically by a line interrupt handler). Those writes are
+ * recorded with their time (sat_log): a control word setting an address
+ * inside the table during the active display marks the access word slow
+ * (one compare with the key kept in the low byte of the count of control
+ * writes, which the control port's paths load and store anyway: the
+ * table's address bits 8-13, followed by every write of register 5, with
+ * VDP_NCTRL_LOG with record memory, VDP_NCTRL_OFF set outside the
+ * active display), and the data port writes that follow are recorded
+ * until the address leaves the table or the writes no longer reach a line
+ * shown (the last line of the picture, or of the LCD window in Game Gear
+ * mode); OUTI and buffered runs inside the table are recorded in one
+ * pass, and a run outside the table or past those lines ends the watch at
+ * once. vdp_sat_view() then gives the renderer the table the lines see:
+ * the table in video RAM when every recorded write either holds the value
+ * the frame leaves in its byte (a table uploaded during the display, the
+ * usual case) or leaves its byte as it was (a table written again with
+ * the values it holds), else every content a slot held during the frame,
+ * as long as it reached the lines that saw it, in slot order.
  */
 
 #include "types.h"
@@ -74,6 +96,12 @@
 #define VDP_NT_LOG      16          /* register 2 writes recorded per frame */
 #define VDP_DE_LOG      8           /* display enable changes recorded per frame */
 #define VDP_CR_LOG      64          /* colour RAM writes recorded per frame */
+#define VDP_SAT_LOG     512         /* sprite table writes recorded per frame */
+/* First line a recorded sprite table write affects (the one after the line
+ * of its time, t / 4 in bits 16-29 of the entry). */
+#define VDP_SAT_LINE(e) ((((((e) >> 16) & 0x3FFF) * 36793u) >> 21) + 1)
+/* In an entry: the write left its byte as it was. */
+#define VDP_SAT_SAME    0x80000000u
 #define VDP_PAL_BANDS   8           /* palettes of a picture (vdp_palette_bands) */
 #define VDP_PAL_WORDS   16          /* words of a band's colours: 8, or 16 in Game
                                        Gear mode (vdp_pal_words) */
@@ -96,7 +124,8 @@
  * 14-15 (0 VRAM read, 1 VRAM write, 2 register write, 3 CRAM write),
  * VDP_PENDING while the second byte of a control word is expected,
  * VDP_ACC_SLOW whenever a data port write cannot take the plain video RAM
- * path (code 3, or a control word pending), and in bits 0-13 the data port
+ * path (code 3, a control word pending, or an address in the sprite
+ * attribute table during the active display), and in bits 0-13 the data port
  * writes since the caller last cleared them (vdp_clear_data_writes, once
  * per frame: the field holds 16 383, more than a frame of Z80 time can
  * write). */
@@ -109,6 +138,26 @@
 #define vdp_code(v)             (((v)->acc >> VDP_ACC_CODE_SHIFT) & 3)
 #define vdp_data_writes(v)      ((v)->acc & VDP_ACC_DW_MASK)
 #define vdp_clear_data_writes(v) ((v)->acc &= ~(uint32)VDP_ACC_DW_MASK)
+
+/* vdp_state.n_ctrl_w: the latest control writes in bits 8-31 (the earlier
+ * ones in ctrl_base, moved there by vdp_fold_ctrl_writes at least every
+ * million writes), the sprite table watch's key in bits 0-7: the table's
+ * address bits 8-13 (VDP_NCTRL_TABLE), VDP_NCTRL_LOG when the machine gave
+ * record memory, VDP_NCTRL_OFF outside the active display. An address is
+ * watched when VDP_NCTRL_LOG | its bits 8-13 equal the whole key: then the
+ * key is the second byte of a control word setting a video RAM write
+ * address in the table. */
+#define VDP_NCTRL_ONE       0x100
+#define VDP_NCTRL_KEY       0xFF
+#define VDP_NCTRL_TABLE     0x3F
+#define VDP_NCTRL_LOG       0x40
+#define VDP_NCTRL_OFF       0x80
+#define vdp_ctrl_writes(v)  ((v)->ctrl_base + ((v)->n_ctrl_w >> 8))
+#define vdp_fold_ctrl_writes(v)                                             \
+    do {                                                                    \
+        (v)->ctrl_base += (v)->n_ctrl_w >> 8;                               \
+        (v)->n_ctrl_w &= VDP_NCTRL_KEY;                                     \
+    } while (0)
 
 /*
  * The port state comes first: the data and control ports also have
@@ -124,7 +173,9 @@
  */
 typedef struct {
     uint32  acc;            /* +0x00: the access word (see VDP_ACC_*) */
-    uint32  n_ctrl_w;       /* +0x04: control port writes */
+    uint32  n_ctrl_w;       /* +0x04: control port writes of the frame in bits 8-31
+                               (VDP_NCTRL_ONE each), and in bits 0-7 the sprite
+                               table watch's key (VDP_NCTRL_KEY, see below) */
     uint32  buffer;         /* +0x08: read buffer */
     uint32  n_data_r;       /* +0x0C: data port reads */
     uint32  cram_dirty;     /* +0x10: colour RAM written since last cleared */
@@ -152,7 +203,23 @@ typedef struct {
     uint8   gg_latch;       /* +0x168: Game Gear: the even byte of a colour */
     uint8   pad1[3];
     uint8   gg_cram[VDP_GG_CRAM];   /* +0x16C: Game Gear colour RAM */
-    uint8   pad[0x200 - 0x7C - VDP_LINE_T - 12 - VDP_GG_CRAM];
+    /* Writes into the sprite attribute table during the active display of
+     * the current frame: (t / 4) << 16 | (offset in the table << 8) |
+     * value, t the T-state of the write in the frame (VDP_SAT_LINE gives
+     * the first line it affects), VDP_SAT_SAME when the write left its
+     * byte as it was. sat_log is NULL when the machine gave it
+     * no memory: no write is watched then. */
+    uint32 *sat_log;                /* +0x1AC: VDP_SAT_LOG entries */
+    uint32  sat_n;                  /* +0x1B0: entries of the frame */
+    uint32  sat_lost;               /* +0x1B4: writes not recorded (log full), in all */
+    uint8  *sat_view;               /* +0x1B8: room for the table the lines see
+                                       (vdp_sat_view: 256 bytes, then its work) */
+    const uint8 *spr_sat;           /* +0x1BC: the table vdp_sprites evaluates; NULL:
+                                       the one register 5 points at */
+    uint32  sat_tmax;               /* +0x1C0: t / 4 of the first write that reaches
+                                       no line shown: 57 times the last line shown */
+    uint32  ctrl_base;              /* +0x1C4: control writes before those of n_ctrl_w */
+    uint8   pad[0x200 - 0x7C - VDP_LINE_T - 12 - VDP_GG_CRAM - 28];
     uint8   dirty[VDP_TILES];       /* +0x200: nonzero: tile written */
     uint8   vram[VDP_VRAM_SIZE];    /* +0x400 */
     /* Writes to register 8 during the active display of the current
@@ -261,11 +328,42 @@ uint32 vdp_hcounter(const vdp_state *v, uint32 left);
 uint32 vdp_palette_bands(const vdp_state *v, uint32 *tops, uint32 *cram, uint32 *merged);
 
 /* Evaluates the sprite attribute table for the picture of the frame
- * (spr_* fields): the per-line limit, the overflow and collision flags,
+ * (spr_sat when set, else the one register 5 points at; spr_* fields):
+ * the per-line limit, the overflow and collision flags,
  * which are set in the status and returned, and the ordered list of the
  * sprites on the screen with an opaque pixel (spr_order). The opaque rows of the
  * tiles are cached; a written tile is seen through the dirty bytes, and
  * the caller clears spr_tile_ok for the tiles it clears them for. */
 uint32 vdp_sprites(vdp_state *v);
+
+/* Bytes of the room sat_view points at (the table, then the work of
+ * vdp_sat_view), and the log's. */
+#define VDP_SAT_VIEW_BYTES  (256 + 4 * 96 + 2 * 96)
+#define VDP_SAT_LOG_BYTES   (VDP_SAT_LOG * 4)
+
+/* Between frames, before vdp_sprites, when some write was recorded
+ * (sat_n): sets spr_sat to the sprite attribute table the lines of the
+ * frame saw (left NULL for the one in video RAM when every recorded write
+ * holds the value the frame leaves in its byte, else the view built in
+ * sat_view) and returns it. The view starts from the table as the frame
+ * leaves it (as the picture does from the video RAM); the slots that a
+ * recorded write not marked VDP_SAT_SAME sets to a value other than the
+ * table's change content at the lines their writes (all of them) changed
+ * it; every content is a
+ * sprite of the view (in slot order, then in line order) when its lines
+ * on the screen meet the lines that saw it, the others left out, at most
+ * VDP_SPRITES. In the 192-line mode a $D0 terminator that the lines of
+ * some sprite saw whole hides it. spr_sat is NULL until then (every
+ * frame starts with it so). */
+const uint8 *vdp_sat_view(vdp_state *v);
+
+/* The sprite attribute table vdp_sprites evaluated. */
+#define vdp_spr_table(v) \
+    ((v)->spr_sat != NULL ? (v)->spr_sat : (v)->vram + (((uint32)(v)->reg[5] & 0x7E) << 7))
+
+/* Gives the VDP the memory to record the sprite table writes of the active
+ * display (VDP_SAT_LOG_BYTES at log, VDP_SAT_VIEW_BYTES at view), or none
+ * (NULL): the table in video RAM is then the only one. */
+void vdp_set_sat_log(vdp_state *v, uint32 *log, uint8 *view);
 
 #endif /* VDP_H */

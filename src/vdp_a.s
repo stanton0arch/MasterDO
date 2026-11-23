@@ -10,6 +10,7 @@
 V_REG           EQU     0x40
 V_STATUS        EQU     0x50
 V_ACTIVE        EQU     0x18           ; active lines: 192, 224 or 240
+V_SPRSAT        EQU     0x1BC           ; the table to evaluate (0: register 5's)
 V_DIRTY         EQU     0x200
 V_VRAM          EQU     0x400
 V_SPR           EQU     0x4874          ; spr_n, then the fields below
@@ -51,6 +52,7 @@ F_SIZE          EQU     1104
 ;
 ; Fills spr_n, spr_h, spr_zoom, spr_partial, spr_y, spr_vis, spr_order and
 ; spr_nord, ORs the sprite flags into the status and returns them. The
+; table is spr_sat when set (vdp_sat_view), else register 5's. The
 ; list ends at the $D0 terminator in the 192-line mode only. A pass over
 ; the sprites gives each one on the screen its screen line, its record and
 ; the opaque rows of its tiles, and chains those sprites by first row (a
@@ -92,8 +94,10 @@ cl_loop
         bne     cl_loop
         ldrb    r1,[r11,#V_REG+5]
         and     r1,r1,#0x7E
-        add     r10,r11,#V_VRAM
-        add     r10,r10,r1,lsl #7       ; r10 = sprite attribute table
+        ldr     r10,[r11,#V_SPRSAT]     ; the table the lines saw (vdp_sat_view),
+        teq     r10,#0                  ; else the one in video RAM
+        addeq   r10,r11,#V_VRAM
+        addeq   r10,r10,r1,lsl #7       ; r10 = sprite attribute table
         ldrb    r1,[r11,#V_REG+1]
         and     r2,r1,#1                ; zoom
         tst     r1,#2
@@ -743,5 +747,445 @@ zoom_mask
         ZBIT    0x01
         mov     r0,r1
         mov     pc,lr
+
+;----------------------------------------------------------------------------
+; const uint8 *vdp_sat_view(vdp_state *v)
+;
+; The sprite attribute table the lines of the frame saw (vdp.h). Three
+; passes over the record of the table's writes (t / 4 << 16 | offset << 8
+; | value, in time order): the slots a write changes are marked (a write
+; that differs from the slot's byte in the table the frame leaves, unless
+; it left its byte as it was, VDP_SAT_SAME; none:
+; the table in video RAM is returned); the marked slots are followed from
+; that table, each change ending the content the slot held as a sprite of
+; the view when the lines it shows on meet the lines that saw it (a $D0
+; terminator of the 192-line mode is kept instead, with those lines);
+; then the view is written in slot order: a marked slot's ended contents
+; in line order and its last content, an unmarked slot's sprite of the
+; table, each when some line shows it, unless the lines it reaches all saw
+; a terminator in an earlier slot; at most 64 sprites, 96 contents.
+;----------------------------------------------------------------------------
+V_SATLOG        EQU     0x1AC
+V_SATN          EQU     0x1B0
+V_SATVIEW       EQU     0x1B8
+
+SV_INST         EQU     256             ; in the view's room: 96 contents ended,
+SV_SPA          EQU     640             ; the first line showing each,
+SV_SPB          EQU     736             ; the last + 1 (VDP_SAT_VIEW_BYTES)
+SV_NINST        EQU     96
+SV_NTERM        EQU     8
+SV_ENDS         EQU     0x10000         ; in r8: $D0 ends the table
+SV_SAME         EQU     0x80000000      ; in an entry: VDP_SAT_SAME
+
+; Stack frame.
+G_CONT          EQU     0               ; 64 words: each marked slot's content,
+                                        ; y << 16 | x << 8 | tile
+G_TERM          EQU     256             ; 8 words: terminators, slot | first line
+                                        ; << 8 | last line + 1 << 16
+G_FROM          EQU     288             ; 64 bytes: the first line that saw the content
+G_HEAD          EQU     352             ; 64 bytes: the first content a slot ended
+G_TAIL          EQU     416             ; 64 bytes: the last one
+G_NEXT          EQU     480             ; 96 bytes: the next content of its slot
+G_V             EQU     576             ; the vdp_state
+G_SIZE          EQU     580
+
+; Registers, after the first pass: r4, r5 the marks of slots 0-31, 32-63;
+; r6 the contents so far (n) | the terminators << 8; r8 the sprite height
+; | the active lines << 8 | SV_ENDS; r10 the view's room.
+
+; The mark pass on entry $e: sv_mdiff when it differs from the table.
+        MACRO
+        SVMARK  $e
+        and     r1,r11,$e,lsr#8         ; offset in the table
+        ldrb    r2,[r9,r1]
+        eor     r2,r2,$e                ; bits 0-7: the difference, 31: SV_SAME
+        tst     r2,#0xFF
+        blne    sv_mdiff
+        MEND
+
+; Puts the content r1 (shown on lines r12 to r0 - 1) as entry r7 of the
+; view, unless a terminator hides it (r3 = slot); full at 64 entries.
+; r11 lost.
+        MACRO
+        SVPUT
+        movs    r11,r6,lsr#8            ; terminators
+        blne    sv_hidden
+        teq     r11,#0
+        bne     %F9
+        mov     r11,r1,lsr#16
+        strb    r11,[r10,r7]            ; y
+        add     r11,r10,r7,lsl#1
+        mov     r12,r1,lsr#8
+        strb    r12,[r11,#0x80]         ; x
+        strb    r1,[r11,#0x81]          ; tile
+        add     r7,r7,#1
+        teq     r7,#64
+        beq     sv_full
+9
+        MEND
+
+        EXPORT  vdp_sat_view
+vdp_sat_view
+        stmfd   sp!,{r4-r11,lr}
+        ldrb    r1,[r0,#V_REG+5]
+        and     r1,r1,#0x7E
+        add     r9,r0,#V_VRAM
+        add     r9,r9,r1,lsl#7          ; r9: the table the frame leaves
+        mov     r1,#0
+        str     r1,[r0,#V_SPRSAT]
+        ldr     r3,[r0,#V_SATN]
+        ldr     r10,[r0,#V_SATVIEW]
+        teq     r3,#0
+        teqne   r10,#0
+        beq     sv_table
+        ldr     r7,[r0,#V_SATLOG]
+        sub     sp,sp,#G_SIZE
+        str     r0,[sp,#G_V]
+        add     r3,r7,r3,lsl#2          ; the end of the record
+        mov     r11,#0xFF
+        mov     r4,#0
+        mov     r5,#0
+        mov     r6,#0                   ; set when a write differs from the table
+sv_mark1                                ; single entries, then four at a time
+        sub     r1,r3,r7
+        tst     r1,#12
+        beq     sv_mark4
+        ldr     r0,[r7],#4
+        SVMARK  r0
+        b       sv_mark1
+sv_mark4
+        cmp     r7,r3
+        bhs     sv_mend
+        ldmia   r7!,{r0,r8,r10,r12}
+        SVMARK  r0
+        SVMARK  r8
+        SVMARK  r10
+        SVMARK  r12
+        b       sv_mark4
+sv_mend
+        ldr     r0,[sp,#G_V]
+        ldr     r10,[r0,#V_SATVIEW]
+        teq     r6,#0
+        beq     sv_table_pop            ; no write changes a slot
+        b       sv_mode
+
+; A write that differs from the table (r1 = its offset, bit 31 of r2 its
+; SV_SAME): its slot marked unless it left its byte as it was or the byte
+; is one the hardware does not read. r1, r2 lost.
+sv_mdiff
+        tst     r2,#SV_SAME
+        movne   pc,lr
+        subs    r2,r1,#0x80
+        movhs   r1,r2,lsr#1             ; x and tile bytes: their slot
+        bhs     sv_mbit
+        cmp     r1,#0x40
+        movhs   pc,lr
+sv_mbit
+        mov     r6,#1
+        mov     r2,#1
+        cmp     r1,#32
+        orrlo   r4,r4,r2,lsl r1
+        subhs   r1,r1,#32
+        orrhs   r5,r5,r2,lsl r1
+        mov     pc,lr
+
+sv_mode
+        ldr     r0,[sp,#G_V]
+        ldrb    r1,[r0,#V_REG+1]
+        tst     r1,#2
+        moveq   r2,#8
+        movne   r2,#16
+        tst     r1,#1
+        movne   r2,r2,lsl#1             ; sprite height
+        ldr     r1,[r0,#V_ACTIVE]
+        orr     r8,r2,r1,lsl#8
+        teq     r1,#192
+        orreq   r8,r8,#SV_ENDS
+        beq     sv_init
+        rsb     r2,r2,#256              ; the entries past the view take a line off
+        cmp     r1,r2                   ; the screen, which the extended modes
+        bgt     sv_table_pop            ; lack for the tallest sprites
+
+        ; The marked slots start with the table's content.
+sv_init
+        mov     r6,#0
+        mov     r1,#0                   ; slot
+        mov     r12,r4                  ; the marks from slot r1 on
+sv_iloop
+        movs    r12,r12,lsr#1
+        bcs     sv_islot
+        beq     sv_iword                ; none left in this word
+sv_inext
+        add     r1,r1,#1
+        teq     r1,#32
+        moveq   r12,r5
+        teq     r1,#64
+        bne     sv_iloop
+        b       sv_follow
+sv_iword
+        cmp     r1,#32
+        bhs     sv_follow
+        mov     r1,#32
+        movs    r12,r5
+        bne     sv_iloop
+        b       sv_follow
+sv_islot
+        ldrb    r0,[r9,r1]              ; y
+        add     r2,r9,r1,lsl#1
+        ldrb    lr,[r2,#0x80]           ; x
+        ldrb    r2,[r2,#0x81]           ; tile
+        orr     r0,r2,r0,lsl#16
+        orr     r0,r0,lr,lsl#8
+        str     r0,[sp,r1,lsl#2]        ; G_CONT
+        add     r2,sp,#G_FROM
+        mov     r0,#0
+        strb    r0,[r2,r1]
+        add     r2,sp,#G_HEAD
+        strb    r11,[r2,r1]             ; no content ended yet
+        b       sv_inext
+
+        ; The marked slots through the record.
+sv_follow
+        ldr     r0,[sp,#G_V]
+        ldr     r7,[r0,#V_SATLOG]
+sv_fl
+        ldr     r0,[r7],#4              ; the entry
+        and     r1,r11,r0,lsr#8         ; offset
+        subs    r2,r1,#0x80
+        bhs     sv_fxt
+        cmp     r1,#0x40
+        bhs     sv_fnext                ; bytes the hardware does not read
+        mov     lr,#16                  ; y: its shift in a content, the slot
+        mov     r2,r1
+        b       sv_fslot
+sv_fxt
+        tst     r1,#1
+        moveq   lr,#8                   ; x
+        movne   lr,#0                   ; tile
+        mov     r2,r2,lsr#1
+sv_fslot
+        subs    r1,r2,#32
+        movlo   r12,r4,lsr r2
+        movhs   r12,r5,lsr r1
+        tst     r12,#1
+        beq     sv_fnext                ; a slot no write changes
+        ldr     r1,[sp,r2,lsl#2]        ; c: the slot's content
+        mov     r12,r1,lsr lr
+        and     r12,r12,#0xFF
+        and     r9,r0,#0xFF             ; the value written
+        teq     r12,r9
+        beq     sv_fnext                ; no change
+        bic     r12,r1,r11,lsl lr
+        orr     r12,r12,r9,lsl lr
+        str     r12,[sp,r2,lsl#2]       ; the new content
+        mov     r0,r0,lsl#2
+        mov     r0,r0,lsr#18            ; t / 4
+        rsb     r12,r0,r0,lsl#9
+        add     r12,r12,r12,lsl#3
+        add     r0,r0,r12,lsl#3         ; t / 4 * 36793 (VDP_SAT_LINE)
+        mov     r0,r0,lsr#21
+        add     r0,r0,#1                ; the first line showing the change
+        add     r9,sp,#G_FROM
+        ldrb    lr,[r9,r2]              ; the first line that saw c
+        cmp     r0,lr
+        ble     sv_fnext
+        strb    r0,[r9,r2]
+        tst     r8,#SV_ENDS
+        beq     sv_fspan
+        mov     r12,r1,lsr#16
+        teq     r12,#0xD0
+        beq     sv_fterm
+sv_fspan                                ; the lines lr to r0 - 1 that show c's rows
+        and     r9,r8,#0xFF             ; height
+        mov     r12,r1,lsr#16
+        add     r12,r12,#1              ; its first line
+        add     r9,r12,r9               ; and its last + 1
+        cmp     r9,#256
+        subgt   r12,r12,#256            ; wrapped to the top
+        subgt   r9,r9,#256
+        cmp     r12,lr
+        movlt   r12,lr
+        cmp     r9,r0
+        movgt   r9,r0
+        cmp     r12,#0
+        movlt   r12,#0
+        mov     lr,r8,lsr#8
+        and     lr,lr,#0xFF             ; active lines
+        cmp     r9,lr
+        movgt   r9,lr
+        cmp     r12,r9
+        bge     sv_fnext                ; no line shows it
+        and     lr,r6,#0xFF             ; n
+        teq     lr,#SV_NINST
+        beq     sv_fnext
+        add     r0,r10,#SV_INST
+        str     r1,[r0,lr,lsl#2]
+        add     r0,r10,#SV_SPA
+        strb    r12,[r0,lr]
+        add     r0,r0,#SV_SPB-SV_SPA
+        strb    r9,[r0,lr]
+        add     r0,sp,#G_NEXT
+        strb    r11,[r0,lr]             ; the last of its slot
+        add     r9,sp,#G_HEAD
+        ldrb    r12,[r9,r2]
+        teq     r12,#0xFF
+        streqb  lr,[r9,r2]              ; the slot's first
+        add     r9,sp,#G_TAIL
+        ldrneb  r12,[r9,r2]
+        strneb  lr,[r0,r12]             ; after the slot's last
+        strb    lr,[r9,r2]
+        add     r6,r6,#1
+sv_fnext
+        cmp     r7,r3
+        blo     sv_fl
+        b       sv_out
+sv_fterm                                ; a terminator seen by lines lr to r0 - 1
+        mov     r12,r6,lsr#8
+        cmp     r12,#SV_NTERM
+        bhs     sv_fnext
+        orr     r2,r2,lr,lsl#8
+        orr     r2,r2,r0,lsl#16
+        add     r9,sp,#G_TERM
+        str     r2,[r9,r12,lsl#2]
+        add     r6,r6,#0x100
+        b       sv_fnext
+
+        ; The view, in slot order: r3 = slot, r7 = entries written.
+sv_out
+        ldr     r0,[sp,#G_V]
+        ldrb    r1,[r0,#V_REG+5]
+        and     r1,r1,#0x7E
+        add     r9,r0,#V_VRAM
+        add     r9,r9,r1,lsl#7          ; the table again
+        mov     r7,#0
+        mov     r3,#0
+sv_oloop
+        subs    r1,r3,#32
+        movlo   r12,r4,lsr r3
+        movhs   r12,r5,lsr r1
+        tst     r12,#1
+        beq     sv_ofixed
+        add     r0,sp,#G_HEAD
+        ldrb    r2,[r0,r3]
+sv_olist                                ; the contents the slot ended
+        teq     r2,#0xFF
+        beq     sv_olast
+        add     r0,r10,#SV_INST
+        ldr     r1,[r0,r2,lsl#2]
+        add     r0,r10,#SV_SPA
+        ldrb    r12,[r0,r2]
+        add     r0,r0,#SV_SPB-SV_SPA
+        ldrb    r0,[r0,r2]
+        SVPUT
+        add     r0,sp,#G_NEXT
+        ldrb    r2,[r0,r2]
+        b       sv_olist
+sv_olast                                ; its last content
+        ldr     r1,[sp,r3,lsl#2]
+        add     r0,sp,#G_FROM
+        ldrb    lr,[r0,r3]
+        mov     r2,r1,lsr#16
+        b       sv_ocommon
+sv_ofixed                               ; the table's sprite, all frame long
+        ldrb    r2,[r9,r3]
+        mov     lr,#0
+        mov     r1,#0x01000000          ; (its content read if shown)
+sv_ocommon                              ; r2 = y, lr = the first line that saw it
+        tst     r8,#SV_ENDS
+        beq     sv_ospan
+        teq     r2,#0xD0
+        beq     sv_oterm
+sv_ospan
+        and     r0,r8,#0xFF
+        add     r12,r2,#1
+        add     r0,r12,r0
+        cmp     r0,#256
+        subgt   r12,r12,#256
+        subgt   r0,r0,#256
+        cmp     r12,lr
+        movlt   r12,lr
+        cmp     r12,#0
+        movlt   r12,#0
+        mov     r11,r8,lsr#8
+        and     r11,r11,#0xFF
+        cmp     r0,r11
+        movgt   r0,r11
+        cmp     r12,r0
+        bge     sv_onext                ; no line shows it
+        and     r11,r6,#0xFF
+        teq     r11,#SV_NINST
+        beq     sv_onext
+        add     r6,r6,#1
+        tst     r1,#0x01000000
+        beq     sv_oput
+        add     r11,r9,r3,lsl#1
+        ldrb    r1,[r11,#0x80]
+        ldrb    r11,[r11,#0x81]
+        orr     r1,r11,r1,lsl#8
+        orr     r1,r1,r2,lsl#16
+sv_oput
+        SVPUT
+sv_onext
+        add     r3,r3,#1
+        teq     r3,#64
+        bne     sv_oloop
+        tst     r8,#SV_ENDS
+        movne   r0,#0xD0
+        strneb  r0,[r10,r7]             ; the table ends there
+        bne     sv_full
+        mov     r0,r8,lsr#8
+        and     r0,r0,#0xFF
+        sub     r0,r0,#1                ; the entries left: on the last line
+sv_ofill
+        cmp     r7,#64
+        strlob  r0,[r10,r7]
+        addlo   r7,r7,#1
+        blo     sv_ofill
+sv_full
+        ldr     r0,[sp,#G_V]
+        str     r10,[r0,#V_SPRSAT]
+        mov     r0,r10
+        add     sp,sp,#G_SIZE
+        ldmfd   sp!,{r4-r11,pc}
+sv_oterm                                ; a terminator seen by lines lr to the end
+        mov     r12,r6,lsr#8
+        cmp     r12,#SV_NTERM
+        bhs     sv_onext
+        mov     r11,r8,lsr#8
+        and     r11,r11,#0xFF
+        orr     r0,r3,lr,lsl#8
+        orr     r0,r0,r11,lsl#16
+        add     r11,sp,#G_TERM
+        str     r0,[r11,r12,lsl#2]
+        add     r6,r6,#0x100
+        b       sv_onext
+sv_table_pop
+        add     sp,sp,#G_SIZE
+sv_table
+        mov     r0,r9
+        ldmfd   sp!,{r4-r11,pc}
+
+; r11 := 0 when no terminator of an earlier slot than r3 was seen by all
+; the lines r12 to r0 - 1, else nonzero. In: r11 = the terminators (1-8).
+sv_hidden
+        stmfd   sp!,{r1,r2,lr}
+        add     r2,sp,#G_TERM+12
+sv_hl
+        ldr     r1,[r2],#4
+        and     lr,r1,#0xFF
+        cmp     lr,r3
+        bhs     sv_hn                   ; its slot is not an earlier one
+        mov     lr,r1,lsr#8
+        and     lr,lr,#0xFF
+        cmp     lr,r12
+        cmple   r0,r1,lsr#16
+        ble     sv_hhid
+sv_hn
+        subs    r11,r11,#1
+        bne     sv_hl
+        ldmfd   sp!,{r1,r2,pc}
+sv_hhid
+        mov     r11,#1
+        ldmfd   sp!,{r1,r2,pc}
 
         END

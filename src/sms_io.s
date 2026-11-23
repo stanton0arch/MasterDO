@@ -65,6 +65,22 @@ V_LCVAL         EQU     0x74
 V_HC            EQU     0x7C
 V_GGLATCH       EQU     0x168
 V_GGCRAM        EQU     0x16C
+V_SATLOG        EQU     0x1AC           ; sprite table writes of the active display
+V_SATN          EQU     0x1B0
+V_SATLOST       EQU     0x1B4
+SAT_SAME        EQU     0x80000000      ; in an entry: the write left its byte as it was
+V_SATTMAX       EQU     0x1C0           ; t / 4 past the watched lines
+VDP_SAT_LOG     EQU     512
+; The count of control writes (V_NCTRLW): one is NCTRL_ONE, bits 0-7 hold
+; the sprite table watch's key (vdp.h): the table's address bits 8-13,
+; NCTRL_LOG with record memory, NCTRL_OFF set outside the active display.
+; An address is watched when NCTRL_LOG | its bits 8-13 equal the whole
+; key, which is then the second byte of a control word setting a video RAM
+; write address in the table.
+NCTRL_ONE       EQU     0x100
+NCTRL_KEY       EQU     0xFF
+NCTRL_LOG       EQU     0x40
+NCTRL_OFF       EQU     0x80
         ASSERT  V_NCTRLW = V_ACC + 4 :LAND: V_NDATAR = V_BUFFER + 4
         ASSERT  V_NSTATR = V_STATUS + 4 :LAND: V_LINES = V_NCOUNTR + 4 :LAND: V_VCJUMP = V_LINES + 4
 V_DIRTY         EQU     0x200
@@ -156,6 +172,35 @@ ACC_SLOW        EQU     0x20000
         add     r2,r2,r1,lsl#2          ; entry r1 - 1 of the log
         MEND
 
+;  $t := t / 4 (rounded down), t the T-state of an access in the frame,
+; with the flags of its sign (MI: it ends the previous frame). In: r2 =
+; T-states left (times 256), r10, r12 = the vdp_state; $s clobbered.
+        MACRO
+        SATTIME $t,$s
+        ldr     $t,[r10,#LINE]
+        ldr     $s,[r12,#V_FRAMEBASE]
+        sub     $t,$t,$s                ; L, lines of the frame at the stretch end
+        rsb     $s,$t,$t,lsl#3          ; 7 L
+        rsb     $t,$s,$t,lsl#6          ; 57 L: t / 4 at the stretch end
+        add     $s,r2,#0x300
+        subs    $t,$t,$s,asr#10         ; less ceil((left / 256) / 4)
+        MEND
+
+; One byte of an OUTI run in the watched sprite table: copied from r2 to
+; r4 (both advanced), its entry built in $e from r5 (t / 4 << 16 | offset
+; << 8, advanced by lr), SAT_SAME when it leaves the byte as it was.
+; r1 := the byte.
+        MACRO
+        SATBYTE $e
+        ldrb    r1,[r2],#1
+        ldrb    $e,[r4]
+        strb    r1,[r4],#1
+        teq     $e,r1
+        orr     $e,r1,r5
+        orreq   $e,$e,#SAT_SAME
+        add     r5,r5,lr
+        MEND
+
 ;----------------------------------------------------------------------------
 ; OUT to the data port. In: r0 = value, r2 = T-states left. Out: r0 = 0
 ; (stay in the block). Codes 0 to 2 write video RAM (and mark the tile
@@ -185,10 +230,13 @@ data_w_next
         str     r1,[r12,#V_ACC]
         mov     r0,#0
         mov     pc,lr
-data_w_slow                             ; code 3, or a control word pending
-        str     r0,[r12,#V_BUFFER]
-        UNPEND  r1
-        beq     data_w_vram             ; a pending control word ended: video RAM
+data_w_slow                             ; code 3, a control word pending, or the
+        str     r0,[r12,#V_BUFFER]      ; sprite table watched
+        tst     r1,#0x4000
+        tstne   r1,#0x8000
+        beq     data_w_vslow            ; a video RAM code
+        bic     r1,r1,#ACC_PENDING      ; colour RAM (a pending control word ended)
+data_w_cram
         stmfd   sp!,{r1,r3,r4}
         ldr     r4,[r12,#V_GG]
         mov     r3,r1,lsr#18
@@ -206,6 +254,62 @@ data_w_slow                             ; code 3, or a control word pending
         str     r0,[r2,#V_CRN-0x4E00]
 cram_done
         ldmfd   sp!,{r1,r3,r4}
+        b       data_w_next
+
+data_w_vslow                            ; codes 0 to 2
+        tst     r1,#ACC_PENDING
+        beq     data_w_sat              ; nothing pending: the sprite table watched
+        bic     r1,r1,#ACC_PENDING+ACC_SLOW
+        b       data_w_vram             ; a pending control word ended: video RAM
+
+; A video RAM write while the access word is watched (vdp.h): written as
+; usual, and recorded with its time (t / 4 in bits 16-29) when the address
+; lies in the sprite table during the watched lines, SAT_SAME set when it
+; leaves the byte as it was; the slow mark is dropped once the address has
+; left the table or those lines have ended.
+; In: r0 = value, r1 = access word, r2 = T-states left.
+data_w_sat
+        stmfd   sp!,{r3-r5}
+        add     r3,r12,#V_VRAM
+        ldrb    r5,[r3,r1,lsr#18]       ; the byte the lines saw
+        strb    r0,[r3,r1,lsr#18]
+        add     r3,r12,#V_DIRTY
+        mov     r4,#1
+        strb    r4,[r3,r1,lsr#23]       ; its tile written
+        ldrb    r3,[r12,#V_REG+5]
+        mov     r4,r1,lsr#26            ; address bits 8-13
+        eor     r3,r3,r4,lsl#1
+        tst     r3,#0x7E
+        bne     sat_leave               ; the address left the table
+        SATTIME r4,r3
+        bmi     sat_done                ; it ends the previous frame
+        ldr     r3,[r12,#V_SATTMAX]
+        cmp     r4,r3
+        bhs     sat_leave               ; past the watched lines
+        teq     r5,r0
+        orr     r0,r0,r4,lsl#16
+        orreq   r0,r0,#SAT_SAME         ; the byte left as it was
+        and     r4,r1,#0x03FC0000       ; the address's low byte
+        orr     r0,r0,r4,lsr#10         ; t / 4 << 16 | offset << 8 | value
+        add     r3,r12,#V_SATLOG
+        ldmia   r3,{r3,r4}              ; the log, its entries
+        cmp     r4,#VDP_SAT_LOG
+        bhs     sat_full
+        str     r0,[r3,r4,lsl#2]
+        add     r4,r4,#1
+        str     r4,[r12,#V_SATN]
+sat_done
+        ldmfd   sp!,{r3-r5}
+        b       data_w_next
+sat_full
+        ldr     r4,[r12,#V_SATLOST]
+        add     r4,r4,#1
+        str     r4,[r12,#V_SATLOST]
+        ldmfd   sp!,{r3-r5}
+        b       data_w_next
+sat_leave
+        ldmfd   sp!,{r3-r5}
+        bic     r1,r1,#ACC_SLOW
         b       data_w_next
 data_w_gg                               ; Game Gear: colours of 12 bits, two bytes each
         and     r3,r3,#VDP_GG_CRAM-1    ; colour RAM byte address
@@ -480,48 +584,70 @@ sms_vdp_ctrl_w
         orr     r1,r1,r0,lsl#18
         orr     r1,r1,#ACC_PENDING+ACC_SLOW
         ldr     r2,[r12,#V_NCTRLW]
-        add     r2,r2,#1
+        add     r2,r2,#NCTRL_ONE
         stmia   r12,{r1,r2}             ; the access word, one more control write
         mov     r0,#0
         mov     pc,lr
 ctrl_count
         ldr     r1,[r12,#V_NCTRLW]
-        add     r1,r1,#1
+        add     r1,r1,#NCTRL_ONE
         str     r1,[r12,#V_NCTRLW]
         mov     r0,#0
         mov     pc,lr
 ctrl_second                             ; r1 = access word, the first byte in bits 18-25
         cmp     r0,#0x88
         beq     ctrl_reg8
-        tst     r0,#0x40
-        bne     ctrl_data
         tst     r0,#0x80
-        beq     ctrl_data
+        bne     ctrl_high               ; codes 2 and 3
+        tst     r0,#0x40
+        beq     ctrl_read               ; code 0
+        bic     r1,r1,#0xFC000000       ; code 1: address bits 8-13
+        bic     r1,r1,#0x0003C000       ; code, pending and slow marks
+        orr     r1,r1,r0,lsl#26         ; address bits 8-13 from the byte
+        orr     r1,r1,#0x4000           ; video RAM
+        ldr     r2,[r12,#V_NCTRLW]
+        add     r2,r2,#NCTRL_ONE
+        eor     r0,r0,r2                ; the byte is the key (vdp.h): an address
+        tst     r0,#NCTRL_KEY           ; in the watched sprite table
+        orreq   r1,r1,#ACC_SLOW
+        stmia   r12,{r1,r2}             ; the access word, one more control write
+        mov     r0,#0
+        mov     pc,lr
+ctrl_read                               ; code 0: read ahead
+        bic     r1,r1,#0xFC000000
+        bic     r1,r1,#0x0003C000
+        orr     r1,r1,r0,lsl#26
+        mov     r0,r1,lsr#18
+        add     r2,r12,#V_VRAM
+        ldrb    r0,[r2,r0]
+        str     r0,[r12,#V_BUFFER]
+        add     r1,r1,#ACC_ADDR1        ; (0x4000 wraps to 0 in the word)
+        ldr     r2,[r12,#V_NCTRLW]
+        add     r2,r2,#NCTRL_ONE
+        eor     r0,r2,r1,lsr#26         ; the next address in the watched sprite
+        and     r0,r0,#NCTRL_KEY        ; table (vdp.h): the data port writes are
+        teq     r0,#NCTRL_LOG           ; watched
+        orreq   r1,r1,#ACC_SLOW
+        stmia   r12,{r1,r2}
+        mov     r0,#0
+        mov     pc,lr
+ctrl_high
+        tst     r0,#0x40
+        bne     ctrl_cram
         cmp     r0,#0x8A
         beq     ctrl_reg10
         cmp     r0,#0x82
         beq     ctrl_reg2
         mov     r1,#0xBF
         b       z80j_port_out_c         ; other register writes (r0, r2 unchanged)
-ctrl_data                               ; codes 0, 1 and 3
-        bic     r1,r1,#0xFC000000       ; address bits 8-13
-        bic     r1,r1,#0x0003C000       ; code, pending and slow marks
-        orr     r1,r1,r0,lsl#26         ; address bits 8-13 from the byte
-        and     r0,r0,#0xC0
-        orr     r1,r1,r0,lsl#8          ; the code
-        cmp     r0,#0xC0
-        orreq   r1,r1,#ACC_SLOW         ; colour RAM writes take the slow path
-        teq     r0,#0
-        bne     ctrl_addr
-        mov     r0,r1,lsr#18            ; read code: read ahead
-        add     r2,r12,#V_VRAM
-        ldrb    r0,[r2,r0]
-        str     r0,[r12,#V_BUFFER]
-        add     r1,r1,#ACC_ADDR1        ; (0x4000 wraps to 0 in the word)
-ctrl_addr
+ctrl_cram                               ; code 3: colour RAM, the slow path
+        bic     r1,r1,#0xFC000000
+        bic     r1,r1,#0x0003C000
+        orr     r1,r1,r0,lsl#26
+        orr     r1,r1,#0xC000+ACC_SLOW
         ldr     r2,[r12,#V_NCTRLW]
-        add     r2,r2,#1
-        stmia   r12,{r1,r2}             ; the access word, one more control write
+        add     r2,r2,#NCTRL_ONE
+        stmia   r12,{r1,r2}
         mov     r0,#0
         mov     pc,lr
 
@@ -661,7 +787,9 @@ ctrl_slow10
 ; counted as two control writes: data codes and register 8 here, the
 ; other registers through the single output's paths once the first byte
 ; is latched. The access word and the count of control writes, next to
-; it, take one load and one store.
+; it, take one load and one store; the video RAM write code, the usual
+; one, is told apart first and the sprite table watch (vdp.h) takes one
+; compare there: the second byte against the key.
 ;----------------------------------------------------------------------------
 sms_vdp_ctrl_pw
         VDP
@@ -670,33 +798,54 @@ sms_vdp_ctrl_pw
         and     r1,r4,#0xC0000000       ; the code
         cmp     r1,#0x80000000
         beq     pw_latch                ; a register but 8
-        ldr     r0,[r10,#PAIR]
+        cmp     r1,#0x40000000
+        bne     pw_other                ; codes 0 and 3
+        ldr     r0,[r10,#PAIR]          ; code 1: video RAM writes
         tst     r0,#PAIR_SENT
         bne     pw_single
         mov     r0,r0,lsr#6             ; address bits 0-7: the first byte (d falls out)
         orr     r0,r0,r4,lsl#2          ; address bits 8-13: bits 0-5 of the second
-        orr     r0,r0,r1,lsr#16         ; the code
-        cmp     r1,#0xC0000000
-        orreq   r0,r0,#ACC_SLOW         ; colour RAM writes take the slow path
+        orr     r0,r0,#0x4000           ; the code
         ldmia   r12,{r1,r2}             ; the access word, the control writes (left
                                         ; is not needed by the data codes)
-        add     r2,r2,#2
+        add     r2,r2,#2*NCTRL_ONE
         mov     r1,r1,lsl#18
         orr     r0,r0,r1,lsr#18         ; the data writes of the frame
-        tst     r0,#ACC_CODE3
-        beq     pw_read
+        teq     r4,r2,lsl#24            ; the second byte is the key: an address
+        orreq   r0,r0,#ACC_SLOW         ; in the watched sprite table
         stmia   r12,{r0,r2}             ; the access word, two more control writes
         mov     r0,#0
         mov     pc,lr
 pw_single                               ; the first byte went out alone
         mov     r0,r4,lsr#24
         b       sms_vdp_ctrl_w
+pw_other                                ; codes 0 and 3
+        ldr     r0,[r10,#PAIR]
+        tst     r0,#PAIR_SENT
+        bne     pw_single
+        mov     r0,r0,lsr#6
+        orr     r0,r0,r4,lsl#2
+        orr     r0,r0,r1,lsr#16         ; the code
+        ldmia   r12,{r1,r2}
+        add     r2,r2,#2*NCTRL_ONE
+        mov     r1,r1,lsl#18
+        orr     r0,r0,r1,lsr#18
+        tst     r0,#ACC_CODE3
+        beq     pw_read
+        orr     r0,r0,#ACC_SLOW         ; colour RAM writes take the slow path
+        stmia   r12,{r0,r2}
+        mov     r0,#0
+        mov     pc,lr
 pw_read                                 ; read code: read ahead
         mov     r1,r0,lsr#18
         add     r1,r12,r1
         ldrb    r1,[r1,#V_VRAM]
         str     r1,[r12,#V_BUFFER]
         add     r0,r0,#ACC_ADDR1        ; (0x4000 wraps to 0 in the word)
+        eor     r1,r2,r0,lsr#26         ; the next address in the watched sprite
+        and     r1,r1,#NCTRL_KEY        ; table: the data port writes are watched
+        teq     r1,#NCTRL_LOG
+        orreq   r0,r0,#ACC_SLOW
         stmia   r12,{r0,r2}
         mov     r0,#0
         mov     pc,lr
@@ -731,7 +880,7 @@ pw_reg8_acc                             ; r1 = the value in bits 0-7
         orr     r0,r0,#0x8000           ; code 2
         orr     r0,r0,#8:SHL:26         ; address bits 8-11: the register
         orr     r0,r0,r1,lsr#6          ; address bits 0-7: the value
-        add     r2,r2,#2
+        add     r2,r2,#2*NCTRL_ONE
         stmia   r12,{r0,r2}             ; the access word, two more control writes
         mov     r0,#0
         mov     pc,lr
@@ -747,7 +896,7 @@ pw_latch
         orr     r0,r0,r1,lsr#6
         orr     r0,r0,#ACC_PENDING+ACC_SLOW
         ldr     r1,[r12,#V_NCTRLW]
-        add     r1,r1,#1
+        add     r1,r1,#NCTRL_ONE
         stmia   r12,{r0,r1}             ; the access word, one more control write
         mov     r1,r0
         mov     r0,r4,lsr#24
@@ -756,9 +905,11 @@ pw_latch
 ;----------------------------------------------------------------------------
 ; Run of OUTI / OUTD to the data port. In: r0 = count (negative for OUTD),
 ; r7 = HL (bits 16-31), the source of the first byte. Video RAM runs are
-; copied in one loop, by words when the alignment allows it; colour RAM
-; or a pending control word goes byte by byte through sms_vdp_data_w.
-; Mixed runs (OUTI and OUT (C),r) are handled at data_wm.
+; copied in one loop, by words when the alignment allows it; an OUTI run
+; inside the watched sprite table (vdp.h) is copied and recorded in one
+; loop; colour RAM, a pending control word or the other watched runs go
+; byte by byte through sms_vdp_data_w. Mixed runs (OUTI and OUT (C),r) are
+; handled at data_wm.
 ;----------------------------------------------------------------------------
 sms_vdp_data_wn
         cmp     r0,#0x40000000          ; OUTD runs are negative
@@ -769,6 +920,7 @@ sms_vdp_data_wn
         ldr     r1,[r12,#V_ACC]
         tst     r1,#ACC_SLOW
         bne     wn_slow_entry           ; r2 = T-states left at the end
+wn_fast
         cmp     r0,#1
         blo     wn_general              ; OUTD
         cmp     r0,#4
@@ -805,7 +957,124 @@ wn_short_loop
         bne     wn_short_loop
         str     r2,[r12,#V_BUFFER]      ; the last byte written: read buffer
         ldr     pc,[sp],#4
-wn_slow_entry
+wn_sat                                  ; r1 = access word, r2 = T-states left at the end
+        cmp     r0,#0
+        beq     wn_byte_entry
+        ; The sprite table watched: an OUTI run inside the table, its source
+        ; in one page, is copied here and its bytes within the watched lines
+        ; recorded (t / 4 four apart: 16 T-states per OUTI; SAT_SAME for a
+        ; byte left as it was); the watch ends
+        ; with a byte past those lines, as with single writes. A run outside
+        ; the table or wholly past those lines ends the watch, as its first
+        ; byte would, and takes the usual paths.
+        stmfd   sp!,{r3-r6,lr}
+        ldrb    r3,[r12,#V_REG+5]
+        mov     r4,r1,lsr#26            ; address bits 8-13
+        eor     r3,r3,r4,lsl#1
+        tst     r3,#0x7E
+        bne     wns_fast                ; the address left the table
+        mov     r3,r1,lsl#6
+        add     r3,r0,r3,lsr#24         ; offset in the table after the run
+        cmp     r3,#0x100
+        bhi     wns_bytes               ; the run leaves the table
+        mov     r3,r7,lsl#6
+        add     r3,r0,r3,lsr#22         ; source offset in its 1 KiB page after the run
+        cmp     r3,#0x400
+        bhi     wns_bytes               ; the source crosses a page
+        SATTIME r5,r6                   ; t / 4 of the last byte
+        ldr     r4,[r12,#V_SATTMAX]
+        sub     r6,r0,#1
+        cmp     r5,r4
+        bhs     wns_past                ; past the watched lines
+        subs    r5,r5,r6,lsl#2          ; t / 4 of the first byte
+        bmi     wns_bytes               ; it ends the previous frame
+        mov     r6,r0                   ; every byte recorded
+wns_rec                                 ; r5 = t / 4 of the first byte, r6 = the
+        add     r3,r12,#V_SATLOG        ; bytes recorded (the first ones)
+        ldmia   r3,{r3,r4}              ; the log, its entries
+        add     lr,r4,r6
+        cmp     lr,#VDP_SAT_LOG
+        bhi     wns_bytes               ; no room for them
+        str     lr,[r12,#V_SATN]
+        add     r3,r3,r4,lsl#2          ; their first entry
+        mov     r5,r5,lsl#16
+        and     r4,r1,#0x03FC0000       ; address bits 0-7
+        orr     r5,r5,r4,lsr#10         ; t / 4 << 16 | offset << 8
+        add     r4,r0,r1,lsr#18
+        sub     r4,r4,#1
+        mov     r4,r4,lsr#5             ; tile of the last byte
+        add     r2,r12,#V_DIRTY
+        mov     lr,#1
+wns_dirty
+        strb    lr,[r2,r4]
+        sub     r4,r4,#1
+        cmp     r4,r1,lsr#23
+        bge     wns_dirty               ; down to the tile of the first byte
+        mvn     r2,r7,lsr#26
+        ldr     r2,[r10,r2,lsl#2]
+        add     r2,r2,r7,lsr#16         ; host source
+        add     r4,r12,#V_VRAM
+        add     r4,r4,r1,lsr#18         ; host destination
+        add     r1,r1,r0                ; the bytes counted
+        add     r1,r1,r0,lsl#18         ; the address after the run (wrapping by itself)
+        cmp     r6,r0
+        bicne   r1,r1,#ACC_SLOW         ; the run reaches past the watched lines
+        str     r1,[r12,#V_ACC]
+        sub     r0,r0,r6                ; the bytes after those recorded
+        stmfd   sp!,{r7-r9,r11}
+        mov     lr,#0x40000
+        orr     lr,lr,#0x100            ; t / 4 + 4, the next offset
+        ands    r11,r6,#3
+        beq     wns_quad
+wns_one                                 ; the first (bytes recorded mod 4)
+        SATBYTE r7
+        str     r7,[r3],#4
+        subs    r11,r11,#1
+        bne     wns_one
+        bics    r6,r6,#3
+        beq     wns_done
+wns_quad                                ; then four at a time
+        SATBYTE r7
+        SATBYTE r8
+        SATBYTE r9
+        SATBYTE r11
+        stmia   r3!,{r7-r9,r11}
+        subs    r6,r6,#4
+        bne     wns_quad
+wns_done
+        ldmfd   sp!,{r7-r9,r11}
+        teq     r0,#0
+        bne     wns_rest
+wns_end
+        str     r1,[r12,#V_BUFFER]      ; the last byte written: read buffer
+        mov     r0,#0
+        ldmfd   sp!,{r3-r6,pc}
+wns_rest                                ; past the watched lines: copied only
+        ldrb    r1,[r2],#1
+        strb    r1,[r4],#1
+        subs    r0,r0,#1
+        bne     wns_rest
+        b       wns_end
+wns_past
+        subs    r5,r5,r6,lsl#2          ; t / 4 of the first byte
+        bmi     wns_bytes               ; it ends the previous frame
+        subs    r6,r4,r5
+        ble     wns_fast                ; the whole run past the watched lines
+        add     r6,r6,#3
+        mov     r6,r6,lsr#2             ; the bytes before their end, recorded
+        b       wns_rec
+wns_fast
+        bic     r1,r1,#ACC_SLOW         ; the watch ends
+        ldmfd   sp!,{r3-r6,lr}
+        b       wn_fast
+wns_bytes
+        ldmfd   sp!,{r3-r6,lr}
+        b       wn_byte_entry
+wn_slow_entry                           ; r1 = access word, r2 = T-states left at the end
+        tst     r1,#ACC_PENDING+0x8000  ; a control word pending, colour RAM
+        tsteq   r0,#0x80000000          ; or OUTD: byte by byte
+        beq     wn_sat                  ; an OUTI run of codes 0 and 1: watched
+wn_byte_entry
         stmfd   sp!,{r3-r9,lr}
         mov     r12,#0x10000            ; source step
         movs    r0,r0
@@ -939,6 +1208,7 @@ data_wb
         ldr     r1,[r12,#V_ACC]
         tst     r1,#ACC_SLOW
         bne     wb_slow
+wb_fast
         stmfd   sp!,{r3,lr}
         and     r3,r0,#0x1F00           ; count << 8
         add     r1,r1,r3,lsr#8          ; counted as writes
@@ -1009,6 +1279,106 @@ data_wb
         mov     r0,#0
         ldmfd   sp!,{r3,pc}
 wb_slow
+        ; The sprite table watched (nothing pending, video RAM): a run inside
+        ; the table, every element within the watched lines and room in the
+        ; log, is copied and recorded here, each element with its time
+        ; (SAT_SAME for a byte left as it was); a
+        ; run outside the table or past those lines ends the watch, as its
+        ; first byte would, and takes the usual path.
+        tst     r1,#ACC_PENDING
+        bne     wbs_bytes
+        tst     r1,#0x4000
+        tstne   r1,#0x8000
+        bne     wbs_bytes               ; colour RAM
+        stmfd   sp!,{r3-r9,lr}
+        ldrb    r3,[r12,#V_REG+5]
+        mov     r4,r1,lsr#26            ; address bits 8-13
+        eor     r3,r3,r4,lsl#1
+        tst     r3,#0x7E
+        bne     wbs_fast                ; the address left the table
+        and     r6,r0,#0x1F00
+        mov     r6,r6,lsr#8             ; count (2 or more)
+        ldr     r3,[r10,#LINE]
+        ldr     r4,[r12,#V_FRAMEBASE]
+        sub     r3,r3,r4                ; L, lines of the frame at the stretch end
+        rsb     r4,r3,r3,lsl#3
+        rsb     r5,r4,r3,lsl#6          ; 57 L: t / 4 at the stretch end
+        add     r4,r2,#0x300            ; t / 4 at T-states left x: 57 L - (x + 0x300) >> 10
+        ldr     r7,[r12,#V_SATTMAX]
+        sub     r3,r5,r4,asr#10         ; t / 4 of the last element
+        ldr     lr,[r10,#OBUF_OFF]
+        and     lr,lr,#0xFF00           ; the first one d T-states earlier
+        add     lr,lr,r4
+        cmp     r3,r7
+        bhs     wbs_past                ; the last one past the watched lines
+        subs    lr,r5,lr,asr#10         ; t / 4 of the first one
+        bmi     wbs_pop                 ; it ends the previous frame
+        mov     r3,r1,lsl#6
+        add     r3,r6,r3,lsr#24         ; offset in the table after the run
+        cmp     r3,#0x100
+        bhi     wbs_pop                 ; the run leaves the table
+        add     r3,r12,#V_SATLOG
+        ldmia   r3,{r3,r7}              ; the log, its entries
+        add     r8,r7,r6
+        cmp     r8,#VDP_SAT_LOG
+        bhi     wbs_pop                 ; no room for the run
+        str     r8,[r12,#V_SATN]
+        add     r3,r3,r7,lsl#2          ; its first entry
+        and     r2,r0,#0xFF             ; the last element's byte
+        add     r8,r12,#V_DIRTY
+        mov     r9,#1
+        strb    r9,[r8,r1,lsr#23]       ; the tiles of the first and last bytes
+        add     r7,r1,r6,lsl#18
+        sub     r7,r7,#ACC_ADDR1        ; the last element's address
+        strb    r9,[r8,r7,lsr#23]
+        add     r9,r12,#V_VRAM
+        add     r9,r9,r1,lsr#18         ; host destination
+        and     r8,r1,#0x03FC0000
+        mov     r8,r8,lsr#10            ; offset << 8 of the first element
+        add     r1,r7,#ACC_ADDR1        ; the address after the run
+        add     r1,r1,r6                ; the elements counted
+        str     r1,[r12,#V_ACC]
+        add     r7,r10,#OBUF_OFF
+        sub     lr,r6,#1                ; elements before the last
+wbs_sat
+        ldr     r0,[r7],#4              ; d << 8 | byte
+        ldrb    r1,[r9]
+        strb    r0,[r9],#1
+        eor     r1,r1,r0
+        tst     r1,#0xFF                ; the byte left as it was
+        and     r1,r0,#0xFF00
+        add     r1,r1,r4
+        sub     r1,r5,r1,asr#10         ; its t / 4
+        and     r0,r0,#0xFF
+        orr     r0,r0,r8
+        orr     r0,r0,r1,lsl#16
+        orreq   r0,r0,#SAT_SAME
+        str     r0,[r3],#4              ; t / 4 << 16 | offset << 8 | value
+        add     r8,r8,#0x100
+        subs    lr,lr,#1
+        bne     wbs_sat
+        ldrb    r6,[r9]
+        strb    r2,[r9]
+        teq     r6,r2
+        sub     r1,r5,r4,asr#10
+        orr     r0,r2,r8
+        orr     r0,r0,r1,lsl#16
+        orreq   r0,r0,#SAT_SAME
+        str     r0,[r3]
+        str     r2,[r12,#V_BUFFER]      ; the last byte written: read buffer
+        mov     r0,#0
+        ldmfd   sp!,{r3-r9,pc}
+wbs_past
+        sub     lr,r5,lr,asr#10         ; t / 4 of the first one
+        cmp     lr,r7
+        blt     wbs_pop                 ; it may be within the watched lines
+wbs_fast
+        ldmfd   sp!,{r3-r9,lr}
+        bic     r1,r1,#ACC_SLOW         ; the watch ends
+        b       wb_fast
+wbs_pop
+        ldmfd   sp!,{r3-r9,lr}
+wbs_bytes
         stmfd   sp!,{r3-r6,lr}
         mov     r3,r0,lsr#8
         and     r3,r3,#0x1F
@@ -1227,6 +1597,9 @@ ev_synced
         bne     ev_irq
         mov     r2,#1
         str     r2,[r12,#V_VBLDONE]
+        ldr     r6,[r12,#V_NCTRLW]
+        orr     r6,r6,#NCTRL_OFF        ; the sprite table watch ends (vdp.h)
+        str     r6,[r12,#V_NCTRLW]
         ldr     r6,[r12,#V_STATUS]
         orr     r6,r6,#0x80
         str     r6,[r12,#V_STATUS]

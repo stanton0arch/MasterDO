@@ -118,7 +118,7 @@ static uint32 tile_row(const work *w, const uint8 *vram, uint32 e, uint32 r)
  * (last first). */
 static uint32 sprite_list(const vdp_state *v, sprite *list)
 {
-    const uint8 *sat = v->vram + ((v->reg[5] & 0x7E) << 7);
+    const uint8 *sat = vdp_spr_table(v);
     uint32 tbase = (v->reg[6] & 0x04) ? 256 : 0;
     uint32 tmask = (v->reg[1] & 0x02) ? 0xFE : 0xFF;
     int32 xoff = (v->reg[0] & 0x08) ? 8 : 0;

@@ -303,6 +303,8 @@ typedef struct {
     uint8  *pool;           /* the renderer's bitmaps when they follow the code buffer */
     uint32  hot_vram;       /* entry counters allocated in VRAM */
     uint32  pad_log_vram;   /* pad log allocated in VRAM */
+    uint8   *sat_mem;       /* the VDP's record of the sprite table writes of the
+                               active display and its view (vdp.h), or NULL */
     uint32  state_saved;    /* a savestate written in this run (state.c) */
 } game;
 
