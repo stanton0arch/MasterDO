@@ -3605,17 +3605,24 @@ m_jr                                    ; JR
         beq     m_jr_out
 m_jump_in
         ; A static target inside the block: the idle time of a busy-wait
-        ; loop, then a direct branch.
+        ; loop (up to the next line for a loop waiting for a line), then a
+        ; direct branch.
         ldrb    r0,[r6,#I_BUSY]
+        cmp     r0,#2
+        beq     mji_line
         cmp     r0,#0
         movne   r0,#CC_AL
         blne    e_idle
+mji_branch
         ldrb    r0,[r6,#I_INTERNAL]
         ldr     r1,[r4,#B_INS]
         RECORD  r2,r1,r0
         ldr     r0,[r2,#I_HOST]
         EMITB   r1,r0,B_AL
         b       eb_done
+mji_line
+        bl      e_line_idle
+        b       mji_branch
 m_jr_out
         ldr     r0,[r6,#I_TARGET]
         bl      e_exit

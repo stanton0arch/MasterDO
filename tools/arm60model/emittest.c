@@ -1808,7 +1808,9 @@ static void emit_main(jit_block_ctx *b, jit_insn *in, int32 index)
                 break;
             case 3:                                 /* JR */
                 if (in->internal >= 0) {
-                    if (in->busy)
+                    if (in->busy == 2)
+                        emit_line_idle(j);
+                    else if (in->busy)
                         emit_idle(j, C_AL);
                     ref_emit_b(j, C_AL, 0, JIT_ADDR(b->ins[in->internal].host));
                 } else {
@@ -2125,7 +2127,9 @@ static void emit_main(jit_block_ctx *b, jit_insn *in, int32 index)
                 if (in->dyn) {
                     emit_dyn_exit(b, in);
                 } else if (in->internal >= 0) {
-                    if (in->busy)
+                    if (in->busy == 2)
+                        emit_line_idle(j);
+                    else if (in->busy)
                         emit_idle(j, C_AL);
                     ref_emit_b(j, C_AL, 0, JIT_ADDR(b->ins[in->internal].host));
                 } else {

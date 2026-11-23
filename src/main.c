@@ -1148,8 +1148,9 @@ int main(int argc, char **argv)
     /* The banner names the build by its latest changes (the oldest ones
      * dropped as new ones come: its bytes are DRAM the code buffer may
      * need). */
-    printf("masterdo: interrupt pending at a HALT after EI taken after the HALT; code "
-           "buffer cleared when a game starts; second pad, read once the game reads port $DD\n");
+    printf("masterdo: line wait loop closed by a jump idled to the next line; "
+           "interrupt pending at a HALT after EI taken after the HALT; code buffer "
+           "cleared when a game starts\n");
 #else
     printf("masterdo " MASTERDO_VERSION "\n");
 #endif

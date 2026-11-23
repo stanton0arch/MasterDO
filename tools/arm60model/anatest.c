@@ -364,7 +364,7 @@ void ana_gen_code(const z80j_ctx *c, uint32 pc, uint32 len)
 
     while (at < len) {
         uint32 kind = rnd() % 40;
-        uint8 b[6];
+        uint8 b[8];
         uint32 nb = 1;
         int32 disp;
         uint32 target;
@@ -471,7 +471,19 @@ void ana_gen_code(const z80j_ctx *c, uint32 pc, uint32 len)
                 nb = 5;
                 break;
             case 2: b[0] = 0x7E; b[1] = 0xB7; b[2] = 0x28; b[3] = 0xFC; nb = 4; break;
-            case 3: b[0] = 0xDB; b[1] = 0x7E; b[2] = 0xFE; b[3] = (uint8)(r >> 8); b[4] = 0x38; b[5] = 0xFA; nb = 6; break;
+            case 3:                             /* a line wait: JR C back, or RET Z and JR / JP back */
+                b[0] = 0xDB; b[1] = 0x7E; b[2] = 0xFE; b[3] = (uint8)(r >> 8);
+                if ((r & 0x60) != 0x60) {
+                    b[4] = 0x38; b[5] = 0xFA; nb = 6;
+                } else if (r & 0x80) {
+                    b[4] = 0xC8; b[5] = 0x18; b[6] = 0xF9; nb = 7;
+                } else {
+                    b[4] = 0xC8; b[5] = 0xC3;
+                    target = (pc + at) & 0xFFFFu;
+                    b[6] = (uint8)target; b[7] = (uint8)(target >> 8);
+                    nb = 8;
+                }
+                break;
             case 4: b[0] = 0xED; b[1] = (r & 0x20) ? 0xAA : 0xA2; b[2] = 0x20; b[3] = 0xFC; nb = 4; break;
             case 5: {
                 uint32 m = (r >> 5) & 3;            /* NOP between the head and the jump */
