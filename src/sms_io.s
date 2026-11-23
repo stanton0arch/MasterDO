@@ -457,7 +457,7 @@ stat_lc_slow
 ;----------------------------------------------------------------------------
 ; IN from the V counter (even ports $40-$7F) and the H counter (odd ports).
 ; In: r2 = T-states left. The beam position comes from the access time as
-; in vdp_beam (vdp.c): the line of the frame (an access that ends the
+; in vdp_read_beam (vdp.c): the line of the frame (an access that ends the
 ; previous frame counts from its start) and the T-state in the line; the V
 ; counter then jumps back as the display mode says, the H counter comes
 ; from the table of a line.
@@ -473,6 +473,12 @@ stat_lc_slow
         ldrmi   r1,[r12,#V_LINES]
         movmi   r2,#228
         mlami   r0,r1,r2,r0             ; t + lines * 228
+        ldrpl   r1,[r12,#V_LCK]         ; in this frame: not before the line the
+        movmi   r1,#0                   ; line counter was brought to
+        mov     r2,#228
+        mul     r1,r2,r1
+        cmp     r0,r1
+        movlo   r0,r1
         mov     r2,r0,lsr#2             ; line = (t / 4) * 36793 >> 21
         mov     r1,#0x8F00
         orr     r1,r1,#0xB9
@@ -485,10 +491,12 @@ stat_lc_slow
 
 ; The V counter only needs the line: the lines at the stretch end less
 ; ceil(left / 228), computed as (ceil(left / 4) + 56) / 57 by one
-; multiplication (exact within a frame), as the control port does; the
-; count of counter reads, the line count and the last value before the
-; jump of the display mode come with one LDM, the amount of the jump only
-; when the counter jumps.
+; multiplication (exact within a frame), as the control port does, not
+; before line lc_k (vdp_read_beam; unsigned: an access that ends the
+; previous frame is not moved), which comes with the frame base in one
+; LDM; the count of counter reads, the line count and the last value
+; before the jump of the display mode come with another, the amount of
+; the jump only when the counter jumps.
 sms_vdp_vc_r
         add     r0,r2,#0x300
         mov     r0,r0,lsr#10
@@ -499,11 +507,17 @@ sms_vdp_vc_r
         ldr     r0,[r10,#LINE]
         sub     r0,r0,r2,lsr#21         ; the line of the access
         VDP
-        ldr     r1,[r12,#V_FRAMEBASE]
-        subs    r0,r0,r1                ; from the start of the frame
+        ASSERT  V_LCK = V_FRAMEBASE + 8
+        add     r12,r12,#V_FRAMEBASE
+        ldmia   r12,{r1,r2,r12}         ; frame base, (VBlank done), lc_k
+        sub     r0,r0,r1                ; from the start of the frame
+        cmp     r0,r12
+        movlo   r0,r12                  ; not before lc_k
+        VDP
         add     r12,r12,#V_NCOUNTR
         ldmia   r12,{r1,r2,r12}         ; counter reads, lines, vc_jump
-        addmi   r0,r0,r2                ; an access that ends the previous frame
+        cmp     r0,#0
+        addlt   r0,r0,r2                ; an access that ends the previous frame
         cmp     r0,r2
         subhs   r0,r0,r2
         cmp     r0,r12

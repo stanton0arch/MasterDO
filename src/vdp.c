@@ -97,6 +97,34 @@ static uint32 vdp_beam(const vdp_state *v, uint32 left, uint32 *hpos)
 }
 
 /*
+ * The same for a read of the V or H counter, which never shows a line
+ * before lc_k, the line the line counter was last brought to (by the event
+ * of that line, or an earlier access): a stretch ends before a segment
+ * that does not fit in the T-states left, so the event of its last line,
+ * and an interrupt it raises, can run up to that segment's T-states early,
+ * and the handler must still read the line it was raised for, as the Z80
+ * does. Writes keep the time of the access; an access that ends the
+ * previous frame is not moved. sms_vdp_vc_r and sms_vdp_hc_r (sms_io.s)
+ * do the same.
+ */
+static uint32 vdp_read_beam(const vdp_state *v, uint32 left, uint32 *hpos)
+{
+    int32 t = vdp_time(v, left);
+    int32 k = (int32)(v->lc_k * VDP_LINE_T);
+    uint32 line;
+
+    if (t >= 0 && t < k)
+        t = k;
+    if (t < 0)
+        t += (int32)(v->lines * VDP_LINE_T);
+    line = T_LINE(t);
+    *hpos = (uint32)t - line * VDP_LINE_T;
+    if (line >= v->lines)
+        line -= v->lines;
+    return line;
+}
+
+/*
  * Display mode from registers 0 and 1: the active lines, the name table
  * rows and the jump of the V counter. Mode 4 (register 0 bit 2) with M2
  * (register 0 bit 1) selects the extended heights: M1 (register 1 bit 4)
@@ -513,7 +541,7 @@ uint32 vdp_control_write(vdp_state *v, uint32 value, uint32 left)
 uint32 vdp_vcounter(const vdp_state *v, uint32 left)
 {
     uint32 hpos;
-    uint32 line = vdp_beam(v, left, &hpos);
+    uint32 line = vdp_read_beam(v, left, &hpos);
 
     if (line > v->vc_jump)
         line -= v->vc_back;
@@ -524,7 +552,7 @@ uint32 vdp_hcounter(const vdp_state *v, uint32 left)
 {
     uint32 hpos;
 
-    vdp_beam(v, left, &hpos);
+    vdp_read_beam(v, left, &hpos);
     return v->hc[hpos];
 }
 

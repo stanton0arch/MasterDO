@@ -1148,9 +1148,9 @@ int main(int argc, char **argv)
     /* The banner names the build by its latest changes (the oldest ones
      * dropped as new ones come: its bytes are DRAM the code buffer may
      * need). */
-    printf("masterdo: sprite table rewritten during the display shown as each line "
-           "saw it; line wait loop closed by a jump idled to the next line; interrupt "
-           "pending at a HALT after EI taken after the HALT\n");
+    printf("masterdo: counters read after a line event never show an earlier line; "
+           "sprite table rewritten during the display shown as each line saw it; "
+           "line wait loop closed by a jump idled to the next line\n");
 #else
     printf("masterdo " MASTERDO_VERSION "\n");
 #endif
