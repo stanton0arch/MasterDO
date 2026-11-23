@@ -1,11 +1,11 @@
 # Game Gear compatibility
 
-Estimated fluidity of the Game Gear set on the 3DO, measured in the ARM60 cycle model of the emulator (commit ca773eb, 2026-11-23), not by playing the games. The model predicts the emulator's frame times on the console within a few percent.
+Estimated fluidity of the Game Gear set on the 3DO, measured in the ARM60 cycle model of the emulator (commit 03e35f2, 2026-11-23), not by playing the games. The model predicts the emulator's frame times on the console within a few percent.
 
 - One image per title: 369 titles for 433 images (the regions, revisions and translations of a title run alike). The image measured is the one with a recorded play if any, else an untranslated one, US / European first; the data file in `tools/arm60model/reports/compat/` names it.
 - Each title runs 90 s several times: without a button (title and attract mode, whose demos run the game) and with three generic pad sequences that start the game and play it blindly (START 7, 8 or 9 times, so that one of them leaves the game unpaused); the titles with a recorded play run it too. Only the scenes these runs reach are measured.
 - **Fluidity**: the speed held nine tenths of the time with the display on, in percent of 60 pictures per second (every game runs on a 60 Hz machine; a PAL 3DO shows 50 of its 60 pictures), to the nearest 5%; the lowest of the runs. Brief freezes are left out of it and given as remarks.
-- Titles: 100%: 315; 90-95%: 20; 75-85%: 13; 70% or less: 9; not measured: 12.
+- Titles: 100%: 314; 90-95%: 20; 75-85%: 14; 70% or less: 9; not measured: 12.
 
 | Game | Fluidity | Remarks |
 |------|----------|---------|
@@ -85,12 +85,12 @@ Estimated fluidity of the Game Gear set on the 3DO, measured in the ARM60 cycle 
 | Ecco 2 | 100% | Hitches at scene starts |
 | Ernie Els Golf | 55% | Frequent hitches |
 | Eternal Legend | 100% |  |
-| Excellent Dizzy Collection | 100% |  |
+| Excellent Dizzy Collection | 100% | Hitches at scene starts |
 | F1 | 100% | Hitches at scene starts |
 | F15 Strike Eagle | 100% |  |
 | Faceball 2000 | 100% | Hitches at scene starts |
 | Factory Panic | 100% |  |
-| Fantastic Dizzy | 100% | Slowdown in some scenes |
+| Fantastic Dizzy | 100% | Hitches at scene starts |
 | Fantasy Zone Gear | 85% | Hitches at scene starts |
 | Fatal Fury Special | 100% | Hitches at scene starts |
 | Fifa International Soccer | 100% | Hitches at scene starts |
@@ -100,7 +100,7 @@ Estimated fluidity of the Game Gear set on the 3DO, measured in the ARM60 cycle 
 | Fred Couples Golf | 100% |  |
 | Galaga 91 | 100% |  |
 | Gamble Panic | 100% |  |
-| Gambler Jikochuushin Ha | 90% | Hitches at scene starts |
+| Gambler Jikochuushin Ha | 90% | Frequent hitches |
 | Ganbare Gorby | 100% |  |
 | Garfield | 100% | Frequent hitches |
 | Gear Stadium | 100% | Hitches at scene starts |
@@ -110,11 +110,11 @@ Estimated fluidity of the Game Gear set on the 3DO, measured in the ARM60 cycle 
 | GG Doraemon | 100% | Hitches at scene starts |
 | GG Portrait Pai Chan | 100% |  |
 | GG Portrait Yuuki Akira | 100% |  |
-| GG Shinobi | 100% | Hitches at scene starts |
+| GG Shinobi | 100% |  |
 | Global Gladiators | 100% | Hitches at scene starts |
 | Gloc Air Battle | 100% | Hitches at scene starts |
 | Godzilla | 100% |  |
-| Gp Rider | 80% | Hitches at scene starts |
+| Gp Rider | 75% | Hitches at scene starts |
 | Greendog | 80% | Hitches at scene starts |
 | Griffin | 100% | Hitches at scene starts |
 | Gunstar Heroes | 100% | Hitches at scene starts |
@@ -200,7 +200,7 @@ Estimated fluidity of the Game Gear set on the 3DO, measured in the ARM60 cycle 
 | Nba Jam | 100% | Hitches at scene starts |
 | Nba Jam Te | 100% | Hitches at scene starts |
 | Neko Daisuki | 100% |  |
-| Nfl 95 | 100% | Frequent hitches |
+| Nfl 95 | 100% | Hitches at scene starts |
 | Nfl Quarterback Club | 100% |  |
 | Nfl Quarterback Club 96 | 95% | Hitches at scene starts |
 | Nhl Allstar Hockey | 85% |  |
@@ -223,7 +223,7 @@ Estimated fluidity of the Game Gear set on the 3DO, measured in the ARM60 cycle 
 | Pet Club Inu Daisuki | 100% |  |
 | Pete Sampras Tennis | 100% |  |
 | Pga Tour 96 | 100% |  |
-| Pga Tour Golf | 100% |  |
+| Pga Tour Golf | 80% |  |
 | Pga Tour Golf 2 | 100% |  |
 | Phantasy Star Adv | 100% |  |
 | Phantasy Star Gaiden | 90% |  |

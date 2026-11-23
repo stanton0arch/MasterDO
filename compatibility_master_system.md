@@ -1,11 +1,11 @@
 # Master System compatibility
 
-Estimated fluidity of the Master System set on the 3DO, measured in the ARM60 cycle model of the emulator (commit ca773eb, 2026-11-23), not by playing the games. The model predicts the emulator's frame times on the console within a few percent.
+Estimated fluidity of the Master System set on the 3DO, measured in the ARM60 cycle model of the emulator (commit 03e35f2, 2026-11-23), not by playing the games. The model predicts the emulator's frame times on the console within a few percent.
 
 - One image per title: 365 titles for 488 images (the regions, revisions and translations of a title run alike). The image measured is the one with a recorded play if any, else an untranslated one, US / European first; the data file in `tools/arm60model/reports/compat/` names it.
 - Each title runs 90 s several times: without a button (title and attract mode, whose demos run the game) and with three generic pad sequences that start the game and play it blindly; the titles with a recorded play run it too. Only the scenes these runs reach are measured.
 - **Fluidity**: the speed held nine tenths of the time with the display on, in percent of 60 pictures per second (every game runs on a 60 Hz machine; a PAL 3DO shows 50 of its 60 pictures), to the nearest 5%; the lowest of the runs. Brief freezes are left out of it and given as remarks.
-- Titles: 100%: 308; 90-95%: 29; 75-85%: 15; 70% or less: 3; not measured: 10.
+- Titles: 100%: 307; 90-95%: 28; 75-85%: 16; 70% or less: 4; not measured: 10.
 
 | Game | Fluidity | Remarks |
 |------|----------|---------|
@@ -111,10 +111,10 @@ Estimated fluidity of the Master System set on the 3DO, measured in the ARM60 cy
 | Ecco 2 | 100% | Graphical artifacts, Hitches at scene starts |
 | Enduro Racer | 100% |  |
 | Eswat | 100% | Hitches at scene starts |
-| F1 Championship | 100% | Slowdown in some scenes, Hitches at scene starts |
+| F1 Championship | 95% | Slowdown in some scenes, Hitches at scene starts |
 | F16 Fighter | - | Unsupported video mode |
 | F16 Fighting Falcon | - | Unsupported video mode |
-| Fantastic Dizzy | 100% |  |
+| Fantastic Dizzy | 100% | Slowdown in some scenes, Hitches at scene starts |
 | Fantasy Zone | 100% |  |
 | Fantasy Zone 2 | 95% |  |
 | Fantasy Zone Maze | 100% | Hitches at scene starts |
@@ -152,7 +152,7 @@ Estimated fluidity of the Master System set on the 3DO, measured in the ARM60 cy
 | Great Football | 100% | Hitches at scene starts |
 | Great Golf | 100% | Hitches at scene starts |
 | Great Ice Hockey | 100% | Hitches at scene starts |
-| Great Soccer | 100% |  |
+| Great Soccer | 100% | Hitches at scene starts |
 | Great Volleyball | 100% |  |
 | Haja No Fuuin | 100% |  |
 | Hangon | 85% | Hitches at scene starts |
@@ -230,10 +230,10 @@ Estimated fluidity of the Master System set on the 3DO, measured in the ARM60 cy
 | Parlour Games | 100% |  |
 | Party Games | 100% |  |
 | Penguin Land | 100% | Hitches at scene starts |
-| Pga Tour Golf | 100% |  |
+| Pga Tour Golf | 75% |  |
 | Phantasy Star | 95% |  |
 | Pit Fighter | 85% |  |
-| Populous | 100% | Hitches at scene starts |
+| Populous | 100% |  |
 | Poseidon Wars 3d | 100% | Graphical artifacts, Hitches at scene starts |
 | Power Strike | 100% |  |
 | Power Strike 2 | 100% |  |
@@ -244,7 +244,7 @@ Estimated fluidity of the Master System set on the 3DO, measured in the ARM60 cy
 | Promocao Ms 3 Compact | 100% |  |
 | Psychic World | 100% | Hitches at scene starts |
 | Psycho Fox | 100% | Hitches at scene starts |
-| Putt Putter | 100% | Hitches at scene starts |
+| Putt Putter | 100% |  |
 | Quartet | 100% |  |
 | Rainbow Islands | 100% | Hitches at scene starts |
 | Rambo 2 | 100% |  |
@@ -257,7 +257,7 @@ Estimated fluidity of the Master System set on the 3DO, measured in the ARM60 cy
 | Ren Stimpy | 100% |  |
 | Renegade | 100% | Hitches at scene starts |
 | Rescue Mission | 100% | Hitches at scene starts |
-| Road Rash | 80% | Frequent hitches |
+| Road Rash | 80% | Hitches at scene starts |
 | Robocop 3 | 100% | Hitches at scene starts |
 | Robocop Vs Terminator | 100% |  |
 | Rocky | 100% | Hitches at scene starts |
@@ -277,9 +277,9 @@ Estimated fluidity of the Master System set on the 3DO, measured in the ARM60 cy
 | Seishyun Scandal | 100% |  |
 | Sensible Soccer | 100% |  |
 | Shadow Dancer | - | Black screen |
-| Shadow Of The Beast | 70% | Graphical artifacts, Hitches at scene starts |
+| Shadow Of The Beast | 15% | Graphical artifacts, Hitches at scene starts |
 | Shanghai | 95% | Hitches at scene starts |
-| Shinobi | 95% |  |
+| Shinobi | 100% |  |
 | Shooting Gallery | 100% |  |
 | Sitio Do Picapau Amarelo | 95% | Frequent hitches |
 | Slap Shot | 100% |  |
@@ -296,7 +296,7 @@ Estimated fluidity of the Master System set on the 3DO, measured in the ARM60 cy
 | Spacegun | 100% |  |
 | Special Criminal | 100% | Hitches at scene starts |
 | Speedball | 100% |  |
-| Speedball 2 | 95% | Slowdown in some scenes, Hitches at scene starts |
+| Speedball 2 | 90% | Hitches at scene starts |
 | Spellcaster | 100% |  |
 | Spiderman Sinister Six | 100% |  |
 | Spiderman Vs Kingpin | 100% | Slowdown in some scenes |
@@ -318,7 +318,7 @@ Estimated fluidity of the Master System set on the 3DO, measured in the ARM60 cy
 | Super Monaco Gp 2 | 90% | Hitches at scene starts |
 | Super Offroad | 100% | Hitches at scene starts |
 | Super Racing | 100% |  |
-| Super Smash Tv | 95% |  |
+| Super Smash Tv | 95% | Slowdown in some scenes |
 | Super Space Invaders | 100% | Slowdown in some scenes, Hitches at scene starts |
 | Super Tennis | 100% | Hitches at scene starts |
 | Super Wonder Boy | 100% |  |
@@ -367,7 +367,7 @@ Estimated fluidity of the Master System set on the 3DO, measured in the ARM60 cy
 | World Grand Prix | 80% | Hitches at scene starts |
 | World Soccer | 100% |  |
 | Wwf Steel Cage | 100% | Hitches at scene starts |
-| Xenon 2 | 95% | Hitches at scene starts |
+| Xenon 2 | 65% | Hitches at scene starts |
 | Xmen Mojo World | 100% | Hitches at scene starts |
 | Ys | 100% |  |
 | Zaxxon 3d | 100% |  |
