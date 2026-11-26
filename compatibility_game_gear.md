@@ -1,11 +1,11 @@
 # Game Gear compatibility
 
-Estimated fluidity of the Game Gear set on the 3DO, measured in the ARM60 cycle model of the emulator (commit 03e35f2, 2026-11-23), not by playing the games. The model predicts the emulator's frame times on the console within a few percent.
+Estimated fluidity of the Game Gear set on the 3DO, measured in the ARM60 cycle model of the emulator (commit e2d3608, 2026-11-26), not by playing the games. The model predicts the emulator's frame times on the console within a few percent.
 
 - One image per title: 369 titles for 433 images (the regions, revisions and translations of a title run alike). The image measured is the one with a recorded play if any, else an untranslated one, US / European first; the data file in `tools/arm60model/reports/compat/` names it.
 - Each title runs 90 s several times: without a button (title and attract mode, whose demos run the game) and with three generic pad sequences that start the game and play it blindly (START 7, 8 or 9 times, so that one of them leaves the game unpaused); the titles with a recorded play run it too. Only the scenes these runs reach are measured.
 - **Fluidity**: the speed held nine tenths of the time with the display on, in percent of 60 pictures per second (every game runs on a 60 Hz machine; a PAL 3DO shows 50 of its 60 pictures), to the nearest 5%; the lowest of the runs. Brief freezes are left out of it and given as remarks.
-- Titles: 100%: 314; 90-95%: 20; 75-85%: 14; 70% or less: 9; not measured: 12.
+- Titles: 100%: 317; 90-95%: 20; 75-85%: 14; 70% or less: 9; not measured: 9.
 
 | Game | Fluidity | Remarks |
 |------|----------|---------|
@@ -159,7 +159,7 @@ Estimated fluidity of the Game Gear set on the 3DO, measured in the ARM60 cycle 
 | Land Of Illusion | 100% |  |
 | Last Action Hero | 100% |  |
 | Last Bible | 100% |  |
-| Last Bible Special | - | Unsupported video mode |
+| Last Bible Special | 100% |  |
 | Legend Of Illusion | 100% |  |
 | Lemmings | 100% |  |
 | Lion King | 100% | Hitches at scene starts |
@@ -282,7 +282,7 @@ Estimated fluidity of the Game Gear set on the 3DO, measured in the ARM60 cycle 
 | Shinobi 2 | 100% |  |
 | Side Pocket | 100% |  |
 | Skweek | 100% |  |
-| Slam Dunk | - | Unsupported video mode |
+| Slam Dunk | 100% | Hitches at scene starts |
 | Slider | 100% |  |
 | Smurfs | 100% | Slowdown in some scenes, Hitches at scene starts |
 | Solitaire Funpak | 100% |  |
@@ -299,7 +299,7 @@ Estimated fluidity of the Game Gear set on the 3DO, measured in the ARM60 cycle 
 | Sonic Tails 2 | 100% | Hitches at scene starts |
 | Sonic Triple Trouble | 100% | Hitches at scene starts |
 | Soukoban | 100% |  |
-| Space Harrier | 100% | Stuck on one screen |
+| Space Harrier | 100% |  |
 | Spiderman Sinister Six | 75% |  |
 | Spiderman Vs Kingpin | 100% | Hitches at scene starts |
 | Spiderman Xmen | 100% |  |
@@ -314,7 +314,7 @@ Estimated fluidity of the Game Gear set on the 3DO, measured in the ARM60 cycle 
 | Streets Of Rage | 100% |  |
 | Streets Of Rage 2 | 100% |  |
 | Strider Returns | 100% |  |
-| Super Battletank | - | Black screen |
+| Super Battletank | 100% |  |
 | Super Columns | 100% |  |
 | Super Golf | 100% |  |
 | Super Kick Off | 100% | Hitches at scene starts |

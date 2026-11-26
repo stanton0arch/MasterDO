@@ -1,11 +1,11 @@
 # Master System compatibility
 
-Estimated fluidity of the Master System set on the 3DO, measured in the ARM60 cycle model of the emulator (commit 03e35f2, 2026-11-23), not by playing the games. The model predicts the emulator's frame times on the console within a few percent.
+Estimated fluidity of the Master System set on the 3DO, measured in the ARM60 cycle model of the emulator (commit e2d3608, 2026-11-26), not by playing the games. The model predicts the emulator's frame times on the console within a few percent.
 
 - One image per title: 365 titles for 488 images (the regions, revisions and translations of a title run alike). The image measured is the one with a recorded play if any, else an untranslated one, US / European first; the data file in `tools/arm60model/reports/compat/` names it.
 - Each title runs 90 s several times: without a button (title and attract mode, whose demos run the game) and with three generic pad sequences that start the game and play it blindly; the titles with a recorded play run it too. Only the scenes these runs reach are measured.
 - **Fluidity**: the speed held nine tenths of the time with the display on, in percent of 60 pictures per second (every game runs on a 60 Hz machine; a PAL 3DO shows 50 of its 60 pictures), to the nearest 5%; the lowest of the runs. Brief freezes are left out of it and given as remarks.
-- Titles: 100%: 307; 90-95%: 28; 75-85%: 16; 70% or less: 4; not measured: 10.
+- Titles: 100%: 308; 90-95%: 27; 75-85%: 17; 70% or less: 3; not measured: 10.
 
 | Game | Fluidity | Remarks |
 |------|----------|---------|
@@ -132,7 +132,7 @@ Estimated fluidity of the Master System set on the 3DO, measured in the ARM60 cy
 | Gain Ground | 100% |  |
 | Galactic Protector | 100% |  |
 | Galaxy Force | 100% | Hitches at scene starts |
-| Gamebox Esportes Radicais | 50% | Hitches at scene starts |
+| Gamebox Esportes Radicais | 85% | Graphical artifacts, Hitches at scene starts |
 | Gangster Town | 100% | Graphical artifacts |
 | Gauntlet | 80% | Hitches at scene starts |
 | Geraldinho | 100% |  |
@@ -164,7 +164,7 @@ Estimated fluidity of the Master System set on the 3DO, measured in the ARM60 cy
 | Home Alone | 100% | Hitches at scene starts |
 | Hoshi Wo Sagasite | 100% |  |
 | Impossible Mission | 100% | Slowdown in some scenes, Hitches at scene starts |
-| Incredible Crash Dummies | 95% |  |
+| Incredible Crash Dummies | 100% |  |
 | Incredible Hulk | 100% | Hitches at scene starts |
 | Indiana Jones Crusade | 100% |  |
 | James Bond 007 | 100% | Slowdown in some scenes, Frequent hitches |
