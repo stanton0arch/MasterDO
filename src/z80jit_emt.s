@@ -2984,8 +2984,8 @@ t_io_flags      BIC     r3,r3,#PSR_Z
 ; OUTI (OUTD): B decreases by the run length, the bytes go out, then HL
 ; moves. A mixed run (OUTI and OUT (C),r) passes its description and the
 ; byte of r in r0; B and HL move by its OUTI only. The flags are those of
-; the last OUTI, and the block is left after the run when a handler asked
-; for it.
+; the last OUTI (also when OUT (C),r elements follow it), and the block is
+; left after the run when a handler asked for it.
 e_out_run
         stmfd   sp!,{r6,r7,r9,r11,lr}
         ldr     r0,[r6,#I_RUN]
@@ -3057,8 +3057,20 @@ eor_call
         TMPLC   ne,r0,t_add_hl_n
         orr     r0,r0,r1
         EMIT    r0
-        ldrb    r0,[r11,#I_DEF]
-        ldrb    r1,[r11,#I_LIVE_AFTER]
+        ; The flags come from the last OUTI, the highest element whose mask
+        ; bit is clear: an OUT (C),r after it neither sets nor reads them,
+        ; so its liveness is that of the run's end. Reading the run's last
+        ; element instead would drop the flags when it is an OUT (C),r.
+        sub     r2,r7,#1                ; k = the last element
+eor_last
+        mov     r1,r9,lsr r2
+        tst     r1,#1                   ; an OUT (C),r: one element back
+        subne   r2,r2,#1
+        bne     eor_last
+        ldr     r12,[sp,#4]             ; the head
+        RECORD  r12,r12,r2
+        ldrb    r0,[r12,#I_DEF]
+        ldrb    r1,[r12,#I_LIVE_AFTER]
         tst     r0,r1
         beq     eor_leave
         adr     r12,t_io_flags

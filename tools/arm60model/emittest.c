@@ -1449,8 +1449,12 @@ static void emit_out_run(jit_block_ctx *b, jit_insn *in)
     }
     ref_emit_b(j, C_AL, 1, j->glue.io_outn);
     if (nmem != 0) {
+        const jit_insn *outi = last;                    /* the last OUTI */
+
+        while ((mask >> (uint32)(outi - in)) & 1u)
+            outi--;
         dp_i(j, C_AL, dec ? OP_SUB : OP_ADD, 0, RHL, RHL, nmem << 16);
-        if (flags_live(last)) {
+        if (flags_live(outi)) {
             dp_i(j, C_AL, OP_BIC, 0, RF, RF, PSR_Z);
             dp_i(j, C_AL, OP_ORR, 0, RF, RF, PSR_n);
             cmp_i(j, C_AL, OP_TST, RBC, 0xFF000000u);
