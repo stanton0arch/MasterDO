@@ -1,6 +1,6 @@
 # Game Gear compatibility
 
-Estimated fluidity of the Game Gear set on the 3DO, measured in the ARM60 cycle model of the emulator (commit e2d3608, 2026-11-26), not by playing the games. The model predicts the emulator's frame times on the console within a few percent.
+Estimated fluidity of the Game Gear set on the 3DO, measured in the ARM60 cycle model of the emulator (commit beef983, 2026-11-26), not by playing the games. The model predicts the emulator's frame times on the console within a few percent.
 
 - One image per title: 369 titles for 433 images (the regions, revisions and translations of a title run alike). The image measured is the one with a recorded play if any, else an untranslated one, US / European first; the data file in `tools/arm60model/reports/compat/` names it.
 - Each title runs 90 s several times: without a button (title and attract mode, whose demos run the game) and with three generic pad sequences that start the game and play it blindly (START 7, 8 or 9 times, so that one of them leaves the game unpaused); the titles with a recorded play run it too. Only the scenes these runs reach are measured.
